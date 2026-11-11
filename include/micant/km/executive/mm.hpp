@@ -406,6 +406,10 @@ public:
         if (startPfn == 0 || startPfn >= entries_.size() ||
             pageCount > entries_.size() - static_cast<size_t>(startPfn)) return;
         for (size_t offset = 0; offset < pageCount; ++offset) {
+            const auto& entry = entries_[static_cast<size_t>(startPfn) + offset];
+            if (entry.location != PageLocation::ActiveAndValid || entry.referenceCount == 0) return;
+        }
+        for (size_t offset = 0; offset < pageCount; ++offset) {
             releasePageLocked(startPfn + offset);
         }
     }

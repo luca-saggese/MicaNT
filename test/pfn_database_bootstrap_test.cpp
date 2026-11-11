@@ -13,9 +13,11 @@ constexpr size_t TestPageCount = 10;
 using PhysicalPage = std::array<std::byte, PageSize4KB>;
 
 std::array<PhysicalPage, TestPageCount> physicalBacking{};
+size_t zeroPhysicalPageCalls = 0;
 
 void ZeroPhysicalPage(uint64_t pfn) noexcept {
     if (pfn >= physicalBacking.size()) return;
+    ++zeroPhysicalPageCalls;
     physicalBacking[static_cast<size_t>(pfn)].fill(std::byte{0});
 }
 
@@ -108,6 +110,54 @@ void TestBootMemoryInitialization() {
     assert(database.allocateContiguousPages(2) == 0);
 }
 
+void TestReservedHolesAndBoundedFree() {
+    auto& database = PfnDatabase::get();
+    std::array<Mmpfn, TestPageCount> metadata{};
+    const std::array<PhysicalPageRange, 3> ranges{{{1, 2}, {4, 2}, {8, 2}}};
+    assert(database.initializeFromBootMemory(metadata, ranges, ZeroPhysicalPage) == micant::NtStatus::Success);
+
+    zeroPhysicalPageCalls = 0;
+    const size_t freePages = database.getFreeCount();
+    database.freePage(0);
+    database.referencePage(0);
+    database.zeroPage(0);
+    database.setModified(0, true);
+    for (uint64_t hole : {3, 6, 7}) {
+        database.freePage(hole);
+        database.referencePage(hole);
+        database.zeroPage(hole);
+        database.setModified(hole, true);
+        assert(metadata[hole].location == PageLocation::BadPageList);
+    }
+    assert(database.getFreeCount() == freePages);
+    assert(database.getActiveCount() == 0);
+    assert(database.getZeroedCount() == 0);
+    assert(database.getModifiedCount() == 0);
+    assert(database.getStandbyCount() == 0);
+    assert(zeroPhysicalPageCalls == 0);
+
+    assert(database.allocateContiguousPages(2) == 1);
+    assert(database.getActiveCount() == 2);
+    database.freeContiguousPages(1, SIZE_MAX);
+    assert(database.getActiveCount() == 2);
+    assert(metadata[1].location == PageLocation::ActiveAndValid);
+    assert(metadata[2].location == PageLocation::ActiveAndValid);
+
+    database.freeContiguousPages(UINT64_MAX - 1, 4);
+    assert(database.getActiveCount() == 2);
+    assert(metadata[1].location == PageLocation::ActiveAndValid);
+    assert(metadata[2].location == PageLocation::ActiveAndValid);
+
+    database.freeContiguousPages(2, 2);
+    assert(database.getActiveCount() == 2);
+    assert(metadata[1].location == PageLocation::ActiveAndValid);
+    assert(metadata[2].location == PageLocation::ActiveAndValid);
+
+    database.freeContiguousPages(1, 2);
+    assert(database.getActiveCount() == 0);
+    assert(database.getFreeCount() == freePages);
+}
+
 #if !defined(MICANT_FREESTANDING)
 void TestHostedLegacyInitialization() {
     auto& database = PfnDatabase::get();
@@ -125,6 +175,7 @@ void TestHostedLegacyInitialization() {
 
 int main() {
     TestBootMemoryInitialization();
+    TestReservedHolesAndBoundedFree();
 #if !defined(MICANT_FREESTANDING)
     TestHostedLegacyInitialization();
 #endif
