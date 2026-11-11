@@ -75,6 +75,38 @@ BootstrapMapPagesRoutine g_mapPages{};
 bool g_runtimeInitialized{};
 uint64_t g_rejectionLogCount{};
 
+using CInitializer = int (*)();
+using CxxInitializer = void (*)();
+
+enum class CxxPhase : uint8_t {
+    Cold, Initializing, Ready, Failed, Terminating, Terminated
+};
+
+constexpr size_t kMaximumInitializers = 4096;
+constexpr size_t kMaximumDestructors = 1024;
+constinit CxxPhase g_cxxPhase{CxxPhase::Cold};
+constinit CxxInitializer g_destructors[kMaximumDestructors]{};
+constinit size_t g_destructorCount{};
+
+#if defined(_WIN32)
+// PE linker ordering and compiler ABI, not a hosted CRT implementation:
+// https://learn.microsoft.com/en-us/cpp/c-runtime-library/crt-initialization
+__attribute__((section(".CRT$XIA"), used))
+CInitializer const g_cInitializersBegin[]{nullptr};
+__attribute__((section(".CRT$XIZ"), used))
+CInitializer const g_cInitializersEnd[]{nullptr};
+__attribute__((section(".CRT$XCA"), used))
+CxxInitializer const g_cxxInitializersBegin[]{nullptr};
+__attribute__((section(".CRT$XCZ"), used))
+CxxInitializer const g_cxxInitializersEnd[]{nullptr};
+
+#if defined(__MINGW32__)
+// The GNU PE target emits .ctors instead of .CRT$XCU. Its linker supplies this
+// sentinel-bounded table even with -nostdlib; no MinGW runtime is called.
+extern "C" CxxInitializer __CTOR_LIST__[];
+#endif
+#endif
+
 [[nodiscard]] bool isPowerOfTwo(size_t value) noexcept {
     return value != 0 && (value & (value - 1)) == 0;
 }
@@ -91,6 +123,7 @@ void rejectAllocation(const char* reason) noexcept {
 }
 
 [[noreturn]] void stop(const char* reason) noexcept {
+    logMessage(g_bootstrapLog, "ExRuntime FATAL: ");
     logMessage(g_bootstrapLog, reason);
     __builtin_trap();
 }
@@ -100,6 +133,31 @@ void requireInitialized() noexcept {
         stop("ExHeap: pre-init allocator use rejected; stopping\r\n");
     }
 }
+
+#if defined(_WIN32)
+template<typename Initializer>
+[[nodiscard]] size_t initializerCount(
+    const Initializer* begin, const Initializer* end
+) noexcept {
+    const auto first = reinterpret_cast<uintptr_t>(begin);
+    const auto last = reinterpret_cast<uintptr_t>(end);
+    if (last < first || (last - first) % sizeof(Initializer) != 0 ||
+        (last - first) / sizeof(Initializer) > kMaximumInitializers) {
+        stop("ExCxx: invalid PE initializer range; stopping\r\n");
+    }
+    return (last - first) / sizeof(Initializer);
+}
+
+template<typename Initializer>
+[[nodiscard]] Initializer initializerAt(
+    const Initializer* begin, size_t index
+) noexcept {
+    // The PE linker, not the C++ array object model, joins these contributions.
+    const auto address = reinterpret_cast<uintptr_t>(begin) +
+        index * sizeof(Initializer);
+    return *reinterpret_cast<const Initializer*>(address);
+}
+#endif
 
 [[nodiscard]] uint64_t allocationCookie(
     uintptr_t userAddress,
@@ -241,6 +299,74 @@ void releaseMemory(void* pointer) noexcept {
 } // namespace
 
 namespace micant::ex {
+
+[[noreturn]] void stopBootstrapRuntime(const char* message) noexcept {
+    stop(message);
+}
+
+bool initializeBootstrapCxxRuntime() noexcept {
+    if (!g_runtimeInitialized || g_cxxPhase != CxxPhase::Cold) {
+        logMessage(g_bootstrapLog, "ExCxx: initialization rejected (heap or phase)\r\n");
+        return false;
+    }
+#if !defined(_WIN32)
+    logMessage(g_bootstrapLog, "ExCxx: initialization rejected (requires PE tables)\r\n");
+    return false;
+#else
+    const size_t cCount = initializerCount(g_cInitializersBegin, g_cInitializersEnd);
+    const size_t cxxCount = initializerCount(
+        g_cxxInitializersBegin, g_cxxInitializersEnd);
+#if defined(__MINGW32__)
+    if (reinterpret_cast<uintptr_t>(__CTOR_LIST__[0]) != static_cast<uintptr_t>(-1)) {
+        stop("ExCxx: invalid GNU PE constructor sentinel; stopping\r\n");
+    }
+    size_t gnuCount{};
+    while (gnuCount < kMaximumInitializers && __CTOR_LIST__[gnuCount + 1]) {
+        ++gnuCount;
+    }
+    if (gnuCount == kMaximumInitializers) {
+        stop("ExCxx: unterminated GNU PE constructor table; stopping\r\n");
+    }
+#endif
+    g_cxxPhase = CxxPhase::Initializing;
+    for (size_t index = 1; index < cCount; ++index) {
+        const auto initializer = initializerAt(g_cInitializersBegin, index);
+        if (initializer && initializer() != 0) {
+            g_cxxPhase = CxxPhase::Failed;
+            logMessage(g_bootstrapLog, "ExCxx: C initializer failed; teardown required\r\n");
+            return false;
+        }
+    }
+    for (size_t index = 1; index < cxxCount; ++index) {
+        const auto initializer = initializerAt(g_cxxInitializersBegin, index);
+        if (initializer) initializer();
+    }
+#if defined(__MINGW32__)
+    for (size_t index = gnuCount; index != 0; --index) {
+        __CTOR_LIST__[index]();
+    }
+#endif
+    g_cxxPhase = CxxPhase::Ready;
+    logMessage(g_bootstrapLog, "ExCxx: kernel global constructors dispatched\r\n");
+    return true;
+#endif
+}
+
+bool shutdownBootstrapCxxRuntime() noexcept {
+    if (g_cxxPhase != CxxPhase::Ready && g_cxxPhase != CxxPhase::Failed) {
+        logMessage(g_bootstrapLog, "ExCxx: teardown rejected (phase)\r\n");
+        return false;
+    }
+    g_cxxPhase = CxxPhase::Terminating;
+    while (g_destructorCount != 0) {
+        const auto destructor = g_destructors[--g_destructorCount];
+        g_destructors[g_destructorCount] = nullptr;
+        destructor();
+    }
+    g_cxxPhase = CxxPhase::Terminated;
+    logMessage(g_bootstrapLog, "ExCxx: kernel atexit callbacks dispatched\r\n");
+    return true;
+}
 
 bool initializeBootstrapRuntime(
     BootstrapLogRoutine log,
@@ -464,6 +590,23 @@ bool verifyBootstrapRuntime() noexcept {
 }
 
 } // namespace micant::ex
+
+// Compiler ABI only; intentionally not a public Windows kernel export.
+extern "C" int atexit(void (*callback)()) {
+    if (!callback) {
+        logMessage(g_bootstrapLog, "ExCxx: null atexit callback rejected\r\n");
+        return -1;
+    }
+    if (!g_runtimeInitialized ||
+        (g_cxxPhase != CxxPhase::Initializing && g_cxxPhase != CxxPhase::Ready)) {
+        stop("ExCxx: atexit outside live initialization/runtime; stopping\r\n");
+    }
+    if (g_destructorCount == kMaximumDestructors) {
+        stop("ExCxx: destructor registry exhausted; stopping\r\n");
+    }
+    g_destructors[g_destructorCount++] = callback;
+    return 0;
+}
 
 extern "C" void* malloc(size_t size) {
     return allocateMemory(size, kDefaultAlignment);
