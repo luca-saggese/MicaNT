@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <optional>
-#include <deque>
+#include <atomic>
 #include "micant/shared/ntdef.hpp"
 
 namespace micant::mm {
@@ -116,71 +116,268 @@ struct Mmpfn {
     uint64_t blink{0};
 };
 
+struct PhysicalPageRange {
+    uint64_t firstPfn{0};
+    uint64_t pageCount{0};
+};
+
+using ZeroPhysicalPageRoutine = void (*)(uint64_t pfn) noexcept;
+
 /**
  * @brief Physical Page Frame Number (PFN) Database.
  * Canonical Windows NT physical memory tracker.
  */
 class PfnDatabase {
 private:
-    mutable std::mutex mutex_;
-    std::vector<Mmpfn> entries_;
-    std::deque<uint64_t> zeroedList_;
-    std::deque<uint64_t> freeList_;
-    std::deque<uint64_t> standbyList_;
-    std::deque<uint64_t> modifiedList_;
-    size_t activeCount_{0};
+    struct PageList {
+        uint64_t head{0};
+        uint64_t tail{0};
+        size_t count{0};
+    };
 
+#if defined(MICANT_FREESTANDING)
+    mutable std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
+#else
+    mutable std::mutex mutex_;
+    std::vector<Mmpfn> ownedEntries_;
+#endif
+    std::span<Mmpfn> entries_{};
+    PageList zeroedList_{};
+    PageList freeList_{};
+    PageList standbyList_{};
+    PageList modifiedList_{};
+    size_t activeCount_{0};
+    ZeroPhysicalPageRoutine zeroPhysicalPage_{nullptr};
+
+#if defined(MICANT_FREESTANDING)
+    constexpr PfnDatabase() noexcept = default;
+#else
     PfnDatabase() {
-        // Default physical memory pool: 262,144 pages (1 GB)
         initialize(262144);
+    }
+#endif
+
+    class Guard {
+    public:
+        explicit Guard(const PfnDatabase& database) noexcept
+#if defined(MICANT_FREESTANDING)
+            : lock_(database.lock_)
+#else
+            : lock_(database.mutex_)
+#endif
+        {
+#if defined(MICANT_FREESTANDING)
+            // This bootstrap-only lock is valid only while interrupts are disabled.
+            while (lock_.test_and_set(std::memory_order_acquire)) {}
+#endif
+        }
+
+        ~Guard() noexcept {
+#if defined(MICANT_FREESTANDING)
+            lock_.clear(std::memory_order_release);
+#endif
+        }
+
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+
+    private:
+#if defined(MICANT_FREESTANDING)
+        std::atomic_flag& lock_;
+#else
+        std::lock_guard<std::mutex> lock_;
+#endif
+    };
+
+    [[nodiscard]] PageList* listFor(PageLocation location) noexcept {
+        switch (location) {
+            case PageLocation::ZeroedPageList: return &zeroedList_;
+            case PageLocation::FreePageList: return &freeList_;
+            case PageLocation::StandbyPageList: return &standbyList_;
+            case PageLocation::ModifiedPageList: return &modifiedList_;
+            default: return nullptr;
+        }
+    }
+
+    void resetEntriesLocked() noexcept {
+        zeroedList_ = {};
+        freeList_ = {};
+        standbyList_ = {};
+        modifiedList_ = {};
+        activeCount_ = 0;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            entries_[i] = Mmpfn{};
+            entries_[i].pfn = static_cast<uint64_t>(i);
+            entries_[i].location = PageLocation::BadPageList;
+        }
+    }
+
+    void insertTailLocked(PageList& list, uint64_t pfn, PageLocation location) noexcept {
+        if (pfn == 0 || pfn >= entries_.size()) return;
+        auto& entry = entries_[static_cast<size_t>(pfn)];
+        entry.location = location;
+        entry.blink = list.tail;
+        entry.flink = 0;
+        if (list.tail != 0) {
+            entries_[static_cast<size_t>(list.tail)].flink = pfn;
+        } else {
+            list.head = pfn;
+        }
+        list.tail = pfn;
+        ++list.count;
+    }
+
+    [[nodiscard]] bool removeFromListLocked(uint64_t pfn) noexcept {
+        if (pfn == 0 || pfn >= entries_.size()) return false;
+        auto& entry = entries_[static_cast<size_t>(pfn)];
+        PageList* list = listFor(entry.location);
+        if (!list || list->count == 0) return false;
+
+        const uint64_t previous = entry.blink;
+        const uint64_t next = entry.flink;
+        if (previous != 0) {
+            if (previous >= entries_.size()) return false;
+            entries_[static_cast<size_t>(previous)].flink = next;
+        } else if (list->head == pfn) {
+            list->head = next;
+        } else {
+            return false;
+        }
+        if (next != 0) {
+            if (next >= entries_.size()) return false;
+            entries_[static_cast<size_t>(next)].blink = previous;
+        } else if (list->tail == pfn) {
+            list->tail = previous;
+        } else {
+            return false;
+        }
+        entry.flink = 0;
+        entry.blink = 0;
+        --list->count;
+        return true;
+    }
+
+    [[nodiscard]] uint64_t popHeadLocked(PageList& list) noexcept {
+        const uint64_t pfn = list.head;
+        if (pfn != 0) {
+            (void)removeFromListLocked(pfn);
+        }
+        return pfn;
+    }
+
+    void releasePageLocked(uint64_t pfn) noexcept {
+        if (pfn == 0 || pfn >= entries_.size()) return;
+        auto& entry = entries_[static_cast<size_t>(pfn)];
+        if (entry.location != PageLocation::ActiveAndValid || entry.referenceCount == 0) return;
+        --entry.referenceCount;
+        if (entry.referenceCount != 0) return;
+        if (activeCount_ > 0) --activeCount_;
+        if (entry.modified) {
+            insertTailLocked(modifiedList_, pfn, PageLocation::ModifiedPageList);
+        } else {
+            insertTailLocked(freeList_, pfn, PageLocation::FreePageList);
+        }
+    }
+
+    [[nodiscard]] bool validBootMemoryRanges(
+        std::span<Mmpfn> storage,
+        std::span<const PhysicalPageRange> availableRanges,
+        ZeroPhysicalPageRoutine zeroPhysicalPage
+    ) const noexcept {
+        if (storage.empty() || !zeroPhysicalPage) return false;
+        const uint64_t storagePages = static_cast<uint64_t>(storage.size());
+        for (size_t i = 0; i < availableRanges.size(); ++i) {
+            const auto& range = availableRanges[i];
+            if (range.pageCount == 0 ||
+                range.pageCount > UINT64_MAX - range.firstPfn) {
+                return false;
+            }
+            const uint64_t end = range.firstPfn + range.pageCount;
+            if (range.firstPfn >= storagePages || end > storagePages) return false;
+            for (size_t j = 0; j < i; ++j) {
+                const auto& previous = availableRanges[j];
+                const uint64_t previousEnd = previous.firstPfn + previous.pageCount;
+                if (range.firstPfn < previousEnd && previous.firstPfn < end) return false;
+            }
+        }
+        return true;
     }
 
 public:
     static PfnDatabase& get() noexcept {
+#if defined(MICANT_FREESTANDING)
+        static PfnDatabase instance;
+        return instance;
+#else
         static PfnDatabase* instance = new PfnDatabase();
         return *instance;
+#endif
     }
 
     PfnDatabase(const PfnDatabase&) = delete;
     PfnDatabase& operator=(const PfnDatabase&) = delete;
 
     void initialize(size_t totalPages) {
-        std::lock_guard<std::mutex> lock(mutex_);
+#if defined(MICANT_FREESTANDING)
+        (void)totalPages;
+#else
+        Guard guard(*this);
         initializeLocked(totalPages);
+#endif
     }
 
     void initializeLocked(size_t totalPages) {
-        entries_.clear();
-        entries_.resize(totalPages);
-        zeroedList_.clear();
-        freeList_.clear();
-        standbyList_.clear();
-        modifiedList_.clear();
-        activeCount_ = 0;
-
+#if defined(MICANT_FREESTANDING)
+        (void)totalPages;
+#else
+        ownedEntries_.resize(totalPages);
+        entries_ = ownedEntries_;
+        resetEntriesLocked();
+        zeroPhysicalPage_ = nullptr;
         for (uint64_t i = 0; i < totalPages; ++i) {
-            entries_[i].pfn = i;
-            if (i < 256) {
-                // Reserve first 1MB low memory as Bad/Reserved
-                entries_[i].location = PageLocation::BadPageList;
-            } else if (i % 2 == 0) {
-                entries_[i].location = PageLocation::ZeroedPageList;
-                zeroedList_.push_back(i);
+            if (i < 256) continue;
+            if ((i & 1) == 0) {
+                insertTailLocked(zeroedList_, i, PageLocation::ZeroedPageList);
             } else {
-                entries_[i].location = PageLocation::FreePageList;
-                freeList_.push_back(i);
+                insertTailLocked(freeList_, i, PageLocation::FreePageList);
             }
         }
+#endif
+    }
+
+    [[nodiscard]] NtStatus initializeFromBootMemory(
+        std::span<Mmpfn> storage,
+        std::span<const PhysicalPageRange> availableRanges,
+        ZeroPhysicalPageRoutine zeroPhysicalPage
+    ) noexcept {
+        Guard guard(*this);
+        if (!validBootMemoryRanges(storage, availableRanges, zeroPhysicalPage)) {
+            return NtStatus::InvalidParameter;
+        }
+#if !defined(MICANT_FREESTANDING)
+        ownedEntries_.clear();
+#endif
+        entries_ = storage;
+        zeroPhysicalPage_ = zeroPhysicalPage;
+        resetEntriesLocked();
+        for (const auto& range : availableRanges) {
+            const uint64_t end = range.firstPfn + range.pageCount;
+            const uint64_t first = range.firstPfn == 0 ? 1 : range.firstPfn;
+            for (uint64_t pfn = first; pfn < end; ++pfn) {
+                insertTailLocked(freeList_, pfn, PageLocation::FreePageList);
+            }
+        }
+        return NtStatus::Success;
     }
 
     [[nodiscard]] uint64_t allocateContiguousPages(size_t pageCount) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Guard guard(*this);
         if (pageCount == 0 || pageCount > entries_.size()) return 0;
 
         size_t consecutive = 0;
         uint64_t candidateStart = 0;
 
-        for (uint64_t i = 256; i < entries_.size(); ++i) {
+        for (uint64_t i = 1; i < entries_.size(); ++i) {
             if (entries_[i].location == PageLocation::FreePageList ||
                 entries_[i].location == PageLocation::ZeroedPageList) {
                 if (consecutive == 0) {
@@ -189,8 +386,7 @@ public:
                 consecutive++;
                 if (consecutive == pageCount) {
                     for (uint64_t p = candidateStart; p < candidateStart + pageCount; ++p) {
-                        std::erase(freeList_, p);
-                        std::erase(zeroedList_, p);
+                        (void)removeFromListLocked(p);
                         entries_[p].location = PageLocation::ActiveAndValid;
                         entries_[p].referenceCount = 1;
                         entries_[p].modified = false;
@@ -206,132 +402,123 @@ public:
     }
 
     void freeContiguousPages(uint64_t startPfn, size_t pageCount) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (uint64_t p = startPfn; p < startPfn + pageCount && p < entries_.size(); ++p) {
-            if (entries_[p].referenceCount > 0) {
-                entries_[p].referenceCount--;
-            }
-            if (entries_[p].referenceCount == 0) {
-                if (activeCount_ > 0) activeCount_--;
-                entries_[p].location = PageLocation::FreePageList;
-                freeList_.push_back(p);
-            }
+        Guard guard(*this);
+        if (startPfn == 0 || startPfn >= entries_.size() ||
+            pageCount > entries_.size() - static_cast<size_t>(startPfn)) return;
+        for (size_t offset = 0; offset < pageCount; ++offset) {
+            releasePageLocked(startPfn + offset);
         }
     }
 
     size_t flushModifiedPages() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        size_t count = modifiedList_.size();
-        while (!modifiedList_.empty()) {
-            uint64_t pfn = modifiedList_.front();
-            modifiedList_.pop_front();
+        Guard guard(*this);
+        const size_t count = modifiedList_.count;
+        while (modifiedList_.head != 0) {
+            const uint64_t pfn = popHeadLocked(modifiedList_);
             if (pfn < entries_.size()) {
-                entries_[pfn].location = PageLocation::StandbyPageList;
-                entries_[pfn].modified = false;
-                standbyList_.push_back(pfn);
+                entries_[static_cast<size_t>(pfn)].modified = false;
+                insertTailLocked(standbyList_, pfn, PageLocation::StandbyPageList);
             }
         }
         return count;
     }
 
     void resetForTesting() {
+#if defined(MICANT_FREESTANDING)
+        return;
+#else
         initialize(262144);
+#endif
     }
 
     [[nodiscard]] uint64_t allocatePage(bool preferZeroed = true) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Guard guard(*this);
         uint64_t pfn = 0;
 
-        if (preferZeroed && !zeroedList_.empty()) {
-            pfn = zeroedList_.front();
-            zeroedList_.pop_front();
-        } else if (!freeList_.empty()) {
-            pfn = freeList_.front();
-            freeList_.pop_front();
-        } else if (!zeroedList_.empty()) {
-            pfn = zeroedList_.front();
-            zeroedList_.pop_front();
-        } else if (!standbyList_.empty()) {
-            pfn = standbyList_.front();
-            standbyList_.pop_front();
+        if (preferZeroed && zeroedList_.head != 0) {
+            pfn = popHeadLocked(zeroedList_);
+        } else if (freeList_.head != 0) {
+            pfn = popHeadLocked(freeList_);
+        } else if (zeroedList_.head != 0) {
+            pfn = popHeadLocked(zeroedList_);
+        } else if (standbyList_.head != 0) {
+            pfn = popHeadLocked(standbyList_);
         } else {
             return 0; // Out of physical memory (STATUS_NO_MEMORY)
         }
 
         if (pfn < entries_.size()) {
-            entries_[pfn].location = PageLocation::ActiveAndValid;
-            entries_[pfn].referenceCount = 1;
-            entries_[pfn].modified = false;
+            entries_[static_cast<size_t>(pfn)].location = PageLocation::ActiveAndValid;
+            entries_[static_cast<size_t>(pfn)].referenceCount = 1;
+            entries_[static_cast<size_t>(pfn)].modified = false;
             activeCount_++;
         }
         return pfn;
     }
 
     void freePage(uint64_t pfn) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pfn >= entries_.size()) return;
-
-        auto& entry = entries_[pfn];
-        if (entry.referenceCount > 0) {
-            entry.referenceCount--;
-        }
-
-        if (entry.referenceCount == 0) {
-            if (activeCount_ > 0) activeCount_--;
-            if (entry.modified) {
-                entry.location = PageLocation::ModifiedPageList;
-                modifiedList_.push_back(pfn);
-            } else {
-                entry.location = PageLocation::FreePageList;
-                freeList_.push_back(pfn);
-            }
-        }
+        Guard guard(*this);
+        releasePageLocked(pfn);
     }
 
     void referencePage(uint64_t pfn) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pfn < entries_.size()) {
-            entries_[pfn].referenceCount++;
+        Guard guard(*this);
+        if (pfn == 0 || pfn >= entries_.size()) return;
+        auto& entry = entries_[static_cast<size_t>(pfn)];
+        if (entry.location == PageLocation::BadPageList ||
+            entry.referenceCount == UINT32_MAX) return;
+        if (entry.referenceCount == 0) {
+            if (!removeFromListLocked(pfn)) return;
+            entry.location = PageLocation::ActiveAndValid;
+            ++activeCount_;
         }
+        ++entry.referenceCount;
     }
 
     void zeroPage(uint64_t pfn) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pfn >= entries_.size()) return;
-        entries_[pfn].location = PageLocation::ZeroedPageList;
-        entries_[pfn].modified = false;
-        zeroedList_.push_back(pfn);
+        Guard guard(*this);
+        if (pfn == 0 || pfn >= entries_.size()) return;
+        auto& entry = entries_[static_cast<size_t>(pfn)];
+        if (entry.location == PageLocation::BadPageList) return;
+#if defined(MICANT_FREESTANDING)
+        if (!zeroPhysicalPage_) __builtin_trap();
+#endif
+        if (zeroPhysicalPage_) zeroPhysicalPage_(pfn);
+        entry.modified = false;
+        if (entry.referenceCount != 0) return;
+        (void)removeFromListLocked(pfn);
+        insertTailLocked(zeroedList_, pfn, PageLocation::ZeroedPageList);
     }
 
     void setModified(uint64_t pfn, bool modified) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Guard guard(*this);
         if (pfn < entries_.size()) {
-            entries_[pfn].modified = modified;
+            entries_[static_cast<size_t>(pfn)].modified = modified;
         }
     }
 
     [[nodiscard]] size_t getZeroedCount() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return zeroedList_.size();
+        Guard guard(*this);
+        return zeroedList_.count;
     }
     [[nodiscard]] size_t getFreeCount() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return freeList_.size();
+        Guard guard(*this);
+        return freeList_.count;
     }
     [[nodiscard]] size_t getStandbyCount() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return standbyList_.size();
+        Guard guard(*this);
+        return standbyList_.count;
     }
     [[nodiscard]] size_t getModifiedCount() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return modifiedList_.size();
+        Guard guard(*this);
+        return modifiedList_.count;
     }
     [[nodiscard]] size_t getActiveCount() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Guard guard(*this);
         return activeCount_;
     }
     [[nodiscard]] size_t getTotalPages() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Guard guard(*this);
         return entries_.size();
     }
 };
