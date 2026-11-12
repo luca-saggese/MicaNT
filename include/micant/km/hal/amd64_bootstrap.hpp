@@ -53,6 +53,8 @@ bool verifyBootstrapTimerInterrupt() noexcept;
 bool startBootstrapSchedulerClock() noexcept;
 bool verifyBootstrapSchedulerClock() noexcept;
 bool bootstrapSchedulerClockFailed() noexcept;
+// BSP xAPIC clock priority mask; no other interrupt vectors are routed yet.
+void setBootstrapClockIrqlMask(uint8_t irql) noexcept;
 uint64_t bootstrapSchedulerClockTicks() noexcept;
 
 struct UserServiceArguments {

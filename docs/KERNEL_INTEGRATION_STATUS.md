@@ -103,6 +103,26 @@ differs from the historical integration inventory below.
 The detailed increments and commands below record the checks actually run;
 an isolated diagnostic does not establish a complete milestone contract.
 
+### Bootstrap clock IRQL masking batch
+
+The AMD64 BSP now synchronizes Ke IRQL transitions with CR8 for the only
+routed interrupt, local APIC clock vector `0xd1`: CLOCK_LEVEL masks its
+priority class and HIGH_LEVEL masks all classes. Transitions preserve the
+incoming IF state. The timer diagnostic additionally requires a pending clock
+interrupt to remain in the APIC IRR at CLOCK_LEVEL and become deliverable
+after lowering IRQL; it checks nested HIGH_LEVEL and IF preservation. This
+batch has not yet been run in QEMU. It does not establish general DIRQL,
+software interrupt delivery, x2APIC or SMP behavior. The contract references
+are Microsoft documentation for [KeRaiseIrql](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-keraiseirql),
+[KeLowerIrql](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-kelowerirql),
+and [hardware priorities](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/managing-hardware-priorities).
+ReactOS `hal/halx86/mp/mpsirql.c` was consulted as an architectural reference.
+
+Focused checks performed: host ready-queue tests with ASan/UBSan, kernel
+architecture verification, AMD64 cross-compiler syntax checks for HAL and
+context switching, and cross-compilation of the affected HAL translation unit.
+Integrated build and QEMU remain the integrator's responsibility.
+
 ### Bootstrap local APIC timer diagnostic
 
 On QEMU TCG, a temporary BSP-only xAPIC setup delivers at least three periodic

@@ -100,15 +100,33 @@ inline thread_local ProcessorControlBlock g_CurrentCpu{
 }
 
 inline KIRQL KfRaiseIrql(KIRQL newIrql) noexcept {
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+#endif
     KIRQL old = g_CurrentCpu.currentIrql;
     if (newIrql > old) {
         g_CurrentCpu.currentIrql = newIrql;
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+        hal::amd64::setBootstrapClockIrqlMask(newIrql);
+#endif
     }
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+#endif
     return old;
 }
 
 inline void KeLowerIrql(KIRQL newIrql) noexcept {
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+#endif
     g_CurrentCpu.currentIrql = newIrql;
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+    hal::amd64::setBootstrapClockIrqlMask(newIrql);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+#endif
 }
 
 [[nodiscard]] inline uint32_t KeGetCurrentProcessorNumber() noexcept {
