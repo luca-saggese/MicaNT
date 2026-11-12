@@ -6,7 +6,9 @@
 #include "micant/km/core/ke.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
 #include "micant/um/native/pe.hpp"
+#include <array>
 #include <memory>
+#include <string_view>
 
 namespace micant::ke { struct KThread; }
 namespace micant::um { class NativeUserImageSet64; }
@@ -27,8 +29,13 @@ public:
     // return. The owning context performs deferred cleanup after switch.
     NtStatus terminateCurrent(NtStatus exitStatus) noexcept;
     // Internal BSP image loader; caller holds the active process root and
-    // keeps the supplied name and file bytes alive until process teardown.
-    NtStatus loadNativeImage(std::string_view name, std::span<const uint8_t> file) noexcept;
+    // keeps the supplied name and file bytes alive until process teardown;
+    // fullPath is borrowed until image finalization.
+    NtStatus loadNativeImage(std::string_view name, std::span<const uint8_t> file,
+                             std::u16string_view fullPath = {}) noexcept;
+    // The supplied strings are borrowed until image finalization.
+    NtStatus setNativeProcessParameters(std::u16string_view imagePath,
+                                        std::u16string_view commandLine) noexcept;
     NtStatus finalizeNativeImages() noexcept;
     [[nodiscard]] const um::NativeUserImageSet64* nativeImages() const noexcept { return images_.get(); }
     [[nodiscard]] mm::ProcessAddressSpace& getAddressSpace() noexcept { return addressSpace_; }
@@ -53,6 +60,11 @@ private:
     bool imagesFinalized_{false};
     uintptr_t userPeb_{0};
     uintptr_t userLoaderData_{0};
+    uintptr_t userProcessParameters_{0};
+    std::array<std::u16string_view, 16> nativeImagePaths_{};
+    std::u16string_view processImagePath_{};
+    std::u16string_view processCommandLine_{};
+    bool processParametersConfigured_{false};
     std::unique_ptr<pe::PeImageView64::TlsLayout[]> userTlsLayouts_{};
     size_t userTlsCount_{0};
 };

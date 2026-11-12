@@ -1,5 +1,6 @@
 #include "micant/km/executive/ps.hpp"
 #include "micant/km/executive/usermode.hpp"
+#include "micant/km/executive/image_metadata.hpp"
 #include <new>
 #include <cstring>
 
@@ -9,10 +10,10 @@ NtStatus mapBootstrapImageView(mm::ProcessAddressSpace& space, uintptr_t& base, 
 
 namespace micant::ps {
 namespace {
-// Only the public winternl.h fields are populated. Names remain empty until
-// the loader receives verified full image paths from a file-backed source.
+// Only public winternl.h fields are populated. Paths come from the caller;
+// the in-memory bootstrap has no filesystem from which to infer them.
 struct UserListEntry { uint64_t next; uint64_t previous; };
-struct UserUnicodeString { uint16_t length; uint16_t maximumLength; uint32_t padding; uint64_t buffer; };
+using detail::UserUnicodeString;
 struct UserLoaderData { uint8_t reserved1[8]; uint64_t reserved2[3]; UserListEntry memoryOrder; };
 struct UserLoaderEntry {
     uint64_t reserved1[2];
@@ -31,10 +32,24 @@ static_assert(offsetof(UserLoaderEntry, memoryOrder) == 0x10);
 static_assert(offsetof(UserLoaderEntry, dllBase) == 0x30);
 static_assert(offsetof(UserLoaderEntry, fullDllName) == 0x48);
 
-bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t address) noexcept {
+bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t address,
+                              std::span<const std::u16string_view> paths) noexcept {
     constexpr size_t entriesOffset = 0x40;
-    if (images.size() > 16 || entriesOffset + images.size() * sizeof(UserLoaderEntry) > mm::PageSize4KB)
+    if (images.size() > 16 || paths.size() != images.size() ||
+        entriesOffset + images.size() * sizeof(UserLoaderEntry) > mm::PageSize4KB)
         return false;
+    const size_t stringsOffset = entriesOffset + images.size() * sizeof(UserLoaderEntry);
+    auto bytes = std::span<uint8_t>{reinterpret_cast<uint8_t*>(address), mm::PageSize4KB};
+    detail::UserMetadataWriter writer(bytes, address, stringsOffset);
+    // Validate every length before writing any entries or string bytes.
+    size_t remaining = bytes.size() - stringsOffset;
+    for (const auto path : paths) {
+        if (path.empty()) continue;
+        if (path.size() > (UINT16_MAX - sizeof(char16_t)) / sizeof(char16_t)) return false;
+        const size_t length = (path.size() + 1) * sizeof(char16_t);
+        if (length > remaining) return false;
+        remaining -= length;
+    }
     auto* loader = reinterpret_cast<UserLoaderData*>(address);
     auto* entries = reinterpret_cast<UserLoaderEntry*>(address + entriesOffset);
     const uintptr_t head = address + offsetof(UserLoaderData, memoryOrder);
@@ -46,6 +61,7 @@ bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t 
         entries[i].dllBase = module->base;
         entries[i].checksum = module->view.headers().optionalHeader.checkSum;
         entries[i].timestamp = module->view.headers().fileHeader.timeDateStamp;
+        if (!writer.append(paths[i], entries[i].fullDllName)) return false;
         order[i] = i;
         size_t position = i;
         while (position && images.module(order[position - 1])->base > module->base) {
@@ -95,8 +111,11 @@ NtStatus validateProtectionLayout(const pe::PeImageView64& view) noexcept {
 }
 }
 
-NtStatus EProcess::loadNativeImage(std::string_view name, std::span<const uint8_t> file) noexcept {
+NtStatus EProcess::loadNativeImage(std::string_view name, std::span<const uint8_t> file,
+                                   std::u16string_view fullPath) noexcept {
     if (!active(*this) || terminating_ || imagesFinalized_) return NtStatus::InvalidParameter;
+    if (fullPath.size() > (UINT16_MAX - sizeof(char16_t)) / sizeof(char16_t) ||
+        fullPath.size() > mm::PageSize4KB / sizeof(char16_t) - 1) return NtStatus::BufferTooSmall;
     pe::PeImageView64 view;
     auto status = view.inspect(file);
     if (status != NtStatus::Success) return status;
@@ -116,12 +135,40 @@ NtStatus EProcess::loadNativeImage(std::string_view name, std::span<const uint8_
         if (addressSpace_.unmapSharedPages(target) != NtStatus::Success) __builtin_trap();
         return status;
     }
+    nativeImagePaths_[images_->size() - 1] = fullPath;
+    return NtStatus::Success;
+}
+
+NtStatus EProcess::setNativeProcessParameters(std::u16string_view imagePath,
+                                               std::u16string_view commandLine) noexcept {
+    if (!active(*this) || terminating_ || imagesFinalized_) return NtStatus::InvalidParameter;
+    const size_t capacity = mm::PageSize4KB - sizeof(detail::UserProcessParameters);
+    const auto bytes = [](std::u16string_view text) noexcept {
+        return text.empty() ? size_t{0} : (text.size() + 1) * sizeof(char16_t);
+    };
+    if (imagePath.size() > capacity / sizeof(char16_t) || commandLine.size() > capacity / sizeof(char16_t) ||
+        bytes(imagePath) > capacity || bytes(commandLine) > capacity - bytes(imagePath))
+        return NtStatus::BufferTooSmall;
+    processImagePath_ = imagePath;
+    processCommandLine_ = commandLine;
+    processParametersConfigured_ = true;
     return NtStatus::Success;
 }
 
 NtStatus EProcess::finalizeNativeImages() noexcept {
     if (!active(*this) || terminating_ || !images_) return NtStatus::InvalidParameter;
     if (imagesFinalized_) return NtStatus::Success;
+    // Reject oversized metadata before import binding or protection changes so
+    // an oversized path set cannot leave the image partially finalized.
+    if (images_->size() > nativeImagePaths_.size()) return NtStatus::BufferTooSmall;
+    size_t remaining = mm::PageSize4KB - 0x40 - images_->size() * sizeof(UserLoaderEntry);
+    for (size_t i = 0; i < images_->size(); ++i) {
+        const auto path = nativeImagePaths_[i];
+        if (path.empty()) continue;
+        const size_t bytes = (path.size() + 1) * sizeof(char16_t);
+        if (bytes > remaining) return NtStatus::BufferTooSmall;
+        remaining -= bytes;
+    }
     const auto binding = images_->bindAll();
     if (binding != NtStatus::Success) return binding;
     uintptr_t tlsIndexAddresses[16]{};
@@ -189,7 +236,7 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
             if (status != NtStatus::Success) return status;
         }
     }
-    // Process parameters and other startup state remain uninitialized.
+    // Other process startup state remains uninitialized.
     if (!userPeb_) {
         auto status = addressSpace_.allocate(userPeb_, mm::PageSize4KB,
             mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
@@ -200,14 +247,34 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
             mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
         if (status != NtStatus::Success) return status;
     }
-    if (!initializeLoaderMetadata(*images_, userLoaderData_)) return NtStatus::Unsuccessful;
+    if (!initializeLoaderMetadata(*images_, userLoaderData_,
+            std::span<const std::u16string_view>{nativeImagePaths_.data(), images_->size()}))
+        return NtStatus::BufferTooSmall;
+    if (processParametersConfigured_) {
+        if (!userProcessParameters_) {
+            auto status = addressSpace_.allocate(userProcessParameters_, mm::PageSize4KB,
+                mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
+            if (status != NtStatus::Success) return status;
+        }
+        auto* parameters = reinterpret_cast<detail::UserProcessParameters*>(userProcessParameters_);
+        *parameters = {};
+        detail::UserMetadataWriter writer(
+            {reinterpret_cast<uint8_t*>(userProcessParameters_), mm::PageSize4KB},
+            userProcessParameters_, sizeof(*parameters));
+        if (!writer.append(processImagePath_, parameters->imagePathName) ||
+            !writer.append(processCommandLine_, parameters->commandLine)) return NtStatus::BufferTooSmall;
+    }
     *reinterpret_cast<uint64_t*>(userPeb_ + 0x18) = userLoaderData_;
+    *reinterpret_cast<uint64_t*>(userPeb_ + 0x20) = userProcessParameters_;
     for (size_t i = 0; i < tlsCount; ++i) {
         const auto index = static_cast<uint32_t>(i);
         std::memcpy(reinterpret_cast<void*>(tlsIndexAddresses[i]), &index, sizeof(index));
     }
     userTlsLayouts_ = std::move(selectedTls);
     userTlsCount_ = tlsCount;
+    nativeImagePaths_ = {};
+    processImagePath_ = {};
+    processCommandLine_ = {};
     imagesFinalized_ = true;
     return NtStatus::Success;
 }

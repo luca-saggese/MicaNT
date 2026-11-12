@@ -1078,3 +1078,23 @@ this audit: use the existing canonical contracts. Any required signature
 change must be reviewed centrally before worker implementation. Integrate in
 dependency order: runtime/backing, Mm, Ob, Ke, Ps, Io, then higher services.
 Advanced incomplete features are not prerequisites for the first boot.
+
+
+### Ps loader metadata batch (integration pending)
+
+Ps can copy caller-supplied UTF-16 full module paths into the PEB loader list
+and initialize the documented `ImagePathName` and `CommandLine` fields of a
+process-owned parameter block. The bootstrap caller supplies these values; this
+does not implement filesystem lookup or complete process parameters. Oversized
+combined loader strings are rejected before import binding and protection changes.
+
+The host `ps_image_metadata_test` passed under AddressSanitizer and
+UndefinedBehaviorSanitizer. AMD64 freestanding syntax checks passed for the Ps
+implementation and the extended two-user-threads test. That test now checks the
+metadata through process PEB and loader entries, but has **not** been run in
+QEMU for this batch. This is not evidence of M6 or M7 completion.
+
+Public layout references: [PEB](https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb),
+[PEB_LDR_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb_ldr_data),
+[RTL_USER_PROCESS_PARAMETERS](https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-rtl_user_process_parameters),
+and [UNICODE_STRING](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_unicode_string).

@@ -1,4 +1,5 @@
 #include "micant/km/executive/ps.hpp"
+#include "micant/km/executive/image_metadata.hpp"
 #include "micant/km/executive/usermode.hpp"
 #include "micant/km/core/syscalls.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
@@ -12,6 +13,10 @@ uint32_t bootstrapEventObjectCount() noexcept;
 }
 
 namespace {
+constexpr std::u16string_view executablePath = u"\\??\\C:\\MicaNTTest\\fixture.exe";
+constexpr std::u16string_view dllPath = u"\\??\\C:\\MicaNTTest\\ntdll.dll";
+constexpr std::u16string_view tlsPath = u"\\??\\C:\\MicaNTTest\\tls.dll";
+constexpr std::u16string_view commandLine = u"fixture.exe --test";
 const uint8_t nativeDll[]{
 #include "ntdll-process.inc"
 };
@@ -187,7 +192,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const size_t beforeImage = mm::PfnDatabase::get().getActiveCount();
         if (process.loadNativeImage("bad.exe", {}) != NtStatus::InvalidImageFormat ||
             mm::PfnDatabase::get().getActiveCount() != beforeImage ||
-            process.loadNativeImage("fixture.exe", std::span<const uint8_t>{file}) != NtStatus::Success)
+            process.loadNativeImage("fixture.exe", std::span<const uint8_t>{file}, executablePath) != NtStatus::Success)
             return false;
         const auto* images = process.nativeImages();
         const auto* image = images ? images->module(0) : nullptr;
@@ -212,7 +217,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         std::memcpy(file + 64 + sizeof(nt), &text, sizeof(text));
         if (wxStatus != NtStatus::NotSupported || mm::PfnDatabase::get().getActiveCount() != beforeDuplicate)
             return false;
-        if (process.loadNativeImage("ntdll.dll", std::span<const uint8_t>{nativeDll}) != NtStatus::Success)
+        if (process.loadNativeImage("ntdll.dll", std::span<const uint8_t>{nativeDll}, dllPath) != NtStatus::Success)
             return false;
         static constinit uint8_t tlsDllFile[1024]{};
         constexpr uintptr_t tlsDllBase = hal::amd64::BootstrapManagedBase + 0xe00000;
@@ -250,8 +255,9 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         constexpr uint64_t secondSeed = 0x1020304050607080ULL;
         std::memcpy(tlsDllFile + 512 + 0x80, &secondSeed, sizeof(secondSeed));
         std::memcpy(tlsDllFile + 512 + 0x90, &uninitializedTlsIndex, sizeof(uninitializedTlsIndex));
-        if (process.loadNativeImage("tls.dll", std::span<const uint8_t>{tlsDllFile}) != NtStatus::Success)
+        if (process.loadNativeImage("tls.dll", std::span<const uint8_t>{tlsDllFile}, tlsPath) != NtStatus::Success)
             return false;
+        if (process.setNativeProcessParameters(executablePath, commandLine) != NtStatus::Success) return false;
         auto* loadedTls = reinterpret_cast<pe::ImageTlsDirectory64*>(code + 2 * mm::PageSize4KB);
         auto* callbacks = reinterpret_cast<uint64_t*>(code + 2 * mm::PageSize4KB + 0x68);
         loadedTls->addressOfCallBacks = reinterpret_cast<uintptr_t>(callbacks);
@@ -334,13 +340,27 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         uintptr_t link = head[0];
         uintptr_t previousLink = listHead;
         const uintptr_t expectedBases[]{code, tlsDllBase, dll.headers().optionalHeader.imageBase};
+        const std::u16string_view expectedPaths[]{executablePath, tlsPath, dllPath};
+        const auto matches = [](const ps::detail::UserUnicodeString& value, std::u16string_view expected) {
+            return value.length == expected.size() * sizeof(char16_t) &&
+                value.maximumLength == value.length + sizeof(char16_t) &&
+                hal::amd64::bootstrapUserRange(value.buffer, value.maximumLength, false) &&
+                std::memcmp(reinterpret_cast<const void*>(value.buffer), expected.data(), value.length) == 0 &&
+                *reinterpret_cast<const char16_t*>(value.buffer + value.length) == 0;
+        };
+        const auto parametersAddress = *reinterpret_cast<const uint64_t*>(process.userPebAddress() + 0x20);
+        if (!hal::amd64::bootstrapUserRange(parametersAddress, sizeof(ps::detail::UserProcessParameters), false)) return false;
+        const auto& parameters = *reinterpret_cast<const ps::detail::UserProcessParameters*>(parametersAddress);
+        tls = tls && matches(parameters.imagePathName, executablePath) && matches(parameters.commandLine, commandLine);
+        size_t pathIndex = 0;
         for (const auto expectedBase : expectedBases) {
-            if (link == listHead || !hal::amd64::bootstrapUserRange(link, 40, false)) {
+            if (link == listHead || !hal::amd64::bootstrapUserRange(link, 0x48, false)) {
                 tls = false;
                 break;
             }
             const auto* entry = reinterpret_cast<const uint64_t*>(link);
-            if (entry[1] != previousLink || entry[4] != expectedBase) {
+            if (entry[1] != previousLink || entry[4] != expectedBase ||
+                !matches(*reinterpret_cast<const ps::detail::UserUnicodeString*>(link + 0x38), expectedPaths[pathIndex++])) {
                 tls = false;
                 break;
             }

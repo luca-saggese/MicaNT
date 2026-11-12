@@ -28,6 +28,11 @@ NtStatus EProcess::initializeAddressSpace() noexcept {
     imagesFinalized_ = false;
     userPeb_ = 0;
     userLoaderData_ = 0;
+    userProcessParameters_ = 0;
+    nativeImagePaths_ = {};
+    processImagePath_ = {};
+    processCommandLine_ = {};
+    processParametersConfigured_ = false;
     userTlsLayouts_.reset();
     userTlsCount_ = 0;
     return NtStatus::Success;
@@ -46,6 +51,11 @@ NtStatus EProcess::closeAddressSpace() noexcept {
     if (status != NtStatus::Success) return status;
     userPeb_ = 0;
     userLoaderData_ = 0;
+    userProcessParameters_ = 0;
+    nativeImagePaths_ = {};
+    processImagePath_ = {};
+    processCommandLine_ = {};
+    processParametersConfigured_ = false;
     userTlsLayouts_.reset();
     userTlsCount_ = 0;
     images_.reset();
