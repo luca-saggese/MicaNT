@@ -73,6 +73,20 @@ bool networkTestEnabled() noexcept {
     return io::IoOpenBackendFile(&marker.value, 1, {path.data(), length}) == NtStatus::Success;
 }
 
+NtStatus waitForUserProcess(Handle process, int64_t timeout100ns) noexcept {
+    LargeInteger timeout{};
+    timeout.quadPart = timeout100ns;
+    auto status = sys::NtWaitForSingleObject(process, false, &timeout);
+    if (status != NtStatus::Success) return status;
+    ps::EProcess* object{};
+    ob::ObjectHeader* reference{};
+    status = ps::detail::referenceProcessHandle(process, 0x0400u, object, reference);
+    if (status != NtStatus::Success) return status;
+    const auto exitStatus = object->exitStatus();
+    ob::ObDereferenceObject(reference);
+    return exitStatus;
+}
+
 void seedConfiguredNetworkTestUtc() noexcept {
     uint64_t current{};
     if (hal::amd64::queryBootstrapSystemTime(current) ==
@@ -151,24 +165,13 @@ NtStatus acquireBootDhcpLease() noexcept {
     logStatus("service process creation", status);
     if (status != NtStatus::Success) return status;
 
-    LargeInteger timeout{};
-    timeout.quadPart = -250'000'000; // DHCP retry budget plus DNS query and service teardown.
-    status = sys::NtWaitForSingleObject(process.value, false, &timeout);
+    status = waitForUserProcess(process.value,
+        -250'000'000); // DHCP retry budget plus DNS query and service teardown.
     logStatus("service process wait", status);
     if (status != NtStatus::Success) {
         (void)sys::NtTerminateProcess(process.value, status);
         return status;
     }
-    ps::EProcess* serviceProcess{};
-    ob::ObjectHeader* serviceReference{};
-    status = ps::detail::referenceProcessHandle(process.value, 0x0400u,
-        serviceProcess, serviceReference);
-    if (status != NtStatus::Success) return status;
-    const auto serviceExitStatus = serviceProcess->exitStatus();
-    ob::ObDereferenceObject(serviceReference);
-    logStatus("service process exit", serviceExitStatus);
-    if (serviceExitStatus != NtStatus::Success) return serviceExitStatus;
-
     tcpip::Ipv4Address ip{}, mask{}, gateway{}, dns{};
     ndis::MacAddress mac{};
     network.queryNetworkConfiguration(ip, mask, gateway, dns, mac);
@@ -189,11 +192,11 @@ NtStatus acquireBootDhcpLease() noexcept {
         ScopedHandle probeProcess{}, probeThread{};
         status = ps::detail::createBootstrapUserProcess(probeImages, probePath,
             {probeCommandLine, std::size(probeCommandLine) - 1}, 32768, 32768, true,
-            ob::SYNCHRONIZE, ob::SYNCHRONIZE, probeProcess.value, probeThread.value, true);
+            ob::SYNCHRONIZE | 0x0400u, ob::SYNCHRONIZE,
+            probeProcess.value, probeThread.value, true);
         if (status != NtStatus::Success) return status;
-        LargeInteger probeTimeout{};
-        probeTimeout.quadPart = -300'000'000; // 30 seconds for TCP connect/exchange and accept.
-        status = sys::NtWaitForSingleObject(probeProcess.value, false, &probeTimeout);
+        status = waitForUserProcess(probeProcess.value,
+            -300'000'000); // 30 seconds for TCP connect/exchange and accept.
         logStatus("network probe wait", status);
         if (status != NtStatus::Success) {
             (void)sys::NtTerminateProcess(probeProcess.value, status);
@@ -221,11 +224,11 @@ NtStatus acquireBootDhcpLease() noexcept {
         ScopedHandle httpsProcess{}, httpsThread{};
         status = ps::detail::createBootstrapUserProcess(httpsImages, httpsPath,
             {httpsCommandLine, std::size(httpsCommandLine) - 1}, 32768, 32768, true,
-            ob::SYNCHRONIZE, ob::SYNCHRONIZE, httpsProcess.value, httpsThread.value, true);
+            ob::SYNCHRONIZE | 0x0400u, ob::SYNCHRONIZE,
+            httpsProcess.value, httpsThread.value, true);
         if (status != NtStatus::Success) return status;
-        LargeInteger httpsTimeout{};
-        httpsTimeout.quadPart = -600'000'000; // 60 seconds including certificate rejection leg.
-        status = sys::NtWaitForSingleObject(httpsProcess.value, false, &httpsTimeout);
+        status = waitForUserProcess(httpsProcess.value,
+            -600'000'000); // 60 seconds including certificate rejection leg.
         if (status != NtStatus::Success) {
             (void)sys::NtTerminateProcess(httpsProcess.value, status);
             return status;
