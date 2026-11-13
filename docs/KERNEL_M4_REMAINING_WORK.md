@@ -60,6 +60,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   Verificare parent handle e diritti, attributi e flags supportati, access mode,
   metadata loader, handle inheritance, pubblicazione dell'handle e rollback di
   ogni fase. Gli input o flags non supportati devono fallire esplicitamente.
+  QEMU CPL3 verifica ora il rifiuto con handle nullo per flag ignoti, debug port,
+  exception port e `InJob`; i limiti di sicurezza/metadata e il rollback di tutte
+  le fasi restano aperti.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
