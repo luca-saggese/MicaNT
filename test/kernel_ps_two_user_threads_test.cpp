@@ -341,6 +341,14 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x108(%rsp)\nmovq $0, 0x110(%rsp)\nmovq $0, 0x118(%rsp)\nmovl $48, 0xf0(%rsp)\n"
         "leaq 0x68(%rsp), %rcx\nmovl $0x400, %edx\nleaq 0xf0(%rsp), %r8\nleaq 0xe0(%rsp), %r9\n"
         "callq *64(%r15)\ntestl %eax, %eax\njz 6f\nmovl $0xc0000213, %r13d\njmp 90f\n6:\n"
+        // The opened parent handle grants query access only; process creation
+        // must require PROCESS_CREATE_PROCESS and publish no child on denial.
+        "leaq 0x78(%rsp), %rcx\nmovq $0, 0x78(%rsp)\nmovl $0x0010043b, %edx\n"
+        "xorl %r8d, %r8d\nmovq 0x68(%rsp), %r9\nxorl %eax, %eax\n"
+        "movq %rax, 0x20(%rsp)\nmovq %rax, 0x28(%rsp)\nmovq %rax, 0x30(%rsp)\n"
+        "movq %rax, 0x38(%rsp)\nmovq %rax, 0x40(%rsp)\ncallq *40(%r15)\n"
+        "cmpl $0xc0000022, %eax\nje 76f\nmovl $0xc000024a, %r13d\njmp 90f\n"
+        "76: cmpq $0, 0x78(%rsp)\nje 77f\nmovl $0xc000024b, %r13d\njmp 90f\n77:\n"
         // NtCreateThreadEx must reject unsupported named Ps objects before
         // it references the restricted process handle or publishes a handle.
         "leaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\nleaq 0x130(%rsp), %r8\n"

@@ -360,7 +360,9 @@ The same Ring 3 fixture now verifies that `NtCreateProcessEx` returns
 `STATUS_NOT_IMPLEMENTED` and leaves its output handle null for an unknown flag,
 non-null debug port, non-null exception port and `InJob`. These are explicit
 unsupported-input checks; they do not establish general process creation or
-security-descriptor/metadata semantics. QEMU passed with all four cases.
+security-descriptor/metadata semantics. It also passes a query-only process
+handle as the parent and verifies `STATUS_ACCESS_DENIED` with no child handle.
+QEMU passed with all five cases.
 
 The kernel-side native thread fixture passes a commit size larger than its
 reserve and a reserve above `BootstrapManagedSize` through `NtCreateThreadEx`.
