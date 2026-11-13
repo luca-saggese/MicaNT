@@ -63,7 +63,7 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
-  dopo errori di allocazione o copyout. Il test QEMU ora esercita il rifiuto
+  dopo errori di allocazione o copyout. Il fixture QEMU kernel ora esercita il rifiuto
   `STATUS_INVALID_PARAMETER` per commit maggiore del reserve e reserve oltre il
   limite gestito, verificando handle nullo e nessun thread/ready entry aggiunto;
   il contratto generale e il rollback di tutte le fasi restano aperti.

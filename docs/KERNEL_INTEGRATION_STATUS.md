@@ -353,7 +353,7 @@ freestanding Ps namespace with `STATUS_NOT_IMPLEMENTED` and leave the output
 handle unpublished. The full `python3 qemu.py --headless` run passed after
 adding these cases.
 
-The CPL3 native thread fixture now also passes a commit size larger than its
+The kernel-side native thread fixture now also passes a commit size larger than its
 reserve and a reserve above `BootstrapManagedSize` through `NtCreateThreadEx`.
 Both return `STATUS_INVALID_PARAMETER`; the test confirms null output handles,
 unchanged Ps thread-object count and unchanged ready-queue count. QEMU passed
