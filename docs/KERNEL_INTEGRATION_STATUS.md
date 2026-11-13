@@ -337,6 +337,12 @@ stable for five seconds. Normal user-APC dispatch is now exercised by this
 bounded path; its general interleavings and M4's broader access/lifecycle
 contracts remain open.
 
+The Ring 3 process-creation fixture also passes named `ObjectAttributes` to
+`NtCreateProcessEx` and `NtCreateThreadEx`. Both reject the unsupported
+freestanding Ps namespace with `STATUS_NOT_IMPLEMENTED` and leave the output
+handle unpublished. The full `python3 qemu.py --headless` run passed after
+adding these cases.
+
 A bounded internal Ps factory now creates Ob-backed thread objects. A lifecycle
 reference keeps each object alive if its last handle closes before reap. The
 Ke switch commit signals thread termination before the outgoing stack is

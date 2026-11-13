@@ -280,9 +280,19 @@ __asm__(".section .uthreads$z,\"xr\"\n.globl MicantTwoUserThreadsEnd\n"
 __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStart() noexcept {
     __asm__ __volatile__(
         "pushq %r12\npushq %r13\npushq %r15\nmovq %rcx, %r12\nmovq 0(%r12), %r15\n"
-        "xorl %r13d, %r13d\nsubq $0x140, %rsp\n"
+        "xorl %r13d, %r13d\nsubq $0x180, %rsp\n"
         "movabsq $0x400020002700, %rax\nmovq $0, (%rax)\n"
         "movq $0, 0x60(%rsp)\nmovq $0, 0x68(%rsp)\nmovq $0, 0x70(%rsp)\nmovq $0, 0x78(%rsp)\n"
+        // The freestanding Ps namespace is not implemented. A named
+        // ObjectAttributes input must fail explicitly before publication.
+        "movq $0, 0x130(%rsp)\nmovq $0, 0x138(%rsp)\nmovq $0, 0x140(%rsp)\n"
+        "movq $0, 0x148(%rsp)\nmovq $0, 0x150(%rsp)\nmovq $0, 0x158(%rsp)\n"
+        "movl $48, 0x130(%rsp)\nmovq $1, 0x140(%rsp)\n"
+        "leaq 0x60(%rsp), %rcx\nmovl $0x0010043b, %edx\nleaq 0x130(%rsp), %r8\nmovq $-1, %r9\n"
+        "movq $0, 0x20(%rsp)\nmovq $0, 0x28(%rsp)\nmovq $0, 0x30(%rsp)\n"
+        "movq $0, 0x38(%rsp)\nmovq $0, 0x40(%rsp)\ncallq *40(%r15)\n"
+        "cmpl $0xc0000002, %eax\nje 27f\nmovl $0xc0000227, %r13d\njmp 90f\n"
+        "27: cmpq $0, 0x60(%rsp)\nje 28f\nmovl $0xc0000228, %r13d\njmp 90f\n28:\n"
         "leaq 0x60(%rsp), %rcx\nmovl $0x0010043b, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
         "movq $0, 0x20(%rsp)\nmovq $0, 0x28(%rsp)\nmovq $0, 0x30(%rsp)\n"
         "movq $0, 0x38(%rsp)\nmovq $0, 0x40(%rsp)\ncallq *40(%r15)\n"
@@ -298,6 +308,15 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x108(%rsp)\nmovq $0, 0x110(%rsp)\nmovq $0, 0x118(%rsp)\nmovl $48, 0xf0(%rsp)\n"
         "leaq 0x68(%rsp), %rcx\nmovl $0x400, %edx\nleaq 0xf0(%rsp), %r8\nleaq 0xe0(%rsp), %r9\n"
         "callq *64(%r15)\ntestl %eax, %eax\njz 6f\nmovl $0xc0000213, %r13d\njmp 90f\n6:\n"
+        // NtCreateThreadEx must reject unsupported named Ps objects before
+        // it references the restricted process handle or publishes a handle.
+        "leaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\nleaq 0x130(%rsp), %r8\n"
+        "movq 0x68(%rsp), %r9\nleaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
+        "leaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\nmovq $0, 0x30(%rsp)\n"
+        "movq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\n"
+        "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ncmpl $0xc0000002, %eax\nje 29f\n"
+        "movl $0xc0000229, %r13d\njmp 90f\n29: cmpq $0, 0x70(%rsp)\nje 30f\n"
+        "movl $0xc000022a, %r13d\njmp 90f\n30:\n"
         "leaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\nxorl %r8d, %r8d\nmovq 0x68(%rsp), %r9\n"
         "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nleaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\n"
         "movq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
@@ -332,7 +351,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq 0x78(%rsp), %rcx\ntestq %rcx, %rcx\njz 21f\ncallq *88(%r15)\n21:\n"
         "movq 0x70(%rsp), %rcx\ntestq %rcx, %rcx\njz 22f\ncallq *88(%r15)\n22:\n"
         "movq 0x68(%rsp), %rcx\ntestq %rcx, %rcx\njz 20f\ncallq *88(%r15)\n20:\n"
-        "91: addq $0x140, %rsp\npopq %r15\npopq %r13\npopq %r12\nmovl $0xc0000022, %eax\nretq\n");
+        "91: addq $0x180, %rsp\npopq %r15\npopq %r13\npopq %r12\nmovl $0xc0000022, %eax\nretq\n");
 }
 }
 

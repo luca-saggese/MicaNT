@@ -68,11 +68,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   terminazione, attach, handle table e reaper. Includere stress concorrente e
   verifica QEMU multi-CPU quando il backend SMP è disponibile. Non dichiarare
   supporto SMP finché scheduler, lock e teardown non sono coerenti fra loro.
-- [ ] **Chiudere o delimitare esplicitamente il namespace degli oggetti Ps.**
-  La documentazione storica segnala che il namespace nominato freestanding non
-  è supportato. Stabilire se rientra nell'accettazione M4; se resta fuori,
-  rifiutare in modo documentato gli attributi/nome non supportati e coprire il
-  comportamento con un test, senza fingere un'apertura riuscita.
+- [x] **Delimitare esplicitamente il namespace degli oggetti Ps nel percorso
+  nativo coperto.** Il namespace nominato freestanding resta non supportato;
+  `NtCreateProcessEx` e `NtCreateThreadEx` rifiutano `ObjectAttributes` con nome
+  con `STATUS_NOT_IMPLEMENTED`. Il fixture CPL3 verifica entrambi i rifiuti e
+  controlla che non venga pubblicato un handle.
 
 ### Limiti dichiarati e accettazione integrata
 
@@ -108,6 +108,6 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   `python3 qemu.py --build-only` nel batch precedente.
 - Boot completo: superato nell'ultima verifica con
   `python3 qemu.py --headless`; seriale stabile per 5 secondi. Il test Ring 3
-  APC passa dopo aver corretto il puntatore d'argomento della fixture. M4 resta
-  aperto per i contratti generali elencati sopra, non per questo test.
+  APC e i rifiuti espliciti per gli attributi nominati passano. M4 resta aperto
+  per i contratti generali elencati sopra.
 
