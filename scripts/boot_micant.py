@@ -530,14 +530,14 @@ def run_qemu(
                         if peer_connection is not None:
                             with peer_connection:
                                 peer_connection.settimeout(5)
-                                expected = b"MICANT-M10-PING"
+                                expected_payload = b"MICANT-M10-PING"
                                 received = bytearray()
-                                while len(received) < len(expected):
-                                    block = peer_connection.recv(len(expected) - len(received))
+                                while len(received) < len(expected_payload):
+                                    block = peer_connection.recv(len(expected_payload) - len(received))
                                     if not block:
                                         break
                                     received.extend(block)
-                                if bytes(received) != expected:
+                                if bytes(received) != expected_payload:
                                     raise RuntimeError("Ring 3 TCP probe sent an unexpected payload")
                                 peer_connection.sendall(b"MICANT-M10-PONG")
                             network_outbound_peer_done = True
@@ -547,14 +547,14 @@ def run_qemu(
                             with socket.create_connection(("127.0.0.1", network_inbound_port), timeout=0.5) as peer:
                                 peer.settimeout(5)
                                 peer.sendall(b"MICA-ACCEPT-PING\n")
-                                expected = b"MICA-ACCEPT-PONG\n"
+                                expected_payload = b"MICA-ACCEPT-PONG\n"
                                 received = bytearray()
-                                while len(received) < len(expected):
-                                    block = peer.recv(len(expected) - len(received))
+                                while len(received) < len(expected_payload):
+                                    block = peer.recv(len(expected_payload) - len(received))
                                     if not block:
                                         break
                                     received.extend(block)
-                                if bytes(received) != expected:
+                                if bytes(received) != expected_payload:
                                     raise RuntimeError("Ring 3 TCP accept path returned an unexpected payload")
                             network_inbound_peer_done = True
                         except (ConnectionRefusedError, TimeoutError, OSError):

@@ -6,6 +6,7 @@
 #include <string_view>
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/afd_socket_abi.hpp"
+#include "micant/shared/native_process_abi.hpp"
 
 extern "C" __declspec(dllimport) uintptr_t socket(int, int, int) noexcept;
 extern "C" __declspec(dllimport) int closesocket(uintptr_t) noexcept;
@@ -218,8 +219,9 @@ Slot* allocateSlot(bool wide) noexcept {
 void releaseSlot(Slot* slot) noexcept { if(!slot)return;while(!acquire(&g_slotLock)){}slot->used=false;release(&g_slotLock); }
 
 bool hostsIpv4(std::string_view requested, uint32_t& address) noexcept {
-    const auto* shared = reinterpret_cast<const volatile KUserSharedData*>(UserSharedDataAddress);
-    char16_t drive = __atomic_load_n(&shared->ntSystemRoot[0], __ATOMIC_ACQUIRE);
+    micant::shared::native_process::UnicodeString64 imagePath{};
+    if (!micant::shared::native_process::currentImagePath(imagePath)) return false;
+    char16_t drive = imagePath.Buffer[0];
     if (drive >= u'a' && drive <= u'z') drive = static_cast<char16_t>(drive - (u'a' - u'A'));
     if (drive < u'A' || drive > u'Z') return false;
     wchar_t path[] = L"X:\\MicaNT\\System32\\drivers\\etc\\hosts";

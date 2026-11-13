@@ -2535,12 +2535,16 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         constexpr uint32_t allowedAttributes = OBJ_INHERIT | OBJ_CASE_INSENSITIVE;
         constexpr uint32_t allowedShareAccess = 0x7;
         constexpr uint32_t allowedOpenOptions = 0x20 | 0x40;
+        const auto fileAttributes = static_cast<uint32_t>(extra[1]);
+        const auto shareAccess = static_cast<uint32_t>(extra[2]);
+        const auto createDisposition = static_cast<uint32_t>(extra[3]);
+        const auto createOptions = static_cast<uint32_t>(extra[4]);
         if (attributes.length != sizeof(ObjectAttributes) || !attributes.objectName ||
             attributes.rootDirectory || (attributes.attributes & ~allowedAttributes) ||
             attributes.securityDescriptor || attributes.securityQualityOfService ||
-            extra[0] || extra[2] > allowedShareAccess ||
-            (extra[3] != fileOpen && extra[3] != fileOpenIf) ||
-            (extra[4] & ~allowedOpenOptions))
+            extra[0] || shareAccess > allowedShareAccess ||
+            (createDisposition != fileOpen && createDisposition != fileOpenIf) ||
+            (createOptions & ~allowedOpenOptions))
             return status(NtStatus::NotSupported);
         UnicodeString name{};
         captureStatus = ex::ProbeForRead(attributes.objectName, sizeof(name), alignof(UnicodeString));
@@ -2560,29 +2564,33 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         IoStatusBlock ioStatus{};
         bool provisionalCreated{};
         if (pathView == afdPath) {
-            if (extra[3] != fileOpen || extra[1] || extra[4] || !extra[5] || !extra[6] || extra[6] > 256)
+            const auto eaLength = static_cast<uint32_t>(extra[6]);
+            if (createDisposition != fileOpen || fileAttributes || createOptions || !extra[5] ||
+                !eaLength || eaLength > 256)
                 return status(NtStatus::NotSupported);
             std::array<uint8_t, 256> ea{};
             if (ex::ExSafeCopyFromUser(ea.data(), reinterpret_cast<const void*>(extra[5]),
-                                       static_cast<size_t>(extra[6])) != NtStatus::Success)
+                                       eaLength) != NtStatus::Success)
                 return status(NtStatus::AccessViolation);
             const auto createStatus = micant::km::afdwsk::IoAfdCreateEndpointHandle(
                 &handle, std::wstring_view(reinterpret_cast<const wchar_t*>(pathView.data()), pathView.size()),
-                static_cast<uint32_t>(second), ea.data(), static_cast<size_t>(extra[6]));
+                static_cast<uint32_t>(second), ea.data(), eaLength);
             if (createStatus != NtStatus::Success) return status(createStatus);
             ioStatus.status = NtStatus::Success;
             ioStatus.information = 1; // FILE_OPENED
         } else if (micant::km::hid::isInputDeviceName(pathView)) {
-            if (extra[3] != fileOpen || extra[1] || extra[5] || extra[6]) return status(NtStatus::NotSupported);
+            if (createDisposition != fileOpen || fileAttributes || extra[5] ||
+                static_cast<uint32_t>(extra[6])) return status(NtStatus::NotSupported);
             ioStatus.status = micant::km::hid::openInputDevice(&handle, static_cast<uint32_t>(second), pathView,
-                                                               (extra[4] & 0x20u) != 0);
+                                                               (createOptions & 0x20u) != 0);
             ioStatus.information = ioStatus.status == NtStatus::Success ? 1 : 0;
             if (ioStatus.status != NtStatus::Success) {
                 (void)ex::ExSafeCopyToUser(reinterpret_cast<void*>(args.fourth), &ioStatus, sizeof(ioStatus));
                 return status(ioStatus.status);
             }
         } else {
-            if (extra[1] || extra[5] || extra[6]) return status(NtStatus::NotSupported);
+            if (fileAttributes || extra[5] || static_cast<uint32_t>(extra[6]))
+                return status(NtStatus::NotSupported);
             // Filesystem lookup may read a real block device or wait for its
             // owner. The captured path is resident on this thread's stack.
             __asm__ __volatile__("swapgs" : : : "memory");
@@ -2590,7 +2598,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
             if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
             ioStatus.status = io::IoOpenBackendFile(&handle, static_cast<uint32_t>(second),
-                pathView, extra[3] == fileOpenIf, &provisionalCreated, true);
+                pathView, createDisposition == fileOpenIf, &provisionalCreated, true);
             if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
             __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
             __asm__ __volatile__("swapgs" : : : "memory");
@@ -2719,7 +2727,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         ioStatus = io::IoCallDriver(irp.deviceObject, &irp);
         __asm__ __volatile__("cli; movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es; swapgs"
                              : : : "rax", "memory");
-        const bool outputIoctl = ioctl == micant::shared::afd::IoctlReceive ||
+        const bool outputIoctl = ioctl == micant::shared::afd::IoctlAccept ||
+                                 ioctl == micant::shared::afd::IoctlReceive ||
                                  ioctl == micant::shared::afd::IoctlReceiveFrom ||
                                  ioctl == micant::shared::afd::IoctlQueryNetworkConfiguration;
         if (outputIoctl && irp.ioStatus.information > outputLength) {

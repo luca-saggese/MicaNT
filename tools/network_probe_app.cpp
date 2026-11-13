@@ -33,6 +33,7 @@ extern "C" __declspec(dllimport) uintptr_t accept(uintptr_t, void*, int*) noexce
 extern "C" __declspec(dllimport) int send(uintptr_t, const char*, int, int) noexcept;
 extern "C" __declspec(dllimport) int recv(uintptr_t, char*, int, int) noexcept;
 extern "C" __declspec(dllimport) int setsockopt(uintptr_t, int, int, const char*, int) noexcept;
+extern "C" __declspec(dllimport) int WSAGetLastError() noexcept;
 
 namespace {
 constexpr uintptr_t InvalidSocket = ~uintptr_t{0};
@@ -56,6 +57,18 @@ void print(const char* text) noexcept {
     size_t length{};
     while (text[length]) ++length;
     (void)syscall(0x25, reinterpret_cast<uint64_t>(text), length);
+}
+
+void printWsaFailure(const char* operation) noexcept {
+    print(operation);
+    const uint32_t error = static_cast<uint32_t>(WSAGetLastError());
+    char digits[11]{};
+    size_t cursor = sizeof(digits);
+    uint32_t value = error;
+    do { digits[--cursor] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+    print(" WSA error ");
+    print(digits + cursor);
+    print("\n");
 }
 
 bool parseNumber(const char*& cursor, uint32_t maximum, uint32_t& result) noexcept {
@@ -157,21 +170,31 @@ extern "C" void _start(const char* = nullptr) noexcept {
         const uint16_t networkPort = static_cast<uint16_t>((GuestAcceptPort << 8) |
                                                             (GuestAcceptPort >> 8));
         const SockaddrIn local{AfInet, networkPort, 0, {}};
-        ok = listener != InvalidSocket && bind(listener, &local, sizeof(local)) == 0 &&
-             listen(listener, 1) == 0;
+        if (listener == InvalidSocket) {
+            printWsaFailure("M10 TCP listen socket creation failed");
+            ok = false;
+        } else if (bind(listener, &local, sizeof(local)) != 0) {
+            printWsaFailure("M10 TCP listener bind failed");
+            ok = false;
+        } else if (listen(listener, 1) != 0) {
+            printWsaFailure("M10 TCP listen failed");
+            ok = false;
+        }
         if (ok) {
             print("MicaNT guest TCP listener ready.\n");
             const uintptr_t accepted = accept(listener, nullptr, nullptr);
             ok = accepted != InvalidSocket;
+            if (!ok) printWsaFailure("M10 TCP accept failed");
             char request[sizeof(AcceptRequest) - 1]{};
             size_t received{};
             while (ok && received < sizeof(request)) {
                 const int count = recv(accepted, request + received,
                     static_cast<int>(sizeof(request) - received), 0);
-                if (count <= 0) { ok = false; break; }
+                if (count <= 0) { printWsaFailure("M10 TCP accept recv failed"); ok = false; break; }
                 received += static_cast<size_t>(count);
             }
             ok = ok && std::memcmp(request, AcceptRequest, sizeof(request)) == 0;
+            if (!ok && accepted != InvalidSocket) print("M10 TCP accept payload mismatch\n");
             if (ok) ok = send(accepted, AcceptResponse, sizeof(AcceptResponse) - 1, 0) ==
                 static_cast<int>(sizeof(AcceptResponse) - 1);
             if (accepted != InvalidSocket) (void)closesocket(accepted);

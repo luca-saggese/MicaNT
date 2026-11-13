@@ -13,7 +13,8 @@ struct UnicodeString64 {
 };
 
 struct ProcessParametersPrefix64 {
-    uint8_t Reserved[0x70]{};
+    uint8_t Reserved[0x60]{};
+    UnicodeString64 ImagePathName{};
     UnicodeString64 CommandLine{};
 };
 
@@ -23,6 +24,7 @@ struct PebPrefix64 {
 };
 
 static_assert(sizeof(UnicodeString64) == 16);
+static_assert(offsetof(ProcessParametersPrefix64, ImagePathName) == 0x60);
 static_assert(offsetof(ProcessParametersPrefix64, CommandLine) == 0x70);
 static_assert(offsetof(PebPrefix64, ProcessParameters) == 0x20);
 
@@ -36,6 +38,18 @@ inline bool currentCommandLine(UnicodeString64& commandLine) noexcept {
     commandLine = peb->ProcessParameters->CommandLine;
     return commandLine.Buffer != nullptr && commandLine.Length != 0 &&
         (commandLine.Length & 1) == 0 && commandLine.Length <= commandLine.MaximumLength;
+}
+
+inline bool currentImagePath(UnicodeString64& imagePath) noexcept {
+    imagePath = {};
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb || teb > UINTPTR_MAX - 0x60) return false;
+    const auto* peb = *reinterpret_cast<const PebPrefix64* const*>(teb + 0x60);
+    if (!peb || peb->ProcessParameters == nullptr) return false;
+    imagePath = peb->ProcessParameters->ImagePathName;
+    return imagePath.Buffer != nullptr && imagePath.Length >= 2 * sizeof(char16_t) &&
+        (imagePath.Length & 1) == 0 && imagePath.Length <= imagePath.MaximumLength;
 }
 
 inline bool currentCommandLineAscii(char* destination, size_t capacity) noexcept {
