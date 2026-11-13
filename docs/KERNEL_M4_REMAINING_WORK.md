@@ -19,6 +19,13 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   il ritorno tramite `NtContinue` e lo status di uscita. Il failure era nella
   fixture: dopo `SYSCALL` usava il valore clobberato di RCX come puntatore
   all'argomento; il test ora lo conserva in R12 secondo la convenzione AMD64.
+- [x] **Consegnare un APC durante un wait alertable.** Il fixture CPL3 accoda un
+  APC al thread corrente, attende su un evento non segnalato in modalità
+  alertable, verifica `STATUS_USER_APC` e controlla il marker scritto dalla
+  callback prima di riprendere il chiamante, senza una successiva `NtTestAlert`.
+  QEMU ha trovato che il dispatcher HAL richiedeva IF nel frame al ritorno:
+  ora il ritorno da `NtWaitForSingleObject` con `STATUS_USER_APC` è un punto di
+  consegna esplicito anche quando IF non è impostato.
 - [x] **Verificare la consegna normale e il rundown APC nei casi coperti.** In
   QEMU due callback utente sono consegnate in ordine FIFO e il test controlla
   `NtContinue` e lo status di uscita; il test di terminazione remota verifica il
@@ -144,4 +151,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   `--interactive` richiede un backend visibile. Questi tentativi non verificano
   i punti M4; il risultato positivo precedente rimane l'ultima verifica
   integrata riuscita. M4 resta aperto per i contratti generali elencati sopra.
+- Verifica del fixture esteso APC/wait: la seriale QEMU ha raggiunto
+  `[MicaNT Ps] Two CPL3 threads, TLS slots and event waits verified` e i test
+  successivi del reaper. Il processo QEMU è poi terminato con errore nel solo
+  controllo d'input PS/2 (`PS/2 IRQ route was enabled but no ISR byte reached
+  the consumer`) dopo che il click era stato ricevuto dal desktop. Il caso M4
+  APC/wait è passato; l'accettazione complessiva del runner resta non verde.
 

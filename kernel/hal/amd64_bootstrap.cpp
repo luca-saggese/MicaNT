@@ -1205,8 +1205,12 @@ void MicantBootstrapDispatch(SyscallFrame* frame, const void* floatingState) noe
     // faulted.
     const bool dispatchingRaisedException = args.number == MICANT_SSN_NT_RAISE_EXCEPTION;
     const bool explicitApcAlert = args.number == MICANT_SSN_NT_TEST_ALERT;
+    // An alertable wait interrupted by a user APC is itself a delivery
+    // boundary, even when the interrupted user RFLAGS had IF clear.
+    const bool alertableWaitApc = args.number == MICANT_SSN_NT_WAIT_FOR_SINGLE_OBJECT &&
+        serviceResult == static_cast<uint32_t>(micant::NtStatus::UserApc);
     if (!dispatchingRaisedException && (frame->cs & 3) == 3 &&
-        ((frame->flags & (uint64_t{1} << 9)) || explicitApcAlert) && floatingState &&
+        ((frame->flags & (uint64_t{1} << 9)) || explicitApcAlert || alertableWaitApc) && floatingState &&
         micant::ke::KeGetCurrentIrql() == micant::ke::PASSIVE_LEVEL) {
         uint64_t hardwareFrame[5]{frame->rip, frame->cs, frame->flags, frame->rsp, frame->ss};
         uint64_t savedRegisters[15]{

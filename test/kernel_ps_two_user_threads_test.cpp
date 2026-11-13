@@ -215,15 +215,26 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "cmpq $0, 48(%r14)\nje 42f\n"
         // CPL3 native wait timeout coverage: a relative one millisecond wait
         // on an unsignaled event returns STATUS_TIMEOUT.
-        "movabsq $0x400020002700, %r8\nmovq $-10000, (%r8)\nmovq %rbx, %rcx\nxorl %edx, %edx\n"
+        "movabsq $0x400020003700, %r8\nmovq $-10000, (%r8)\nmovq %rbx, %rcx\nxorl %edx, %edx\n"
         "callq *8(%r15)\ncmpq $0x102, %rax\njne 31f\n"
-        "42: movabsq $0x400020002708, %rax\nmovq $1, (%rax)\n"
-        "movabsq $0x400020002708, %rax\nmovq $1, (%rax)\n"
+        "42: movabsq $0x400020003708, %rax\nmovq $1, (%rax)\n"
+        "movabsq $0x400020003708, %rax\nmovq $1, (%rax)\n"
         // NtAlertThread marks this thread alerted; an alertable delay consumes
         // that alert and returns STATUS_ALERTED without sleeping.
         "movq $-2, %rcx\ncallq *112(%r15)\ntestl %eax, %eax\njnz 33f\n"
-        "movabsq $0x400020002700, %rdx\nmovq $-10000, (%rdx)\nmovl $1, %ecx\n"
+        "movabsq $0x400020003700, %rdx\nmovq $-10000, (%rdx)\nmovl $1, %ecx\n"
         "callq *104(%r15)\ncmpq $0x101, %rax\njne 34f\n"
+        // A queued user APC must break an alertable wait with USER_APC and
+        // run its callback on the real CPL3 return path before the caller
+        // resumes after the syscall.
+        "movabsq $0x400020003700, %rax\nmovq $0, (%rax)\n"
+        "movq $-2, %rcx\nleaq MicantTestUserApc(%rip), %rdx\n"
+        "xorl %r8d, %r8d\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
+        "testl %eax, %eax\njz 35f\nmovl %eax, %edx\njmp 8f\n35:\n"
+        "movq %rbx, %rcx\nmovl $1, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\n"
+        "cmpq $0xc0, %rax\nje 36f\nmovl $0xc000024c, %edx\njmp 8f\n36:\n"
+        "movabsq $0x400020003700, %rax\ncmpq $0x41504321, (%rax)\nje 37f\n"
+        "movl $0xc000024d, %edx\njmp 8f\n37:\n"
         // Thread A allocates and checks a page through the native syscall.
         "movq $0, 64(%rsp)\nmovq $4096, 72(%rsp)\n"
         "movq $0x3000, 32(%rsp)\nmovq $4, 40(%rsp)\n"
@@ -241,7 +252,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "movq %r12, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
         "testl %eax, %eax\njnz 9f\n10: movl $0xc0000022, %edx\njmp 8f\n"
         // Thread B signals A, then blocks until A signals its event.
-        "3: movabsq $0x400020002708, %r10\n39: cmpq $0, (%r10)\nje 39b\n"
+        "3: movabsq $0x400020003708, %r10\n39: cmpq $0, (%r10)\nje 39b\n"
         "movq %rbx, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
         "testl %eax, %eax\njnz 9f\n"
         "movq %r12, %rcx\nxorl %edx, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\n"
@@ -258,13 +269,13 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         // argument in a Windows-ABI nonvolatile register across NtTestAlert.
         "MicantApcThreadStart: pushq %r12\nmovq %rcx, %r12\n"
         "movl $0x170, %eax\nsyscall\n"
-        "movabsq $0x400020002700, %r10\ncmpq $0x41504322, (%r10)\njne 43f\n"
+        "movabsq $0x400020003700, %r10\ncmpq $0x41504322, (%r10)\njne 43f\n"
         "movq $0x12345678, (%r12)\nmovl $0xc0000123, %eax\npopq %r12\nretq\n"
         "43: movl $0xc0000022, %eax\npopq %r12\nretq\n"
         ".globl MicantTestUserApc\n"
-        "MicantTestUserApc: movabsq $0x400020002700, %rax\nmovq $0x41504321, (%rax)\nretq\n"
+        "MicantTestUserApc: movabsq $0x400020003700, %rax\nmovq $0x41504321, (%rax)\nretq\n"
         ".globl MicantTestUserApcSecond\n"
-        "MicantTestUserApcSecond: movabsq $0x400020002700, %rax\n"
+        "MicantTestUserApcSecond: movabsq $0x400020003700, %rax\n"
         "cmpq $0x41504321, (%rax)\njne 46f\nmovq $0x41504322, (%rax)\nretq\n"
         "46: movq $0x415043ff, (%rax)\nretq\n"
         ".globl MicantApcFaultThreadStart\n"
@@ -294,7 +305,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
     __asm__ __volatile__(
         "pushq %r12\npushq %r13\npushq %r15\nmovq %rcx, %r12\nmovq 0(%r12), %r15\n"
         "xorl %r13d, %r13d\nsubq $0x180, %rsp\n"
-        "movabsq $0x400020002700, %rax\nmovq $0, (%rax)\n"
+        "movabsq $0x400020003700, %rax\nmovq $0, (%rax)\n"
         "movq $0, 0x60(%rsp)\nmovq $0, 0x68(%rsp)\nmovq $0, 0x70(%rsp)\nmovq $0, 0x78(%rsp)\n"
         // The freestanding Ps namespace is not implemented. A named
         // ObjectAttributes input must fail explicitly before publication.
@@ -828,10 +839,11 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
             !hal::amd64::switchProcessPagingRootByPhysical(process.getDirectoryTableBase())) return false;
         progress.stage = "synthetic image construction";
         const uintptr_t code = hal::amd64::BootstrapManagedBase;
+        constexpr uintptr_t dataRva = 3 * mm::PageSize4KB;
         const auto* program = reinterpret_cast<const uint8_t*>(MicantTwoUserThreads);
         const size_t programSize = reinterpret_cast<uintptr_t>(MicantTwoUserThreadsEnd) - reinterpret_cast<uintptr_t>(program);
-        if (!programSize || programSize > mm::PageSize4KB) return false;
-        static constinit uint8_t file[512 + 2 * mm::PageSize4KB]{};
+        if (!programSize || programSize > 2 * mm::PageSize4KB) return false;
+        static constinit uint8_t file[512 + 3 * mm::PageSize4KB]{};
         pe::ImageDosHeader dos{};
         dos.e_magic = pe::DOS_MAGIC;
         dos.e_lfanew = 64;
@@ -848,46 +860,46 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         nt.optionalHeader.addressOfEntryPoint = mm::PageSize4KB;
         nt.optionalHeader.sectionAlignment = mm::PageSize4KB;
         nt.optionalHeader.fileAlignment = 512;
-        nt.optionalHeader.sizeOfImage = 3 * mm::PageSize4KB;
+        nt.optionalHeader.sizeOfImage = 4 * mm::PageSize4KB;
         nt.optionalHeader.sizeOfHeaders = 512;
         nt.optionalHeader.subsystem = pe::IMAGE_SUBSYSTEM_WINDOWS_CUI;
         nt.optionalHeader.numberOfRvaAndSizes = 16;
         nt.optionalHeader.dataDirectory[pe::IMAGE_DIRECTORY_ENTRY_TLS] =
-            {2 * mm::PageSize4KB, sizeof(pe::ImageTlsDirectory64)};
+            {dataRva, sizeof(pe::ImageTlsDirectory64)};
         nt.optionalHeader.dataDirectory[pe::IMAGE_DIRECTORY_ENTRY_IMPORT] =
-            {2 * mm::PageSize4KB + 0x80, 2 * sizeof(pe::ImageImportDescriptor)};
+            {dataRva + 0x80, 2 * sizeof(pe::ImageImportDescriptor)};
         std::memcpy(file + 64, &nt, sizeof(nt));
         pe::ImageSectionHeader text{};
         text.virtualAddress = mm::PageSize4KB;
-        text.misc.virtualSize = mm::PageSize4KB;
+        text.misc.virtualSize = 2 * mm::PageSize4KB;
         text.pointerToRawData = 512;
-        text.sizeOfRawData = mm::PageSize4KB;
+        text.sizeOfRawData = 2 * mm::PageSize4KB;
         text.characteristics = pe::IMAGE_SCN_MEM_EXECUTE | pe::IMAGE_SCN_MEM_READ;
         std::memcpy(file + 64 + sizeof(nt), &text, sizeof(text));
         pe::ImageSectionHeader data{};
-        data.virtualAddress = 2 * mm::PageSize4KB;
+        data.virtualAddress = dataRva;
         data.misc.virtualSize = mm::PageSize4KB;
-        data.pointerToRawData = 512 + mm::PageSize4KB;
+        data.pointerToRawData = 512 + 2 * mm::PageSize4KB;
         data.sizeOfRawData = mm::PageSize4KB;
         data.characteristics = pe::IMAGE_SCN_MEM_READ | pe::IMAGE_SCN_MEM_WRITE;
         std::memcpy(file + 64 + sizeof(nt) + sizeof(text), &data, sizeof(data));
         std::memcpy(file + 512, program, programSize);
         pe::ImageTlsDirectory64 tlsDirectory{};
-        tlsDirectory.startAddressOfRawData = code + 2 * mm::PageSize4KB + 0x40;
+        tlsDirectory.startAddressOfRawData = code + dataRva + 0x40;
         tlsDirectory.endAddressOfRawData = tlsDirectory.startAddressOfRawData + 8;
-        tlsDirectory.addressOfIndex = code + 2 * mm::PageSize4KB + 0x50;
+        tlsDirectory.addressOfIndex = code + dataRva + 0x50;
         tlsDirectory.sizeOfZeroFill = 8;
         tlsDirectory.characteristics = 5u << 20;
-        std::memcpy(file + 512 + mm::PageSize4KB, &tlsDirectory, sizeof(tlsDirectory));
+        std::memcpy(file + 512 + 2 * mm::PageSize4KB, &tlsDirectory, sizeof(tlsDirectory));
         constexpr uint64_t seed = 0x8877665544332211ULL;
-        std::memcpy(file + 512 + mm::PageSize4KB + 0x40, &seed, sizeof(seed));
+        std::memcpy(file + 512 + 2 * mm::PageSize4KB + 0x40, &seed, sizeof(seed));
         constexpr uint32_t uninitializedTlsIndex = 0xdeadbeef;
-        std::memcpy(file + 512 + mm::PageSize4KB + 0x50, &uninitializedTlsIndex, sizeof(uninitializedTlsIndex));
-        auto* rawData = file + 512 + mm::PageSize4KB;
+        std::memcpy(file + 512 + 2 * mm::PageSize4KB + 0x50, &uninitializedTlsIndex, sizeof(uninitializedTlsIndex));
+        auto* rawData = file + 512 + 2 * mm::PageSize4KB;
         pe::ImageImportDescriptor imports{};
-        imports.originalFirstThunk = 2 * mm::PageSize4KB + 0xe0;
-        imports.name = 2 * mm::PageSize4KB + 0xc0;
-        imports.firstThunk = 2 * mm::PageSize4KB + 0x120;
+        imports.originalFirstThunk = dataRva + 0xe0;
+        imports.name = dataRva + 0xc0;
+        imports.firstThunk = dataRva + 0x120;
         std::memcpy(rawData + 0x80, &imports, sizeof(imports));
         constexpr char dllName[] = "ntdll.dll";
         std::memcpy(rawData + 0xc0, dllName, sizeof(dllName));
@@ -896,7 +908,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
             "NtResumeThread", "NtOpenProcess", "NtOpenThread", "NtQueryInformationProcess", "NtClose",
             "NtQuerySystemTime", "NtDelayExecution", "NtAlertThread", "NtQueueApcThread", "NtTestAlert"};
         for (size_t i = 0; i < std::size(names); ++i) {
-            const uint64_t rva = 2 * mm::PageSize4KB + 0x200 + i * 0x40;
+            const uint64_t rva = dataRva + 0x200 + i * 0x40;
             std::memcpy(rawData + 0xe0 + i * 8, &rva, sizeof(rva));
             std::memcpy(rawData + 0x120 + i * 8, &rva, sizeof(rva));
             std::memcpy(rawData + 0x202 + i * 0x40, names[i], std::strlen(names[i]) + 1);
@@ -921,9 +933,9 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         if (!ownsFile) return false;
         pe::PeImageView64::TlsLayout tlsLayout{};
         progress.stage = "main PE TLS validation";
-        if (image->view.tlsLayout(std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(code), 3 * mm::PageSize4KB},
+        if (image->view.tlsLayout(std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(code), 4 * mm::PageSize4KB},
                             code, tlsLayout) != NtStatus::Success || !tlsLayout.present || tlsLayout.callbackCount ||
-            tlsLayout.indexRva != 2 * mm::PageSize4KB + 0x50) return false;
+            tlsLayout.indexRva != dataRva + 0x50) return false;
         const auto unboundFirst = *reinterpret_cast<uint64_t*>(code + imports.firstThunk);
         if (process.finalizeNativeImages() != NtStatus::NoSuchFile ||
             *reinterpret_cast<uint64_t*>(code + imports.firstThunk) != unboundFirst) return false;
@@ -988,9 +1000,9 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         if (process.setNativeProcessParameters(executablePath, commandLine) != NtStatus::Success) return false;
         // Finalization reads the immutable image snapshot, not the writable
         // process mapping. Inject the unsupported metadata into that snapshot.
-        auto* loadedTls = reinterpret_cast<pe::ImageTlsDirectory64*>(image->metadata.get() + 2 * mm::PageSize4KB);
-        auto* callbacks = reinterpret_cast<uint64_t*>(image->metadata.get() + 2 * mm::PageSize4KB + 0x68);
-        loadedTls->addressOfCallBacks = code + 2 * mm::PageSize4KB + 0x68;
+        auto* loadedTls = reinterpret_cast<pe::ImageTlsDirectory64*>(image->metadata.get() + dataRva);
+        auto* callbacks = reinterpret_cast<uint64_t*>(image->metadata.get() + dataRva + 0x68);
+        loadedTls->addressOfCallBacks = code + dataRva + 0x68;
         callbacks[0] = code + mm::PageSize4KB;
         callbacks[1] = 0;
         const auto callbackStatus = process.finalizeNativeImages();
@@ -1008,7 +1020,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
             hal::amd64::bootstrapUserRange(code, 1, true) ||
             hal::amd64::bootstrapUserRange(code + mm::PageSize4KB, 1, true) ||
             !hal::amd64::bootstrapUserRange(code + mm::PageSize4KB, 1, false, true) ||
-            !hal::amd64::bootstrapUserRange(code + 2 * mm::PageSize4KB, 1, true) ||
+            !hal::amd64::bootstrapUserRange(code + dataRva, 1, true) ||
             process.loadNativeImage("late.dll", std::span<const uint8_t>{nativeDll}) != NtStatus::InvalidParameter)
             return false;
         uintptr_t counters{};

@@ -2,6 +2,7 @@
 
 // MicaNT's native service profile; usable by both syscall entry and NTDLL.
 #define MICANT_SSN_NT_RAISE_EXCEPTION 0x0160
+#define MICANT_SSN_NT_WAIT_FOR_SINGLE_OBJECT 0x0004
 
 // Internal MicaNT profile assignments, not Windows service indices.
 #define MICANT_SSN_NT_OPEN_PROCESS 0x016A
