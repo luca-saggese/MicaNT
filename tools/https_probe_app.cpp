@@ -50,9 +50,9 @@ constexpr size_t MaximumBodySize = 4096;
 
 uint64_t syscall(uint64_t number, uint64_t first = 0, uint64_t second = 0) noexcept {
     uint64_t result{};
-    __asm__ __volatile__("movq %1, %%rax; movq %2, %%rdx; movq %3, %%r8; syscall; movq %%rax, %0"
+    __asm__ __volatile__("movq %1, %%rax; movq %2, %%r10; movq %3, %%rdx; syscall; movq %%rax, %0"
         : "=r"(result) : "r"(number), "r"(first), "r"(second)
-        : "rax", "rdx", "r8", "rcx", "r11", "memory");
+        : "rax", "rdx", "r8", "r10", "rcx", "r11", "memory");
     return result;
 }
 

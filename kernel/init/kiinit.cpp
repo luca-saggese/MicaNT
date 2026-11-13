@@ -3455,6 +3455,18 @@ bool pollMouseInput(MicaWin32kInputEvent& event) noexcept {
 
 } // namespace
 
+namespace {
+void (*const g_serialWriteBridge)(const char*) noexcept = serialWrite;
+void (*const g_serialWriteNumberBridge)(uint64_t) noexcept = serialWriteNumber;
+}
+
+extern "C" void MicantNetbootSerialWrite(const char* text) noexcept {
+    g_serialWriteBridge(text);
+}
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t value) noexcept {
+    g_serialWriteNumberBridge(value);
+}
+
 namespace micant::hal::amd64 {
 void setBootstrapPs2InterruptMode(bool active) noexcept {
     // The caller serializes with interrupts disabled and masks the source.

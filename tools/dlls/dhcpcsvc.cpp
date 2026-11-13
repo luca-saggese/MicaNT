@@ -161,7 +161,7 @@ uint32_t acquireLease(uint32_t timeoutMilliseconds,uint32_t* leaseSeconds) noexc
 
 uint32_t resolveBootHost() noexcept {
     DnsRecordA* records{};
-    const uint32_t status = MicantDnsQueryWithTimeout("host", 1, 5000, &records);
+    const uint32_t status = MicantDnsQueryWithTimeout("example.com", 1, 5000, &records);
     bool found = false;
     for (auto* record = records; record; record = record->next) {
         if (record->type == 1 && record->dataLength == sizeof(uint32_t) && record->ipv4Address)

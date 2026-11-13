@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "micant/shared/native_process_abi.hpp"
 
 extern "C" __declspec(dllimport) int32_t NtTerminateProcess(void* processHandle,
                                                                int32_t exitStatus) noexcept;
@@ -25,13 +26,13 @@ inline uint64_t DoSyscall(uint64_t ssn, uint64_t arg1 = 0, uint64_t arg2 = 0) no
 #if defined(__x86_64__)
     __asm__ __volatile__(
         "movq %1, %%rax\n\t"
-        "movq %2, %%rdx\n\t"
-        "movq %3, %%r8\n\t"
+        "movq %2, %%r10\n\t"
+        "movq %3, %%rdx\n\t"
         "syscall\n\t"
         "movq %%rax, %0\n\t"
         : "=r"(res)
         : "r"(ssn), "r"(arg1), "r"(arg2)
-        : "rax", "rdx", "r8", "rcx", "r11", "memory"
+        : "rax", "rdx", "r8", "r10", "rcx", "r11", "memory"
     );
 #endif
     return res;
@@ -69,7 +70,10 @@ void PrintStatus(uint32_t status) noexcept {
 
 } // namespace
 
-extern "C" void _start(const char* cmdLine = nullptr) {
+extern "C" void _start(const char* = nullptr) {
+    char commandLine[512]{};
+    const char* cmdLine = micant::shared::native_process::currentCommandLineAscii(
+        commandLine, sizeof(commandLine)) ? commandLine : nullptr;
     uint32_t serviceExitStatus{};
     uint16_t csVal = 0;
 #if defined(__x86_64__)
@@ -92,7 +96,7 @@ extern "C" void _start(const char* cmdLine = nullptr) {
             PrintLine("DHCP lease committed through AFD.");
             if (cmdLine && Contains(cmdLine, "m10-test")) {
                 const uint32_t dnsStatus = micant::services::dhcp::resolveBootHost();
-                if (dnsStatus == 0) PrintLine("DNS A record for QEMU host resolved through Winsock/AFD.");
+                if (dnsStatus == 0) PrintLine("DNS A record for example.com resolved through Winsock/AFD.");
                 else {
                     serviceExitStatus = dnsStatus;
                     PrintLine("DNS A resolution failed through Winsock/AFD.");

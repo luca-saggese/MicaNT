@@ -154,6 +154,7 @@ NtStatus acquireBootDhcpLease() noexcept {
     LargeInteger timeout{};
     timeout.quadPart = -250'000'000; // DHCP retry budget plus DNS query and service teardown.
     status = sys::NtWaitForSingleObject(process.value, false, &timeout);
+    logStatus("service process wait", status);
     if (status != NtStatus::Success) {
         (void)sys::NtTerminateProcess(process.value, status);
         return status;
@@ -165,6 +166,7 @@ NtStatus acquireBootDhcpLease() noexcept {
     if (status != NtStatus::Success) return status;
     const auto serviceExitStatus = serviceProcess->exitStatus();
     ob::ObDereferenceObject(serviceReference);
+    logStatus("service process exit", serviceExitStatus);
     if (serviceExitStatus != NtStatus::Success) return serviceExitStatus;
 
     tcpip::Ipv4Address ip{}, mask{}, gateway{}, dns{};
@@ -187,11 +189,12 @@ NtStatus acquireBootDhcpLease() noexcept {
         ScopedHandle probeProcess{}, probeThread{};
         status = ps::detail::createBootstrapUserProcess(probeImages, probePath,
             {probeCommandLine, std::size(probeCommandLine) - 1}, 32768, 32768, true,
-            ob::SYNCHRONIZE, ob::SYNCHRONIZE, probeProcess.value, probeThread.value);
+            ob::SYNCHRONIZE, ob::SYNCHRONIZE, probeProcess.value, probeThread.value, true);
         if (status != NtStatus::Success) return status;
         LargeInteger probeTimeout{};
         probeTimeout.quadPart = -300'000'000; // 30 seconds for TCP connect/exchange and accept.
         status = sys::NtWaitForSingleObject(probeProcess.value, false, &probeTimeout);
+        logStatus("network probe wait", status);
         if (status != NtStatus::Success) {
             (void)sys::NtTerminateProcess(probeProcess.value, status);
             return status;
@@ -218,7 +221,7 @@ NtStatus acquireBootDhcpLease() noexcept {
         ScopedHandle httpsProcess{}, httpsThread{};
         status = ps::detail::createBootstrapUserProcess(httpsImages, httpsPath,
             {httpsCommandLine, std::size(httpsCommandLine) - 1}, 32768, 32768, true,
-            ob::SYNCHRONIZE, ob::SYNCHRONIZE, httpsProcess.value, httpsThread.value);
+            ob::SYNCHRONIZE, ob::SYNCHRONIZE, httpsProcess.value, httpsThread.value, true);
         if (status != NtStatus::Success) return status;
         LargeInteger httpsTimeout{};
         httpsTimeout.quadPart = -600'000'000; // 60 seconds including certificate rejection leg.

@@ -389,6 +389,9 @@ def run_qemu(
         # loader opens the real DLLs from there for file-backed SEC_IMAGE.
         system32_dir = esp / "MicaNT" / "System32"
         system32_dir.mkdir(parents=True)
+        hosts_dir = system32_dir / "drivers" / "etc"
+        hosts_dir.mkdir(parents=True, exist_ok=True)
+        (hosts_dir / "hosts").write_text("10.0.2.2 host\n", encoding="ascii")
         service_host = ROOT / "build" / "svchost.exe"
         shutil.copyfile(service_host, system32_dir / service_host.name)
         if network_test:
@@ -470,7 +473,7 @@ def run_qemu(
                 port_probe.close()
             command.extend([
                 "-netdev",
-                f"user,id=micant_net,restrict=on,hostfwd=tcp:127.0.0.1:{network_inbound_port}-:18081",
+                f"user,id=micant_net,dns=10.0.2.3,hostfwd=tcp:127.0.0.1:{network_inbound_port}-:18081",
                 "-device", "virtio-net-pci,netdev=micant_net,disable-legacy=on",
                 "-object",
                 f"filter-dump,id=micant_net_capture,netdev=micant_net,file={network_capture_path}",
@@ -576,7 +579,7 @@ def run_qemu(
                         raise RuntimeError(f"Controlled M10 TLS peer failed: {tls_peer.error}")
                     if (network_test and
                             "[MicaNT DHCP] Ring 3 DORA lease acquired through Winsock/AFD" in serial_log and
-                            "DNS A record for QEMU host resolved through Winsock/AFD." in serial_log and
+                            "DNS A record for example.com resolved through Winsock/AFD." in serial_log and
                             "M10 TCP client exchange passed" in serial_log and
                             "M10 TCP listen/accept exchange passed" in serial_log and
                             "M10 HTTPS trusted payload passed" in serial_log and

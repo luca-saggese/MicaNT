@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include "micant/shared/native_process_abi.hpp"
 
 // This freestanding probe deliberately links without a hosted CRT. Keep the
 // small memory primitives it needs local to the executable.
@@ -45,9 +46,9 @@ constexpr char AcceptResponse[] = "MICA-ACCEPT-PONG\n";
 
 uint64_t syscall(uint64_t number, uint64_t first = 0, uint64_t second = 0) noexcept {
     uint64_t result{};
-    __asm__ __volatile__("movq %1, %%rax; movq %2, %%rdx; movq %3, %%r8; syscall; movq %%rax, %0"
+    __asm__ __volatile__("movq %1, %%rax; movq %2, %%r10; movq %3, %%rdx; syscall; movq %%rax, %0"
         : "=r"(result) : "r"(number), "r"(first), "r"(second)
-        : "rax", "rdx", "r8", "rcx", "r11", "memory");
+        : "rax", "rdx", "r8", "r10", "rcx", "r11", "memory");
     return result;
 }
 
@@ -94,10 +95,14 @@ bool parseEndpoint(const char* command, uint32_t& address, uint16_t& port) noexc
 }
 }
 
-extern "C" void _start(const char* commandLine = nullptr) noexcept {
+extern "C" void _start(const char* = nullptr) noexcept {
+    print("M10 TCP probe started\n");
+    char commandLine[128]{};
+    const char* command = micant::shared::native_process::currentCommandLineAscii(
+        commandLine, sizeof(commandLine)) ? commandLine : nullptr;
     uint32_t address{};
     uint16_t port{};
-    if (!parseEndpoint(commandLine, address, port)) {
+    if (!parseEndpoint(command, address, port)) {
         print("M10 TCP probe: invalid endpoint arguments\n");
         finish(2);
     }

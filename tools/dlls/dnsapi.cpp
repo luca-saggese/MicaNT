@@ -3,6 +3,7 @@
 #define MICANT_NATIVE_USERMODE 1
 #include <cstdint>
 #include <cstddef>
+#include <string_view>
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/afd_socket_abi.hpp"
 
@@ -216,6 +217,98 @@ Slot* allocateSlot(bool wide) noexcept {
 }
 void releaseSlot(Slot* slot) noexcept { if(!slot)return;while(!acquire(&g_slotLock)){}slot->used=false;release(&g_slotLock); }
 
+bool hostsIpv4(std::string_view requested, uint32_t& address) noexcept {
+    const auto* shared = reinterpret_cast<const volatile KUserSharedData*>(UserSharedDataAddress);
+    char16_t drive = __atomic_load_n(&shared->ntSystemRoot[0], __ATOMIC_ACQUIRE);
+    if (drive >= u'a' && drive <= u'z') drive = static_cast<char16_t>(drive - (u'a' - u'A'));
+    if (drive < u'A' || drive > u'Z') return false;
+    wchar_t path[] = L"X:\\MicaNT\\System32\\drivers\\etc\\hosts";
+    path[0] = static_cast<wchar_t>(drive);
+    UnicodeString name{path};
+    ObjectAttributes attributes{}; attributes.objectName = &name; attributes.attributes = OBJ_CASE_INSENSITIVE;
+    Handle file{}; IoStatusBlock status{};
+    constexpr uint32_t ReadAccess = 0x00100001u;
+    const auto openStatus = native_nt::NtCreateFile(&file, ReadAccess, &attributes, &status, nullptr,
+        0, 0x7u, 1u, 0x20u, nullptr, 0);
+    if (openStatus != NtStatus::Success) return false;
+    char contents[8192]{};
+    LargeInteger offset{};
+    const auto readStatus = native_nt::NtReadFile(file, 0, nullptr, nullptr, &status,
+        contents, sizeof(contents), &offset, nullptr);
+    (void)native_nt::NtClose(file);
+    if (readStatus != NtStatus::Success && readStatus != NtStatus::EndOfFile) return false;
+    size_t cursor{};
+    const size_t bytes = status.information <= sizeof(contents) ? status.information : sizeof(contents);
+    while (cursor < bytes) {
+        while (cursor < bytes && (contents[cursor] == ' ' || contents[cursor] == '\t' ||
+               contents[cursor] == '\r' || contents[cursor] == '\n')) ++cursor;
+        if (cursor == bytes) break;
+        if (contents[cursor] == '#') {
+            while (cursor < bytes && contents[cursor] != '\n') ++cursor;
+            continue;
+        }
+        uint32_t octets[4]{};
+        bool valid = true;
+        for (size_t part = 0; part < 4; ++part) {
+            if (cursor == bytes || contents[cursor] < '0' || contents[cursor] > '9') { valid = false; break; }
+            size_t digits{};
+            while (cursor < bytes && contents[cursor] >= '0' && contents[cursor] <= '9') {
+                const uint32_t digit = static_cast<uint32_t>(contents[cursor++] - '0');
+                if (octets[part] > (255u - digit) / 10u) { valid = false; break; }
+                octets[part] = octets[part] * 10u + digit;
+                if (++digits > 3) { valid = false; break; }
+            }
+            if (!valid || (part != 3 && (cursor == bytes || contents[cursor++] != '.'))) { valid = false; break; }
+        }
+        if (!valid) { while (cursor < bytes && contents[cursor] != '\n') ++cursor; continue; }
+        address = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
+        bool matched = false;
+        while (cursor < bytes && contents[cursor] != '\n' && contents[cursor] != '#') {
+            while (cursor < bytes && (contents[cursor] == ' ' || contents[cursor] == '\t')) ++cursor;
+            const size_t begin = cursor;
+            while (cursor < bytes && contents[cursor] != ' ' && contents[cursor] != '\t' &&
+                   contents[cursor] != '\r' && contents[cursor] != '\n' && contents[cursor] != '#') ++cursor;
+            if (cursor - begin == requested.size() && cursor > begin) {
+                bool same = true;
+                for (size_t i = 0; i < requested.size(); ++i) {
+                    char left = contents[begin + i], right = requested[i];
+                    if (left >= 'A' && left <= 'Z') left = static_cast<char>(left + ('a' - 'A'));
+                    if (right >= 'A' && right <= 'Z') right = static_cast<char>(right + ('a' - 'A'));
+                    if (left != right) { same = false; break; }
+                }
+                if (same) matched = true;
+            }
+        }
+        if (matched) return true;
+        while (cursor < bytes && contents[cursor] != '\n') ++cursor;
+    }
+    return false;
+}
+
+bool resolveHosts(const char* name, uint16_t qtype, bool wide, void** output) noexcept {
+    if (qtype != DnsA || !name || !output) return false;
+    uint32_t address{};
+    if (!hostsIpv4(name, address)) return false;
+    Slot* slot = allocateSlot(wide);
+    if (!slot) return false;
+    const size_t n = length(name);
+    if (n >= 256) { releaseSlot(slot); return false; }
+    if (wide) {
+        auto* record = reinterpret_cast<RecordW*>(slot->publicRecord);
+        record->name = slot->wideName; record->type = DnsA; record->ttl = 60;
+        record->dataLength = sizeof(address); record->data.a.address = address;
+        for (size_t i = 0; i <= n; ++i) slot->wideName[i] = static_cast<unsigned char>(name[i]);
+        *output = record;
+    } else {
+        auto* record = reinterpret_cast<RecordA*>(slot->publicRecord);
+        record->name = slot->ansiName; record->type = DnsA; record->ttl = 60;
+        record->dataLength = sizeof(address); record->data.a.address = address;
+        copy(slot->ansiName, name, n + 1);
+        *output = record;
+    }
+    return true;
+}
+
 uint32_t query(const char* name,uint16_t qtype,bool wide,void** output,Deadline* deadline = nullptr) noexcept {
     if (!name || !output) return DnsInvalidParameter;
     *output = nullptr;
@@ -223,6 +316,7 @@ uint32_t query(const char* name,uint16_t qtype,bool wide,void** output,Deadline*
     size_t initialLength = length(name);
     if (initialLength && name[initialLength - 1] == '.') --initialLength;
     if (!initialLength || initialLength >= 256) return DnsInvalidName;
+    if (resolveHosts(name, qtype, wide, output)) return DnsSuccess;
     char current[256]{};
     copy(current, name, initialLength);
     char visited[9][256]{};
