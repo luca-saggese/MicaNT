@@ -342,7 +342,10 @@ requires both callbacks in FIFO order before the thread returns
 `STATUS_USER_APC`. The complete QEMU boot passed with this case. A separate
 termination test covers rundown of a queued user APC on a remotely terminated
 event waiter; faulting user callbacks with later APCs still queued remain
-unverified.
+unverified. Commit `6e28db0` suppresses APC injection during both chances of
+`NtRaiseException`, while preserving explicit `NtTestAlert` delivery. The
+subsequent `python3 qemu.py --headless` run passed and remained stable for five
+seconds; it does not replace the missing faulting-callback fixture.
 
 The Ring 3 process-creation fixture also passes named `ObjectAttributes` to
 `NtCreateProcessEx` and `NtCreateThreadEx`. Both reject the unsupported

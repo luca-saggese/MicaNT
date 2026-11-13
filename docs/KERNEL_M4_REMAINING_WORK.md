@@ -26,7 +26,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 - [ ] **Verificare il guasto durante una callback utente con altre APC pendenti.**
   Coprire routine non valida o fault/eccezione della callback, APC successive
   non eseguite e rundown/cleanup esattamente una volta. Gli status e i riferimenti
-  devono restare coerenti anche se il thread termina nel dispatcher.
+  devono restare coerenti anche se il thread termina nel dispatcher. Il commit
+  `6e28db0` ora impedisce l'iniezione di APC durante entrambe le chance di
+  `NtRaiseException` e consente la consegna esplicita via `NtTestAlert`; il boot
+  QEMU integrato passa, ma il fixture con callback che fa fault e APC successive
+  pendenti resta da aggiungere e verificare.
 
 ### Contratti di accesso
 
