@@ -380,11 +380,38 @@ __attribute__((noinline)) bool testNativePeerThread(micant::Handle process, uint
             entry, 0, 0, 0, mm::PageSize4KB, mm::PageSize4KB, nullptr)
         : duplicateStatus;
     const auto restrictedCloseStatus = restricted ? sys::NtClose(restricted) : NtStatus::Success;
+    const auto threadObjectsBeforeStackValidation = ps::detail::bootstrapThreadObjectCount();
+    const auto readyThreadsBeforeStackValidation = ke::PriorityScheduler::get().getReadyThreadCount();
+    Handle invalidCommitThread{};
+    const auto invalidCommitStatus = sys::NtCreateThreadEx(&invalidCommitThread,
+        ob::SYNCHRONIZE, nullptr, process, entry, 0, 1, 0,
+        2 * mm::PageSize4KB, mm::PageSize4KB, nullptr);
+    Handle oversizedReserveThread{};
+    const auto oversizedReserveStatus = sys::NtCreateThreadEx(&oversizedReserveThread,
+        ob::SYNCHRONIZE, nullptr, process, entry, 0, 1, 0,
+        mm::PageSize4KB, hal::amd64::BootstrapManagedSize + mm::PageSize4KB, nullptr);
+    if (duplicateStatus != NtStatus::Success || restrictedCreateStatus != NtStatus::AccessDenied ||
+        restrictedCloseStatus != NtStatus::Success ||
+        invalidCommitStatus != NtStatus::InvalidParameter || invalidCommitThread ||
+        oversizedReserveStatus != NtStatus::InvalidParameter || oversizedReserveThread ||
+        ps::detail::bootstrapThreadObjectCount() != threadObjectsBeforeStackValidation ||
+        ke::PriorityScheduler::get().getReadyThreadCount() != readyThreadsBeforeStackValidation) {
+        serialWrite("[MicaNT Ps] NtCreateThreadEx stack validation status/handle/count/ready=");
+        serialWriteHex(static_cast<uint32_t>(invalidCommitStatus)); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(oversizedReserveStatus)); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(invalidCommitThread)); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(oversizedReserveThread)); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(ps::detail::bootstrapThreadObjectCount() -
+                                               threadObjectsBeforeStackValidation));
+        serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(ke::PriorityScheduler::get().getReadyThreadCount() -
+                                               readyThreadsBeforeStackValidation));
+        serialWrite("\r\n");
+        return false;
+    }
     const auto invalidPcStatus = sys::NtCreateThreadEx(&peer, ob::SYNCHRONIZE, nullptr, process,
         1, 0, 1, 0, mm::PageSize4KB, 32768, nullptr);
-    if (duplicateStatus != NtStatus::Success || restrictedCreateStatus != NtStatus::AccessDenied ||
-        restrictedCloseStatus != NtStatus::Success || invalidPcStatus != NtStatus::Success || !peer)
-        return false;
+    if (invalidPcStatus != NtStatus::Success || !peer) return false;
     ps::EThread* invalidThread{};
     ob::ObjectHeader* invalidReference{};
     if (ps::detail::referenceThreadHandle(peer, ob::SYNCHRONIZE, invalidThread, invalidReference) != NtStatus::Success ||
