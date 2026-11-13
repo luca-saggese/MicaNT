@@ -212,6 +212,18 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "leaq 49(%rsp), %rcx\nxorl %edx, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
         "movq %rcx, %r10\nmovl $0xb4, %eax\nsyscall\ncmpl $0x80000002, %eax\njne 9f\n"
         "testq %r13, %r13\njnz 3f\n"
+        "cmpq $0, 48(%r14)\nje 42f\n"
+        // CPL3 native wait timeout coverage: a relative one millisecond wait
+        // on an unsignaled event returns STATUS_TIMEOUT.
+        "movabsq $0x400020002700, %r8\nmovq $-10000, (%r8)\nmovq %rbx, %rcx\nxorl %edx, %edx\n"
+        "callq *8(%r15)\ncmpq $0x102, %rax\njne 31f\n"
+        "42: movabsq $0x400020002708, %rax\nmovq $1, (%rax)\n"
+        "movabsq $0x400020002708, %rax\nmovq $1, (%rax)\n"
+        // NtAlertThread marks this thread alerted; an alertable delay consumes
+        // that alert and returns STATUS_ALERTED without sleeping.
+        "movq $-2, %rcx\ncallq *112(%r15)\ntestl %eax, %eax\njnz 33f\n"
+        "movabsq $0x400020002700, %rdx\nmovq $-10000, (%rdx)\nmovl $1, %ecx\n"
+        "callq *104(%r15)\ncmpq $0x101, %rax\njne 34f\n"
         // Thread A allocates and checks a page through the native syscall.
         "movq $0, 64(%rsp)\nmovq $4096, 72(%rsp)\n"
         "movq $0x3000, 32(%rsp)\nmovq $4, 40(%rsp)\n"
@@ -229,14 +241,28 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "movq %r12, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
         "testl %eax, %eax\njnz 9f\n10: movl $0xc0000022, %edx\njmp 8f\n"
         // Thread B signals A, then blocks until A signals its event.
-        "3: movq %rbx, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
+        "3: movabsq $0x400020002708, %r10\n39: cmpq $0, (%r10)\nje 39b\n"
+        "movq %rbx, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
         "testl %eax, %eax\njnz 9f\n"
         "movq %r12, %rcx\nxorl %edx, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\n"
         "ud2\n"
+        "31: movl $0xc0000101, %edx\njmp 8f\n"
+        "33: movl %eax, %edx\njmp 8f\n"
+        "34: movl $0xc0000104, %edx\njmp 8f\n"
         "9: movl $0xc000000d, %edx\n"
         "8: movq $-1, %rcx\ncallq *24(%r15)\nud2\n"
         ".globl MicantNativeThreadStart\n"
         "MicantNativeThreadStart: movq $0x12345678, (%rcx)\nmovl $0xc0000022, %eax\nretq\n"
+        ".globl MicantApcThreadStart\n"
+        // SYSCALL overwrites RCX with the return RIP; retain the thread
+        // argument in a Windows-ABI nonvolatile register across NtTestAlert.
+        "MicantApcThreadStart: pushq %r12\nmovq %rcx, %r12\n"
+        "movl $0x170, %eax\nsyscall\n"
+        "movabsq $0x400020002700, %r10\ncmpq $0x41504321, (%r10)\njne 43f\n"
+        "movq $0x12345678, (%r12)\nmovl $0xc0000123, %eax\npopq %r12\nretq\n"
+        "43: movl $0xc0000022, %eax\npopq %r12\nretq\n"
+        ".globl MicantTestUserApc\n"
+        "MicantTestUserApc: movabsq $0x400020002700, %rax\nmovq $0x41504321, (%rax)\nretq\n"
         ".globl MicantGrowStackThreadStart\n"
         "MicantGrowStackThreadStart: movabsq $0x5a5a12345678abcd, %rax\nmovq %rax, %xmm0\n"
         // Probe downward page by page through the initial commit and across
@@ -255,6 +281,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
     __asm__ __volatile__(
         "pushq %r12\npushq %r13\npushq %r15\nmovq %rcx, %r12\nmovq 0(%r12), %r15\n"
         "xorl %r13d, %r13d\nsubq $0x140, %rsp\n"
+        "movabsq $0x400020002700, %rax\nmovq $0, (%rax)\n"
         "movq $0, 0x60(%rsp)\nmovq $0, 0x68(%rsp)\nmovq $0, 0x70(%rsp)\nmovq $0, 0x78(%rsp)\n"
         "leaq 0x60(%rsp), %rcx\nmovl $0x0010043b, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
         "movq $0, 0x20(%rsp)\nmovq $0, 0x28(%rsp)\nmovq $0, 0x30(%rsp)\n"
@@ -276,14 +303,20 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
         "callq *48(%r15)\ncmpl $0xc0000022, %eax\nje 7f\nmovl $0xc0000204, %r13d\njmp 90f\n7:\n"
         "movq 0x68(%rsp), %rcx\ncallq *88(%r15)\ntestl %eax, %eax\njz 8f\nmovl $0xc0000214, %r13d\njmp 90f\n8:\n"
-        "leaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\nxorl %r8d, %r8d\nmovq 0x60(%rsp), %r9\n"
-        "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nleaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\n"
+        "leaq 0x70(%rsp), %rcx\nmovl $0x00100052, %edx\nxorl %r8d, %r8d\nmovq 0x60(%rsp), %r9\n"
+        "leaq MicantApcThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nleaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\n"
         "movq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
         "callq *48(%r15)\ntestl %eax, %eax\njz 9f\nmovl $0xc0000215, %r13d\njmp 90f\n9:\n"
+        // Queue a user APC to the suspended child thread before its first
+        // user instruction; NtTestAlert at the entry requests delivery.
+        "movq 0x70(%rsp), %rcx\nleaq MicantTestUserApc(%rip), %rdx\nxorl %r8d, %r8d\n"
+        "xorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
+        "testl %eax, %eax\njz 25f\nmovl $0xc0000225, %r13d\njmp 90f\n25:\n"
         "movq 0x70(%rsp), %rcx\nxorl %edx, %edx\ncallq *56(%r15)\ntestl %eax, %eax\njz 10f\nmovl $0xc0000216, %r13d\njmp 90f\n10:\n"
         "movq 0x70(%rsp), %rcx\nxorl %edx, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\ntestl %eax, %eax\njz 11f\nmovl $0xc0000217, %r13d\njmp 90f\n11:\n"
         "movq 0x70(%rsp), %rcx\nxorl %edx, %edx\nleaq 0xb0(%rsp), %r8\nmovl $48, %r9d\n"
         "leaq 0x120(%rsp), %rax\nmovq %rax, 0x20(%rsp)\ncallq *32(%r15)\ntestl %eax, %eax\njz 12f\nmovl $0xc0000218, %r13d\njmp 90f\n12:\n"
+        "cmpl $0xc0000123, 0xb0(%rsp)\nje 26f\nmovl $0xc0000226, %r13d\njmp 90f\n26:\n"
         "cmpq $0, 0xb8(%rsp)\njne 13f\nmovl $0xc0000205, %r13d\njmp 90f\n13:\n"
         "movq 0xc0(%rsp), %rax\ncmpq 0xa0(%rsp), %rax\nje 14f\nmovl $0xc0000206, %r13d\njmp 90f\n14:\n"
         "leaq 0x78(%rsp), %rcx\nmovl $0x40, %edx\nleaq 0xf0(%rsp), %r8\nleaq 0xc0(%rsp), %r9\ncallq *72(%r15)\n"
@@ -715,8 +748,9 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         std::memcpy(rawData + 0xc0, dllName, sizeof(dllName));
         constexpr const char* names[]{"NtAllocateVirtualMemory", "NtWaitForSingleObject", "NtSetEvent",
             "NtTerminateProcess", "NtQueryInformationThread", "NtCreateProcessEx", "NtCreateThreadEx",
-            "NtResumeThread", "NtOpenProcess", "NtOpenThread", "NtQueryInformationProcess", "NtClose"};
-        for (size_t i = 0; i < 12; ++i) {
+            "NtResumeThread", "NtOpenProcess", "NtOpenThread", "NtQueryInformationProcess", "NtClose",
+            "NtQuerySystemTime", "NtDelayExecution", "NtAlertThread", "NtQueueApcThread", "NtTestAlert"};
+        for (size_t i = 0; i < std::size(names); ++i) {
             const uint64_t rva = 2 * mm::PageSize4KB + 0x200 + i * 0x40;
             std::memcpy(rawData + 0xe0 + i * 8, &rva, sizeof(rva));
             std::memcpy(rawData + 0x120 + i * 8, &rva, sizeof(rva));
@@ -971,6 +1005,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
             arguments[3] = code + imports.firstThunk;
             arguments[4] = counters;
             arguments[5] = threadCount == 3 || preemptive ? 1 : 0;
+            arguments[6] = preemptive ? 1 : 0;
         }
         progress.stage = "user workers ready";
         if (!hal::amd64::switchProcessPagingRootByPhysical(previous)) return false;

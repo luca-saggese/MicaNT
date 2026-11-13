@@ -329,9 +329,13 @@ default control word (`0x037f`) because its accepted-bit mask omitted bit 6;
 the mask now accepts that architecturally valid value. APC continuation
 contexts also use flat user DS/ES selectors instead of the kernel selectors
 active at syscall return. Commit `cf1f4d9` fixes both and QEMU now advances past
-the prior `STATUS_INVALID_PARAMETER`/`#UD`. The current expanded callback test
-still exits with `STATUS_ACCESS_DENIED` before its callback marker is set, so
-normal user-APC dispatch remains unverified and M4 is not complete.
+the prior `STATUS_INVALID_PARAMETER`/`#UD`. The expanded callback test then
+exposed a fixture bug: its user thread used RCX as the output pointer after
+`SYSCALL`, which replaces RCX with the return RIP. Saving the argument in R12
+fixed the test, and `python3 qemu.py --headless` passed with the serial console
+stable for five seconds. Normal user-APC dispatch is now exercised by this
+bounded path; its general interleavings and M4's broader access/lifecycle
+contracts remain open.
 
 A bounded internal Ps factory now creates Ob-backed thread objects. A lifecycle
 reference keeps each object alive if its last handle closes before reap. The
