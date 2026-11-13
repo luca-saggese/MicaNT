@@ -132,8 +132,16 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 - Build/link `ntoskrnl_core_baremetal` e target boot: passati con
   `python3 qemu.py --build-only` nel batch precedente.
-- Boot completo: superato nell'ultima verifica con
-  `python3 qemu.py --headless`; seriale stabile per 5 secondi. Il test Ring 3
-  APC e i rifiuti espliciti per gli attributi nominati passano. M4 resta aperto
-  per i contratti generali elencati sopra.
+- Ultimo boot completo riuscito: `python3 qemu.py --headless` nel batch
+  precedente; seriale stabile per 5 secondi, con test Ring 3 APC e rifiuti
+  espliciti degli attributi nominati.
+- Dopo il ripristino del fixture sperimentale alertable non verificato,
+  `python3 qemu.py --headless` ha ricompilato e linkato il kernel, ma due avvii
+  consecutivi si sono fermati nel controllo d'input preliminare:
+  `PS/2 IRQ route was enabled but no ISR byte reached the consumer`. Il boot
+  aveva raggiunto la superficie CPL3 prima dell'invio dell'input. Un avvio con
+  `--display none` senza `--headless` è stato rifiutato dal runner perché
+  `--interactive` richiede un backend visibile. Questi tentativi non verificano
+  i punti M4; il risultato positivo precedente rimane l'ultima verifica
+  integrata riuscita. M4 resta aperto per i contratti generali elencati sopra.
 
