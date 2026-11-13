@@ -17,6 +17,8 @@ extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
 
 namespace micant::netboot {
 namespace {
+constexpr size_t NetworkProcessKernelStackSize = 64 * 1024;
+
 void logStatus(const char* stage, NtStatus status) noexcept {
     if (status == NtStatus::Success) return;
     MicantNetbootSerialWrite("[MicaNT DHCP] ");
@@ -159,7 +161,7 @@ NtStatus acquireBootDhcpLease() noexcept {
         : std::u16string_view(normalCommandLine, std::size(normalCommandLine) - 1);
     ScopedHandle process{}, thread{};
     status = ps::detail::createBootstrapUserProcess(images, executablePath,
-        commandLine, 32768, 32768, true,
+        commandLine, NetworkProcessKernelStackSize, 32768, true,
         ob::SYNCHRONIZE | 0x0400u, ob::SYNCHRONIZE,
         process.value, thread.value, true);
     logStatus("service process creation", status);
@@ -191,7 +193,7 @@ NtStatus acquireBootDhcpLease() noexcept {
             u"network-probe.exe 10.0.2.2 18080";
         ScopedHandle probeProcess{}, probeThread{};
         status = ps::detail::createBootstrapUserProcess(probeImages, probePath,
-            {probeCommandLine, std::size(probeCommandLine) - 1}, 32768, 32768, true,
+            {probeCommandLine, std::size(probeCommandLine) - 1}, NetworkProcessKernelStackSize, 32768, true,
             ob::SYNCHRONIZE | 0x0400u, ob::SYNCHRONIZE,
             probeProcess.value, probeThread.value, true);
         if (status != NtStatus::Success) return status;
@@ -223,7 +225,7 @@ NtStatus acquireBootDhcpLease() noexcept {
         static constexpr char16_t httpsCommandLine[] = u"https-probe.exe";
         ScopedHandle httpsProcess{}, httpsThread{};
         status = ps::detail::createBootstrapUserProcess(httpsImages, httpsPath,
-            {httpsCommandLine, std::size(httpsCommandLine) - 1}, 32768, 32768, true,
+            {httpsCommandLine, std::size(httpsCommandLine) - 1}, NetworkProcessKernelStackSize, 32768, true,
             ob::SYNCHRONIZE | 0x0400u, ob::SYNCHRONIZE,
             httpsProcess.value, httpsThread.value, true);
         if (status != NtStatus::Success) return status;
