@@ -1195,11 +1195,15 @@ void MicantBootstrapDispatch(SyscallFrame* frame, const void* floatingState) noe
     // Even early bootstrap user contexts may return with IF clear. A pending
     // process termination must be serviced before any return to user mode.
     micant::ke::detail::serviceUserReturnTermination();
-    // A successful first-chance NtRaiseException has already installed its
-    // dispatcher frame. Do not replace that return with a queued user APC.
-    const bool dispatchingRaisedException = continuationApplied &&
-        args.number == MICANT_SSN_NT_RAISE_EXCEPTION;
-    if (!dispatchingRaisedException && (frame->cs & 3) == 3 && (frame->flags & (uint64_t{1} << 9)) && floatingState &&
+    // Keep queued APCs out of both first- and second-chance exception
+    // dispatch. The second-chance path can call process termination and return
+    // an error; injecting another APC there would interrupt the active
+    // exception dispatcher and could run callbacks after an earlier callback
+    // faulted.
+    const bool dispatchingRaisedException = args.number == MICANT_SSN_NT_RAISE_EXCEPTION;
+    const bool explicitApcAlert = args.number == MICANT_SSN_NT_TEST_ALERT;
+    if (!dispatchingRaisedException && (frame->cs & 3) == 3 &&
+        ((frame->flags & (uint64_t{1} << 9)) || explicitApcAlert) && floatingState &&
         micant::ke::KeGetCurrentIrql() == micant::ke::PASSIVE_LEVEL) {
         uint64_t hardwareFrame[5]{frame->rip, frame->cs, frame->flags, frame->rsp, frame->ss};
         uint64_t savedRegisters[15]{
