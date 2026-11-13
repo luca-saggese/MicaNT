@@ -1458,3 +1458,22 @@ Public layout references: [PEB](https://learn.microsoft.com/en-us/windows/win32/
 [PEB_LDR_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb_ldr_data),
 [RTL_USER_PROCESS_PARAMETERS](https://learn.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-rtl_user_process_parameters),
 and [UNICODE_STRING](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_unicode_string).
+
+### M10 native network closure checkpoint
+
+The bare-metal QEMU scenario now reaches the canonical virtio-net miniport and
+exercises Ring 3 DHCP, DNS, TCP connect/send/receive, TCP listen/accept and
+WinHTTP TLS 1.3. The HTTPS peer provisions a temporary trust root, sends a
+known payload and closes with TLS `close_notify`; the guest also rejects an
+incorrect hostname, an unknown issuer and an expired certificate. The guest
+processes use the shared KUSER mapping, and newly bootstrapped kernel threads
+start at `PASSIVE_LEVEL` after a dispatcher switch.
+
+| Command | Result |
+|---|---|
+| `python3 qemu.py --network-test --headless --timeout 240` | Passed; `ntoskrnl_core_baremetal` linked and the harness verified DHCP/DNS, both TCP directions, the trusted HTTPS payload, all three certificate rejection cases and a non-empty NIC packet capture |
+
+The QEMU network scenario does not yet inject packet loss or malformed frames;
+those resilience checks remain open under M10's definition of done. The pass
+above verifies the initial N0–N5 functional closure, not N6, SMP or general
+network compatibility.

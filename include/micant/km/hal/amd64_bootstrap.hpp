@@ -177,6 +177,8 @@ struct BootstrapDeadline {
 [[nodiscard]] BootstrapClockStatus initializeBootstrapKuserSharedData() noexcept;
 [[nodiscard]] BootstrapClockStatus updateBootstrapKuserSharedData() noexcept;
 [[nodiscard]] micant::KUserSharedData* bootstrapKuserSharedData() noexcept;
+[[nodiscard]] bool bootstrapKuserSharedDataReady() noexcept;
+[[nodiscard]] bool mapBootstrapKuserSharedDataForRoot(uint64_t rootPhysical) noexcept;
 
 enum class BootstrapRtcStatus : uint8_t {
     Success,
@@ -229,7 +231,8 @@ bool bootstrapSyscallGsActive() noexcept;
 void saveBootstrapThreadSegments(ThreadSegmentState& state, bool syscallGsActive) noexcept;
 void restoreBootstrapThreadSegments(const ThreadSegmentState& state) noexcept;
 bool bootstrapStackHasHeadroom(uintptr_t stackPointer, uintptr_t threadBase,
-                               uintptr_t threadTop, size_t required) noexcept;
+                               uintptr_t threadTop, size_t required,
+                               bool terminatedThread = false) noexcept;
 uintptr_t bootstrapThreadSyscallStack() noexcept;
 // Enter an already mapped user context in the current process. On success
 // this does not return; caller must provide a valid thread-owned kernel stack.

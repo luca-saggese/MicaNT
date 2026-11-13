@@ -44,10 +44,21 @@ extern "C" bool MicantAmd64ConfigureExtendedState() noexcept {
     return true;
 }
 
+extern "C" [[noreturn]] void MicantAmd64BootstrapThreadDispatch(
+    micant::ke::detail::BootstrapThreadEntry entry, void* argument) noexcept {
+    if (!entry) __builtin_trap();
+    // A freshly-created kernel thread starts at PASSIVE_LEVEL even when the
+    // dispatcher selected it from a DISPATCH_LEVEL context switch.
+    micant::ke::g_CurrentCpu.currentIrql = micant::ke::PASSIVE_LEVEL;
+    entry(argument);
+    __builtin_trap();
+}
+
 extern "C" __attribute__((naked)) void MicantAmd64BootstrapThread() noexcept {
     __asm__ __volatile__(
-        "movq %r13, %rcx\n"
-        "callq *%r12\n"
+        "movq %r13, %rdx\n"
+        "movq %r12, %rcx\n"
+        "callq MicantAmd64BootstrapThreadDispatch\n"
         "ud2\n"
     );
 }

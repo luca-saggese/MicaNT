@@ -143,6 +143,7 @@ uint64_t g_bootstrapSystemTimeCounter{};
 uint64_t g_bootstrapSystemTimeFrequency{};
 uint64_t g_bootstrapMonotonicCounter{};
 uint64_t g_bootstrapMonotonicFrequency{};
+uint64_t g_kuserBackingPhysical{};
 std::atomic<uint8_t> g_bootstrapMonotonicState{}; // 0=unset, 2=ready
 std::atomic_flag g_cmosRtcLock = ATOMIC_FLAG_INIT;
 // The firmware selects the APIC mode before boot. Do not change modes while
@@ -552,7 +553,7 @@ bool splitTwoMiBMapping(KuserPageTableEdit& edit, uint64_t& entry) noexcept {
     return edit.set(entry, tablePhysical | kPresent | kWritable | kUser | kOwnedTable);
 }
 
-bool installKuserUserMapping(uint64_t physical, uint64_t* writableRoot) noexcept {
+bool installKuserUserMapping(uint64_t physical, uint64_t rootPhysical) noexcept {
     const auto fail = [](const char* message) noexcept {
         if (g_log) g_log(message);
         return false;
@@ -561,10 +562,12 @@ bool installKuserUserMapping(uint64_t physical, uint64_t* writableRoot) noexcept
     if (!bootstrapPagingContext() || (physical & 4095) ||
         physical > kPhysicalMask || !physical || isProtectedIommuPhysicalPage(physical) ||
         reinterpret_cast<uint64_t>(activePagingRoot()) != reinterpret_cast<uint64_t>(g_pml4) ||
-        !writableRoot)
+        !rootPhysical || (rootPhysical & 4095) || rootPhysical > kPhysicalMask)
         return fail("[MicaNT Hal] KUSER map precondition failed\r\n");
 
     KuserPageTableEdit edit;
+    uint64_t* writableRoot = edit.mapTable(rootPhysical);
+    if (!writableRoot) return fail("[MicaNT Hal] KUSER process root alias failed\r\n");
     uint64_t& pml4Entry = writableRoot[(address >> 39) & 511];
     if (pml4Entry & 128) return fail("[MicaNT Hal] KUSER PML4 large-page conflict\r\n");
     uint64_t* pdpt{};
@@ -2253,7 +2256,8 @@ void restoreBootstrapThreadSegments(const ThreadSegmentState& state) noexcept {
 }
 
 bool bootstrapStackHasHeadroom(uintptr_t stackPointer, uintptr_t threadBase,
-                               uintptr_t threadTop, size_t required) noexcept {
+                               uintptr_t threadTop, size_t required,
+                               bool terminatedThread) noexcept {
     uintptr_t base = threadBase;
     uintptr_t top = threadTop;
     if (stackPointer >= MicantBootstrapUserInterruptStackBase &&
@@ -2265,6 +2269,14 @@ bool bootstrapStackHasHeadroom(uintptr_t stackPointer, uintptr_t threadBase,
              stackPointer < MicantBootstrapSyscallStackTop) {
         base = MicantBootstrapSyscallStackBase;
         top = MicantBootstrapSyscallStackTop;
+    }
+    else if (terminatedThread && stackPointer >= reinterpret_cast<uintptr_t>(g_kernelStack) &&
+             stackPointer < reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack))) {
+        // A terminal thread can reach exitCurrent while its syscall-return
+        // APC is still on the per-CPU interrupt stack. It will never resume,
+        // so that stack may be reused by the incoming thread after the switch.
+        base = reinterpret_cast<uintptr_t>(g_kernelStack);
+        top = reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack));
     }
     return base && top > base && stackPointer >= base && stackPointer < top &&
         stackPointer - base >= required;
@@ -4304,6 +4316,21 @@ micant::KUserSharedData* bootstrapKuserSharedData() noexcept {
     return reinterpret_cast<micant::KUserSharedData*>(address);
 }
 
+bool bootstrapKuserSharedDataReady() noexcept { return g_kuserSharedMappingReady; }
+
+bool mapBootstrapKuserSharedDataForRoot(uint64_t rootPhysical) noexcept {
+    if (!g_kuserSharedMappingReady || !g_kuserBackingPhysical) return false;
+    if (reinterpret_cast<uint64_t>(activePagingRoot()) != reinterpret_cast<uint64_t>(g_pml4))
+        return false;
+    const bool mapped = installKuserUserMapping(g_kuserBackingPhysical, rootPhysical);
+    if (g_log) {
+        g_log("[MicaNT Hal] KUSER process root/backing/status=");
+        logTrapValue("", rootPhysical); logTrapValue("/", g_kuserBackingPhysical);
+        logTrapValue("/", mapped); g_log("\r\n");
+    }
+    return mapped;
+}
+
 BootstrapClockStatus updateBootstrapKuserSharedData() noexcept {
     if (!g_kuserSharedMappingReady) return BootstrapClockStatus::ClockUnavailable;
     uint64_t uptime{}, systemTime{};
@@ -4366,12 +4393,13 @@ BootstrapClockStatus initializeBootstrapKuserSharedData() noexcept {
         if (g_log) g_log("[MicaNT Hal] KUSER kernel aliases could not be installed\r\n");
         return BootstrapClockStatus::ClockUnavailable;
     }
+    g_kuserBackingPhysical = physicalPage;
     g_kuserKernelAliasReady = true;
     auto* shared = bootstrapKuserSharedData();
     std::memset(shared, 0, sizeof(*shared));
-    if (!installKuserUserMapping(physicalPage,
-            reinterpret_cast<uint64_t*>(kKuserRootAlias))) {
+    if (!installKuserUserMapping(physicalPage, rootPhysical)) {
         g_kuserKernelAliasReady = false;
+        g_kuserBackingPhysical = 0;
         if (!unmapPage(kKuserKernelAlias, false)) __builtin_trap();
         if (!unmapPage(kKuserRootAlias, false)) __builtin_trap();
         if (g_log) g_log("[MicaNT Hal] KUSER user mapping transaction failed\r\n");

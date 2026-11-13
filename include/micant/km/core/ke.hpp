@@ -1003,6 +1003,8 @@ inline void unregisterClientThread(KThread& thread) noexcept {
 
 using BootstrapThreadEntry = void (*)(void*) noexcept;
 extern "C" void MicantAmd64BootstrapThread() noexcept;
+extern "C" [[noreturn]] void MicantAmd64BootstrapThreadDispatch(
+    BootstrapThreadEntry entry, void* argument) noexcept;
 
 // The caller owns a writable, resident stack until the thread can no longer
 // run. This bootstrap path is single-CPU and requires interrupts disabled.
@@ -1434,7 +1436,8 @@ inline bool KiSwapContext(KThread* outgoing, KThread* incoming, bool prequeued =
     // for it and the compiler's call frame rather than writing past the base.
     if (!hal::amd64::bootstrapStackHasHeadroom(stackPointer, outgoing->kernelStackBase,
                                                outgoing->kernelExecutionStackTop,
-                                               1024 + MicantAmd64ExtendedSize)) return false;
+                                               1024 + MicantAmd64ExtendedSize,
+                                               outgoing->state == ThreadState::Terminated)) return false;
     if (hardwareCr3 != incoming->directoryTableBase &&
         !hal::amd64::switchProcessPagingRootByPhysical(incoming->directoryTableBase)) return false;
     g_CurrentCpu.currentCr3 = incoming->directoryTableBase;

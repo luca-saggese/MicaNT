@@ -3757,18 +3757,6 @@ extern "C" micant::NtStatus KiSystemStartup(
     initializeBootStartDrivers(handoff);
     auto& bootNetworkStack = micant::tcpip::NetworkStack::get();
     bootNetworkStack.initialize();
-    if (bootNetworkStack.isInitialized()) {
-        serialWrite("[MicaNT NDIS/TCPIP] Boot-start network adapter attached to canonical transport\r\n");
-        const auto dhcpStatus = micant::netboot::acquireBootDhcpLease();
-        if (dhcpStatus == micant::NtStatus::Success)
-            serialWrite("[MicaNT DHCP] Ring 3 DORA lease acquired through Winsock/AFD\r\n");
-        else {
-            serialWrite("[MicaNT DHCP] Ring 3 lease acquisition failed status=");
-            serialWriteNumber(static_cast<uint32_t>(dhcpStatus));
-            serialWrite("\r\n");
-        }
-    } else
-        serialWrite("[MicaNT NDIS/TCPIP] No boot-start network adapter registered\r\n");
     drawExplorerDesktop();
     serialWrite("[MicaNT Explorer] Desktop and taskbar rendered\r\n");
     bool utcSeeded = false;
@@ -3866,6 +3854,18 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!MicantTestPsFileBackedImage())
         stopWithError("[MicaNT Ps] File-backed SEC_IMAGE verification failed\r\n");
     serialWrite("[MicaNT Ps] File-backed SEC_IMAGE process image verified\r\n");
+    if (bootNetworkStack.isInitialized()) {
+        serialWrite("[MicaNT NDIS/TCPIP] Boot-start network adapter attached to canonical transport\r\n");
+        const auto dhcpStatus = micant::netboot::acquireBootDhcpLease();
+        if (dhcpStatus == micant::NtStatus::Success)
+            serialWrite("[MicaNT DHCP] Ring 3 DORA lease acquired through Winsock/AFD\r\n");
+        else {
+            serialWrite("[MicaNT DHCP] Ring 3 lease acquisition failed status=");
+            serialWriteNumber(static_cast<uint32_t>(dhcpStatus));
+            serialWrite("\r\n");
+        }
+    } else
+        serialWrite("[MicaNT NDIS/TCPIP] No boot-start network adapter registered\r\n");
     if (micant::hal::amd64::bootstrapQemuFaultTestsAvailable()) {
         if (!micant::hal::amd64::verifyBootstrapTimerInterrupt())
             stopWithError("[MicaNT Hal] Local APIC timer verification failed\r\n");

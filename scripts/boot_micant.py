@@ -433,7 +433,8 @@ def run_qemu(
             qemu,
             "-machine", "q35" if usb_test else "q35,usb=off",
             "-accel", "tcg",
-            "-cpu", "qemu64,+invtsc,vendor=GenuineIntel",
+            "-cpu", "qemu64,+invtsc" + (",+rdrand" if network_test else "") +
+                ",vendor=GenuineIntel",
             "-device", "intel-iommu,intremap=on,caching-mode=on",
             "-rtc", "base=utc",
             "-smp", "1",

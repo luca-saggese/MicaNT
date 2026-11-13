@@ -600,10 +600,25 @@ NtStatus createBootstrapUserProcess(std::span<const BootstrapProcessImage> image
     }
     if (status == NtStatus::Success) status = process->setNativeProcessParameters(capturedPath, capturedCommand);
     if (status == NtStatus::Success) status = process->finalizeNativeImages();
-    if (status == NtStatus::Success)
+    if (status == NtStatus::Success) {
         status = createUserThreadHandle(*process, entry, kernelStackSize, userStackSize,
                                         interruptible, threadAccess, threadResult, thread);
+    }
     if (targetActive && !hal::amd64::switchProcessPagingRootByPhysical(previousRoot)) __builtin_trap();
+    if (status == NtStatus::Success) {
+        const bool kuserReady = hal::amd64::bootstrapKuserSharedDataReady();
+        if (kuserReady) {
+            const uintptr_t attachRoot = hal::amd64::bootstrapKernelPagingRoot();
+            const bool switchedForMapping = previousRoot != attachRoot;
+            if ((switchedForMapping &&
+                 !hal::amd64::switchProcessPagingRootByPhysical(attachRoot)) ||
+                !hal::amd64::mapBootstrapKuserSharedDataForRoot(process->getDirectoryTableBase())) {
+                status = NtStatus::Unsuccessful;
+            }
+            if (switchedForMapping &&
+                !hal::amd64::switchProcessPagingRootByPhysical(previousRoot)) __builtin_trap();
+        }
+    }
     if (status == NtStatus::Success) {
         status = thread->ready();
     }

@@ -265,6 +265,15 @@ class M10TlsPeer:
                             + b"Connection: close\r\n\r\n"
                         )
                         secure.sendall(headers + body)
+                        # The native WinHTTP client treats an unauthenticated
+                        # TCP EOF as a truncated HTTPS response. Send TLS
+                        # close_notify, then let the peer close its half.
+                        secure.setblocking(False)
+                        try:
+                            secure.unwrap()
+                        except (ssl.SSLWantReadError, ssl.SSLWantWriteError,
+                                BlockingIOError):
+                            pass
             except (ssl.SSLError, OSError, TimeoutError):
                 # Invalid-hostname and malformed-peer tests are expected to
                 # abort TLS before an HTTP request reaches this point.
