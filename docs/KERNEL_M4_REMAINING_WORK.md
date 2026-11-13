@@ -19,13 +19,14 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   il ritorno tramite `NtContinue` e lo status di uscita. Il failure era nella
   fixture: dopo `SYSCALL` usava il valore clobberato di RCX come puntatore
   all'argomento; il test ora lo conserva in R12 secondo la convenzione AMD64.
-- [x] **Consegnare un APC durante un wait alertable.** Il fixture CPL3 accoda un
-  APC al thread corrente, attende su un evento non segnalato in modalità
-  alertable, verifica `STATUS_USER_APC` e controlla il marker scritto dalla
-  callback prima di riprendere il chiamante, senza una successiva `NtTestAlert`.
-  QEMU ha trovato che il dispatcher HAL richiedeva IF nel frame al ritorno:
-  ora il ritorno da `NtWaitForSingleObject` con `STATUS_USER_APC` è un punto di
-  consegna esplicito anche quando IF non è impostato.
+- [x] **Consegnare APC durante wait e delay alertable.** Il fixture CPL3 accoda
+  callback al thread corrente, attende su evento non segnalato e invoca
+  `NtDelayExecution` alertable; verifica `STATUS_USER_APC` e i marker scritti
+  dalle callback prima di riprendere il chiamante, senza una successiva
+  `NtTestAlert`. QEMU ha trovato che il dispatcher HAL richiedeva IF nel frame
+  al ritorno: ora il ritorno con `STATUS_USER_APC` da `NtWaitForSingleObject`,
+  `NtWaitForMultipleObjects` o `NtDelayExecution` è un punto di consegna anche
+  quando IF non è impostato.
 - [x] **Verificare la consegna normale e il rundown APC nei casi coperti.** In
   QEMU due callback utente sono consegnate in ordine FIFO e il test controlla
   `NtContinue` e lo status di uscita; il test di terminazione remota verifica il
@@ -157,4 +158,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   controllo d'input PS/2 (`PS/2 IRQ route was enabled but no ISR byte reached
   the consumer`) dopo che il click era stato ricevuto dal desktop. Il caso M4
   APC/wait è passato; l'accettazione complessiva del runner resta non verde.
+- Verifica successiva dopo l'estensione al delay alertable: `python3 qemu.py
+  --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-alertable-waits8` è terminato con esito positivo; la
+  build/link del kernel bare-metal, il boot, il controllo input, la seriale
+  stabile per 5 secondi e i test CPL3 sono passati.
 

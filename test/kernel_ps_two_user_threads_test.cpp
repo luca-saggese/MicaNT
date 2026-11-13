@@ -235,6 +235,17 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "cmpq $0xc0, %rax\nje 36f\nmovl $0xc000024c, %edx\njmp 8f\n36:\n"
         "movabsq $0x400020003700, %rax\ncmpq $0x41504321, (%rax)\nje 37f\n"
         "movl $0xc000024d, %edx\njmp 8f\n37:\n"
+        // Alertable delay is another user APC return boundary; deliver the
+        // next queued routine before returning STATUS_USER_APC to this code.
+        "movq $-2, %rcx\nleaq MicantTestUserApcSecond(%rip), %rdx\n"
+        "xorl %r8d, %r8d\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
+        "testl %eax, %eax\njz .Lmicant_delay_apc_queued\nmovl %eax, %edx\njmp 8f\n"
+        ".Lmicant_delay_apc_queued:\nmovabsq $0x400020003710, %rdx\nmovq $-10000, (%rdx)\n"
+        "movl $1, %ecx\ncallq *104(%r15)\ncmpq $0xc0, %rax\n"
+        "je .Lmicant_delay_apc_returned\nmovl $0xc000024e, %edx\njmp 8f\n"
+        ".Lmicant_delay_apc_returned:\nmovabsq $0x400020003700, %rax\n"
+        "cmpq $0x41504322, (%rax)\nje .Lmicant_delay_apc_called\n"
+        "movl $0xc000024f, %edx\njmp 8f\n.Lmicant_delay_apc_called:\n"
         // Thread A allocates and checks a page through the native syscall.
         "movq $0, 64(%rsp)\nmovq $4096, 72(%rsp)\n"
         "movq $0x3000, 32(%rsp)\nmovq $4, 40(%rsp)\n"

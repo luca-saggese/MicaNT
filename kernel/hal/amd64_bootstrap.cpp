@@ -1207,8 +1207,10 @@ void MicantBootstrapDispatch(SyscallFrame* frame, const void* floatingState) noe
     const bool explicitApcAlert = args.number == MICANT_SSN_NT_TEST_ALERT;
     // An alertable wait interrupted by a user APC is itself a delivery
     // boundary, even when the interrupted user RFLAGS had IF clear.
-    const bool alertableWaitApc = args.number == MICANT_SSN_NT_WAIT_FOR_SINGLE_OBJECT &&
-        serviceResult == static_cast<uint32_t>(micant::NtStatus::UserApc);
+    const bool alertableWaitApc = serviceResult == static_cast<uint32_t>(micant::NtStatus::UserApc) &&
+        (args.number == MICANT_SSN_NT_WAIT_FOR_SINGLE_OBJECT ||
+         args.number == MICANT_SSN_NT_WAIT_FOR_MULTIPLE_OBJECTS ||
+         args.number == MICANT_SSN_NT_DELAY_EXECUTION);
     if (!dispatchingRaisedException && (frame->cs & 3) == 3 &&
         ((frame->flags & (uint64_t{1} << 9)) || explicitApcAlert || alertableWaitApc) && floatingState &&
         micant::ke::KeGetCurrentIrql() == micant::ke::PASSIVE_LEVEL) {
