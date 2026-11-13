@@ -2332,6 +2332,11 @@ extern "C" __attribute__((naked, noreturn)) void MicantEnterBootstrapUserThread(
         (thread->tebAddress && (thread->tebAddress < um::MM_LOWEST_USER_ADDRESS ||
                                 thread->tebAddress > um::MM_HIGHEST_USER_ADDRESS)))
         __builtin_trap();
+    // The first transition to CPL3 can occur without a context switch. Publish
+    // this thread's kernel stack bounds to timer/syscall entry before user
+    // interrupts become possible, using the same path as KiSwapContext.
+    setBootstrapThreadEntryStack(thread->kernelStackTop, thread->tebAddress, false,
+                                 thread->kernelStackBase, thread->kernelExecutionStackTop);
     // The user process may unmap or reprotect the entry, stack or TEB after
     // creation. Keep those races on the ordinary CPL3 exception path; only
     // corrupted kernel bookkeeping and non-user addresses are invariants.
