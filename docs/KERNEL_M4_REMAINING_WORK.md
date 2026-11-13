@@ -60,6 +60,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
   dopo errori di allocazione o copyout.
+- [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
+  wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
+  il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
+  esplicitamente `STATUS_NOT_IMPLEMENTED` finché manca il supporto kernel per
+  sospendere thread già avviati.
 - [ ] **Completare terminazione locale e remota di thread e processi.** Coprire
   thread ready, running, waiting, suspended e mai avviati; processi con zero,
   uno o più thread; APC rundown; segnalazione degli oggetti; cancellazione delle

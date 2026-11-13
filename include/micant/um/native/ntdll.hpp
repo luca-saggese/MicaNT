@@ -7221,9 +7221,13 @@ inline NtStatus WINAPI NtResetEvent_Export(HANDLE /*EventHandle*/, int32_t* Prev
 }
 
 inline NtStatus WINAPI NtResumeProcess(HANDLE /*ProcessHandle*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtResumeThread(HANDLE /*ThreadHandle*/, ULONG* PreviousSuspendCount) noexcept {
-    if (PreviousSuspendCount) *PreviousSuspendCount = 0;
-    return NtStatus::Success;
+inline NtStatus WINAPI NtResumeThread(HANDLE ThreadHandle, ULONG* PreviousSuspendCount) noexcept {
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtResumeThread,
+        .arg1 = reinterpret_cast<uintptr_t>(ThreadHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(PreviousSuspendCount)
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
 }
 
 inline NtStatus WINAPI NtSetEvent_Export(HANDLE /*EventHandle*/, int32_t* PreviousState) noexcept {
@@ -7283,9 +7287,8 @@ inline NtStatus WINAPI NtSetTimerEx(HANDLE /*TimerHandle*/, uint32_t /*TimerSetI
 inline NtStatus WINAPI NtSetValueKey_Export(HANDLE /*KeyHandle*/, void* /*ValueName*/, ULONG /*TitleIndex*/, ULONG /*Type*/, void* /*Data*/, ULONG /*DataSize*/) noexcept { return NtStatus::Success; }
 inline NtStatus WINAPI NtShutdownSystem_Export(uint32_t /*Action*/) noexcept { return NtStatus::Success; }
 inline NtStatus WINAPI NtSuspendProcess(HANDLE /*ProcessHandle*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtSuspendThread(HANDLE /*ThreadHandle*/, ULONG* PreviousSuspendCount) noexcept {
-    if (PreviousSuspendCount) *PreviousSuspendCount = 0;
-    return NtStatus::Success;
+inline NtStatus WINAPI NtSuspendThread(HANDLE /*ThreadHandle*/, ULONG* /*PreviousSuspendCount*/) noexcept {
+    return NtStatus::NotImplemented;
 }
 inline NtStatus WINAPI NtSystemDebugControl(uint32_t /*Command*/, void* /*InputBuffer*/, ULONG /*InputBufferLength*/, void* /*OutputBuffer*/, ULONG /*OutputBufferLength*/, ULONG* ReturnLength) noexcept {
     if (ReturnLength) *ReturnLength = 0;
