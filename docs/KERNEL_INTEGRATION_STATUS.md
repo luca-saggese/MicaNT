@@ -341,11 +341,14 @@ The same CPL3 fixture queues two distinct user APCs to the suspended child and
 requires both callbacks in FIFO order before the thread returns
 `STATUS_USER_APC`. The complete QEMU boot passed with this case. A separate
 termination test covers rundown of a queued user APC on a remotely terminated
-event waiter; faulting user callbacks with later APCs still queued remain
-unverified. Commit `6e28db0` suppresses APC injection during both chances of
-`NtRaiseException`, while preserving explicit `NtTestAlert` delivery. The
-subsequent `python3 qemu.py --headless` run passed and remained stable for five
-seconds; it does not replace the missing faulting-callback fixture.
+event waiter. A new CPL3 fixture queues an invalid callback followed by a
+sentinel that terminates with a distinct status. The child process exits with
+`STATUS_ACCESS_VIOLATION`, and the parent waits for and closes the thread and
+process; this confirms the later APC was not dispatched. Commit `6e28db0`
+suppresses APC injection during both chances of `NtRaiseException` while
+preserving explicit `NtTestAlert` delivery. `python3 qemu.py --headless` passed
+with the fixture, stable for five seconds. Broader callback rundown and
+interleaving cases remain open.
 
 The Ring 3 process-creation fixture also passes named `ObjectAttributes` to
 `NtCreateProcessEx` and `NtCreateThreadEx`. Both reject the unsupported

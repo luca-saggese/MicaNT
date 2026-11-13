@@ -23,14 +23,14 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   QEMU due callback utente sono consegnate in ordine FIFO e il test controlla
   `NtContinue` e lo status di uscita; il test di terminazione remota verifica il
   rundown di un APC utente accodato a un waiter e il rilascio dei riferimenti.
-- [ ] **Verificare il guasto durante una callback utente con altre APC pendenti.**
-  Coprire routine non valida o fault/eccezione della callback, APC successive
-  non eseguite e rundown/cleanup esattamente una volta. Gli status e i riferimenti
-  devono restare coerenti anche se il thread termina nel dispatcher. Il commit
-  `6e28db0` ora impedisce l'iniezione di APC durante entrambe le chance di
-  `NtRaiseException` e consente la consegna esplicita via `NtTestAlert`; il boot
-  QEMU integrato passa, ma il fixture con callback che fa fault e APC successive
-  pendenti resta da aggiungere e verificare.
+- [x] **Verificare il guasto durante una callback utente con altre APC pendenti.**
+  Il fixture CPL3 accoda una routine non valida e un APC sentinella nel processo
+  figlio, poi verifica la terminazione per `STATUS_ACCESS_VIOLATION`, l'attesa
+  e la chiusura di thread/processo. Lo status distinto del sentinella dimostra
+  che l'APC successivo non viene eseguito. Il commit `6e28db0` impedisce
+  l'iniezione di APC durante entrambe le chance di `NtRaiseException` e mantiene
+  la consegna esplicita via `NtTestAlert`; QEMU passa. Restano da ampliare i casi
+  di rundown/callback e gli interleaving oltre il fixture verificato.
 
 ### Contratti di accesso
 
