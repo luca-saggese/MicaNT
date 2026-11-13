@@ -353,12 +353,14 @@ freestanding Ps namespace with `STATUS_NOT_IMPLEMENTED` and leave the output
 handle unpublished. The full `python3 qemu.py --headless` run passed after
 adding these cases.
 
-The kernel-side native thread fixture now also passes a commit size larger than its
+The kernel-side native thread fixture passes a commit size larger than its
 reserve and a reserve above `BootstrapManagedSize` through `NtCreateThreadEx`.
 Both return `STATUS_INVALID_PARAMETER`; the test confirms null output handles,
-unchanged Ps thread-object count and unchanged ready-queue count. QEMU passed
-with these negative cases. This verifies stack-bound validation and rollback
-before thread allocation, not later allocation/copyout rollback.
+unchanged Ps thread-object count and unchanged ready-queue count. The Ring 3
+process fixture now repeats both negative cases through the NTDLL syscall
+trampoline and checks the status and null handle. QEMU passed with both layers
+of coverage. This verifies stack-bound validation and rollback before thread
+allocation, not later allocation/copyout rollback.
 
 A bounded internal Ps factory now creates Ob-backed thread objects. A lifecycle
 reference keeps each object alive if its last handle closes before reap. The

@@ -63,10 +63,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
-  dopo errori di allocazione o copyout. Il fixture QEMU kernel ora esercita il rifiuto
+  dopo errori di allocazione o copyout. QEMU esercita via syscall CPL3 il rifiuto
   `STATUS_INVALID_PARAMETER` per commit maggiore del reserve e reserve oltre il
-  limite gestito, verificando handle nullo e nessun thread/ready entry aggiunto;
-  il contratto generale e il rollback di tutte le fasi restano aperti.
+  limite gestito, verificando handle nullo; il fixture kernel verifica inoltre
+  che non siano creati oggetti o ready entry. Il contratto generale e il rollback
+  di tutte le fasi restano aperti.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
