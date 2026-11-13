@@ -337,6 +337,13 @@ stable for five seconds. Normal user-APC dispatch is now exercised by this
 bounded path; its general interleavings and M4's broader access/lifecycle
 contracts remain open.
 
+The same CPL3 fixture queues two distinct user APCs to the suspended child and
+requires both callbacks in FIFO order before the thread returns
+`STATUS_USER_APC`. The complete QEMU boot passed with this case. A separate
+termination test covers rundown of a queued user APC on a remotely terminated
+event waiter; faulting user callbacks with later APCs still queued remain
+unverified.
+
 The Ring 3 process-creation fixture also passes named `ObjectAttributes` to
 `NtCreateProcessEx` and `NtCreateThreadEx`. Both reject the unsupported
 freestanding Ps namespace with `STATUS_NOT_IMPLEMENTED` and leave the output

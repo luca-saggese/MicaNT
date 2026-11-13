@@ -19,19 +19,27 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   il ritorno tramite `NtContinue` e lo status di uscita. Il failure era nella
   fixture: dopo `SYSCALL` usava il valore clobberato di RCX come puntatore
   all'argomento; il test ora lo conserva in R12 secondo la convenzione AMD64.
-- [ ] **Verificare gli esiti e il cleanup della consegna APC.**
-  Coprire callback riuscita, routine utente non valida/eccezione, APC rimaste in
-  coda, rundown durante terminazione e rimozione delle risorse APC. I casi non
-  supportati devono restituire uno status esplicito e lasciare stato e
-  riferimenti coerenti.
+- [x] **Verificare la consegna normale e il rundown APC nei casi coperti.** In
+  QEMU due callback utente sono consegnate in ordine FIFO e il test controlla
+  `NtContinue` e lo status di uscita; il test di terminazione remota verifica il
+  rundown di un APC utente accodato a un waiter e il rilascio dei riferimenti.
+- [ ] **Verificare il guasto durante una callback utente con altre APC pendenti.**
+  Coprire routine non valida o fault/eccezione della callback, APC successive
+  non eseguite e rundown/cleanup esattamente una volta. Gli status e i riferimenti
+  devono restare coerenti anche se il thread termina nel dispatcher.
 
 ### Contratti di accesso
 
-- [ ] **Completare i controlli di accesso per creazione, apertura e uso di
-  processi e thread.** Verificare access mode Kernel/User, diritti specifici,
-  mapping dei generic rights, `MAXIMUM_ALLOWED`, token/DACL e handle pseudo nei
-  percorsi nativi interessati. Un handle con diritti insufficienti deve fallire
-  con lo status previsto senza pubblicare handle o oggetti parziali.
+- [x] **Chiudere i casi di accesso già verificati.** Il percorso QEMU copre
+  `NtOpenProcess`/`NtOpenThread` per CID, rifiuto di diritti insufficienti,
+  DACL allow/deny in contesto UserMode, valid-access mask, generic e
+  `MAXIMUM_ALLOWED`, duplicate rights e rollback delle callback Ob.
+- [ ] **Completare i controlli di accesso generali per creazione, apertura e uso
+  di processi e thread.** Estendere oltre i casi bootstrap a tutti i modi
+  Kernel/User e ai diritti specifici dei percorsi nativi supportati, inclusi
+  token/DACL, handle pseudo e attributi di sicurezza. Un handle con diritti
+  insufficienti deve fallire con lo status previsto senza pubblicare handle o
+  oggetti parziali.
 - [x] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
   processi.** Verificare diritti concessi, callback Ob, handle ereditabili,
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
@@ -62,12 +70,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   Verificare timeout, alertability/APC, cancellazione, chiusura dell'ultimo
   handle durante l'attesa, riferimenti trattenuti, CID lookup e reaping in ogni
   ordine valido.
-- [ ] **Rimuovere la dipendenza BSP-only dai percorsi che M4 dichiara generali.**
-  Sostituire l'esclusione locale basata su `cli` con sincronizzazione Ke/Ob/Ps
-  corretta dove il percorso deve operare oltre il BSP; proteggere pubblicazione,
-  terminazione, attach, handle table e reaper. Includere stress concorrente e
-  verifica QEMU multi-CPU quando il backend SMP è disponibile. Non dichiarare
-  supporto SMP finché scheduler, lock e teardown non sono coerenti fra loro.
+- [ ] **Portare i percorsi M4 oltre il solo bootstrap BSP.** Collegare accesso,
+  lifecycle e cleanup alle entry native Ps/Ob e ai caller reali; mantenere
+  capture, pubblicazione, rollback e sincronizzazione coerenti con il contesto
+  Ke corrente. La copertura QEMU deve usare i percorsi syscall e non solo fixture
+  interne di bootstrap.
 - [x] **Delimitare esplicitamente il namespace degli oggetti Ps nel percorso
   nativo coperto.** Il namespace nominato freestanding resta non supportato;
   `NtCreateProcessEx` e `NtCreateThreadEx` rifiutano `ObjectAttributes` con nome
@@ -93,6 +100,8 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 - [x] Percorso Ps/Ob limitato per processi e thread, APC/rundown e reaper sul
   BSP, inclusa crescita dello stack attraverso guard fault CPL3 e recupero PFN.
+- [x] Controlli di accesso limitati QEMU/Ob: aperture per CID, diritti concessi
+  e negati, DACL UserMode, generic/`MAXIMUM_ALLOWED` e rollback delle callback.
 - [x] Percorso Io/Mm/Ps file-backed `SEC_IMAGE`: apertura di un PE dal volume
   FAT32 montato, creazione section, mapping rilocato e inizializzazione
   dell'immagine principale con recupero PFN.
