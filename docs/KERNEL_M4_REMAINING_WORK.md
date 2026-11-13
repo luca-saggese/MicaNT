@@ -70,8 +70,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   ogni fase. Gli input o flags non supportati devono fallire esplicitamente.
   QEMU CPL3 verifica ora il rifiuto con handle nullo per flag ignoti, debug port,
   exception port e `InJob`, oltre al rifiuto di un parent handle senza
-  `PROCESS_CREATE_PROCESS`; i limiti di sicurezza/metadata e il rollback di
-  tutte le fasi restano aperti.
+  `PROCESS_CREATE_PROCESS`. Verifica inoltre la cattura syscall di un
+  self-relative security descriptor con DACL vuota: `STATUS_ACCESS_DENIED` e
+  handle nullo. Restano aperti inheritance end-to-end, gli altri access mode e
+  il rollback QEMU di tutte le fasi.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
@@ -163,4 +165,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   /private/tmp/micant-m4-alertable-waits8` è terminato con esito positivo; la
   build/link del kernel bare-metal, il boot, il controllo input, la seriale
   stabile per 5 secondi e i test CPL3 sono passati.
+- Il run con la prova CPL3 del security descriptor ha raggiunto i marker di
+  completamento dei test Ps, compreso `[MicaNT Ps] Two CPL3 threads, TLS slots
+  and event waits verified`, e il click desktop; il runner ha poi fallito sul
+  controllo IRQ PS/2. Dunque il caso DACL è stato eseguito in QEMU, ma questo
+  run non è una verifica integrata completa.
 
