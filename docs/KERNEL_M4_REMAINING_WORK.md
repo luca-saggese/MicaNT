@@ -60,9 +60,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
   riferimenti. I test kernel coprono le primitive Ob; manca ancora la prova
   syscall CPL3 che crea un oggetto `OBJ_INHERIT`, clona il processo, chiude
-  l'handle sorgente e usa la copia nel figlio. `NtCreateEvent` ora accetta e
-  registra `OBJ_INHERIT`; il percorso end-to-end resta aperto finché QEMU non lo
-  verifica.
+  l'handle sorgente e usa la copia nel figlio. Il percorso kernel M4 verifica in
+  QEMU `NtCreateEvent` con `OBJ_INHERIT`, `NtCreateProcessEx` con inheritance,
+  chiusura dell'handle sorgente e wait sul valore-handle dopo attach al figlio.
+  `NtCreateEvent` registra l'attributo nella handle table. Resta aperta la prova
+  CPL3 end-to-end e il rollback completo dei fallimenti d'inheritance.
 - [x] **Verificare gli attributi di handle e gli errori di chiusura.** Coprire
   `OBJ_PROTECT_CLOSE`, chiusura forzata durante teardown e output utente non
   valido senza doppia chiusura o perdita di riferimenti; i casi documentati nel
@@ -191,4 +193,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   wait pendente: `python3 qemu.py --headless --timeout 120 --diagnostics-dir
   /private/tmp/micant-m4-wait-close-last-pass` è passata, inclusi build/link,
   seriale stabile per 5 secondi e controllo PS/2.
+- Verifica integrata completa dell'inheritance di un evento nel processo figlio:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-event-inherit-kernel` è passata. Il test ha chiuso
+  l'handle parent, fatto attach al child e completato il wait; build/link, PS/2
+  e seriale stabile per 5 secondi sono verdi. L'esercizio CPL3 rimane aperto.
 

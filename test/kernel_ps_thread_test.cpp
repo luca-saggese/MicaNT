@@ -788,6 +788,15 @@ void systemThreadEntry(void* argument) {
         __builtin_trap();
     ObjectAttributes childAttributes{};
     childAttributes.attributes = OBJ_INHERIT;
+    ObjectAttributes inheritedEventAttributes{};
+    inheritedEventAttributes.length = sizeof(inheritedEventAttributes);
+    inheritedEventAttributes.attributes = OBJ_INHERIT;
+    Handle inheritedEvent{};
+    if (sys::NtCreateEvent(&inheritedEvent, ob::SYNCHRONIZE, &inheritedEventAttributes,
+                           0, true) != NtStatus::Success || !inheritedEvent)
+        __builtin_trap();
+    auto* inheritedEventObject = ob::detail::currentHandleTable().lookup(inheritedEvent);
+    if (!inheritedEventObject) __builtin_trap();
     if (sys::NtCreateProcessEx(&child, ob::SYNCHRONIZE | 1, nullptr, limited,
             0, 0, 0, 0, false) != NtStatus::AccessDenied ||
         sys::NtCreateProcessEx(&child, ob::SYNCHRONIZE | 1 | 0x80, &childAttributes, InvalidHandleValue,
@@ -796,8 +805,16 @@ void systemThreadEntry(void* argument) {
     ob::ObjectHeader* childReference{};
     if (ps::detail::referenceProcessHandle(child, ob::SYNCHRONIZE, childProcess, childReference) != NtStatus::Success ||
         childProcess->getHandleTable().lookup(limited) != parentReference || childProcess->getHandleTable().lookup(child) ||
+        childProcess->getHandleTable().lookup(inheritedEvent) != inheritedEventObject ||
         !testPrivateProcessClone(*childProcess)) __builtin_trap();
     ob::ObDereferenceObject(childReference);
+    if (sys::NtClose(inheritedEvent) != NtStatus::Success) __builtin_trap();
+    KAPC_STATE inheritedEventAttach{};
+    KeStackAttachProcess(childProcess, &inheritedEventAttach);
+    const auto inheritedEventWait = sys::NtWaitForSingleObject(inheritedEvent, false, nullptr);
+    KeUnstackDetachProcess(&inheritedEventAttach);
+    if (inheritedEventWait != NtStatus::Success || current->attachedProcess ||
+        current->processAttachDepth) __builtin_trap();
     const auto closeLimitedStatus = sys::NtClose(limited);
     if (closeLimitedStatus != NtStatus::Success) __builtin_trap();
     const auto initialChildWait = sys::NtWaitForSingleObject(child, false, &poll);
