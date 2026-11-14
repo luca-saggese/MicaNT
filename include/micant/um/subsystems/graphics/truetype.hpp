@@ -222,12 +222,13 @@ public:
 
     [[nodiscard]] static constexpr size_t rasterWorkspaceBytes() noexcept;
 
-    // Rasterize a simple TrueType outline to an 8-bit grayscale coverage mask.
-    // The caller supplies a zeroed, clipped target; composite glyphs and hint
-    // bytecode are deliberately unsupported by this bounded first profile.
+    // Rasterize a bounded TrueType outline to an 8-bit grayscale coverage mask.
+    // Simple outlines and untransformed XY composite components are supported;
+    // Hint bytecode is validated but not interpreted; point-attached, scaled,
+    // and grid-rounded component placement is unsupported.
     [[nodiscard]] bool rasterizeSimpleGlyph(uint16_t glyph, uint32_t pixelsPerEm,
             uint8_t* mask, uint32_t width, uint32_t height, size_t stride,
-            void* workspace, size_t workspaceBytes) const noexcept {
+            void* workspace, size_t workspaceBytes, uint32_t compositeDepth = 0) const noexcept {
         if (!valid_ || !mask || !pixelsPerEm || pixelsPerEm > 512 || !width || !height ||
             width > 512 || height > 512 || stride < width ||
             static_cast<uint64_t>(stride) * height > 1024 * 1024 || !workspace ||
@@ -240,10 +241,16 @@ public:
         if (rawLength < 10) return false;
         const size_t base = static_cast<size_t>(raw - data_);
         const int16_t contourCount = bes16(base);
-        if (contourCount < 0 || contourCount > MaxContours) return false;
+        if (contourCount < -1 || contourCount > MaxContours) return false;
         const int16_t xMin = bes16(base + 2), yMin = bes16(base + 4);
         const int16_t xMax = bes16(base + 6), yMax = bes16(base + 8);
         if (xMin > xMax || yMin > yMax) return false;
+        if (contourCount < 0) {
+            if (contourCount != -1 || width > 64 || height > 64 || stride > 64)
+                return false;
+            return rasterizeCompositeGlyph(glyph, pixelsPerEm, mask, width, height,
+                stride, workspace, workspaceBytes, compositeDepth, xMin, yMin, xMax, yMax);
+        }
         if (!contourCount) return true;
         size_t cursor = base + 10;
         if (!range(cursor, static_cast<size_t>(contourCount) * 2 + 2)) return false;
@@ -404,6 +411,84 @@ private:
         float intersections[MaxEdges]{};
         uint8_t rowCoverage[512]{};
     };
+    static constexpr uint32_t MaxCompositeDepth = 8;
+    static constexpr uint32_t MaxCompositeComponents = 64;
+
+    [[nodiscard]] bool rasterizeCompositeGlyph(uint16_t glyph, uint32_t pixelsPerEm,
+            uint8_t* mask, uint32_t width, uint32_t height, size_t stride,
+            void* workspace, size_t workspaceBytes, uint32_t depth,
+            int16_t xMin, int16_t yMin, int16_t xMax, int16_t yMax) const noexcept {
+        (void)yMin; (void)xMax;
+        if (depth >= MaxCompositeDepth || stride < width || stride > 64 ||
+            width > 64 || height > 64) return false;
+        const uint8_t* raw{}; size_t rawLength{};
+        if (!glyphData(glyph, raw, rawLength) || rawLength < 10) return false;
+        const size_t base = static_cast<size_t>(raw - data_);
+        size_t cursor = base + 10;
+        bool moreComponents = true;
+        uint32_t componentCount = 0;
+        for (uint16_t lastFlags = 0; moreComponents;) {
+            if (++componentCount > MaxCompositeComponents || !range(cursor, 4)) return false;
+            const uint16_t flags = be16(cursor);
+            const uint16_t componentGlyph = be16(cursor + 2);
+            cursor += 4;
+            constexpr uint16_t KnownFlags = 0x0001u | 0x0002u | 0x0004u |
+                0x0008u | 0x0020u | 0x0040u | 0x0080u | 0x0100u |
+                0x0200u | 0x0400u | 0x0800u | 0x1000u;
+            if ((flags & ~KnownFlags) || (flags & (0x0004u | 0x0008u | 0x0040u |
+                                                   0x0080u | 0x0800u | 0x1000u)) ||
+                !(flags & 0x0002u) || componentGlyph >= metrics_.glyphCount)
+                return false;
+            int32_t argX{}, argY{};
+            if (flags & 0x0001u) {
+                if (!range(cursor, 4)) return false;
+                argX = bes16(cursor); argY = bes16(cursor + 2); cursor += 4;
+            } else {
+                if (!range(cursor, 2)) return false;
+                argX = static_cast<int8_t>(data_[cursor]);
+                argY = static_cast<int8_t>(data_[cursor + 1]);
+                cursor += 2;
+            }
+            const uint8_t* componentData{}; size_t componentLength{};
+            if (!glyphData(componentGlyph, componentData, componentLength)) return false;
+            if (componentLength) {
+                int16_t childXMin{}, childYMin{}, childXMax{}, childYMax{};
+                if (!glyphBounds(componentGlyph, childXMin, childYMin, childXMax, childYMax))
+                    return false;
+                uint8_t componentMask[64 * 64]{};
+                if (!rasterizeSimpleGlyph(componentGlyph, pixelsPerEm, componentMask,
+                        width, height, stride, workspace, workspaceBytes, depth + 1))
+                    return false;
+                const int32_t offsetX = scale(argX + childXMin - xMin,
+                                              pixelsPerEm, metrics_.unitsPerEm);
+                const int32_t offsetY = scale(yMax - (argY + childYMax),
+                                              pixelsPerEm, metrics_.unitsPerEm);
+                for (uint32_t sourceY = 0; sourceY < height; ++sourceY) {
+                    const int32_t targetY = offsetY + static_cast<int32_t>(sourceY);
+                    if (targetY < 0 || targetY >= static_cast<int32_t>(height)) continue;
+                    for (uint32_t sourceX = 0; sourceX < width; ++sourceX) {
+                        const int32_t targetX = offsetX + static_cast<int32_t>(sourceX);
+                        if (targetX < 0 || targetX >= static_cast<int32_t>(width)) continue;
+                        const uint8_t source = componentMask[static_cast<size_t>(sourceY) * stride + sourceX];
+                        if (!source) continue;
+                        uint8_t& target = mask[static_cast<size_t>(targetY) * stride +
+                                               static_cast<uint32_t>(targetX)];
+                        target = static_cast<uint8_t>(source +
+                            (static_cast<uint32_t>(target) * (255u - source) + 127u) / 255u);
+                    }
+                }
+            }
+            lastFlags = flags;
+            moreComponents = (flags & 0x0020u) != 0;
+        }
+        if (lastFlags & 0x0100u) {
+            if (!range(cursor, 2)) return false;
+            const uint16_t instructionLength = be16(cursor);
+            cursor += 2;
+            if (!range(cursor, instructionLength)) return false;
+        }
+        return true;
+    }
 
     [[nodiscard]] bool fail() noexcept { valid_ = false; return false; }
     [[nodiscard]] bool range(size_t offset, size_t size) const noexcept {

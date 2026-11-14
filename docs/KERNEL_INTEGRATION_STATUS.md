@@ -1763,8 +1763,10 @@ restored. `EnumFontFamiliesExW` enumerates the supported logical families and
 their installed TTF styles; the QEMU probe enumerates all four Arial styles.
 Each raster manager also retains a bounded 32-mask glyph coverage cache in its
 owned workspace and releases it with the face. This is a bounded TrueType GDI
-subset: complex glyph outlines and unsupported text options still fail
-explicitly; runtime font registration, persistent settings and DirectWrite
+subset: untransformed XY composite glyph components are now rasterized with
+bounded component count/depth; point-attached, transformed and grid-rounded
+components remain unsupported. Hint instructions are bounds-checked but not
+executed. Runtime font registration, persistent settings and DirectWrite
 face/collection behavior remain open.
 
 QEMU's Explorer input verification now waits for the actual scanout pixels to
@@ -1775,3 +1777,4 @@ unchanged frame as a failure.
 | Command | Result |
 |---|---|
 | `python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-font-f2-build --cxx build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ --diagnostics-dir /private/tmp/micant-f5-glyph-cache` | Passed; modular kernel and Explorer dependency closure linked, TTF metrics, two-face switch, four-style enumeration and cached repeated glyph rendering probes succeeded; app DIBs rendered and composed, overlapping/move/resize/repeated cleanup checks passed, and serial remained stable for five seconds |
+| `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` (temporary verification tree `/private/tmp/micant-font-f2-verify`) | Passed; current composite outline parser/rasterizer compiled and linked into `ntoskrnl_core_baremetal` dependency closure; Explorer input, scanout and cleanup passed, serial remained stable for five seconds |
