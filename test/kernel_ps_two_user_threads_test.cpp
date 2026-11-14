@@ -223,6 +223,10 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         // NtAlertThread marks this thread alerted; an alertable delay consumes
         // that alert and returns STATUS_ALERTED without sleeping.
         "movq $-2, %rcx\ncallq *112(%r15)\ntestl %eax, %eax\njnz 33f\n"
+        // The current-thread pseudo handle is accepted, while a null thread
+        // handle must fail without changing the alert state.
+        "xorl %ecx, %ecx\ncallq *112(%r15)\ncmpl $0xc0000008, %eax\nje .Lmicant_alert_invalid_handle\n"
+        "movl $0xc0000250, %edx\njmp 8f\n.Lmicant_alert_invalid_handle:\n"
         "movabsq $0x400020003700, %rdx\nmovq $-10000, (%rdx)\nmovl $1, %ecx\n"
         "callq *104(%r15)\ncmpq $0x101, %rax\njne 34f\n"
         // A queued user APC must break an alertable wait with USER_APC and
@@ -232,6 +236,11 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "movq $-2, %rcx\nleaq MicantTestUserApc(%rip), %rdx\n"
         "xorl %r8d, %r8d\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
         "testl %eax, %eax\njz 35f\nmovl %eax, %edx\njmp 8f\n35:\n"
+        // Invalid handles are rejected before a KAPC is allocated or queued.
+        "xorl %ecx, %ecx\nleaq MicantTestUserApc(%rip), %rdx\n"
+        "xorl %r8d, %r8d\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
+        "cmpl $0xc0000008, %eax\nje .Lmicant_queue_invalid_handle\n"
+        "movl $0xc0000251, %edx\njmp 8f\n.Lmicant_queue_invalid_handle:\n"
         "movq %rbx, %rcx\nmovl $1, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\n"
         "cmpq $0xc0, %rax\nje 36f\nmovl $0xc000024c, %edx\njmp 8f\n36:\n"
         "movabsq $0x400020003700, %rax\ncmpq $0x41504321, (%rax)\nje 37f\n"

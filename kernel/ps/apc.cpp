@@ -23,16 +23,18 @@ NtStatus NtQueueApcThread(Handle threadHandle, uintptr_t apcRoutine,
         return NtStatus::InvalidParameter;
     ps::EThread* target{};
     ob::ObjectHeader* reference{};
-    auto status = ps::detail::referenceThreadHandle(threadHandle, ThreadSetContext, target, reference);
+    const bool currentPseudoHandle = threadHandle == static_cast<Handle>(-2);
+    auto status = currentPseudoHandle ? NtStatus::Success
+        : ps::detail::referenceThreadHandle(threadHandle, ThreadSetContext, target, reference);
     if (status != NtStatus::Success) return status;
 
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     // The Ob reference pins EThread, not its reaped KThread. Acquire the
     // borrowed KThread and process only after excluding the reaper.
-    auto* kernelThread = target->kernelThread();
+    auto* kernelThread = currentPseudoHandle ? ke::KeGetCurrentThread() : target->kernelThread();
     auto* process = kernelThread ? kernelThread->owningProcess : nullptr;
-    if (!kernelThread || target->isSystemThread() || !process ||
+    if (!kernelThread || (!currentPseudoHandle && target->isSystemThread()) || !process ||
         kernelThread->state == ke::ThreadState::Terminated || process->isTerminating()) {
         status = NtStatus::InvalidHandle;
     }
@@ -51,7 +53,7 @@ NtStatus NtQueueApcThread(Handle threadHandle, uintptr_t apcRoutine,
         }
     }
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
-    ob::ObDereferenceObject(reference);
+    if (reference) ob::ObDereferenceObject(reference);
     return status;
 }
 }

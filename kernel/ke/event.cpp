@@ -71,13 +71,14 @@ NtStatus NtAlertThread(Handle threadHandle) {
     if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidDeviceState;
     ps::EThread* target{};
     ob::ObjectHeader* reference{};
-    const auto status = threadHandle == static_cast<Handle>(-2)
-        ? ps::detail::referenceCurrentThread(target, reference)
+    ke::KThread* kernelThread{};
+    const auto currentPseudoHandle = threadHandle == static_cast<Handle>(-2);
+    const auto status = currentPseudoHandle ? NtStatus::Success
         : ps::detail::referenceThreadHandle(threadHandle, 0x0004, target, reference);
     if (status != NtStatus::Success) return status;
-    auto* kernelThread = target->kernelThread();
+    kernelThread = currentPseudoHandle ? ke::KeGetCurrentThread() : target->kernelThread();
     if (!kernelThread) {
-        ob::ObDereferenceObject(reference);
+        if (reference) ob::ObDereferenceObject(reference);
         return NtStatus::ThreadIsTerminating;
     }
     {
@@ -88,7 +89,7 @@ NtStatus NtAlertThread(Handle threadHandle) {
             (void)event->cancelWaitForAlert(*kernelThread);
         }
     }
-    ob::ObDereferenceObject(reference);
+    if (reference) ob::ObDereferenceObject(reference);
     return NtStatus::Success;
 }
 

@@ -31,6 +31,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   QEMU due callback utente sono consegnate in ordine FIFO e il test controlla
   `NtContinue` e lo status di uscita; il test di terminazione remota verifica il
   rundown di un APC utente accodato a un waiter e il rilascio dei riferimenti.
+  Il thread corrente può usare l'handle pseudo `NtCurrentThread()` per
+  `NtAlertThread` e `NtQueueApcThread`; QEMU verifica anche che entrambi
+  rifiutino un handle nullo (`STATUS_INVALID_HANDLE`) senza alterare la
+  consegna successiva.
 - [x] **Verificare il guasto durante una callback utente con altre APC pendenti.**
   Il fixture CPL3 accoda una routine non valida e un APC sentinella nel processo
   figlio, poi verifica la terminazione per `STATUS_ACCESS_VIOLATION`, l'attesa
