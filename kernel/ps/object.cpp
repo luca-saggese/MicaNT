@@ -220,6 +220,40 @@ struct ProcessObjectFactory {
         child.inheritedFromProcessId_ = parent.processId_;
         return NtStatus::Success;
     }
+    static NtStatus assignExistingToken(EProcess& process,
+        ob::ObjectHeader* processReference, se::FreestandingAccessToken& token,
+        ob::ObjectHeader* tokenReference) noexcept {
+        if (!processReference || processReference->type != &processType ||
+            processReference->as<EProcess>() != &process ||
+            !se::SeIsFreestandingTokenObject(&token, tokenReference) ||
+            !token.IsPrimary || token.IsSystem || !token.AuthenticationId || !token.SessionId)
+            return NtStatus::InvalidParameter;
+
+        // Take ownership before publishing the pointer. On every failure path
+        // this reference is rolled back; the displaced process reference is
+        // released only after readers leave the shared object lock.
+        tokenReference->addReference();
+        ob::ObjectHeader* displaced{};
+        NtStatus status = NtStatus::Success;
+        {
+            ob::detail::HandleTableGuard guard;
+            if (process.terminating_ || process.systemProcess_ ||
+                process.objectHeader_ != processReference) {
+                status = process.terminating_ ? NtStatus::ProcessIsTerminating :
+                    (process.systemProcess_ ? NtStatus::AccessDenied : NtStatus::InvalidHandle);
+            } else {
+                displaced = process.primaryTokenReference_;
+                process.primaryTokenReference_ = tokenReference;
+                process.primaryToken_ = &token;
+            }
+        }
+        if (status != NtStatus::Success) {
+            se::SeDereferenceFreestandingToken(tokenReference);
+            return status;
+        }
+        if (displaced) se::SeDereferenceFreestandingToken(displaced);
+        return NtStatus::Success;
+    }
     static void markPublished(EProcess& process) noexcept {
         if (!process.cidRegistered_) {
             process.cidNext_ = registeredProcesses;
@@ -724,6 +758,44 @@ uint32_t bootstrapThreadObjectCount() noexcept {
 }
 
 namespace micant::ps {
+NtStatus PsCreateFreestandingLogonToken(
+    const se::FreestandingLogonTokenRequest& request,
+    se::FreestandingAccessToken*& token, ob::ObjectHeader*& reference) noexcept {
+    token = nullptr;
+    reference = nullptr;
+    auto* process = ke::KeGetCurrentProcess();
+    if (!process) return NtStatus::AccessDenied;
+
+    se::FreestandingAccessToken* issuer{};
+    ob::ObjectHeader* issuerReference{};
+    const auto referenceStatus = process->referencePrimaryToken(issuer, issuerReference);
+    if (referenceStatus != NtStatus::Success) return referenceStatus;
+    const auto status = se::SeCreateFreestandingLogonToken(
+        issuer, issuerReference, request, token, reference);
+    se::SeDereferenceFreestandingToken(issuerReference);
+    return status;
+}
+
+NtStatus PsAssignFreestandingPrimaryToken(EProcess& target,
+    ob::ObjectHeader* targetReference, se::FreestandingAccessToken& token,
+    ob::ObjectHeader* tokenReference) noexcept {
+    auto* caller = ke::KeGetCurrentProcess();
+    if (!caller) return NtStatus::PrivilegeNotHeld;
+    se::FreestandingAccessToken* issuer{};
+    ob::ObjectHeader* issuerReference{};
+    auto status = caller->referencePrimaryToken(issuer, issuerReference);
+    if (status != NtStatus::Success) return status;
+    if (!se::SeIsFreestandingTokenObject(issuer, issuerReference) ||
+        !se::SeTokenHasPrivilegeFreestanding(issuer, 3)) {
+        status = NtStatus::PrivilegeNotHeld;
+    } else {
+        status = detail::ProcessObjectFactory::assignExistingToken(
+            target, targetReference, token, tokenReference);
+    }
+    se::SeDereferenceFreestandingToken(issuerReference);
+    return status;
+}
+
 extern "C" __declspec(dllexport) NtStatus PsCreateSystemThread(
     Handle* out, uint32_t access, ObjectAttributes* attributes, Handle processHandle,
     ClientId* clientId, void (*start)(void*), void* context) noexcept {

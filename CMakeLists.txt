@@ -328,6 +328,7 @@ if (MICANT_ENABLE_BAREMETAL)
         test/kernel_ke_event_test.cpp
         test/kernel_ob_open_access_test.cpp
         test/kernel_se_access_test.cpp
+        test/kernel_ps_token_test.cpp
         test/kernel_ps_thread_test.cpp
         test/kernel_ps_user_test.cpp
         test/kernel_ps_two_user_threads_test.cpp

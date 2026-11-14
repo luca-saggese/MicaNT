@@ -139,6 +139,17 @@ private:
     size_t userTlsCount_{0};
 };
 
+// Kernel-internal issuance entry point. It derives authority from the current
+// process primary token; callers cannot nominate a different issuer token.
+[[nodiscard]] NtStatus PsCreateFreestandingLogonToken(
+    const se::FreestandingLogonTokenRequest& request,
+    se::FreestandingAccessToken*& token, ob::ObjectHeader*& reference) noexcept;
+// Kernel-internal primary-token assignment for a live referenced process.
+// The current process must hold SeAssignPrimaryTokenPrivilege.
+[[nodiscard]] NtStatus PsAssignFreestandingPrimaryToken(
+    EProcess& target, ob::ObjectHeader* targetReference,
+    se::FreestandingAccessToken& token, ob::ObjectHeader* tokenReference) noexcept;
+
 // Public WDK kernel entry points; kernel handles are never exposed to Ring 3.
 extern "C" __declspec(dllexport) NtStatus PsCreateSystemThread(Handle* threadHandle, uint32_t desiredAccess,
     ObjectAttributes* attributes, Handle processHandle, ClientId* clientId,

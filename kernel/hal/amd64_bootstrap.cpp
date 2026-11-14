@@ -927,6 +927,7 @@ uintptr_t MicantBootstrapSyscallStackFloor{};
 volatile uint64_t MicantTimerTicks{};
 volatile bool MicantTimerPreemptionEnabled{};
 volatile bool MicantTimerDispatchFailed{};
+volatile uint32_t MicantTimerDispatchFailureReason{};
 micant::ke::KThread* MicantTimerBootThread{};
 bool MicantTimerBootQueued{};
 uint64_t MicantTimerBootDeadline{24};
@@ -969,6 +970,7 @@ void MicantBootstrapTimerDispatch() noexcept {
     if (g_kuserSharedMappingReady &&
         micant::hal::amd64::updateBootstrapKuserSharedData() !=
             micant::hal::amd64::BootstrapClockStatus::Success) {
+        MicantTimerDispatchFailureReason |= 1u;
         MicantTimerDispatchFailed = true;
     }
 #if defined(MICANT_FREESTANDING) && defined(MICANT_BAREMETAL)
@@ -987,10 +989,12 @@ void MicantBootstrapTimerDispatch() noexcept {
         reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack));
     if (!current || g_syscallCpu.kernelRsp != expectedSyscallStack ||
         micant::cpu::CpuHardwareEngine::get().getTss().rsp0 != expectedInterruptStack) {
+        MicantTimerDispatchFailureReason |= 2u;
         MicantTimerDispatchFailed = true;
     }
     if (MicantTimerBootThread && MicantTimerTicks >= MicantTimerBootDeadline && !MicantTimerBootQueued) {
         if (!scheduler.readyKThread(MicantTimerBootThread)) {
+            MicantTimerDispatchFailureReason |= 4u;
             MicantTimerDispatchFailed = true;
         }
         else MicantTimerBootQueued = true;
@@ -998,7 +1002,10 @@ void MicantBootstrapTimerDispatch() noexcept {
     auto* next = scheduler.selectOnClockTick(current);
     if (next && !KiSwapContext(current, next, current != g_CurrentCpu.idleThread)) {
         if (!scheduler.cancelQuantumPreemption(current, next)) __builtin_trap();
-        MicantTimerDispatchFailed = true;
+        // A context switch can be refused when the interrupted kernel stack
+        // lacks the reserved switch-frame headroom. The scheduler rollback
+        // restores the selected thread to its ready queue, so defer the switch
+        // to a later tick instead of poisoning the clock for the whole boot.
     }
     KeLowerIrql(previous);
 }
@@ -3937,6 +3944,7 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
                 logTrapValue("[MicaNT Hal] Live timer period=0x", g_schedulerTimerPeriod);
                 logTrapValue("[MicaNT Hal] Live timer current=0x", g_timerApic[0x380 / 4]);
                 logTrapValue("[MicaNT Hal] Live timer dispatch failed=0x", MicantTimerDispatchFailed);
+                logTrapValue("[MicaNT Hal] Live timer failure reason=0x", MicantTimerDispatchFailureReason);
             }
             return false;
         }
@@ -4341,6 +4349,7 @@ bool startBootstrapSchedulerClock() noexcept {
     MicantTimerTicks = 0;
     MicantTimerBootThread = nullptr;
     MicantTimerDispatchFailed = false;
+    MicantTimerDispatchFailureReason = 0;
     MicantTimerPreemptionEnabled = true;
     g_clockIrqlMaskReady = true;
     setBootstrapClockIrqlMask(ke::KeGetCurrentIrql());

@@ -223,9 +223,11 @@ extern "C" bool MicantTestKeApcFifo() noexcept;
 extern "C" bool MicantTestObOpenAccess() noexcept;
 extern "C" uint32_t MicantObOpenAccessFailureStage() noexcept;
 extern "C" bool MicantTestSeFreestandingAccess() noexcept;
+extern "C" bool MicantTestSeFreestandingLogonToken() noexcept;
 extern "C" bool MicantTestKeDeferredDelivery() noexcept;
 extern "C" bool MicantTestKeEventWait() noexcept;
 extern "C" bool MicantTestPsThreadLifecycle() noexcept;
+extern "C" bool MicantTestPsTokenAssignment() noexcept;
 extern "C" uint32_t MicantPsAttachFailureStage() noexcept;
 extern "C" bool MicantTestPsDeferredReaper() noexcept;
 extern "C" bool MicantTestPsUserProcess() noexcept;
@@ -4100,6 +4102,9 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!MicantTestSeFreestandingAccess())
         stopWithError("[MicaNT Se] Freestanding DACL access verification failed\r\n");
     serialWrite("[MicaNT Se] DACL deny, grant, maximum access and ACE order verified\r\n");
+    if (!MicantTestSeFreestandingLogonToken())
+        stopWithError("[MicaNT Se] Logon token issuance verification failed\r\n");
+    serialWrite("[MicaNT Se] Logon token authority, claims and identity verified\r\n");
     if (!MicantTestKeReadyQueue()) {
         stopWithError("[MicaNT Ke] Ready-queue withdrawal verification failed\r\n");
     }
@@ -4351,6 +4356,9 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (clockActive && startMouseInterrupt())
         serialWrite("[MicaNT Input] PS/2 mouse interrupt routing active\r\n");
     if (!clockActive) serialWrite("[MicaNT Ke] Runtime scheduler clock unavailable\r\n");
+    if (!MicantTestPsTokenAssignment())
+        stopWithError("[MicaNT Ps] Authenticated primary token assignment verification failed\r\n");
+    serialWrite("[MicaNT Ps] Authenticated primary token assignment verified\r\n");
     runMouseShell(clockActive);
 }
 
@@ -5168,7 +5176,3 @@ int main(int argc, char* argv[]) {
 }
 
 #endif
-extern "C" bool MicantTestSeFreestandingLogonToken() noexcept;
-    if (!MicantTestSeFreestandingLogonToken())
-        stopWithError("[MicaNT Se] Logon token issuance verification failed\r\n");
-    serialWrite("[MicaNT Se] Logon token authority, claims and identity verified\r\n");
