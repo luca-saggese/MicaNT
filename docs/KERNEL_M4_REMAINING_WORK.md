@@ -114,7 +114,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   mentre un waiter è bloccato sul relativo oggetto; l'esecuzione successiva
   segnala l'oggetto, risveglia il waiter e consente il reaping con il riferimento
   esplicito di verifica ancora valido. Gli altri ordini e le varianti timeout/
-  alertability restano aperti.
+  alertability restano aperti. QEMU CPL3 verifica inoltre che il wait a timeout
+  zero su un thread appena creato sospeso restituisca `STATUS_TIMEOUT` e lasci
+  il thread disponibile per setup APC e resume.
 - [ ] **Portare i percorsi M4 oltre il solo bootstrap BSP.** Collegare accesso,
   lifecycle e cleanup alle entry native Ps/Ob e ai caller reali; mantenere
   capture, pubblicazione, rollback e sincronizzazione coerenti con il contesto
@@ -224,4 +226,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   --diagnostics-dir /private/tmp/micant-m4-thread-stack-overflow` è passata,
   con `STATUS_INVALID_PARAMETER` e handle nullo, build/link, controllo PS/2 e
   seriale stabile per 5 secondi.
+- Verifica integrata completa del wait CPL3 a timeout zero su thread sospeso:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-suspended-zero-wait2` è passata. Il syscall ha
+  restituito `STATUS_TIMEOUT`, il successivo setup APC/resume è proseguito,
+  build/link, PS/2 e seriale stabile per 5 secondi sono verdi.
 

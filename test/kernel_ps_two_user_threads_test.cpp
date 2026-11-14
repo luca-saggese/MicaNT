@@ -463,6 +463,11 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "leaq MicantApcThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nleaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\n"
         "movq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
         "callq *48(%r15)\ntestl %eax, %eax\njz 9f\nmovl $0xc0000215, %r13d\njmp 90f\n9:\n"
+        // A zero-time wait on the newly created suspended thread must time
+        // out and leave it available for APC setup and resume.
+        "movq $0, 0x100(%rsp)\nmovq 0x70(%rsp), %rcx\nxorl %edx, %edx\n"
+        "leaq 0x100(%rsp), %r8\ncallq *8(%r15)\n"
+        "cmpl $0x00000102, %eax\nje 33f\nmovl $0xc0000264, %r13d\njmp 90f\n33:\n"
         // Queue a user APC to the suspended child thread before its first
         // user instruction; NtTestAlert at the entry requests delivery.
         "movq 0x70(%rsp), %rcx\nleaq MicantTestUserApc(%rip), %rdx\nxorl %r8d, %r8d\n"
