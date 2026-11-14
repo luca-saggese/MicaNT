@@ -91,9 +91,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   `STATUS_INVALID_PARAMETER` per commit maggiore del reserve e reserve oltre il
   limite gestito, verificando handle nullo; il fixture kernel verifica inoltre
   che non siano creati oggetti o ready entry. Un attributo `CLIENT_ID`
-  duplicato viene inoltre rifiutato senza handle, oggetti o ready entry; QEMU
-  ha verificato il caso. Il contratto generale e il rollback di tutte le fasi
-  restano aperti.
+  duplicato viene rifiutato senza handle, oggetti o ready entry. QEMU CPL3
+  verifica anche il rifiuto `STATUS_NOT_IMPLEMENTED` di flag non supportati con
+  handle nullo. Il contratto generale e il rollback di tutte le fasi restano
+  aperti.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
@@ -212,4 +213,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   /private/tmp/micant-m4-duplicate-attributes` è passata. Il rifiuto
   `STATUS_INVALID_PARAMETER` senza handle/oggetto/ready entry, build/link,
   controllo input PS/2 e seriale stabile per 5 secondi sono verdi.
+- Verifica integrata completa del rifiuto CPL3 dei flag non supportati in
+  `NtCreateThreadEx`: `python3 qemu.py --headless --timeout 120
+  --diagnostics-dir /private/tmp/micant-m4-thread-unsupported-flags` è passata,
+  incluso handle nullo, build/link, controllo PS/2 e seriale stabile per 5
+  secondi.
 

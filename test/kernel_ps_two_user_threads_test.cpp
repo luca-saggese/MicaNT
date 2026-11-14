@@ -415,6 +415,16 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ncmpl $0xc0000002, %eax\nje 29f\n"
         "movl $0xc0000229, %r13d\njmp 90f\n29: cmpq $0, 0x70(%rsp)\nje 30f\n"
         "movl $0xc000022a, %r13d\njmp 90f\n30:\n"
+        // Unsupported NtCreateThreadEx flags must fail before publishing an
+        // object handle.
+        "movq $0, 0x70(%rsp)\nleaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\n"
+        "xorl %r8d, %r8d\nmovq 0x60(%rsp), %r9\n"
+        "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
+        "leaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\nmovq $2, 0x30(%rsp)\n"
+        "movq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\n"
+        "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ncmpl $0xc0000002, %eax\nje 31f\n"
+        "movl $0xc0000260, %r13d\njmp 90f\n31: cmpq $0, 0x70(%rsp)\nje 32f\n"
+        "movl $0xc0000261, %r13d\njmp 90f\n32:\n"
         // Exercise stack reserve/commit validation through real CPL3 syscalls.
         // A rejected request must leave its output handle unpublished.
         "movq $0, 0x70(%rsp)\nleaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\n"
