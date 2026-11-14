@@ -42,6 +42,17 @@ public:
     [[nodiscard]] const FontAssetChoice& selectedAsset() const noexcept { return asset_; }
     [[nodiscard]] const truetype::FaceMetrics& metrics() const noexcept { return primary_.metrics(); }
 
+    void shutdown() noexcept {
+        initialized_ = false;
+        release(primaryBytes_);
+        release(fallbackBytes_);
+        release(workspace_);
+        workspaceSize_ = 0;
+        primary_ = {};
+        fallback_ = {};
+        asset_ = {};
+    }
+
     // Draw a UTF-8 string onto an owned BGRA8 buffer. Input and output are
     // clipped to the supplied dimensions; y is the top of the em box.
     [[nodiscard]] bool drawUtf8(uint32_t* pixels, uint32_t width, uint32_t height,
@@ -52,7 +63,13 @@ public:
         const uint32_t pxEm = truetype::pixelsFromPoints(asset_.pointSize, asset_.dpi);
         if (!pxEm) return false;
         const auto& primaryMetrics = primary_.metrics();
-        const int32_t baseline = y + scale(primaryMetrics.ascender, pxEm, primaryMetrics.unitsPerEm);
+        int32_t baseline = y + scale(primaryMetrics.ascender, pxEm, primaryMetrics.unitsPerEm);
+        int32_t lineHeight = scale(static_cast<int32_t>(primaryMetrics.ascender) -
+            primaryMetrics.descender + primaryMetrics.lineGap, pxEm, primaryMetrics.unitsPerEm);
+        if (lineHeight <= 0) lineHeight = scale(
+            static_cast<int32_t>(primaryMetrics.ascender) - primaryMetrics.descender,
+            pxEm, primaryMetrics.unitsPerEm);
+        if (lineHeight <= 0) return false;
         int32_t pen = x;
         const truetype::FaceView* previousFace = nullptr;
         uint16_t previousGlyph = 0;
@@ -66,6 +83,10 @@ public:
             cursor += consumed;
             if (scalar == '\n') {
                 pen = x;
+                if (baseline > INT32_MAX - lineHeight) return false;
+                baseline += lineHeight;
+                previousFace = nullptr;
+                previousGlyph = 0;
                 continue;
             }
             uint32_t baseScalar = scalar, markScalar = 0;

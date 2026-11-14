@@ -4,7 +4,6 @@
 namespace micant::explorer {
 namespace {
 
-using micant_gui::DrawChar;
 
 void fill(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t y,
           int32_t rectWidth, int32_t rectHeight, uint32_t color) noexcept {
@@ -23,12 +22,7 @@ void fill(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 
 void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t y,
           const char* value, uint32_t color) noexcept {
-    if (!pixels || !value || x < 0 || y < 0 || y + 8 > static_cast<int32_t>(height)) return;
-    for (size_t i = 0; value[i]; ++i) {
-        const int32_t left = x + static_cast<int32_t>(i * 8);
-        if (left + 8 > static_cast<int32_t>(width)) break;
-        DrawChar(pixels, width, static_cast<uint32_t>(left), static_cast<uint32_t>(y), value[i], color);
-    }
+    micant_gui::DrawStringClipped(pixels, width, height, x, y, value, color);
 }
 
 } // namespace

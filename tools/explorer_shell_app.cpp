@@ -15,8 +15,6 @@
 #include <windows.h>
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
-#include "micant/um/subsystems/graphics/font_catalog.hpp"
-#include "micant/um/subsystems/graphics/font_manager.hpp"
 #include "gui_common.hpp"
 #include "explorer_shell/taskbar.hpp"
 #include "explorer_shell/start_menu.hpp"
@@ -52,7 +50,7 @@ struct ShellState {
     HWND desktop{};
     HDC desktopDc{};
     uint32_t* desktopPixels{};
-    micant::um::graphics::FontManager fontManager{};
+    HFONT uiFont{};
     bool fontReady{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -96,15 +94,63 @@ void fill(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
     }
 }
 
+bool decodeUtf8ToUtf16(const char* input, wchar_t* output, size_t capacity, size_t& units) noexcept {
+    units = 0;
+    if (!input || !output || capacity == 0) return false;
+    for (size_t cursor = 0; input[cursor];) {
+        const auto b0 = static_cast<uint8_t>(input[cursor]);
+        uint32_t scalar{}; size_t count{};
+        if (b0 < 0x80) { scalar = b0; count = 1; }
+        else if (b0 >= 0xC2 && b0 <= 0xDF) { scalar = b0 & 0x1F; count = 2; }
+        else if (b0 >= 0xE0 && b0 <= 0xEF) { scalar = b0 & 0x0F; count = 3; }
+        else if (b0 >= 0xF0 && b0 <= 0xF4) { scalar = b0 & 0x07; count = 4; }
+        else return false;
+        for (size_t i = 1; i < count; ++i) {
+            const auto byte = static_cast<uint8_t>(input[cursor + i]);
+            if (!byte || (byte & 0xC0) != 0x80) return false;
+            scalar = (scalar << 6) | (byte & 0x3F);
+        }
+        if ((count == 3 && scalar < 0x800) || (count == 4 && scalar < 0x10000) ||
+            scalar > 0x10FFFF || (scalar >= 0xD800 && scalar <= 0xDFFF)) return false;
+        cursor += count;
+        if (scalar <= 0xFFFF) {
+            if (units + 1 >= capacity) return false;
+            output[units++] = static_cast<wchar_t>(scalar);
+        } else {
+            if (units + 2 >= capacity) return false;
+            scalar -= 0x10000;
+            output[units++] = static_cast<wchar_t>(0xD800 + (scalar >> 10));
+            output[units++] = static_cast<wchar_t>(0xDC00 + (scalar & 0x3FF));
+        }
+    }
+    output[units] = 0;
+    return true;
+}
+
+bool renderExplorerText(uint32_t* pixels, uint32_t width, uint32_t height,
+                       int32_t x, int32_t y, const char* value, uint32_t color) noexcept {
+    if (!g.fontReady || !pixels || !value || x < 0 || y < 0) return false;
+    HDC dc = nullptr;
+    if (pixels == g.desktopPixels) dc = g.desktopDc;
+    else if (pixels == g.taskbarPixels) dc = g.taskbarDc;
+    else if (pixels == g.menuPixels) dc = g.menuDc;
+    else for (auto& app : g.apps) if (pixels == app.pixels) return false;
+    if (!dc) return false;
+    wchar_t wide[4096]{}; size_t units{};
+    if (!decodeUtf8ToUtf16(value, wide, sizeof(wide) / sizeof(wide[0]), units) || !units) return false;
+    if (!SelectObject(dc, g.uiFont)) return false;
+    const COLORREF foreground = RGB(static_cast<BYTE>((color >> 16) & 0xFF),
+                                    static_cast<BYTE>((color >> 8) & 0xFF),
+                                    static_cast<BYTE>(color & 0xFF));
+    (void)SetTextColor(dc, foreground);
+    (void)SetBkMode(dc, TRANSPARENT);
+    (void)width; (void)height;
+    return TextOutW(dc, x, y, wide, static_cast<int>(units)) != FALSE;
+}
+
 void text(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
           const char* value, uint32_t color) noexcept {
-    if (!p || !value) return;
-    if (g.fontReady && g.fontManager.drawUtf8(p, w, h, x, y, value, color)) return;
-    for (size_t i = 0; value[i]; ++i) {
-        const int32_t gx = x + static_cast<int32_t>(i * 8);
-        if (gx < 0 || gx + 8 > static_cast<int32_t>(w) || y < 0 || y + 8 > static_cast<int32_t>(h)) break;
-        DrawChar(p, w, static_cast<uint32_t>(gx), static_cast<uint32_t>(y), value[i], color);
-    }
+    micant_gui::DrawStringClipped(p, w, h, x, y, value, color);
 }
 
 void drawAppWindow(AppWindow& app) noexcept {
@@ -207,8 +253,8 @@ void redrawDesktop() noexcept {
     if (!g.desktopPixels) return;
     micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
                                   g.wallpaperPixels);
-    if (g.fontReady) (void)g.fontManager.drawUtf8(g.desktopPixels, g.screenW,
-        g.screenH - TASKBAR_H, 40, 48, "MicaNT — Città, perché? Ĉ ƀ", rgb(255, 255, 255));
+    if (g.fontReady) micant_gui::DrawStringClipped(g.desktopPixels, g.screenW,
+        g.screenH - TASKBAR_H, 420, 48, "MicaNT — Città, perché? Ĉ ƀ", rgb(255, 255, 255));
 
     present(g.desktop);
     redrawTaskbar();
@@ -259,16 +305,17 @@ void loadPackagedWallpaper() noexcept {
 
 
 void initializeSystemFonts() noexcept {
-    constexpr micant::um::graphics::LogicalFontRequest request{
-        u"Segoe UI", 400, false, micant::um::graphics::UiFontDefaults::TextPoints,
-        micant::um::graphics::UiFontDefaults::ReferenceDpi};
-    g.fontReady = g.fontManager.initialize(request);
+    // The UI uses 9 pt at the reference 96 DPI: a -12 logical-pixel height.
+    g.uiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g.fontReady = g.uiFont != nullptr;
     if (!g.fontReady) {
-        PrintLine("[MicaNT FontProbe] font manager initialization failed");
+        PrintLine("[MicaNT FontProbe] GDI font creation failed");
         return;
     }
-    PrintLine("[MicaNT FontProbe] Unicode fallback face loaded");
-    PrintLine("[MicaNT FontProbe] TrueType manager ready for Explorer text");
+    micant_gui::SetTextRenderer(renderExplorerText);
+    PrintLine("[MicaNT FontProbe] GDI TrueType font selected for Explorer surfaces");
 }
 
 void chooseFallbackActiveApp() noexcept {

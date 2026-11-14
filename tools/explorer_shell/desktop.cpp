@@ -4,7 +4,6 @@
 namespace micant::explorer {
 namespace {
 
-using micant_gui::DrawChar;
 using micant_gui::PackBGRA;
 
 enum class Icon : uint8_t { Computer, Documents, Network, RecycleBin };
@@ -30,12 +29,7 @@ void fill(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 
 void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t y,
           const char* value, uint32_t foreground) noexcept {
-    if (!pixels || !value || x < 0 || y < 0 || y + 8 > static_cast<int32_t>(height)) return;
-    for (size_t index = 0; value[index]; ++index) {
-        const int32_t left = x + static_cast<int32_t>(index * 8);
-        if (left + 8 > static_cast<int32_t>(width)) break;
-        DrawChar(pixels, width, static_cast<uint32_t>(left), static_cast<uint32_t>(y), value[index], foreground);
-    }
+    micant_gui::DrawStringClipped(pixels, width, height, x, y, value, foreground);
 }
 
 void drawIcon(uint32_t* pixels, uint32_t width, uint32_t height,

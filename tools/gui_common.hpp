@@ -122,6 +122,26 @@ inline void DrawChar(uint32_t* buf, uint32_t bufW, uint32_t x, uint32_t y, char 
     }
 }
 
+using TextRenderer = bool (*)(uint32_t*, uint32_t, uint32_t, int32_t, int32_t,
+                              const char*, uint32_t) noexcept;
+inline TextRenderer g_textRenderer{};
+
+inline void SetTextRenderer(TextRenderer renderer) noexcept { g_textRenderer = renderer; }
+
+inline void DrawStringClipped(uint32_t* buf, uint32_t bufW, uint32_t bufH,
+                              int32_t x, int32_t y, const char* str, uint32_t fg) noexcept {
+    if (!buf || !str) return;
+    if (g_textRenderer && g_textRenderer(buf, bufW, bufH, x, y, str, fg)) return;
+    if (x < 0 || y < 0) return;
+    uint32_t cx = static_cast<uint32_t>(x), cy = static_cast<uint32_t>(y);
+    for (size_t i = 0; str[i] != '\0'; ++i) {
+        if (str[i] == '\n') { cx = static_cast<uint32_t>(x); cy += 10; continue; }
+        if (cx + 8 > bufW || cy + 8 > bufH) break;
+        DrawChar(buf, bufW, cx, cy, str[i], fg);
+        cx += 8;
+    }
+}
+
 inline void DrawString(uint32_t* buf, uint32_t bufW, uint32_t x, uint32_t y, const char* str, uint32_t fg, uint32_t bg = 0) noexcept {
     if (!str) return;
     uint32_t cx = x;

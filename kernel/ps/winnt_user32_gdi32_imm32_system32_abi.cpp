@@ -14,6 +14,9 @@
 #include "micant/shared/native_nt_api.hpp"
 #endif
 #include "micant/shared/win32k_client.h"
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+#include "micant/um/subsystems/graphics/font_manager.hpp"
+#endif
 
 #include <algorithm>
 
@@ -73,6 +76,155 @@ struct WinNtWindowState {
     void*     imc{reinterpret_cast<void*>(static_cast<uintptr_t>(0x00000000000E0100ULL))};
     uint32_t  pendingMessages{1};
 } g_primaryWindow{};
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+constexpr size_t GdiFontCapacity = 24;
+constexpr size_t GdiBitmapCapacity = 32;
+constexpr size_t GdiDcCapacity = 64;
+constexpr int32_t GdiFontSize = 9;
+struct GdiLogFontW {
+    int32_t height, width, escapement, orientation, weight;
+    uint8_t italic, underline, strikeOut, charSet, outPrecision, clipPrecision, quality, pitchAndFamily;
+    wchar_t faceName[32];
+};
+struct GdiFontObject {
+    uint64_t magic{0x4D494341464F4E54ULL};
+    bool active{};
+    bool stock{};
+    char16_t family[32]{};
+    micant::um::graphics::LogicalFontRequest request{};
+    micant::um::graphics::FontManager manager{};
+};
+static_assert(sizeof(GdiLogFontW) == 92);
+static_assert(offsetof(GdiLogFontW, faceName) == 28);
+struct GdiBitmapSurface {
+    void* bitmap{};
+    uint32_t* pixels{};
+    uint32_t width{}, height{};
+    bool topDown{};
+};
+struct GdiDcSelection {
+    void* dc{};
+    void* bitmap{};
+    GdiFontObject* font{};
+    uint32_t textColor{0x00000000u}; // COLORREF black
+    int32_t backgroundMode{1};       // TRANSPARENT
+};
+GdiFontObject g_gdiFonts[GdiFontCapacity]{};
+GdiFontObject* g_systemFont{};
+GdiBitmapSurface g_gdiBitmaps[GdiBitmapCapacity]{};
+GdiDcSelection g_gdiDcs[GdiDcCapacity]{};
+
+GdiFontObject* FindGdiFont(void* handle) noexcept {
+    for (auto& font : g_gdiFonts) if (font.active && handle == &font) return &font;
+    return nullptr;
+}
+GdiBitmapSurface* FindGdiBitmap(void* handle) noexcept {
+    for (auto& bitmap : g_gdiBitmaps) if (bitmap.bitmap == handle && handle) return &bitmap;
+    return nullptr;
+}
+GdiDcSelection* FindGdiDc(void* handle, bool create) noexcept {
+    if (!handle) return nullptr;
+    GdiDcSelection* freeSlot = nullptr;
+    for (auto& dc : g_gdiDcs) {
+        if (dc.dc == handle) return &dc;
+        if (!dc.dc && !freeSlot) freeSlot = &dc;
+    }
+    if (!create || !freeSlot) return nullptr;
+    *freeSlot = GdiDcSelection{};
+    freeSlot->dc = handle;
+    return freeSlot;
+}
+
+GdiFontObject* CreateGdiFont(const GdiLogFontW& logical) noexcept {
+    if (logical.width || logical.escapement || logical.orientation || logical.underline ||
+        logical.strikeOut || logical.weight < 0 || logical.weight > 1000)
+        return nullptr;
+    size_t familyLength = 0;
+    while (familyLength < 32 && logical.faceName[familyLength]) ++familyLength;
+    if (familyLength == 32) return nullptr;
+    for (auto& font : g_gdiFonts) {
+        if (font.active) continue;
+        font.magic = 0x4D494341464F4E54ULL;
+        font.stock = false;
+        font.family[0] = 0;
+        font.active = true;
+        const wchar_t* family = familyLength ? logical.faceName : L"Segoe UI";
+        size_t copyLength = familyLength ? familyLength : 8;
+        if (copyLength > 31) copyLength = 31;
+        for (size_t i = 0; i < copyLength; ++i) font.family[i] = static_cast<char16_t>(family[i]);
+        font.family[copyLength] = 0;
+        uint32_t points = GdiFontSize;
+        if (logical.height) {
+            const int64_t magnitude = logical.height < 0
+                ? -static_cast<int64_t>(logical.height) : logical.height;
+            const uint64_t scaled = static_cast<uint64_t>(magnitude) * 72u;
+            points = static_cast<uint32_t>((scaled + 48u) / 96u);
+            if (!points) points = 1;
+            if (points > 512) { font.active = false; return nullptr; }
+        }
+        font.request = {font.family,
+            static_cast<uint16_t>(logical.weight ? logical.weight : 400),
+            logical.italic != 0, static_cast<uint16_t>(points), 96};
+        if (!font.manager.initialize(font.request)) {
+            font.manager.shutdown();
+            font.active = false;
+            return nullptr;
+        }
+        return &font;
+    }
+    return nullptr;
+}
+
+GdiFontObject* GetSystemGdiFont() noexcept {
+    if (g_systemFont && g_systemFont->active) return g_systemFont;
+    GdiLogFontW logical{};
+    GdiFontObject* font = CreateGdiFont(logical);
+    if (font) {
+        font->stock = true;
+        g_systemFont = font;
+    }
+    return font;
+}
+
+bool AppendUtf8(uint32_t scalar, char* output, size_t capacity, size_t& used) noexcept {
+    uint8_t bytes[4]{}; size_t count{};
+    if (scalar <= 0x7F) { bytes[0] = static_cast<uint8_t>(scalar); count = 1; }
+    else if (scalar <= 0x7FF) {
+        bytes[0] = static_cast<uint8_t>(0xC0 | (scalar >> 6));
+        bytes[1] = static_cast<uint8_t>(0x80 | (scalar & 0x3F)); count = 2;
+    } else if (scalar <= 0xFFFF && !(scalar >= 0xD800 && scalar <= 0xDFFF)) {
+        bytes[0] = static_cast<uint8_t>(0xE0 | (scalar >> 12));
+        bytes[1] = static_cast<uint8_t>(0x80 | ((scalar >> 6) & 0x3F));
+        bytes[2] = static_cast<uint8_t>(0x80 | (scalar & 0x3F)); count = 3;
+    } else if (scalar <= 0x10FFFF) {
+        bytes[0] = static_cast<uint8_t>(0xF0 | (scalar >> 18));
+        bytes[1] = static_cast<uint8_t>(0x80 | ((scalar >> 12) & 0x3F));
+        bytes[2] = static_cast<uint8_t>(0x80 | ((scalar >> 6) & 0x3F));
+        bytes[3] = static_cast<uint8_t>(0x80 | (scalar & 0x3F)); count = 4;
+    } else return false;
+    if (used + count >= capacity) return false;
+    for (size_t i = 0; i < count; ++i) output[used++] = static_cast<char>(bytes[i]);
+    return true;
+}
+
+bool Utf16ToUtf8(const wchar_t* input, int32_t length, char* output,
+                 size_t capacity) noexcept {
+    if (!input || !output || length <= 0 || length > 4096 || capacity < 2) return false;
+    size_t used = 0;
+    for (int32_t i = 0; i < length; ++i) {
+        uint32_t scalar = static_cast<uint16_t>(input[i]);
+        if (scalar >= 0xD800 && scalar <= 0xDBFF) {
+            if (++i >= length) return false;
+            const uint32_t low = static_cast<uint16_t>(input[i]);
+            if (low < 0xDC00 || low > 0xDFFF) return false;
+            scalar = 0x10000 + ((scalar - 0xD800) << 10) + (low - 0xDC00);
+        } else if (scalar >= 0xDC00 && scalar <= 0xDFFF) return false;
+        if (!scalar || !AppendUtf8(scalar, output, capacity, used)) return false;
+    }
+    output[used] = 0;
+    return true;
+}
+#endif
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 struct RegisteredClassIcons {
     wchar_t name[MICANT_WIN32K_TEXT_CAPACITY]{};
@@ -149,6 +301,20 @@ void* User32_CreateIconFromResourceEx(const uint8_t* resourceBytes,
 void* User32_CopyIcon(void* icon) noexcept {
     return micant::um::winuser::ProcessIconHandles().copy(
         icon, micant::um::imaging::NativeImageAllocator());
+}
+
+void* User32_CopyImage(void* image, uint32_t type, int32_t width, int32_t height,
+                       uint32_t flags) noexcept {
+    constexpr uint32_t ImageIcon = 1;
+    if (!image || type != ImageIcon || width < 0 || height < 0 || flags != 0) return nullptr;
+    micant::um::winuser::IconHandleTable::Lease lease{};
+    if (!micant::um::winuser::ProcessIconHandles().acquire(image, lease) &&
+        !micant::um::winuser::ProcessWindowIcons().acquire(image, lease)) return nullptr;
+    const auto& view = lease.bitmap();
+    const uint32_t targetWidth = width ? static_cast<uint32_t>(width) : view.width;
+    const uint32_t targetHeight = height ? static_cast<uint32_t>(height) : view.height;
+    return micant::um::winuser::ProcessIconHandles().copyScaled(
+        lease, targetWidth, targetHeight, micant::um::imaging::NativeImageAllocator());
 }
 
 int32_t User32_DestroyIcon(void* icon) noexcept {
@@ -702,7 +868,11 @@ int32_t User32_SetProcessDpiAwarenessContext(void* /*value*/) noexcept {
 // user32.dll implementations
 void* User32_GetDC(void* hWnd) noexcept {
     using Fn=void* (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kGetDC");
-    return fn ? fn(hWnd) : nullptr;
+    void* dc = fn ? fn(hWnd) : nullptr;
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (dc && !FindGdiDc(dc, true)) return nullptr;
+#endif
+    return dc;
 }
 
 int32_t User32_ReleaseDC(void* hWnd, void* hDC) noexcept {
@@ -713,7 +883,15 @@ int32_t User32_ReleaseDC(void* hWnd, void* hDC) noexcept {
 // gdi32.dll implementations
 void* Gdi32_CreateCompatibleDC(void* hdc) noexcept {
     using Fn=void* (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kCreateCompatibleDC");
-    return fn ? fn(hdc) : nullptr;
+    void* dc = fn ? fn(hdc) : nullptr;
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (dc && !FindGdiDc(dc, true)) {
+        using DeleteFn=int32_t (*)(void*); auto deleteFn=Win32kProc<DeleteFn>("MicaWin32kDeleteDC");
+        if (deleteFn) (void)deleteFn(dc);
+        return nullptr;
+    }
+#endif
+    return dc;
 }
 
 void* Gdi32_CreateCompatibleBitmap(void* hdc, int32_t width, int32_t height) noexcept {
@@ -723,7 +901,11 @@ void* Gdi32_CreateCompatibleBitmap(void* hdc, int32_t width, int32_t height) noe
 
 int32_t Gdi32_DeleteDC(void* hdc) noexcept {
     using Fn=int32_t (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kDeleteDC");
-    return fn ? fn(hdc) : 0;
+    const int32_t result = fn ? fn(hdc) : 0;
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (result) for (auto& dc : g_gdiDcs) if (dc.dc == hdc) dc = GdiDcSelection{};
+#endif
+    return result;
 }
 
 int32_t Gdi32_GetDeviceCaps(void* /*hdc*/, int32_t index) noexcept {
@@ -755,15 +937,34 @@ int32_t Gdi32_SwapBuffers(void* hdc) noexcept {
     return fn ? fn(hdc) : 0;
 }
 
-void* Gdi32_CreateDIBSection(void* hdc, const void* pbmi, uint32_t /*usage*/, void** ppvBits, void* /*hSection*/, uint32_t /*offset*/) noexcept {
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+void* Gdi32_CreateDIBSection(void* hdc, const void* pbmi, uint32_t usage, void** ppvBits, void* hSection, uint32_t offset) noexcept {
     if (ppvBits) *ppvBits=nullptr;
-    if (!pbmi) return nullptr;
+    if (!pbmi || !ppvBits || usage != 0 || hSection || offset != 0) return nullptr;
     const auto* info=static_cast<const MicaWin32kBitmapInfoHeader*>(pbmi);
     if (info->size < sizeof(MicaWin32kBitmapInfoHeader) || info->planes != 1 || info->bitCount != 32 || info->compression != 0)
         return nullptr;
+    if (info->width <= 0 || info->height == 0 || info->height == INT32_MIN) return nullptr;
     const int32_t height=info->height < 0 ? -info->height : info->height;
     using Fn=void* (*)(void*,int32_t,int32_t,void**); auto fn=Win32kProc<Fn>("MicaWin32kCreateDibSection");
-    return fn ? fn(hdc,info->width,height,ppvBits) : nullptr;
+    void* bitmap = fn ? fn(hdc,info->width,height,ppvBits) : nullptr;
+    if (!bitmap) return nullptr;
+    if (!*ppvBits) {
+        using DeleteFn=int32_t (*)(void*); auto deleteFn=Win32kProc<DeleteFn>("MicaWin32kDeleteObject");
+        if (deleteFn) (void)deleteFn(bitmap);
+        return nullptr;
+    }
+    GdiBitmapSurface* slot = nullptr;
+    for (auto& current : g_gdiBitmaps) if (!current.bitmap) { slot = &current; break; }
+    if (!slot) {
+        using DeleteFn=int32_t (*)(void*); auto deleteFn=Win32kProc<DeleteFn>("MicaWin32kDeleteObject");
+        if (deleteFn) (void)deleteFn(bitmap);
+        *ppvBits = nullptr;
+        return nullptr;
+    }
+    *slot = {bitmap, static_cast<uint32_t*>(*ppvBits), static_cast<uint32_t>(info->width),
+             static_cast<uint32_t>(height), info->height < 0};
+    return bitmap;
 }
 
 int32_t Gdi32_BitBlt(void* hdc, int32_t x, int32_t y, int32_t cx, int32_t cy, void* hdcSrc, int32_t x1, int32_t y1, uint32_t rop) noexcept {
@@ -773,19 +974,133 @@ int32_t Gdi32_BitBlt(void* hdc, int32_t x, int32_t y, int32_t cx, int32_t cy, vo
 }
 
 void* Gdi32_GetStockObject(int32_t i) noexcept {
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (i == 10 || i == 11 || i == 12 || i == 13 || i == 14 || i == 16 || i == 17)
+        return GetSystemGdiFont();
+#endif
     using Fn=void* (*)(int32_t); auto fn=Win32kProc<Fn>("MicaWin32kGetStockObject");
     return fn ? fn(i) : nullptr;
 }
 
 void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
+    if (!hdc || !h) return nullptr;
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (GdiFontObject* font = FindGdiFont(h)) {
+        GdiDcSelection* dc = FindGdiDc(hdc, false);
+        if (!dc) return nullptr;
+        void* previous = dc->font ? static_cast<void*>(dc->font) : Gdi32_GetStockObject(13);
+        if (!previous) return nullptr;
+        dc->font = font;
+        return previous;
+    }
+#endif
     using Fn=void* (*)(void*,void*); auto fn=Win32kProc<Fn>("MicaWin32kSelectObject");
-    return fn ? fn(hdc,h) : nullptr;
+    void* previous = fn ? fn(hdc,h) : nullptr;
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (previous) {
+        GdiDcSelection* dc = FindGdiDc(hdc, false);
+        GdiBitmapSurface* bitmap = FindGdiBitmap(h);
+        if (bitmap) {
+            if (!dc) {
+                (void)fn(hdc, previous); // Roll back when local tracking cannot be reserved.
+                return nullptr;
+            }
+            dc->bitmap = h;
+        }
+    }
+#endif
+    return previous;
 }
 
 int32_t Gdi32_DeleteObject(void* ho) noexcept {
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (GdiFontObject* font = FindGdiFont(ho)) {
+        if (font->stock) return 0;
+        for (const auto& dc : g_gdiDcs) if (dc.dc && dc.font == font) return 0;
+        font->manager.shutdown();
+        font->active = false;
+        font->family[0] = 0;
+        return 1;
+    }
+    GdiBitmapSurface* bitmap = FindGdiBitmap(ho);
+    if (bitmap) for (const auto& dc : g_gdiDcs) if (dc.dc && dc.bitmap == ho) return 0;
+#endif
     using Fn=int32_t (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kDeleteObject");
-    return fn ? fn(ho) : 0;
+    const int32_t result = fn ? fn(ho) : 0;
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (result && bitmap) *bitmap = GdiBitmapSurface{};
+#endif
+    return result;
 }
+
+void* Gdi32_CreateFontIndirectW(const GdiLogFontW* logical) noexcept {
+    return logical ? static_cast<void*>(CreateGdiFont(*logical)) : nullptr;
+}
+
+void* Gdi32_CreateFontW(int32_t height, int32_t width, int32_t escapement,
+        int32_t orientation, int32_t weight, uint32_t italic, uint32_t underline,
+        uint32_t strikeOut, uint32_t charSet, uint32_t outPrecision,
+        uint32_t clipPrecision, uint32_t quality, uint32_t pitchAndFamily,
+        const wchar_t* faceName) noexcept {
+    GdiLogFontW logical{};
+    logical.height = height; logical.width = width;
+    logical.escapement = escapement; logical.orientation = orientation;
+    logical.weight = weight; logical.italic = italic ? 1 : 0;
+    logical.underline = underline ? 1 : 0; logical.strikeOut = strikeOut ? 1 : 0;
+    logical.charSet = static_cast<uint8_t>(charSet);
+    logical.outPrecision = static_cast<uint8_t>(outPrecision);
+    logical.clipPrecision = static_cast<uint8_t>(clipPrecision);
+    logical.quality = static_cast<uint8_t>(quality);
+    logical.pitchAndFamily = static_cast<uint8_t>(pitchAndFamily);
+    if (faceName) {
+        size_t i = 0;
+        while (i < 31 && faceName[i]) { logical.faceName[i] = faceName[i]; ++i; }
+        if (faceName[i] && i == 31) return nullptr;
+    }
+    return CreateGdiFont(logical);
+}
+
+int32_t Gdi32_SetTextColor(void* hdc, uint32_t color) noexcept {
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc) return static_cast<int32_t>(0xFFFFFFFFu);
+    const uint32_t previous = dc->textColor;
+    dc->textColor = color & 0x00FFFFFFu;
+    return static_cast<int32_t>(previous);
+}
+
+int32_t Gdi32_SetBkMode(void* hdc, int32_t mode) noexcept {
+    if (mode != 1) return 0; // Opaque backgrounds are not part of this renderer subset.
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc) return 0;
+    const int32_t previous = dc->backgroundMode;
+    dc->backgroundMode = mode;
+    return previous;
+}
+
+int32_t Gdi32_TextOutW(void* hdc, int32_t x, int32_t y,
+                       const wchar_t* text, int32_t count) noexcept {
+    if (!hdc || !text || count <= 0 || count > 4096) return 0;
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc || !dc->font || dc->backgroundMode != 1) return 0;
+    GdiBitmapSurface* bitmap = FindGdiBitmap(dc->bitmap);
+    if (!bitmap || !bitmap->pixels || !bitmap->topDown) return 0;
+    char utf8[16385]{};
+    if (!Utf16ToUtf8(text, count, utf8, sizeof(utf8))) return 0;
+    const uint32_t r = dc->textColor & 0xFF;
+    const uint32_t g = (dc->textColor >> 8) & 0xFF;
+    const uint32_t b = (dc->textColor >> 16) & 0xFF;
+    const uint32_t argb = 0xFF000000u | (r << 16) | (g << 8) | b;
+    return dc->font->manager.drawUtf8(bitmap->pixels, bitmap->width, bitmap->height,
+        x, y, utf8, argb) ? 1 : 0;
+}
+
+int32_t Gdi32_ExtTextOutW(void* hdc, int32_t x, int32_t y, uint32_t options,
+        const void* rect, const wchar_t* text, uint32_t count, const int32_t* advances) noexcept {
+    if (options || rect || advances || count > 4096 || count > static_cast<uint32_t>(INT32_MAX))
+        return 0;
+    return Gdi32_TextOutW(hdc, x, y, text, static_cast<int32_t>(count));
+}
+#endif
 
 // imm32.dll implementations
 void* Imm32_ImmGetContext(void* hWnd) noexcept {
@@ -925,6 +1240,11 @@ __declspec(dllexport) void* CreateIconFromResource(const uint8_t* bits,
 }
 __declspec(dllexport) void* CopyIcon(void* icon) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_CopyIcon(icon);
+}
+__declspec(dllexport) void* CopyImage(void* image, uint32_t type, int32_t cx,
+                                      int32_t cy, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CopyImage(
+        image, type, cx, cy, flags);
 }
 __declspec(dllexport) int32_t DestroyIcon(void* icon) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_DestroyIcon(icon);
@@ -1131,6 +1451,34 @@ __declspec(dllexport) void* SelectObject(void* hdc, void* h) {
 }
 __declspec(dllexport) int32_t DeleteObject(void* ho) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_DeleteObject(ho);
+}
+__declspec(dllexport) void* CreateFontIndirectW(const micant::um::winnt_user32_gdi32_imm32_abi::GdiLogFontW* logical) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateFontIndirectW(logical);
+}
+__declspec(dllexport) void* CreateFontW(int32_t height, int32_t width, int32_t escapement,
+        int32_t orientation, int32_t weight, uint32_t italic, uint32_t underline,
+        uint32_t strikeOut, uint32_t charSet, uint32_t outPrecision,
+        uint32_t clipPrecision, uint32_t quality, uint32_t pitchAndFamily,
+        const wchar_t* faceName) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateFontW(height, width,
+        escapement, orientation, weight, italic, underline, strikeOut, charSet,
+        outPrecision, clipPrecision, quality, pitchAndFamily, faceName);
+}
+__declspec(dllexport) int32_t TextOutW(void* hdc, int32_t x, int32_t y,
+        const wchar_t* text, int32_t count) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_TextOutW(hdc, x, y, text, count);
+}
+__declspec(dllexport) int32_t ExtTextOutW(void* hdc, int32_t x, int32_t y,
+        uint32_t options, const void* rect, const wchar_t* text, uint32_t count,
+        const int32_t* advances) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_ExtTextOutW(hdc, x, y,
+        options, rect, text, count, advances);
+}
+__declspec(dllexport) uint32_t SetTextColor(void* hdc, uint32_t color) {
+    return static_cast<uint32_t>(micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetTextColor(hdc, color));
+}
+__declspec(dllexport) int32_t SetBkMode(void* hdc, int32_t mode) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetBkMode(hdc, mode);
 }
 } // extern "C"
 #elif defined(BUILD_SYSTEM32_IMM32_DLL)
