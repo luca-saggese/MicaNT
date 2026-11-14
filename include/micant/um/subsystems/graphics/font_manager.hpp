@@ -24,28 +24,13 @@ struct FontMetricsPixels {
 class FontManager {
 public:
     [[nodiscard]] bool initialize(const LogicalFontRequest& request) noexcept {
-        if (initialized_) return true;
-        asset_ = resolveFontAsset(request);
-        size_t primaryLength{};
-        if (!loadFile(asset_.fileName, primaryBytes_, primaryLength) ||
-            !primary_.parse(primaryBytes_, primaryLength)) {
-            release(primaryBytes_);
-            return false;
-        }
-        size_t fallbackLength{};
-        if (loadFile(asset_.unicodeFallbackFile, fallbackBytes_, fallbackLength)) {
-            if (!fallback_.parse(fallbackBytes_, fallbackLength)) release(fallbackBytes_);
-        }
-        workspaceSize_ = truetype::FaceView::rasterWorkspaceBytes();
-        if (native_nt::NtAllocateVirtualMemory(static_cast<Handle>(-1), &workspace_, 0,
-                &workspaceSize_, 0x3000, 0x04) != NtStatus::Success || !workspace_) {
-            release(primaryBytes_);
-            release(fallbackBytes_);
-            workspace_ = nullptr; workspaceSize_ = 0;
-            return false;
-        }
-        initialized_ = true;
-        return true;
+        return initializeInternal(request, true);
+    }
+
+    // Parse and retain only the selected face's metrics. Font enumeration does
+    // not need a fallback face or raster scratch workspace for each style.
+    [[nodiscard]] bool initializeForMetrics(const LogicalFontRequest& request) noexcept {
+        return initializeInternal(request, false);
     }
 
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
@@ -160,7 +145,7 @@ public:
     // clipped to the supplied dimensions; y is the top of the em box.
     [[nodiscard]] bool drawUtf8(uint32_t* pixels, uint32_t width, uint32_t height,
             int32_t x, int32_t y, const char* text, uint32_t color) noexcept {
-        if (!initialized_ || !pixels || !width || !height || !text || width > 16384 || height > 16384)
+        if (!initialized_ || !workspace_ || !pixels || !width || !height || !text || width > 16384 || height > 16384)
             return false;
         constexpr uint32_t MaxTextBytes = 4096;
         const uint32_t pxEm = truetype::pixelsFromPoints(asset_.pointSize, asset_.dpi);
@@ -234,6 +219,36 @@ public:
     }
 
 private:
+    [[nodiscard]] bool initializeInternal(const LogicalFontRequest& request,
+                                          bool rasterRequired) noexcept {
+        if (initialized_ && (!rasterRequired || workspace_)) return true;
+        if (initialized_) shutdown();
+        asset_ = resolveFontAsset(request);
+        size_t primaryLength{};
+        if (!loadFile(asset_.fileName, primaryBytes_, primaryLength) ||
+            !primary_.parse(primaryBytes_, primaryLength)) {
+            release(primaryBytes_);
+            return false;
+        }
+        if (rasterRequired) {
+            size_t fallbackLength{};
+            if (loadFile(asset_.unicodeFallbackFile, fallbackBytes_, fallbackLength)) {
+                if (!fallback_.parse(fallbackBytes_, fallbackLength)) release(fallbackBytes_);
+            }
+            workspaceSize_ = truetype::FaceView::rasterWorkspaceBytes();
+            if (native_nt::NtAllocateVirtualMemory(static_cast<Handle>(-1), &workspace_, 0,
+                    &workspaceSize_, 0x3000, 0x04) != NtStatus::Success || !workspace_) {
+                release(primaryBytes_);
+                release(fallbackBytes_);
+                workspace_ = nullptr; workspaceSize_ = 0;
+                primary_ = {};
+                fallback_ = {};
+                return false;
+            }
+        }
+        initialized_ = true;
+        return true;
+    }
     static constexpr uint32_t GlyphMaskSize = 64;
     static constexpr uint32_t MaxFontBytes = 16 * 1024 * 1024;
 

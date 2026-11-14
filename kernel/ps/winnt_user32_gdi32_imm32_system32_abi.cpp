@@ -94,9 +94,22 @@ struct GdiTextMetricW {
     wchar_t firstChar{}, lastChar{}, defaultChar{}, breakChar{};
     uint8_t italic{}, underlined{}, struckOut{}, pitchAndFamily{}, charSet{};
 };
+struct GdiEnumLogFontExW {
+    GdiLogFontW logFont{};
+    wchar_t fullName[64]{};
+    wchar_t style[32]{};
+    wchar_t script[32]{};
+};
+struct GdiNewTextMetricExW {
+    GdiTextMetricW textMetric{};
+    uint32_t fontSignature[4]{};
+};
+using GdiFontEnumProcW = int32_t (*)(const GdiLogFontW*, const GdiTextMetricW*,
+                                     uint32_t, intptr_t);
 static_assert(sizeof(GdiSize) == 8);
 static_assert(sizeof(GdiTextMetricW) == 60);
 static_assert(offsetof(GdiTextMetricW, firstChar) == 44);
+static_assert(offsetof(GdiEnumLogFontExW, fullName) == sizeof(GdiLogFontW));
 struct GdiFontObject {
     uint64_t magic{0x4D494341464F4E54ULL};
     bool active{};
@@ -1155,6 +1168,95 @@ int32_t Gdi32_GetTextMetricsW(void* hdc, GdiTextMetricW* output) noexcept {
     output->charSet = 1;
     return 1;
 }
+
+int32_t Gdi32_EnumFontFamiliesExW(void* hdc, const GdiLogFontW* filter,
+        GdiFontEnumProcW callback, intptr_t parameter, uint32_t flags) noexcept {
+    constexpr uint32_t TrueTypeFontType = 0x0004;
+    if (!FindGdiDc(hdc, false) || !callback || (flags != 0 && flags != TrueTypeFontType))
+        return 0;
+    if (filter && filter->charSet != 0 && filter->charSet != 1) return 0;
+    const auto familyMatches = [](const wchar_t* requested, const wchar_t* candidate) noexcept {
+        if (!requested || !requested[0]) return true;
+        size_t i = 0;
+        for (; i < 31 && requested[i] && candidate[i]; ++i) {
+            wchar_t left = requested[i], right = candidate[i];
+            if (left >= L'A' && left <= L'Z') left += L'a' - L'A';
+            if (right >= L'A' && right <= L'Z') right += L'a' - L'A';
+            if (left != right) return false;
+        }
+        return i < 31 && requested[i] == 0 && candidate[i] == 0;
+    };
+    struct Style { uint16_t weight; bool italic; const wchar_t* label; };
+    constexpr Style standardStyles[] = {
+        {400, false, L"Regular"}, {700, false, L"Bold"},
+        {400, true, L"Italic"}, {700, true, L"Bold Italic"}};
+    constexpr Style selawikStyles[] = {
+        {400, false, L"Regular"}, {600, false, L"Semibold"}, {700, false, L"Bold"}};
+    constexpr const wchar_t* families[] = {
+        L"Segoe UI", L"Segoe UI Semibold", L"Arial", L"Times New Roman",
+        L"Courier New", L"Calibri", L"DejaVu Sans"};
+    int32_t lastResult = 0;
+    for (const wchar_t* family : families) {
+        if (!familyMatches(filter ? filter->faceName : nullptr, family)) continue;
+        const Style* styles = family == families[0] || family == families[1]
+            ? selawikStyles : standardStyles;
+        const size_t styleCount = styles == selawikStyles
+            ? std::size(selawikStyles) : std::size(standardStyles);
+        for (size_t styleIndex = 0; styleIndex < styleCount; ++styleIndex) {
+            if (family == families[1] && styleIndex != 1) continue;
+            const Style& style = styles[styleIndex];
+            GdiLogFontW logical{};
+            logical.height = -12;
+            logical.weight = style.weight;
+            logical.italic = style.italic ? 1 : 0;
+            logical.charSet = 1;
+            char16_t requestedFamily[32]{};
+            for (size_t i = 0; family[i] && i + 1 < std::size(logical.faceName); ++i)
+                requestedFamily[i] = static_cast<char16_t>(family[i]);
+            for (size_t i = 0; i < std::size(requestedFamily); ++i)
+                logical.faceName[i] = family[i];
+            micant::um::graphics::FontManager metricManager{};
+            const micant::um::graphics::LogicalFontRequest request{
+                requestedFamily, style.weight, style.italic, 9, 96};
+            if (!metricManager.initializeForMetrics(request)) continue;
+            GdiTextMetricW metrics{};
+            micant::um::graphics::FontMetricsPixels projected{};
+            const bool projectedOk = metricManager.pixelMetrics(projected);
+            if (!projectedOk) { metricManager.shutdown(); return 0; }
+            metrics.height = projected.lineHeight;
+            metrics.ascent = projected.ascent;
+            metrics.descent = projected.descent;
+            metrics.externalLeading = projected.lineGap;
+            metrics.averageCharWidth = projected.averageAdvance;
+            metrics.maximumCharWidth = projected.maximumAdvance;
+            metrics.weight = style.weight;
+            metrics.digitizedAspectX = request.dpi;
+            metrics.digitizedAspectY = request.dpi;
+            metrics.firstChar = L' ';
+            metrics.lastChar = L'~';
+            metrics.defaultChar = L'?';
+            metrics.breakChar = L' ';
+            metrics.italic = style.italic ? 1 : 0;
+            metrics.charSet = 1;
+            GdiEnumLogFontExW enumeration{};
+            enumeration.logFont = logical;
+            for (size_t i = 0; family[i] && i + 1 < std::size(enumeration.fullName); ++i)
+                enumeration.fullName[i] = family[i];
+            for (size_t i = 0; style.label[i] && i + 1 < std::size(enumeration.style); ++i)
+                enumeration.style[i] = style.label[i];
+            constexpr wchar_t script[] = L"Western";
+            for (size_t i = 0; i < std::size(script); ++i) enumeration.script[i] = script[i];
+            GdiNewTextMetricExW newMetrics{};
+            newMetrics.textMetric = metrics;
+            const int32_t callbackResult = callback(&enumeration.logFont,
+                &newMetrics.textMetric, TrueTypeFontType, parameter);
+            metricManager.shutdown();
+            lastResult = callbackResult;
+            if (!callbackResult) return 0;
+        }
+    }
+    return lastResult;
+}
 #endif
 
 // imm32.dll implementations
@@ -1543,6 +1645,13 @@ __declspec(dllexport) int32_t GetTextExtentPoint32W(void* hdc, const wchar_t* te
 __declspec(dllexport) int32_t GetTextMetricsW(void* hdc,
         micant::um::winnt_user32_gdi32_imm32_abi::GdiTextMetricW* metrics) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetTextMetricsW(hdc, metrics);
+}
+__declspec(dllexport) int32_t EnumFontFamiliesExW(void* hdc,
+        const micant::um::winnt_user32_gdi32_imm32_abi::GdiLogFontW* filter,
+        micant::um::winnt_user32_gdi32_imm32_abi::GdiFontEnumProcW callback,
+        intptr_t parameter, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_EnumFontFamiliesExW(
+        hdc, filter, callback, parameter, flags);
 }
 } // extern "C"
 #elif defined(BUILD_SYSTEM32_IMM32_DLL)

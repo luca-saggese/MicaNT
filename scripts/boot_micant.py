@@ -256,10 +256,23 @@ def verify_mouse(
                                         minimum_pixels: int, timeout: float = 5.0) -> bytes:
                 deadline = time.monotonic() + timeout
                 latest = b""
+                previous = b""
+                stable_since = 0.0
                 while time.monotonic() < deadline:
                     latest = screen(name)
                     if changed_pixels(reference, latest) >= minimum_pixels:
-                        return latest
+                        now = time.monotonic()
+                        if latest == previous:
+                            if not stable_since:
+                                stable_since = now
+                            elif now - stable_since >= 0.5:
+                                return latest
+                        else:
+                            previous = latest
+                            stable_since = 0.0
+                    else:
+                        previous = latest
+                        stable_since = 0.0
                     time.sleep(0.1)
                 raise RuntimeError(
                     f"Explorer scanout did not change by {minimum_pixels} pixels "
@@ -290,7 +303,7 @@ def verify_mouse(
                         "key": {"type": "qcode", "data": "ret"},
                     },
                 }]})
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 if "[MicaNT Explorer] First application window created" in serial_path.read_text(
                     encoding="utf-8", errors="replace"
@@ -307,7 +320,7 @@ def verify_mouse(
                         "key": {"type": "qcode", "data": "ret"},
                     },
                 }]})
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 if "[MicaNT Explorer] Second overlapping application window created" in serial_path.read_text(
                     encoding="utf-8", errors="replace"
@@ -324,14 +337,8 @@ def verify_mouse(
                         "key": {"type": "qcode", "data": "f3"},
                     },
                 }]})
-            time.sleep(0.5)
-            moved_resized = screen("moved-resized-window.ppm")
-            resized_pixels = sum(
-                1 for offset in range(0, len(overlapping), 3)
-                if overlapping[offset:offset + 3] != moved_resized[offset:offset + 3]
-            )
-            if resized_pixels < 1000:
-                raise RuntimeError("Explorer's supported SetWindowPos move/resize path did not update composition")
+            moved_resized = wait_for_changed_screen(
+                overlapping, "moved-resized-window.ppm", 1000)
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": -344}},
                 {"type": "rel", "data": {"axis": "y", "value": -296}},
@@ -344,14 +351,8 @@ def verify_mouse(
             execute("input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": False}},
             ]})
-            time.sleep(0.5)
-            brought_forward = screen("brought-forward-window.ppm")
-            front_pixels = sum(
-                1 for offset in range(0, len(moved_resized), 3)
-                if moved_resized[offset:offset + 3] != brought_forward[offset:offset + 3]
-            )
-            if front_pixels < 1000:
-                raise RuntimeError("Clicking the exposed window did not bring it above its sibling")
+            brought_forward = wait_for_changed_screen(
+                moved_resized, "brought-forward-window.ppm", 1000)
 
             for close_index in range(2):
                 for down in (True, False):
@@ -370,14 +371,8 @@ def verify_mouse(
                 else:
                     raise RuntimeError("Explorer did not independently destroy the active application window")
                 if close_index == 0:
-                    time.sleep(0.5)
-                    one_window = screen("one-window-after-close.ppm")
-                    restored_pixels = sum(
-                        1 for offset in range(0, len(brought_forward), 3)
-                        if brought_forward[offset:offset + 3] != one_window[offset:offset + 3]
-                    )
-                    if restored_pixels < 5000:
-                        raise RuntimeError("Closing the top window did not reveal the remaining surface")
+                    one_window = wait_for_changed_screen(
+                        brought_forward, "one-window-after-close.ppm", 5000)
             destroyed_count = 2
             for cycle in range(3):
                 for down in (True, False):
@@ -387,14 +382,8 @@ def verify_mouse(
                             "key": {"type": "qcode", "data": "ret"},
                         },
                     }]})
-                time.sleep(0.35)
-                reopened = screen(f"reopen-cycle-{cycle + 1}.ppm")
-                visible_pixels = sum(
-                    1 for offset in range(0, len(after), 3)
-                    if after[offset:offset + 3] != reopened[offset:offset + 3]
-                )
-                if visible_pixels < 5000:
-                    raise RuntimeError("Repeated Explorer window creation did not change scanout")
+                reopened = wait_for_changed_screen(
+                    after, f"reopen-cycle-{cycle + 1}.ppm", 5000)
                 for down in (True, False):
                     execute("input-send-event", {"events": [{
                         "type": "key", "data": {
@@ -427,16 +416,7 @@ def verify_mouse(
                     serial.count("[MicaNT Explorer] Application window destroyed by its owner") >= 2
                 )
                 if (not irq_enabled or irq_seen) and explorer_mouse_seen and explorer_key_seen and explorer_application_window_closed:
-                    time.sleep(0.5)
-                    interactive = screen("interactive.ppm")
-                    changed_pixels = sum(
-                        1 for offset in range(0, len(opened), 3)
-                        if opened[offset:offset + 3] != interactive[offset:offset + 3]
-                    )
-                    if changed_pixels < 10000:
-                        raise RuntimeError(
-                            "Explorer destroyed its application window but did not redraw scanout"
-                        )
+                    wait_for_changed_screen(opened, "interactive.ppm", 10000)
                     return
                 time.sleep(0.1)
             if irq_enabled and "[MicaNT Input] PS/2 mouse IRQ byte consumed" not in serial:

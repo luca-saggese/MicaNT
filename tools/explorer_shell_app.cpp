@@ -348,6 +348,24 @@ void initializeSystemFonts() noexcept {
             }
             (void)DeleteObject(alternateFont);
         }
+        LOGFONTW filter{};
+        filter.lfCharSet = DEFAULT_CHARSET;
+        constexpr wchar_t filterFamily[] = L"Arial";
+        for (size_t i = 0; i < std::size(filterFamily); ++i)
+            filter.lfFaceName[i] = filterFamily[i];
+        uint32_t enumeratedFaces = 0;
+        const int enumResult = EnumFontFamiliesExW(g.desktopDc, &filter,
+            [](const LOGFONTW*, const TEXTMETRICW* fontMetrics, DWORD fontType,
+               LPARAM context) -> int {
+                if (!fontMetrics || !(fontType & TRUETYPE_FONTTYPE) || !context) return 0;
+                ++*reinterpret_cast<uint32_t*>(context);
+                return 1;
+            }, reinterpret_cast<LPARAM>(&enumeratedFaces), 0);
+        if (enumResult && enumeratedFaces == 4) {
+            PrintLine("[MicaNT FontProbe] GDI enumerated four installed Arial TTF styles");
+        } else {
+            PrintLine("[MicaNT FontProbe] GDI TTF family enumeration failed");
+        }
     } else {
         PrintLine("[MicaNT FontProbe] GDI metric DC/font selection failed");
     }

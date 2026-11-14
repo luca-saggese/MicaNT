@@ -1759,9 +1759,11 @@ ascender, descender and line gap at its configured point size and DPI. The
 boot probe confirms a successful extent/metrics query against the selected
 TTF and switches the desktop DC at runtime from Segoe UI/Selawik to
 Arial/Liberation Sans; measured extents differ and the original face is then
-restored. This is a bounded TrueType GDI subset: complex glyph outlines and
-unsupported text options still fail explicitly; F3 font enumeration,
-persistence and DirectWrite face/collection behavior remain open.
+restored. `EnumFontFamiliesExW` enumerates the supported logical families and
+their installed TTF styles; the QEMU probe enumerates all four Arial styles.
+This is a bounded TrueType GDI subset: complex glyph outlines and unsupported
+text options still fail explicitly; runtime font registration, persistent
+settings and DirectWrite face/collection behavior remain open.
 
 QEMU's Explorer input verification now waits for the actual scanout pixels to
 change after the kernel window-creation event. That event can precede the
@@ -1770,4 +1772,4 @@ unchanged frame as a failure.
 
 | Command | Result |
 |---|---|
-| `python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-font-f2-build --cxx build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ --diagnostics-dir /private/tmp/micant-f3-runtime-switch` | Passed; modular kernel and Explorer dependency closure linked, GDI TTF extent/metrics and two-face runtime switch probes succeeded, app DIBs rendered and composed, overlapping/move/resize/cleanup input checks passed, and serial remained stable for five seconds |
+| `python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-font-f2-build --cxx build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ --diagnostics-dir /private/tmp/micant-f3-final-verify` | Passed; modular kernel and Explorer dependency closure linked, GDI TTF metrics, two-face switch and four-style Arial enumeration probes succeeded; app DIBs rendered and composed, overlapping/move/resize/repeated cleanup checks passed, and serial remained stable for five seconds |
