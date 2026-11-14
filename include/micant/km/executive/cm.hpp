@@ -645,12 +645,63 @@ public:
      * @brief Deserializes a hive from a raw byte buffer.
      */
     [[nodiscard]] static std::shared_ptr<CmHive> deserialize(std::span<const uint8_t> image) {
-        if (image.size() < sizeof(RegfHeader)) return nullptr;
-        const auto* hdr = reinterpret_cast<const RegfHeader*>(image.data());
-        if (hdr->signature != REGF_SIGNATURE) return nullptr;
+        // Treat the image as untrusted disk input. In particular, do not use
+        // header offsets or cell lengths until the complete stable-bin layout
+        // has been bounded and checked.
+        if (image.size() < sizeof(RegfHeader) + HIVE_BIN_SIZE) return nullptr;
+        RegfHeader header{};
+        std::memcpy(&header, image.data(), sizeof(header));
+        if (header.signature != REGF_SIGNATURE || header.type != 0 || header.format != 1 ||
+            header.majorVersion != 1 || header.minorVersion > 5 ||
+            header.sequence1 != header.sequence2 ||
+            header.checksum != ComputeRegfChecksum(header)) return nullptr;
+
+        const size_t binsSize = image.size() - sizeof(RegfHeader);
+        constexpr size_t maximumHiveBins = 16 * 1024 * 1024;
+        if (header.binsDataSize != binsSize || binsSize > maximumHiveBins ||
+            binsSize % HIVE_BIN_SIZE != 0) return nullptr;
+
+        const uint8_t* bins = image.data() + sizeof(RegfHeader);
+        bool rootCellBoundaryFound = false;
+        for (size_t binOffset = 0; binOffset < binsSize; binOffset += HIVE_BIN_SIZE) {
+            HbinHeader bin{};
+            std::memcpy(&bin, bins + binOffset, sizeof(bin));
+            if (bin.signature != HBIN_SIGNATURE || bin.fileOffset != binOffset ||
+                bin.binSize != HIVE_BIN_SIZE) return nullptr;
+
+            size_t cellOffset = binOffset + sizeof(HbinHeader);
+            const size_t binEnd = binOffset + HIVE_BIN_SIZE;
+            while (cellOffset < binEnd) {
+                if (binEnd - cellOffset < sizeof(HcellHeader)) return nullptr;
+                HcellHeader cell{};
+                std::memcpy(&cell, bins + cellOffset, sizeof(cell));
+                if (cellOffset == header.rootCellOffset) {
+                    rootCellBoundaryFound = true;
+                    if (cell.cellSize >= 0) return nullptr;
+                }
+                if (cell.cellSize == 0 || cell.cellSize == INT32_MIN) return nullptr;
+                const size_t cellSize = static_cast<size_t>(cell.cellSize < 0 ? -cell.cellSize : cell.cellSize);
+                if (cellSize < sizeof(HcellHeader) || (cellSize & 7u) != 0 ||
+                    cellSize > binEnd - cellOffset) return nullptr;
+                cellOffset += cellSize;
+            }
+            if (cellOffset != binEnd) return nullptr;
+        }
+
+        if (header.rootCellOffset >= binsSize || (header.rootCellOffset & HCELL_STORAGE_MASK) != 0 ||
+            header.rootCellOffset % HIVE_BIN_SIZE < sizeof(HbinHeader) || !rootCellBoundaryFound ||
+            binsSize - header.rootCellOffset < sizeof(HcellHeader)) return nullptr;
+        HcellHeader rootCell{};
+        std::memcpy(&rootCell, bins + header.rootCellOffset, sizeof(rootCell));
+        if (rootCell.cellSize >= 0 || rootCell.cellSize == INT32_MIN ||
+            static_cast<size_t>(-rootCell.cellSize) < sizeof(HcellHeader) + sizeof(NkRecordHeader)) return nullptr;
+        const size_t rootDataSize = static_cast<size_t>(-rootCell.cellSize) - sizeof(HcellHeader);
+        NkRecordHeader root{};
+        std::memcpy(&root, bins + header.rootCellOffset + sizeof(HcellHeader), sizeof(root));
+        if (root.signature != NK_SIGNATURE || root.nameLength > rootDataSize - sizeof(root)) return nullptr;
 
         auto hive = std::make_shared<CmHive>();
-        hive->header_ = *hdr;
+        hive->header_ = header;
         hive->binsBuffer_.assign(image.data() + sizeof(RegfHeader), image.data() + image.size());
 
         {

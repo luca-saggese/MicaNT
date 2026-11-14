@@ -775,6 +775,22 @@ void Test_ConfigurationManager_HiveAndValues() {
     TEST_ASSERT(deserializedHive->isConsistent(), "Deserialized hive must be consistent");
     TEST_ASSERT(deserializedHive->getRootCellOffset() == hdr.rootCellOffset, "Root cell offset must match after deserialization");
 
+    auto truncatedHive = hiveBytes;
+    truncatedHive.pop_back();
+    TEST_ASSERT(cm::CmHive::deserialize(truncatedHive) == nullptr,
+                "Truncated hive bins must be rejected");
+    auto badChecksumHive = hiveBytes;
+    auto* badChecksumHeader = reinterpret_cast<cm::RegfHeader*>(badChecksumHive.data());
+    badChecksumHeader->checksum ^= 1;
+    TEST_ASSERT(cm::CmHive::deserialize(badChecksumHive) == nullptr,
+                "Hive with invalid header checksum must be rejected");
+    auto badCellHive = hiveBytes;
+    auto* badCell = reinterpret_cast<cm::HcellHeader*>(badCellHive.data() + sizeof(cm::RegfHeader) +
+                                                        sizeof(cm::HbinHeader));
+    badCell->cellSize = INT32_MIN;
+    TEST_ASSERT(cm::CmHive::deserialize(badCellHive) == nullptr,
+                "Hive with invalid cell length must be rejected");
+
     // 5. Transactional Registry (TxR) Journal Crash Recovery
     cm::TxRJournal journal;
     deserializedHive->setSequence(2, 1); // Simulate interrupted crash during write
@@ -5082,6 +5098,13 @@ void Test_Horizon22_ConfigurationManager_HiveRefinement_Coalescing_And_Security(
                 "Stable cell content must match");
     TEST_ASSERT(std::string(reinterpret_cast<const char*>(hive.getCellData(volatileCell))) == volatileData, 
                 "Volatile cell content must match");
+
+    uint32_t hiveRootCell = hive.allocateCell(sizeof(cm::NkRecordHeader) + 4);
+    auto* hiveRoot = reinterpret_cast<cm::NkRecordHeader*>(hive.getCellData(hiveRootCell));
+    hiveRoot->signature = cm::NK_SIGNATURE;
+    hiveRoot->nameLength = 4;
+    std::memcpy(reinterpret_cast<uint8_t*>(hiveRoot) + sizeof(cm::NkRecordHeader), "ROOT", 4);
+    hive.setRootCellOffset(hiveRootCell);
 
     // Serializing hive must omit volatile storage
     std::vector<uint8_t> stableHiveImage = hive.serialize();
