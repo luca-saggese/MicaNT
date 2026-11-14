@@ -14,6 +14,7 @@
 
 #include <windows.h>
 #include "micant/shared/win32k_client.h"
+#include "micant/shared/native_nt_api.hpp"
 #include "gui_common.hpp"
 #include "explorer_shell/taskbar.hpp"
 #include "explorer_shell/start_menu.hpp"
@@ -245,6 +246,29 @@ void loadPackagedWallpaper() noexcept {
     auto* pixels = composed.pixels.releaseOwnership(g.wallpaperBytes,
                                                      g.wallpaperAllocator);
     g.wallpaperPixels = reinterpret_cast<uint32_t*>(pixels);
+}
+
+void probeSystemFontFile() noexcept {
+    wchar_t path[320]{};
+    constexpr char16_t suffix[] = u"\\System\\Fonts\\DejaVuSans-Regular.ttf";
+    const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(micant::UserSharedDataAddress);
+    size_t rootLength = 0;
+    while (rootLength < std::size(shared->ntSystemRoot) && shared->ntSystemRoot[rootLength]) ++rootLength;
+    if (rootLength < 3 || rootLength + std::size(suffix) > std::size(path)) return;
+    for (size_t i = 0; i < rootLength; ++i) path[i] = static_cast<wchar_t>(shared->ntSystemRoot[i]);
+    for (size_t i = 0; i < std::size(suffix); ++i) path[rootLength + i] = static_cast<wchar_t>(suffix[i]);
+    micant::UnicodeString name{path};
+    micant::ObjectAttributes attributes{};
+    attributes.objectName = &name;
+    attributes.attributes = micant::OBJ_CASE_INSENSITIVE;
+    micant::Handle file{};
+    micant::IoStatusBlock io{};
+    if (micant::native_nt::NtCreateFile(&file, 0x00100001u, &attributes, &io, nullptr, 0, 7, 1, 0x20, nullptr, 0) != micant::NtStatus::Success) return;
+    uint8_t bytes[4096]{};
+    micant::LargeInteger offset{};
+    const auto status = micant::native_nt::NtReadFile(file, 0, nullptr, nullptr, &io, bytes, sizeof(bytes), &offset, nullptr);
+    (void)micant::native_nt::NtClose(file);
+    PrintLine(status == micant::NtStatus::Success ? "[MicaNT FontProbe] TTF read succeeded" : "[MicaNT FontProbe] TTF read failed");
 }
 
 void chooseFallbackActiveApp() noexcept {
@@ -638,6 +662,7 @@ extern "C" void _start(const char* = nullptr) {
     }
 
     loadPackagedWallpaper();
+    probeSystemFontFile();
     redrawDesktop();
     updateClock();
     uint32_t clockPollDivider = 0;

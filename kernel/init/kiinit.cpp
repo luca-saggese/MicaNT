@@ -2963,12 +2963,15 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             return status(NtStatus::AccessViolation);
         auto* ioStatusAddress = reinterpret_cast<IoStatusBlock*>(extra[0]);
         auto* userBuffer = reinterpret_cast<void*>(extra[1]);
-        if (extra[2] > UINT32_MAX) return status(NtStatus::InvalidParameter);
+        // Win64 widens the argument slot to 8 bytes but leaves the upper
+        // half undefined for a uint32_t parameter. Consume only its declared
+        // width; rejecting nonzero padding breaks ordinary NtReadFile callers.
         const size_t length = static_cast<uint32_t>(extra[2]);
         const auto* byteOffsetAddress = reinterpret_cast<const LargeInteger*>(extra[3]);
         const auto* keyAddress = reinterpret_cast<const uint32_t*>(extra[4]);
-        if (!ioStatusAddress || (length && !userBuffer) || keyAddress)
+        if (!ioStatusAddress || (length && !userBuffer) || keyAddress) {
             return status(keyAddress ? NtStatus::NotSupported : NtStatus::InvalidParameter);
+        }
         if (ex::ProbeForWrite(ioStatusAddress, sizeof(IoStatusBlock), alignof(IoStatusBlock)) != NtStatus::Success ||
             ex::ProbeForWrite(userBuffer, length, 1) != NtStatus::Success)
             return status(NtStatus::AccessViolation);
