@@ -328,6 +328,26 @@ void initializeSystemFonts() noexcept {
         } else {
             PrintLine("[MicaNT FontProbe] GDI TTF metric values inconsistent");
         }
+        const HFONT alternateFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Arial");
+        if (alternateFont) {
+            SIZE primaryExtent{}, alternateExtent{};
+            const BOOL measuredPrimary = GetTextExtentPoint32W(
+                g.desktopDc, L"MicaNT WWW 123", 14, &primaryExtent);
+            const HGDIOBJ previousFont = SelectObject(g.desktopDc, alternateFont);
+            const BOOL measuredAlternate = previousFont && GetTextExtentPoint32W(
+                g.desktopDc, L"MicaNT WWW 123", 14, &alternateExtent);
+            if (previousFont) (void)SelectObject(g.desktopDc, previousFont);
+            if (measuredPrimary && measuredAlternate &&
+                (primaryExtent.cx != alternateExtent.cx ||
+                 primaryExtent.cy != alternateExtent.cy)) {
+                PrintLine("[MicaNT FontProbe] Runtime Segoe UI/Arial TTF face switch changed extents");
+            } else {
+                PrintLine("[MicaNT FontProbe] Runtime alternate TTF face switch failed");
+            }
+            (void)DeleteObject(alternateFont);
+        }
     } else {
         PrintLine("[MicaNT FontProbe] GDI metric DC/font selection failed");
     }
