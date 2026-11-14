@@ -37,6 +37,12 @@ public:
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
     [[nodiscard]] const FontAssetChoice& selectedAsset() const noexcept { return asset_; }
     [[nodiscard]] const truetype::FaceMetrics& metrics() const noexcept { return primary_.metrics(); }
+    [[nodiscard]] uint16_t glyphIndex(uint32_t scalar) const noexcept {
+        return initialized_ ? primary_.glyphIndex(scalar) : 0;
+    }
+    [[nodiscard]] uint16_t glyphCount() const noexcept {
+        return initialized_ ? primary_.metrics().glyphCount : 0;
+    }
 
     [[nodiscard]] bool pixelMetrics(FontMetricsPixels& result) const noexcept {
         result = {};

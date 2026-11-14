@@ -13,6 +13,12 @@ struct FaceMetrics {
     int16_t ascender{};
     int16_t descender{};
     int16_t lineGap{};
+    int16_t capHeight{};
+    int16_t xHeight{};
+    int16_t underlinePosition{};
+    int16_t underlineThickness{};
+    int16_t strikethroughPosition{};
+    int16_t strikethroughThickness{};
     uint16_t glyphCount{};
     uint16_t horizontalMetricCount{};
     uint16_t weightClass{};
@@ -67,6 +73,7 @@ public:
         const Table* loca = find(TagLoca);
         const Table* glyf = find(TagGlyf);
         const Table* os2 = find(TagOs2);
+        const Table* post = find(TagPost);
         const Table* kern = find(TagKern);
         if (!head || head->length < 54 || !maxp || maxp->length < 6 ||
             !hhea || hhea->length < 36 || !hmtx || !cmap || !loca || !glyf)
@@ -82,6 +89,18 @@ public:
         metrics_.weightClass = os2 && os2->length >= 6 ? be16(os2->offset + 4) : 400;
         metrics_.useTypographicMetrics = os2 && os2->length >= 64 &&
             (be16(os2->offset + 62) & 0x0080u) != 0;
+        if (os2 && os2->length >= 30) {
+            metrics_.strikethroughThickness = bes16(os2->offset + 26);
+            metrics_.strikethroughPosition = bes16(os2->offset + 28);
+        }
+        if (os2 && os2->length >= 90 && be16(os2->offset) >= 2) {
+            metrics_.xHeight = bes16(os2->offset + 86);
+            metrics_.capHeight = bes16(os2->offset + 88);
+        }
+        if (post && post->length >= 12) {
+            metrics_.underlinePosition = bes16(post->offset + 8);
+            metrics_.underlineThickness = bes16(post->offset + 10);
+        }
         if (metrics_.useTypographicMetrics && os2->length >= 74) {
             metrics_.ascender = bes16(os2->offset + 68);
             metrics_.descender = bes16(os2->offset + 70);
@@ -400,7 +419,7 @@ private:
     static constexpr uint32_t TagHhea = 0x68686561, TagHmtx = 0x686D7478;
     static constexpr uint32_t TagCmap = 0x636D6170, TagLoca = 0x6C6F6361;
     static constexpr uint32_t TagGlyf = 0x676C7966, TagOs2 = 0x4F532F32;
-    static constexpr uint32_t TagKern = 0x6B65726E;
+    static constexpr uint32_t TagKern = 0x6B65726E, TagPost = 0x706F7374;
     struct Table { uint32_t tag{}, offset{}, length{}; };
     struct Edge { float x0, y0, x1, y1; };
     struct RasterWorkspace {
@@ -413,6 +432,17 @@ private:
     };
     static constexpr uint32_t MaxCompositeDepth = 8;
     static constexpr uint32_t MaxCompositeComponents = 64;
+
+    [[nodiscard]] static int32_t scale(int32_t value, uint32_t pixelsPerEm,
+                                       uint16_t unitsPerEm) noexcept {
+        if (!unitsPerEm) return 0;
+        const int64_t product = static_cast<int64_t>(value) * pixelsPerEm;
+        const int64_t rounded = product >= 0
+            ? product + unitsPerEm / 2 : product - unitsPerEm / 2;
+        const int64_t result = rounded / unitsPerEm;
+        if (result < INT32_MIN || result > INT32_MAX) return 0;
+        return static_cast<int32_t>(result);
+    }
 
     [[nodiscard]] bool rasterizeCompositeGlyph(uint16_t glyph, uint32_t pixelsPerEm,
             uint8_t* mask, uint32_t width, uint32_t height, size_t stride,
@@ -427,7 +457,8 @@ private:
         size_t cursor = base + 10;
         bool moreComponents = true;
         uint32_t componentCount = 0;
-        for (uint16_t lastFlags = 0; moreComponents;) {
+        uint16_t lastFlags = 0;
+        while (moreComponents) {
             if (++componentCount > MaxCompositeComponents || !range(cursor, 4)) return false;
             const uint16_t flags = be16(cursor);
             const uint16_t componentGlyph = be16(cursor + 2);

@@ -31,6 +31,7 @@
 #include "micant/shared/ntstatus.hpp"
 #include "micant/um/subsystems/com/ole32.hpp"
 #include "micant/um/native/ldr.hpp"
+#include "micant/um/subsystems/graphics/font_manager.hpp"
 
 namespace micant::dwrite {
 
@@ -423,8 +424,21 @@ private:
 
 class FontFaceImpl : public IDWriteFontFace {
 public:
-    FontFaceImpl(std::wstring faceName, DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE = DWRITE_FONT_STYLE_NORMAL)
-        : m_faceName(std::move(faceName)) {}
+    FontFaceImpl(std::wstring faceName, DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL,
+                 DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL,
+                 std::shared_ptr<micant::um::graphics::FontManager> font = {})
+        : m_faceName(std::move(faceName)), m_font(std::move(font)) {
+        if (m_font && m_font->initialized()) { m_loaded = true; return; }
+        if (!m_font) m_font = std::make_shared<micant::um::graphics::FontManager>();
+        auto family = logicalFamily(m_faceName);
+        micant::um::graphics::LogicalFontRequest request{};
+        request.requestedFamily = family;
+        request.weight = static_cast<uint16_t>(weight);
+        request.italic = style != DWRITE_FONT_STYLE_NORMAL;
+        request.pointSize = 9;
+        request.dpi = 96;
+        m_loaded = m_font->initializeForMetrics(request);
+    }
 
     int32_t __stdcall QueryInterface(const ole32::IID&, void** ppv) override {
         if (!ppv) return ole32::E_POINTER;
@@ -440,46 +454,59 @@ public:
     }
 
     uint32_t __stdcall GetIndex() override { return 0; }
+    [[nodiscard]] bool valid() const noexcept { return m_loaded; }
     DWRITE_FONT_SIMULATIONS __stdcall GetSimulations() override { return DWRITE_FONT_SIMULATIONS_NONE; }
     int32_t __stdcall IsSymbolFont() override { return 0; }
     void __stdcall GetMetrics(DWRITE_FONT_METRICS* fontFaceMetrics) override {
         if (!fontFaceMetrics) return;
-        fontFaceMetrics->designUnitsPerEm = 2048;
-        fontFaceMetrics->ascent = 1854;
-        fontFaceMetrics->descent = 434;
-        fontFaceMetrics->lineGap = 67;
-        fontFaceMetrics->capHeight = 1456;
-        fontFaceMetrics->xHeight = 1024;
-        fontFaceMetrics->underlinePosition = -217;
-        fontFaceMetrics->underlineThickness = 150;
-        fontFaceMetrics->strikethroughPosition = 530;
-        fontFaceMetrics->strikethroughThickness = 130;
+        if (!m_loaded) { *fontFaceMetrics = {}; return; }
+        const auto& metrics = m_font->metrics();
+        fontFaceMetrics->designUnitsPerEm = metrics.unitsPerEm;
+        fontFaceMetrics->ascent = metrics.ascender > 0 ? static_cast<uint16_t>(metrics.ascender) : 0;
+        fontFaceMetrics->descent = metrics.descender < 0 ? static_cast<uint16_t>(-metrics.descender) : 0;
+        fontFaceMetrics->lineGap = metrics.lineGap;
+        fontFaceMetrics->capHeight = metrics.capHeight > 0 ? static_cast<uint16_t>(metrics.capHeight) : 0;
+        fontFaceMetrics->xHeight = metrics.xHeight > 0 ? static_cast<uint16_t>(metrics.xHeight) : 0;
+        fontFaceMetrics->underlinePosition = metrics.underlinePosition;
+        fontFaceMetrics->underlineThickness = metrics.underlineThickness > 0
+            ? static_cast<uint16_t>(metrics.underlineThickness) : 0;
+        fontFaceMetrics->strikethroughPosition = metrics.strikethroughPosition;
+        fontFaceMetrics->strikethroughThickness = metrics.strikethroughThickness > 0
+            ? static_cast<uint16_t>(metrics.strikethroughThickness) : 0;
     }
-    uint16_t __stdcall GetGlyphCount() override { return 256; }
-    int32_t __stdcall GetDesignGlyphMetrics(const uint16_t*, uint32_t glyphCount, DWRITE_GLYPH_METRICS* glyphMetrics, int32_t) override {
-        if (!glyphMetrics) return ole32::E_POINTER;
-        for (uint32_t i = 0; i < glyphCount; ++i) {
-            glyphMetrics[i].leftSideBearing = 64;
-            glyphMetrics[i].advanceWidth = 1024;
-            glyphMetrics[i].rightSideBearing = 64;
-            glyphMetrics[i].topSideBearing = 128;
-            glyphMetrics[i].advanceHeight = 2048;
-            glyphMetrics[i].bottomSideBearing = 128;
-            glyphMetrics[i].verticalOriginY = 1854;
-        }
-        return ole32::S_OK;
+    uint16_t __stdcall GetGlyphCount() override { return m_loaded ? m_font->glyphCount() : 0; }
+    int32_t __stdcall GetDesignGlyphMetrics(const uint16_t* glyphIndices, uint32_t glyphCount, DWRITE_GLYPH_METRICS* glyphMetrics, int32_t isSideways) override {
+        if (glyphCount && (!glyphIndices || !glyphMetrics)) return ole32::E_POINTER;
+        if (!m_loaded || isSideways) return ole32::E_NOTIMPL;
+        (void)glyphIndices;
+        (void)glyphMetrics;
+        // The current parser has no vhea/vmtx support. Returning zero-filled
+        // vertical metrics would look successful while inventing data.
+        return ole32::E_NOTIMPL;
     }
     int32_t __stdcall GetGlyphIndices(const uint32_t* codePoints, uint32_t codePointCount, uint16_t* glyphIndices) override {
-        if (!codePoints || !glyphIndices) return ole32::E_POINTER;
-        for (uint32_t i = 0; i < codePointCount; ++i) {
-            glyphIndices[i] = static_cast<uint16_t>(codePoints[i] & 0xFF);
-        }
+        if (codePointCount && (!codePoints || !glyphIndices)) return ole32::E_POINTER;
+        if (!m_loaded) return ole32::E_FAIL;
+        for (uint32_t i = 0; i < codePointCount; ++i)
+            glyphIndices[i] = m_font->glyphIndex(codePoints[i]);
         return ole32::S_OK;
+    }
+
+public:
+    [[nodiscard]] static const char16_t* logicalFamily(const std::wstring& name) noexcept {
+        if (name.find(L"Arial") != std::wstring::npos) return u"Arial";
+        if (name.find(L"Times New Roman") != std::wstring::npos) return u"Times New Roman";
+        if (name.find(L"Courier New") != std::wstring::npos) return u"Courier New";
+        if (name.find(L"Calibri") != std::wstring::npos) return u"Calibri";
+        if (name.find(L"DejaVu Sans") != std::wstring::npos) return u"DejaVu Sans";
+        return u"Segoe UI";
     }
 
 private:
     uint32_t m_refCount{1};
     std::wstring m_faceName;
+    std::shared_ptr<micant::um::graphics::FontManager> m_font;
+    bool m_loaded{};
 };
 
 class FontImpl : public IDWriteFont {
@@ -512,36 +539,64 @@ public:
     }
     void __stdcall GetMetrics(DWRITE_FONT_METRICS* fontMetrics) override {
         if (!fontMetrics) return;
-        fontMetrics->designUnitsPerEm = 2048;
-        fontMetrics->ascent = 1854;
-        fontMetrics->descent = 434;
-        fontMetrics->lineGap = 67;
-        fontMetrics->capHeight = 1456;
-        fontMetrics->xHeight = 1024;
-        fontMetrics->underlinePosition = -217;
-        fontMetrics->underlineThickness = 150;
-        fontMetrics->strikethroughPosition = 530;
-        fontMetrics->strikethroughThickness = 130;
+        *fontMetrics = {};
+        if (!ensureFont()) return;
+        const auto& metrics = m_font->metrics();
+        fontMetrics->designUnitsPerEm = metrics.unitsPerEm;
+        fontMetrics->ascent = metrics.ascender > 0 ? static_cast<uint16_t>(metrics.ascender) : 0;
+        fontMetrics->descent = metrics.descender < 0 ? static_cast<uint16_t>(-metrics.descender) : 0;
+        fontMetrics->lineGap = metrics.lineGap;
+        fontMetrics->capHeight = metrics.capHeight > 0 ? static_cast<uint16_t>(metrics.capHeight) : 0;
+        fontMetrics->xHeight = metrics.xHeight > 0 ? static_cast<uint16_t>(metrics.xHeight) : 0;
+        fontMetrics->underlinePosition = metrics.underlinePosition;
+        fontMetrics->underlineThickness = metrics.underlineThickness > 0
+            ? static_cast<uint16_t>(metrics.underlineThickness) : 0;
+        fontMetrics->strikethroughPosition = metrics.strikethroughPosition;
+        fontMetrics->strikethroughThickness = metrics.strikethroughThickness > 0
+            ? static_cast<uint16_t>(metrics.strikethroughThickness) : 0;
     }
     int32_t __stdcall CreateFontFace(IDWriteFontFace** fontFace) override {
         if (!fontFace) return ole32::E_POINTER;
-        *fontFace = new FontFaceImpl(m_name, m_weight, m_style);
+        *fontFace = nullptr;
+        if (!ensureFont()) return ole32::E_FAIL;
+        auto* face = new FontFaceImpl(m_name, m_weight, m_style, m_font);
+        if (!face->valid()) { face->Release(); return ole32::E_FAIL; }
+        *fontFace = face;
         return ole32::S_OK;
     }
 
 private:
+    [[nodiscard]] bool ensureFont() const noexcept {
+        std::lock_guard guard(m_fontMutex);
+        if (m_loaded) return true;
+        micant::um::graphics::LogicalFontRequest request{};
+        request.requestedFamily = FontFaceImpl::logicalFamily(m_name);
+        request.weight = static_cast<uint16_t>(m_weight);
+        request.italic = m_style != DWRITE_FONT_STYLE_NORMAL;
+        request.pointSize = 9;
+        request.dpi = 96;
+        if (!m_font) m_font = std::make_shared<micant::um::graphics::FontManager>();
+        m_loaded = m_font->initializeForMetrics(request);
+        return m_loaded;
+    }
     uint32_t m_refCount{1};
     std::wstring m_name;
     DWRITE_FONT_WEIGHT m_weight;
     DWRITE_FONT_STYLE m_style;
+    mutable std::shared_ptr<micant::um::graphics::FontManager> m_font;
+    mutable bool m_loaded{};
+    mutable std::mutex m_fontMutex;
 };
 
 class FontFamilyImpl : public IDWriteFontFamily {
 public:
     FontFamilyImpl(std::wstring familyName) : m_familyName(std::move(familyName)) {
         m_fonts.push_back(std::make_shared<FontImpl>(m_familyName + L" Regular", DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL));
+        if (m_familyName == L"Segoe UI")
+            m_fonts.push_back(std::make_shared<FontImpl>(m_familyName + L" Semibold", DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL));
         m_fonts.push_back(std::make_shared<FontImpl>(m_familyName + L" Bold", DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL));
         m_fonts.push_back(std::make_shared<FontImpl>(m_familyName + L" Italic", DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC));
+        m_fonts.push_back(std::make_shared<FontImpl>(m_familyName + L" Bold Italic", DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC));
     }
 
     int32_t __stdcall QueryInterface(const ole32::IID&, void** ppv) override {
@@ -581,10 +636,11 @@ class FontCollectionImpl : public IDWriteFontCollection {
 public:
     FontCollectionImpl() {
         m_families.push_back(std::make_shared<FontFamilyImpl>(L"Segoe UI"));
-        m_families.push_back(std::make_shared<FontFamilyImpl>(L"Consolas"));
-        m_families.push_back(std::make_shared<FontFamilyImpl>(L"Cascadia Code"));
+        m_families.push_back(std::make_shared<FontFamilyImpl>(L"Arial"));
         m_families.push_back(std::make_shared<FontFamilyImpl>(L"Calibri"));
         m_families.push_back(std::make_shared<FontFamilyImpl>(L"Times New Roman"));
+        m_families.push_back(std::make_shared<FontFamilyImpl>(L"Courier New"));
+        m_families.push_back(std::make_shared<FontFamilyImpl>(L"DejaVu Sans"));
     }
 
     int32_t __stdcall QueryInterface(const ole32::IID&, void** ppv) override {
@@ -1004,11 +1060,16 @@ private:
 // ============================================================================
 
 inline int32_t __stdcall DWriteCreateFactory(
-    DWRITE_FACTORY_TYPE,
-    const ole32::IID&,
+    DWRITE_FACTORY_TYPE factoryType,
+    const ole32::IID& iid,
     ole32::IUnknown** factory)
 {
     if (!factory) return ole32::E_POINTER;
+    *factory = nullptr;
+    if (factoryType != DWRITE_FACTORY_TYPE_SHARED && factoryType != DWRITE_FACTORY_TYPE_ISOLATED)
+        return ole32::E_INVALIDARG;
+    if (iid != IID_IDWriteFactory && iid != ole32::IID_IUnknown)
+        return ole32::E_NOINTERFACE;
     *factory = new FactoryImpl();
     return ole32::S_OK;
 }
