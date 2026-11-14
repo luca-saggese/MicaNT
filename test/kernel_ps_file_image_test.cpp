@@ -16,6 +16,20 @@ NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& referenc
 
 namespace {
 
+void reportFailure(const char* stage, micant::NtStatus status) noexcept {
+    auto write = [](char value) noexcept {
+        uint8_t ready{};
+        do { __asm__ __volatile__("inb %1, %0" : "=a"(ready) : "Nd"(uint16_t{0x3fd})); }
+        while (!(ready & 0x20));
+        __asm__ __volatile__("outb %0, %1" : : "a"(static_cast<uint8_t>(value)), "Nd"(uint16_t{0x3f8}));
+    };
+    for (; *stage; ++stage) write(*stage);
+    write('=');
+    static constexpr char digits[] = "0123456789ABCDEF";
+    for (int shift = 28; shift >= 0; shift -= 4) write(digits[(static_cast<uint32_t>(status) >> shift) & 0xf]);
+    write('\r'); write('\n');
+}
+
 struct ScopedHandle {
     micant::Handle value{};
     ~ScopedHandle() {
@@ -144,6 +158,113 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
             return false;
         }
         if (process.closeAddressSpace() != NtStatus::Success) return false;
+
+        // Exercise the same M4 ownership chain used by a native executable:
+        // create an Ob-owned process from this section, start its mapped PE
+        // entry point as a real CPL3 thread, and wait for both lifetimes.
+        ScopedHandle parentHandle;
+        ps::EProcess* parentProcess{};
+        status = ps::detail::createProcessHandle(ob::SYNCHRONIZE | 0x0080,
+            parentHandle.value, parentProcess);
+        if (status != NtStatus::Success || !parentHandle.value || !parentProcess) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE parent creation", status);
+            return false;
+        }
+        ScopedHandle processHandle;
+        status = sys::NtCreateProcessExFromKernel(&processHandle.value,
+            ob::SYNCHRONIZE | 0x0001 | 0x0002 | 0x0008 | 0x0040,
+            nullptr, parentHandle.value, 0, sectionHandle.value, 0, 0, false);
+        if (status != NtStatus::Success || !processHandle.value) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE process creation", status);
+            return false;
+        }
+
+        ScopedReference processObjectReference;
+        ps::EProcess* createdProcess{};
+        status = ps::detail::referenceProcessHandle(processHandle.value, 0,
+            createdProcess, processObjectReference.value);
+        if (status != NtStatus::Success || !createdProcess ||
+            !createdProcess->nativeImagesFinalized() || !createdProcess->nativeImages()) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE process reference/images", status);
+            return false;
+        }
+        const auto* mainModule = createdProcess->nativeImages()->module(0);
+        if (!mainModule || !mainModule->base ||
+            mainModule->view.headers().optionalHeader.addressOfEntryPoint >= mainModule->image.size() ||
+            mainModule->base > UINTPTR_MAX - mainModule->view.headers().optionalHeader.addressOfEntryPoint) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE process entry point", NtStatus::InvalidImageFormat);
+            return false;
+        }
+        const uintptr_t entry = mainModule->base +
+            mainModule->view.headers().optionalHeader.addressOfEntryPoint;
+
+        ScopedHandle threadHandle;
+        ps::EThread* createdThread{};
+        auto* callerThread = ke::KeGetCurrentThread();
+        if (!callerThread || !callerThread->directoryTableBase) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE caller context", NtStatus::InvalidDeviceState);
+            return false;
+        }
+        const auto previousAttachDepth = callerThread->processAttachDepth;
+        const auto previousRoot = callerThread->directoryTableBase;
+        ke::KAPC_STATE attachState{};
+        ke::KeStackAttachProcess(createdProcess, &attachState);
+        const bool attached = callerThread->attachedProcess == createdProcess &&
+            callerThread->directoryTableBase == createdProcess->getDirectoryTableBase() &&
+            callerThread->processAttachDepth == previousAttachDepth + 1;
+        if (attached) {
+            status = ps::detail::createUserThreadHandle(*createdProcess, entry,
+                32768, 8 * mm::PageSize4KB, true,
+                ob::SYNCHRONIZE | 0x0001 | 0x0040,
+                threadHandle.value, createdThread);
+            if (status == NtStatus::Success && (!threadHandle.value || !createdThread))
+                status = NtStatus::Unsuccessful;
+            if (status == NtStatus::Success) status = createdThread->ready();
+        } else {
+            status = NtStatus::Unsuccessful;
+        }
+        if (attached) ke::KeUnstackDetachProcess(&attachState);
+        if (callerThread->processAttachDepth != previousAttachDepth ||
+            callerThread->directoryTableBase != previousRoot || callerThread->attachedProcess) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE attach restoration", NtStatus::Unsuccessful);
+            return false;
+        }
+        if (status != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE initial thread create/ready", status);
+            return false;
+        }
+        const auto waitAttachDepth = callerThread->processAttachDepth;
+        ke::KAPC_STATE waitAttachState{};
+        ke::KeStackAttachProcess(createdProcess, &waitAttachState);
+        const bool waitAttached = callerThread->attachedProcess == createdProcess &&
+            callerThread->directoryTableBase == createdProcess->getDirectoryTableBase() &&
+            callerThread->processAttachDepth == waitAttachDepth + 1;
+        if (waitAttached) status = sys::NtWaitForSingleObject(threadHandle.value, false, nullptr);
+        else status = NtStatus::Unsuccessful;
+        const auto threadExitStatus = waitAttached ? createdThread->exitStatus() : status;
+        if (waitAttached && status == NtStatus::Success) {
+            const auto closeStatus = sys::NtClose(threadHandle.value);
+            if (closeStatus != NtStatus::Success) status = closeStatus;
+            else threadHandle.value = 0;
+        }
+        if (waitAttached) ke::KeUnstackDetachProcess(&waitAttachState);
+        if (callerThread->processAttachDepth != waitAttachDepth ||
+            callerThread->directoryTableBase != previousRoot || callerThread->attachedProcess)
+            return false;
+        if (status != NtStatus::Success || threadExitStatus != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE initial thread exit/wait",
+                status != NtStatus::Success ? status : threadExitStatus);
+            return false;
+        }
+        status = sys::NtWaitForSingleObject(processHandle.value, false, nullptr);
+        if (status != NtStatus::Success || createdProcess->exitStatus() != NtStatus::Success ||
+            createdProcess->activeThreadCount() != 0) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE process exit/wait",
+                status != NtStatus::Success ? status : createdProcess->exitStatus());
+            return false;
+        }
+        if (sys::NtClose(processHandle.value) != NtStatus::Success) return false;
+        processHandle.value = 0;
     }
 
     drainDeferredDeletes();

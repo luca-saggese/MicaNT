@@ -99,6 +99,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   Verificare parent handle e diritti, attributi e flags supportati, access mode,
   metadata loader, handle inheritance, pubblicazione dell'handle e rollback di
   ogni fase. Gli input o flags non supportati devono fallire esplicitamente.
+  Un test QEMU integrato crea ora un processo Ob-owned da `SEC_IMAGE` file-backed
+  e verifica immagini finalizzate; il rollback esaustivo delle fasi e gli altri
+  access mode supportati restano aperti.
   QEMU CPL3 verifica ora il rifiuto con handle nullo per flag ignoti, debug port,
   exception port e `InJob`, oltre al rifiuto di un parent handle senza
   `PROCESS_CREATE_PROCESS`. Verifica inoltre la cattura syscall di un
@@ -131,6 +134,8 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   La nuova prova CPL3 termina inoltre un thread sospeso con un APC pendente e
   controlla stato di uscita, wait segnalato, mancata esecuzione dell'APC e
   chiusura dell'handle.
+  La fixture file-backed avvia anche un thread dal vero entry point PE, ne
+  attende l'uscita via syscall e chiude l'handle nel processo proprietario.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
@@ -144,7 +149,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   terminazione. Il thunk NTDLL `NtTerminateThread` ora usa il servizio syscall
   canonico; QEMU CPL3 termina il thread corrente con `STATUS_ACCESS_DENIED` e il
   waiter osserva lo status previsto. Resta da generalizzare e stressare gli
-  altri stati e le combinazioni di thread/processo.
+  altri stati e le combinazioni di thread/processo. QEMU verifica inoltre la
+  terminazione del processo file-backed quando l'ultimo thread PE chiama
+  `NtTerminateThread`, wait sui due oggetti e recupero PFN dopo il teardown.
 - [ ] **Completare attese e lifetime degli oggetti di processo/thread.**
   Verificare timeout, alertability/APC, cancellazione, chiusura dell'ultimo
   handle durante l'attesa, riferimenti trattenuti, CID lookup e reaping in ogni
@@ -196,12 +203,20 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   dell'immagine principale con recupero PFN.
 - [x] `NtCreateProcessEx` da section file-backed `SEC_IMAGE` verificato sul
   percorso reale AHCI/FAT32, come riportato nella riga M4 della milestone.
+- [x] Processo file-backed `SEC_IMAGE` eseguito in CPL3: QEMU verifica thread
+  d'entry PE, terminazione syscall, wait/close nelle handle table corrette,
+  attach/restore e recupero PFN dopo il teardown.
 - [x] Il fix del control word x87 `0x037f` e dei selettori DS/ES nel contesto
   APC elimina il precedente `STATUS_INVALID_PARAMETER`/`#UD`; commit
   `cf1f4d9`. Il test APC esteso resta aperto come descritto sopra.
 
 ## Stato QEMU annotato
 
+- Verifica end-to-end processo/thread da PE file-backed: `TMPDIR=/private/tmp
+  python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-fileimage-lifecycle-final` è passata. Anche i test
+  bootstrap a due/tre thread, timer-preemption Ring 0/Ring 3, APC/DPC, reaper,
+  PS/2 e seriale stabile per 5 secondi sono verdi.
 - Verifica integrata del test CPL3 di terminazione del thread sospeso con APC
   pendente: `python3 qemu.py --headless --timeout 120 --diagnostics-dir
   /private/tmp/micant-m4-suspended-apc-retry` è passata. Sono verdi i marker di
