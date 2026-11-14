@@ -44,7 +44,8 @@ def sha256(path: Path) -> str:
 
 
 def inspect_pe(
-    path: Path, expected_subsystem: str, *, allow_imports: bool = False
+    path: Path, expected_subsystem: str, *, allow_imports: bool = False,
+    allow_no_entry_point: bool = False,
 ) -> dict[str, int]:
     data = path.read_bytes()
     if len(data) < 0x40 or data[:2] != b"MZ":
@@ -77,7 +78,7 @@ def inspect_pe(
         fail(f"{path}: expected PE32+ optional header, got 0x{magic:04x}")
     if expected_subsystem_value is None or subsystem != expected_subsystem_value:
         fail(f"{path}: unexpected PE subsystem {subsystem}")
-    if entry_rva == 0 or entry_rva >= image_size:
+    if (entry_rva == 0 and not allow_no_entry_point) or entry_rva >= image_size:
         fail(f"{path}: entry point RVA is outside the PE image")
     if section_count == 0:
         fail(f"{path}: PE image has no sections")
@@ -86,22 +87,23 @@ def inspect_pe(
     if section_table + section_count * 40 > len(data):
         fail(f"{path}: truncated PE section table")
 
-    executable_entry = False
-    for index in range(section_count):
-        section = section_table + index * 40
-        virtual_size, virtual_address, raw_size = struct.unpack_from(
-            "<III", data, section + 8
-        )
-        characteristics = struct.unpack_from("<I", data, section + 36)[0]
-        section_end = virtual_address + max(virtual_size, raw_size)
-        if (
-            virtual_address <= entry_rva < section_end
-            and characteristics & 0x20000000
-        ):
-            executable_entry = True
-            break
-    if not executable_entry:
-        fail(f"{path}: entry point is not in an executable section")
+    if entry_rva:
+        executable_entry = False
+        for index in range(section_count):
+            section = section_table + index * 40
+            virtual_size, virtual_address, raw_size = struct.unpack_from(
+                "<III", data, section + 8
+            )
+            characteristics = struct.unpack_from("<I", data, section + 36)[0]
+            section_end = virtual_address + max(virtual_size, raw_size)
+            if (
+                virtual_address <= entry_rva < section_end
+                and characteristics & 0x20000000
+            ):
+                executable_entry = True
+                break
+        if not executable_entry:
+            fail(f"{path}: entry point is not in an executable section")
 
     if optional_size < 112:
         fail(f"{path}: truncated PE data-directory count")

@@ -6,6 +6,47 @@ This is the integration progress record required by
 specification. The compatibility inventory is
 [FREESTANDING_GAP_MATRIX.md](FREESTANDING_GAP_MATRIX.md).
 
+## 2026-11-14 — dynamic memory bootstrap migration (in progress)
+
+- UEFI memory-map retrieval now retries with `AllocatePool` when the current
+  buffer is too small. Descriptor normalization is sized to the complete map
+  count; the former 512-entry truncation is removed.
+- Handoff V8 carries dynamically allocated PFN metadata and an available-range
+  array. Kernel initialization validates strided descriptors, address/size
+  arithmetic, overlap, memory type and all conventional RAM extents; holes and
+  runtime/MMIO/reserved regions remain unavailable. PFN metadata is sized to
+  the highest conventional PFN, including holes marked unavailable.
+- AMD64 exposes a locked, one-page supervisor physical aperture for validated
+  PFN access. The bootstrap heap retains pointers, so its mapping callback now
+  verifies the full identity mapping before exposing a physical address. The
+  supervisor device aperture grows in slot 129 and is sized to the slot; its
+  first page is reserved for firmware-copy scratch mappings. The former 16 MiB
+  framebuffer and staged-image validation caps have been removed.
+- Process VAD backend reach now spans the lower-half user PML4 slots 133–255
+  (architecture-derived 61.5 TiB); bootstrap-owned slots 129–132 remain
+  supervisor mappings. PE preferred-base checks and stack
+  allocation no longer use the former 16 MiB window as a general limit. The
+  TLS test maps a DLL at 200 MiB. The Ps fixture contains a 20 MiB reserved
+  stack test and overflow rejection.
+- QEMU 2 GiB and 4 GiB runs with the dynamic UEFI map reached the marker
+  proving a PFN above 1 GiB was allocated, mapped, written, freed, zeroed and
+  reallocated. The 2 GiB run passed the 20 MiB stack, 200 MiB DLL, stack-growth
+  and Ring 3 syscall tests, then hit `#UD` in `EThread::prepareUserApc`. The
+  4 GiB run initialized 1,572,864 PFN entries, reached the same high-PFN marker
+  and entered the Ring 3 syscall suite before timeout. A 1 GiB run initialized
+  261,702 PFN entries from 98 UEFI descriptors but timed out in that suite.
+  The 512 MiB profile reached a separate timer stack-bound `#UD` in one run and
+  timed out during process setup in a subsequent run. The 256 MiB
+  profile did not reach the bootloader (OVMF returned to its shell with
+  `Out of Resources`); 512 MiB and larger boots reached later Ps tests.
+- Full QEMU runs are not passing yet. Earlier runs hit `#UD` at
+  `EThread::prepareUserApc`; the latest 1 GiB run stalls in the Ring 3 process
+  syscall suite before producing a trap record. Explorer was not reached. This
+  work is therefore implemented in part and unverified as an integrated
+  milestone. The remaining concrete work is to resolve the Ps suite failure,
+  complete memory-pressure/rollback and fragmented-map coverage, run all
+  viable profiles, then resume Explorer E1-E6.
+
 ## Verified baseline
 
 - One active modular AMD64 Native PE kernel, no external PE imports.
@@ -46,6 +87,51 @@ Reproduced from the current sources, not by accepting an old kernel binary:
 | `cmake -S . -B build/host-check -G Ninja && cmake --build build/host-check --target micant_tests -j 4` | Failed before test execution on existing host-build errors in `ntdll.hpp` and inline assembly |
 | `python3 -m unittest discover -s test -p test_explorer_runtime.py -v` | 12 passed |
 | `python3 scripts/verify_kernel_architecture.py` | Passed |
+
+### E0: monolithic desktop recovery map
+
+| Legacy behavior | Canonical implementation | Difference | Smallest integration step |
+|---|---|---|---|
+| Polled PS/2 mouse, bounded input queue and cursor | `kernel/init/kiinit.cpp` input service and `kernel/hal/amd64_bootstrap.cpp` | The mouse packet is hit-tested against visible windows and queues move/button, focus and activation messages. Keyboard bytes are captured in a PS/2 ring but are not decoded into Win32 messages. | Decode supported PS/2 scan codes and route key events to the foreground thread's process queue. |
+| Window/class table and message queue | `kernel/win32k/freestanding.cpp` via syscall `0x86` | Classes, windows and messages are owned by Ps process ID; lookup, enumeration and dequeue are isolated; z-order, hit testing and process rundown are connected. Paint invalidation and surfaces are not associated with windows yet. | Connect WM_PAINT/invalidation and per-window surfaces to the Ring 3 graphics client. |
+| Per-window software surfaces and 2D blits | `kernel/ps/winnt_win32k_server.cpp` user DLL plus syscall `0x81` | The built client DLL owns fixed global pixel arenas; it is neither an independent compositor process nor isolated per application. | Move surface ownership to canonical section-backed objects and submit validated handles to a Ring 3 compositor. |
+| Desktop/taskbar and interactive window loop | `tools/explorer_shell_app.cpp`, `tools/explorer_shell/*`; boot still calls `drawExplorerDesktop()` in Ring 0 | The shell PE links, but the kernel does not create its Ps process or keep its entrypoint running. | Complete SEC_IMAGE dependency loading and DLL initialization, then create Explorer's Ps process and user thread. |
+| VirtIO-GPU 2D scanout | `drivers/virtio_gpu/virtio_gpu.cpp` through the boot display service | QEMU scanout is operational; blending remains software and shell pixels still enter through the bootstrap presentation service. | Route the compositor's final frame to the existing display owner and preserve bounded present/completion handling. |
+
+The archived desktop path did perform interactive drawing and input against
+its display driver. Its window placement, menu/taskbar state and input hit
+testing were embedded in the monolithic kernel loop. The “driver composition”
+message at legacy service `0x85` only selected a reported path; it is not
+evidence of GPU blending. No legacy behavior is copied into production from
+`old/` by this increment.
+
+The canonical Win32k manager now records the caller's allocated Ps process ID
+for classes, windows and queued messages. The syscall dispatcher supplies that
+identity from `KeGetCurrentProcess`; callers cannot choose it in the shared
+request. Lookup, enumeration and message removal are process-scoped. Ps calls
+`releaseProcess` after a successful address-space close, before destroying the
+process paging root, to release window-manager state and user procedure
+pointers. The owner-zero bootstrap ABI probe remains supported and separate
+from any Ps process. The focused contract test was extended for cross-process
+handle isolation, message-queue isolation and rundown.
+
+Verification of this increment:
+
+| Command | Result |
+|---|---|
+| `c++ -std=c++23 -Wall -Wextra -Werror -I include test/win32k_freestanding_test.cpp kernel/win32k/freestanding.cpp -o /private/tmp/micant-explorer-win32k-contract && /private/tmp/micant-explorer-win32k-contract` | Passed; two-owner lookup/enumeration/queue isolation, process rundown, mouse hit testing and client-coordinate packing |
+| `MICANT_CXX=<LLVM-MinGW> python3 qemu.py --headless` | Passed after the Win32k input integration; `ntoskrnl_core_baremetal` linked, boot stable, VirtIO scanout and PS/2 movement/click delivered. This boot did not launch Explorer. |
+| `python3 scripts/verify_kernel_architecture.py` | Passed; modular startup remains canonical and `old/` is not a build input |
+
+The file-image fixture's NTDLL staging dependency is now an explicit CMake
+target dependency; this prevents the POST_BUILD copy from racing its generated
+PE. The Explorer closure verifier now accepts valid native-subsystem DLLs and
+DLLs with no optional entrypoint while still requiring Explorer itself to be
+Windows GUI. With that check corrected, the linked runtime still fails closure:
+Kernel32 lacks 15 required exports and UCRT lacks 16; these are unresolved
+runtime requirements, not synthetic bindings. The first launch blocker remains
+real DLL initialization and runtime closure, before a user thread can reach the
+Explorer entrypoint.
 
 ### User-mode Win32k boundary increment
 
@@ -759,8 +845,10 @@ a read-only page and a decommitted page, checking the fault address and error
 code. The diagnostic temporarily enables supervisor write protection and uses
 its own IDT before restoring the previous state.
 
-Both the bootstrap and process tests use a bounded 16 MiB window; only the
-process-root path provides the isolation described above. The backend requires the BSP with interrupts
+Historical note (superseded 2026-11-14): both the bootstrap and process tests
+used a bounded 128 MiB window. The current process-root backend spans the
+architecture-derived lower-half PML4 slots 133–255; slot 128 remains only for
+the isolated bootstrap probes. The backend requires the BSP with interrupts
 disabled and has no SMP TLB shootdown. Commit eagerly allocates physical pages;
 private pages support read-only, read-write and execute/read protection. Demand paging and
 general NT syscall coverage remain unimplemented.
@@ -1284,7 +1372,9 @@ intrusive PFN links replace dynamic page lists. Native metadata is borrowed,
 not allocated through a hosted runtime. Hosted legacy initialization remains
 available. Initial native pages are Free, never falsely reported Zeroed.
 
-The boot integration owns stable metadata for **65,536 PFNs (256 MiB)**.
+Historical note (superseded 2026-11-14): the boot integration owned stable
+metadata for **65,536 PFNs (256 MiB)**. The current handoff sizes metadata from
+the highest UEFI conventional-memory PFN and retains unavailable holes.
 It validates descriptor version/stride/range/overlap and supervisor mappings,
 enrolls only non-runtime conventional pages above the first MiB, and leaves
 all other PFNs reserved. Higher and intentionally unmanaged conventional
@@ -1522,3 +1612,49 @@ future acceptance gates for crash/debug, SMP, ACPI/power, IOMMU/DMA, PnP,
 memory pressure, hardening, timekeeping and virtualization. No implementation,
 freestanding linkage, QEMU result or physical-hardware result is asserted by
 this planning record. Existing historical evidence above remains unchanged.
+
+### Explorer Ring 3 integration checkpoint — 2026-11-14
+
+E0 reference comparison (the `old/` implementation remains archival):
+
+| Monolithic behavior | Canonical implementation | Difference found | Minimum integration |
+|---|---|---|---|
+| Desktop/taskbar drawn by `DrawSurShellDesktop` and boot-video pixel routines | `tools/explorer_shell_app.cpp`, Explorer shell modules and User32/GDI32 clients | The old desktop is a kernel-owned framebuffer UI; canonical Explorer had been built but was not staged or launched | Stage Explorer on the mounted System32 volume and start it through Io, `SEC_IMAGE`, Ps and NTDLL |
+| Up to eight manually tracked shell windows; only one active drawing panel | Process-scoped Win32k classes/windows and message queue | Old hit testing, drag/resize and painting are coupled to the monolithic loop; Win32k owns the canonical state but has a narrower ABI | Drive class registration, creation, paint and event-loop calls from Explorer, with process identity and teardown in Win32k |
+| Per-pixel drawing and cursor save/restore directly on the scanout framebuffer | User-mode DIB/client surfaces, Win32k present requests, canonical display driver's `PresentFrame` | No protected per-window surface ownership or independent Ring 3 compositor in the monolith; kernel cursor overlay was competing with user presentation | Keep app surfaces process-owned, compose in a Ring 3 service, send final dirty regions through the existing display service |
+| Polled PS/2 packets update kernel hit testing and the visible cursor | Canonical PS/2 polling and Win32k input request path | The boot shell consumed the same packets and redrew its own framebuffer, preventing Explorer from being the input owner | Leave packet consumption to the Win32k syscall path and let user-mode queues dispatch it |
+| Boot-start display callback presents pixels; the old driver may use VirtIO 2D | Canonical `drivers/virtio_gpu/virtio_gpu.cpp` supports 2D and contains an optional VirGL path | In this QEMU run the canonical driver declined startup because a safe DMA allocator was unavailable; GOP fallback is not VirtIO evidence | Resolve the canonical DMA/backend initialization dependency before claiming E4/E5 |
+
+Explorer's PE import closure and all native-user-mode include-boundary checks
+pass. The bare-metal kernel links with the new `explorer_runtime_boot` target,
+the boot staging now copies `explorer.exe`, and the System32 staging no longer
+overwrites the production `ntdll.dll` with the file-image probe DLL. Ps now
+accepts DLL entrypoints only when they are in executable image ranges, and its
+file-backed loader has a bounded fallback mapping the generated
+`api-ms-win-crt-*` imports to the project's `ucrtbase.dll` when no API-set
+schema is present. Unsupported non-CRT API-set contracts still fail.
+
+The QEMU launch attempt has not reached Explorer. `qemu.py --headless` links
+the real `ntoskrnl_core_baremetal` and passes the earlier CPL3/scanout probes,
+then faults with vector 6 at `MicantBootstrapTimerInterrupt+0x52` (the stack
+range guard), after `[MicaNT Ps] Process-owned CPL3 context and termination
+verified` and before the two-user-thread milestone. One earlier boot reached
+the launch call and exposed that the BSP thread has no current `EProcess`; the
+launcher now supplies a handle to the canonical Ps System process as parent.
+That parent-path change has compiled but has not been exercised in QEMU due to
+the recurring timer guard trap. Explorer entrypoint, first window and input
+therefore remain unverified. The last diagnostics are retained under
+`build/explorer-ring3-qemu-8/serial.log` in the isolated worktree.
+
+| Command | Result |
+|---|---|
+| `cmake --build build/qemu-cmake-mingw --config Release --target ntoskrnl_core_baremetal explorer_runtime_boot` | Passed; canonical kernel linked and Explorer runtime built |
+| `python3 scripts/verify_kernel_architecture.py` | Passed; one modular startup, no monolith build input |
+| `python3 qemu.py --check-explorer` | Passed; Explorer transitive PE import closure only |
+| `python3 qemu.py --headless --timeout 180` | Failed before Explorer startup at the Ke timer stack guard described above |
+
+E2 is not accepted: the actual Explorer user-mode first window has not been
+observed. E3 has no standalone Ring 3 compositor. E4 has not presented Explorer
+through the canonical VirtIO driver. E5 has not shown GPU composition submission
+and completion; the existence of VirGL code is not runtime evidence. E6 has not
+been run.

@@ -479,6 +479,25 @@ public:
         return pfn;
     }
 
+    [[nodiscard]] uint64_t allocatePageInRange(uint64_t firstPfn, uint64_t lastPfn) {
+        Guard guard(*this);
+        if (!firstPfn || firstPfn > lastPfn || firstPfn >= entries_.size()) return 0;
+        if (lastPfn >= entries_.size()) lastPfn = entries_.size() - 1;
+        for (uint64_t pfn = firstPfn; pfn <= lastPfn; ++pfn) {
+            auto& entry = entries_[static_cast<size_t>(pfn)];
+            if (entry.location != PageLocation::FreePageList &&
+                entry.location != PageLocation::ZeroedPageList &&
+                entry.location != PageLocation::StandbyPageList) continue;
+            if (!removeFromListLocked(pfn)) return 0;
+            entry.location = PageLocation::ActiveAndValid;
+            entry.referenceCount = 1;
+            entry.modified = false;
+            ++activeCount_;
+            return pfn;
+        }
+        return 0;
+    }
+
     void freePage(uint64_t pfn) {
         Guard guard(*this);
         releasePageLocked(pfn);
@@ -951,6 +970,21 @@ public:
         return nullptr;
     }
 
+    [[nodiscard]] uintptr_t nextStartingAddress(uintptr_t address) const noexcept {
+        Guard lock(*this);
+        const VirtualAddressDescriptor* current = root_.get();
+        uintptr_t next{};
+        while (current) {
+            if (current->startingAddress > address) {
+                next = current->startingAddress;
+                current = current->left.get();
+            } else {
+                current = current->right.get();
+            }
+        }
+        return next;
+    }
+
     [[nodiscard]] uintptr_t findFreeRange(
         size_t size,
         size_t alignment = PageSize4KB,
@@ -1125,6 +1159,16 @@ public:
         // Replace a present user leaf atomically, only if it still references
         // the expected PFN; failure leaves the original mapping unchanged.
         bool (*replace)(void*, uintptr_t, uint64_t, uint64_t, uint32_t) noexcept {nullptr};
+    };
+
+    struct QueryRegion {
+        uintptr_t baseAddress{};
+        uintptr_t allocationBase{};
+        size_t regionSize{};
+        uint32_t allocationProtect{};
+        uint32_t state{};
+        uint32_t protect{};
+        uint32_t type{};
     };
 
     ProcessAddressSpace() : nextFreeAddress_(0x0000000100000000ULL) {}
@@ -1823,6 +1867,45 @@ public:
 
     [[nodiscard]] const VirtualAddressDescriptor* findVad(uintptr_t addr) const noexcept {
         return vadTree_.find(addr);
+    }
+
+    [[nodiscard]] bool queryRegion(uintptr_t address, QueryRegion& result) const noexcept {
+        if (address > UserSpaceMax) return false;
+        Guard lock(*this);
+        const uintptr_t page = address & ~static_cast<uintptr_t>(PageMask4KB);
+        const auto* vad = vadTree_.find(address);
+        if (!vad) {
+            const uintptr_t next = vadTree_.nextStartingAddress(page);
+            const uintptr_t end = next ? next - 1 : UserSpaceMax;
+            if (end < page) return false;
+            result = {page, 0, static_cast<size_t>(end - page + 1), PAGE_NOACCESS,
+                      0x00010000U, PAGE_NOACCESS, 0};
+            return true;
+        }
+
+        constexpr uint32_t MemCommit = 0x00001000U;
+        constexpr uint32_t MemReserve = 0x00002000U;
+        constexpr uint32_t MemPrivate = 0x00020000U;
+        constexpr uint32_t MemMapped = 0x00040000U;
+        constexpr uint32_t MemImage = 0x01000000U;
+        const uint32_t type = vad->isImageView ? MemImage :
+            (vad->isSectionView ? MemMapped : MemPrivate);
+        const size_t pageCount = vad->pageCount();
+        if (vad->commitCharge == 0 || vad->commitCharge == pageCount) {
+            const uint32_t state = vad->commitCharge ? MemCommit : MemReserve;
+            result = {vad->startingAddress, vad->startingAddress, vad->size(),
+                vad->protection, state, state == MemCommit ? vad->protection : PAGE_NOACCESS, type};
+            return true;
+        }
+
+        const uint64_t vpn = page >> PageShift4KB;
+        const VirtualAddressDescriptor::CommitRange* committed = vad->commitRanges.get();
+        while (committed && !(vpn >= committed->firstVpn && vpn <= committed->lastVpn))
+            committed = committed->next.get();
+        const uint32_t state = committed ? MemCommit : MemReserve;
+        result = {page, vad->startingAddress, PageSize4KB, vad->protection, state,
+            committed ? committed->protection : PAGE_NOACCESS, type};
+        return true;
     }
 
     NtStatus setStackGuard(uintptr_t address, bool guarded) noexcept {

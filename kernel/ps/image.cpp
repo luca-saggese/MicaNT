@@ -7,6 +7,9 @@
 #include <new>
 #include <cstring>
 
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+
 namespace micant::sys {
 NtStatus mapBootstrapImageView(mm::ProcessAddressSpace& space, uintptr_t& base, size_t size) noexcept;
 NtStatus mapBootstrapFileImageView(mm::ProcessAddressSpace& space, uintptr_t& base,
@@ -20,6 +23,15 @@ NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& referenc
 
 namespace micant::ps {
 namespace {
+void traceImageInitializationFailure(const char* stage, NtStatus status) noexcept {
+    if (status == NtStatus::Success) return;
+    MicantNetbootSerialWrite("[MicaNT Ps] SEC_IMAGE initialization ");
+    MicantNetbootSerialWrite(stage);
+    MicantNetbootSerialWrite(" failed status=");
+    MicantNetbootSerialWriteNumber(static_cast<uint32_t>(status));
+    MicantNetbootSerialWrite("\r\n");
+}
+
 bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t address,
                               std::span<const std::u16string_view> paths) noexcept;
 
@@ -343,8 +355,7 @@ private:
     }
     NtStatus validateSchema() noexcept {
         if (namespace_.version != 6 || namespace_.size < sizeof(namespace_) ||
-            namespace_.size > schemaSize_ || namespace_.size > 16 * 1024 * 1024 ||
-            !namespace_.count || namespace_.count > 65536 ||
+            namespace_.size > schemaSize_ || !namespace_.count ||
             !namespace_.hashFactor ||
             !checkedArray(namespace_.entryOffset, namespace_.count, sizeof(ApiSetNamespaceEntryV6), namespace_.size) ||
             !checkedArray(namespace_.hashOffset, namespace_.count, sizeof(ApiSetHashEntryV6), namespace_.size))
@@ -494,6 +505,17 @@ bool isApiSetContractName(std::string_view name) noexcept {
            name[3] == '-';
 }
 
+bool isUniversalCrtApiSet(std::string_view name) noexcept {
+    constexpr std::string_view prefix = "api-ms-win-crt-";
+    if (name.size() < prefix.size()) return false;
+    for (size_t index = 0; index < prefix.size(); ++index) {
+        const char value = name[index] >= 'A' && name[index] <= 'Z'
+            ? static_cast<char>(name[index] + ('a' - 'A')) : name[index];
+        if (value != prefix[index]) return false;
+    }
+    return true;
+}
+
 struct ApiSetResolverDetach {
     um::NativeUserImageSet64* images{};
     ~ApiSetResolverDetach() {
@@ -531,10 +553,10 @@ NtStatus mapFileImageAtAvailableBase(mm::ProcessAddressSpace& addressSpace,
     // managed window. Treat that case like an occupied preferred range and
     // attempt a relocatable view; mapSharedPages reports InvalidParameter for
     // an out-of-window address, which is not itself an invalid PE image.
-    const bool preferredInWindow = mappedBase >= hal::amd64::BootstrapManagedBase &&
-        mappedBase - hal::amd64::BootstrapManagedBase < hal::amd64::BootstrapManagedSize &&
-        image.getSize() <= hal::amd64::BootstrapManagedSize -
-            (mappedBase - hal::amd64::BootstrapManagedBase);
+    const bool preferredInWindow = mappedBase >= hal::amd64::BootstrapUserAddressBase &&
+        mappedBase - hal::amd64::BootstrapUserAddressBase < hal::amd64::BootstrapUserAddressSize &&
+        image.getSize() <= hal::amd64::BootstrapUserAddressSize -
+            (mappedBase - hal::amd64::BootstrapUserAddressBase);
     auto status = preferredInWindow
         ? sys::mapBootstrapFileImageView(addressSpace, mappedBase, image, sectionReference)
         : NtStatus::Conflict;
@@ -792,7 +814,10 @@ NtStatus EProcess::replaceMainImageFromSection(section::SectionObject& image,
         size_t dependencyPathLength{};
         auto dependencyStatus = buildSystemDllPath(library, dependencyPathStorage,
                                                    dependencyPathLength);
-        if (dependencyStatus != NtStatus::Success) return dependencyStatus;
+        if (dependencyStatus != NtStatus::Success) {
+            traceImageInitializationFailure("dependency path", dependencyStatus);
+            return dependencyStatus;
+        }
         const std::u16string_view dependencyPath{dependencyPathStorage, dependencyPathLength};
         ScopedHandle dependencySectionHandle;
         ScopedObjectReference dependencySectionReference;
@@ -827,11 +852,13 @@ NtStatus EProcess::replaceMainImageFromSection(section::SectionObject& image,
             dependencyView.headers().optionalHeader.imageBase != dependencySection->getImageBase() ||
             dependencyView.headers().optionalHeader.sizeOfImage != dependencySection->getSize())
             return NtStatus::InvalidImageFormat;
-        // User-mode loader initialization (DllMain and TLS attach/detach) is
-        // not yet implemented. Do not publish a process that would require
-        // an initializer we cannot execute.
-        if (dependencyView.headers().optionalHeader.addressOfEntryPoint)
-            return NtStatus::NotSupported;
+        // DLL entrypoints are dispatched by ntdll's RtlUserThreadStart after
+        // the image set and loader lists have been published. Validate the
+        // RVA here so malformed entrypoints fail before mapping the image.
+        if (dependencyView.headers().optionalHeader.addressOfEntryPoint &&
+            !dependencyView.executableRva(
+                dependencyView.headers().optionalHeader.addressOfEntryPoint))
+            return NtStatus::InvalidImageFormat;
         if (dependencyView.headers().optionalHeader.numberOfRvaAndSizes >
             pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT) {
             const auto delay = dependencyView.headers().optionalHeader.dataDirectory[
@@ -1014,27 +1041,48 @@ namespace {
 // the in-memory bootstrap has no filesystem from which to infer them.
 struct UserListEntry { uint64_t next; uint64_t previous; };
 using detail::UserUnicodeString;
-struct UserLoaderData { uint8_t reserved1[8]; uint64_t reserved2[3]; UserListEntry memoryOrder; };
-struct UserLoaderEntry {
-    uint64_t reserved1[2];
+struct UserLoaderData {
+    uint32_t length;
+    uint8_t initialized;
+    uint8_t reserved1[3];
+    uint64_t ssHandle;
+    UserListEntry loadOrder;
     UserListEntry memoryOrder;
-    uint64_t reserved2[2];
-    uint64_t dllBase;
-    uint64_t reserved3[2];
-    UserUnicodeString fullDllName;
-    uint8_t reserved4[8];
-    uint64_t reserved5[3];
-    uint64_t checksum;
-    uint32_t timestamp;
+    UserListEntry initializationOrder;
 };
+struct UserLoaderEntry {
+    UserListEntry loadOrder;
+    UserListEntry memoryOrder;
+    UserListEntry initializationOrder;
+    uint64_t dllBase;
+    uint64_t entryPoint;
+    uint32_t sizeOfImage;
+    uint32_t reserved1;
+    UserUnicodeString fullDllName;
+    UserUnicodeString baseDllName;
+    uint32_t flags;
+    uint16_t loadCount;
+    uint16_t tlsIndex;
+    UserListEntry hashLinks;
+    uint32_t timestamp;
+    uint32_t reserved2;
+};
+static_assert(sizeof(UserLoaderData) == 0x40);
+static_assert(offsetof(UserLoaderData, loadOrder) == 0x10);
 static_assert(offsetof(UserLoaderData, memoryOrder) == 0x20);
+static_assert(offsetof(UserLoaderData, initializationOrder) == 0x30);
+static_assert(offsetof(UserLoaderEntry, loadOrder) == 0x00);
 static_assert(offsetof(UserLoaderEntry, memoryOrder) == 0x10);
+static_assert(offsetof(UserLoaderEntry, initializationOrder) == 0x20);
 static_assert(offsetof(UserLoaderEntry, dllBase) == 0x30);
+static_assert(offsetof(UserLoaderEntry, entryPoint) == 0x38);
+static_assert(offsetof(UserLoaderEntry, sizeOfImage) == 0x40);
 static_assert(offsetof(UserLoaderEntry, fullDllName) == 0x48);
+static_assert(offsetof(UserLoaderEntry, baseDllName) == 0x58);
 
 bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t address,
                               std::span<const std::u16string_view> paths) noexcept {
-    constexpr size_t entriesOffset = 0x40;
+    constexpr size_t entriesOffset = sizeof(UserLoaderData);
     if (images.size() > 16 || paths.size() != images.size() ||
         entriesOffset + images.size() * sizeof(UserLoaderEntry) > mm::PageSize4KB)
         return false;
@@ -1049,37 +1097,120 @@ bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t 
         const size_t length = (path.size() + 1) * sizeof(char16_t);
         if (length > remaining) return false;
         remaining -= length;
+        size_t baseOffset{};
+        for (size_t i = 0; i < path.size(); ++i)
+            if (path[i] == u'\\' || path[i] == u'/') baseOffset = i + 1;
+        const size_t baseLength = path.size() - baseOffset;
+        if (baseLength > (UINT16_MAX - sizeof(char16_t)) / sizeof(char16_t)) return false;
+        const size_t baseBytes = (baseLength + 1) * sizeof(char16_t);
+        if (baseBytes > remaining) return false;
+        remaining -= baseBytes;
     }
     auto* loader = reinterpret_cast<UserLoaderData*>(address);
     auto* entries = reinterpret_cast<UserLoaderEntry*>(address + entriesOffset);
-    const uintptr_t head = address + offsetof(UserLoaderData, memoryOrder);
-    size_t order[16]{};
+    *loader = {};
+    loader->length = sizeof(UserLoaderData);
+    const uintptr_t loadHead = address + offsetof(UserLoaderData, loadOrder);
+    const uintptr_t memoryHead = address + offsetof(UserLoaderData, memoryOrder);
+    const uintptr_t initHead = address + offsetof(UserLoaderData, initializationOrder);
+    size_t memoryOrder[16]{};
+    size_t initOrder[16]{};
+    size_t initCount{};
+    uint8_t visited[16]{};
+    const auto findDependency = [&](std::string_view requested) noexcept -> size_t {
+        if (requested.starts_with("api-ms-win-crt-"))
+            requested = "ucrtbase.dll";
+        for (size_t moduleIndex = 0; moduleIndex < images.size(); ++moduleIndex) {
+            const auto* candidate = images.module(moduleIndex);
+            if (!candidate || candidate->name.size() != requested.size()) continue;
+            bool equal = true;
+            for (size_t byte = 0; byte < requested.size(); ++byte) {
+                char left = candidate->name[byte], right = requested[byte];
+                if (left >= 'A' && left <= 'Z') left = static_cast<char>(left + ('a' - 'A'));
+                if (right >= 'A' && right <= 'Z') right = static_cast<char>(right + ('a' - 'A'));
+                if (left != right) { equal = false; break; }
+            }
+            if (equal) return moduleIndex;
+        }
+        return SIZE_MAX;
+    };
+    const auto visitModule = [&](auto&& visit, size_t moduleIndex) noexcept -> bool {
+        if (moduleIndex >= images.size()) return false;
+        if (visited[moduleIndex] == 2) return true;
+        if (visited[moduleIndex] == 1) return false;
+        visited[moduleIndex] = 1;
+        const auto* module = images.module(moduleIndex);
+        if (!module) return false;
+        const auto importStatus = module->view.forEachImportLibrary(module->immutableImage(),
+            [&](std::string_view library) noexcept -> NtStatus {
+                size_t dependency = findDependency(library);
+                if (dependency == SIZE_MAX) {
+                    if (library.size() <= 4 || library.substr(library.size() - 4) != ".dll")
+                        return NtStatus::InvalidImageFormat;
+                    char name[132]{};
+                    if (library.size() >= sizeof(name)) return NtStatus::InvalidImageFormat;
+                    std::memcpy(name, library.data(), library.size() - 4);
+                    std::memcpy(name + library.size() - 4, ".dll", 4);
+                    dependency = findDependency({name, library.size()});
+                }
+                if (dependency == SIZE_MAX || !visit(visit, dependency))
+                    return NtStatus::InvalidImageFormat;
+                return NtStatus::Success;
+            });
+        if (importStatus != NtStatus::Success) return false;
+        visited[moduleIndex] = 2;
+        if (moduleIndex != 0 &&
+            (module->view.headers().fileHeader.characteristics & pe::IMAGE_FILE_DLL))
+            initOrder[initCount++] = moduleIndex;
+        return true;
+    };
     for (size_t i = 0; i < images.size(); ++i) {
         const auto* module = images.module(i);
         if (!module) return false;
         entries[i] = {};
         entries[i].dllBase = module->base;
-        entries[i].checksum = module->view.headers().optionalHeader.checkSum;
+        const auto& optional = module->view.headers().optionalHeader;
+        if (optional.addressOfEntryPoint && module->base <= UINTPTR_MAX - optional.addressOfEntryPoint)
+            entries[i].entryPoint = module->base + optional.addressOfEntryPoint;
+        entries[i].sizeOfImage = optional.sizeOfImage;
+        entries[i].flags = (module->view.headers().fileHeader.characteristics & pe::IMAGE_FILE_DLL)
+            ? 0x00000004U : 0;
+        entries[i].loadCount = 1;
         entries[i].timestamp = module->view.headers().fileHeader.timeDateStamp;
         if (!writer.append(paths[i], entries[i].fullDllName)) return false;
-        order[i] = i;
+        size_t baseOffset{};
+        for (size_t c = 0; c < paths[i].size(); ++c)
+            if (paths[i][c] == u'\\' || paths[i][c] == u'/') baseOffset = c + 1;
+        if (!writer.append(paths[i].substr(baseOffset), entries[i].baseDllName)) return false;
+        memoryOrder[i] = i;
         size_t position = i;
-        while (position && images.module(order[position - 1])->base > module->base) {
-            order[position] = order[position - 1];
+        while (position && images.module(memoryOrder[position - 1])->base > module->base) {
+            memoryOrder[position] = memoryOrder[position - 1];
             --position;
         }
-        order[position] = i;
+        memoryOrder[position] = i;
     }
-    const auto linkAddress = [&](size_t index) {
-        return address + entriesOffset + index * sizeof(UserLoaderEntry) + offsetof(UserLoaderEntry, memoryOrder);
+    for (size_t i = 0; i < images.size(); ++i)
+        if (!visitModule(visitModule, i)) return false;
+    const auto entryLink = [&](size_t index, size_t offset) {
+        return address + entriesOffset + index * sizeof(UserLoaderEntry) + offset;
     };
-    loader->memoryOrder.next = images.size() ? linkAddress(order[0]) : head;
-    loader->memoryOrder.previous = images.size() ? linkAddress(order[images.size() - 1]) : head;
-    for (size_t i = 0; i < images.size(); ++i) {
-        auto& link = entries[order[i]].memoryOrder;
-        link.previous = i ? linkAddress(order[i - 1]) : head;
-        link.next = i + 1 < images.size() ? linkAddress(order[i + 1]) : head;
-    }
+    const auto initializeList = [&](UserListEntry& head, uintptr_t headAddress,
+                                    const size_t* order, size_t count, size_t offset) {
+        head.next = count ? entryLink(order[0], offset) : headAddress;
+        head.previous = count ? entryLink(order[count - 1], offset) : headAddress;
+        for (size_t i = 0; i < count; ++i) {
+            auto& link = *reinterpret_cast<UserListEntry*>(entryLink(order[i], offset));
+            link.previous = i ? entryLink(order[i - 1], offset) : headAddress;
+            link.next = i + 1 < count ? entryLink(order[i + 1], offset) : headAddress;
+        }
+    };
+    size_t loadOrder[16]{};
+    for (size_t i = 0; i < images.size(); ++i) loadOrder[i] = i;
+    initializeList(loader->loadOrder, loadHead, loadOrder, images.size(), offsetof(UserLoaderEntry, loadOrder));
+    initializeList(loader->memoryOrder, memoryHead, memoryOrder, images.size(), offsetof(UserLoaderEntry, memoryOrder));
+    initializeList(loader->initializationOrder, initHead, initOrder, initCount,
+                    offsetof(UserLoaderEntry, initializationOrder));
     return true;
 }
 
@@ -1174,10 +1305,10 @@ NtStatus EProcess::loadNativeImage(std::string_view name, std::span<const uint8_
         fullPath = {copiedPath.get(), fullPath.size()};
     }
     uintptr_t target = base;
-    const bool preferredInWindow = target >= hal::amd64::BootstrapManagedBase &&
-        target - hal::amd64::BootstrapManagedBase < hal::amd64::BootstrapManagedSize &&
-        size <= hal::amd64::BootstrapManagedSize -
-            (target - hal::amd64::BootstrapManagedBase);
+    const bool preferredInWindow = target >= hal::amd64::BootstrapUserAddressBase &&
+        target - hal::amd64::BootstrapUserAddressBase < hal::amd64::BootstrapUserAddressSize &&
+        size <= hal::amd64::BootstrapUserAddressSize -
+            (target - hal::amd64::BootstrapUserAddressBase);
     status = preferredInWindow
         ? sys::mapBootstrapImageView(addressSpace_, target, size)
         : NtStatus::Conflict;
@@ -1247,7 +1378,10 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
         if (!module) __builtin_trap();
         pe::PeImageView64::TlsLayout candidate{};
         const auto status = module->view.tlsLayout(module->immutableImage(), module->base, candidate);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("TLS inspection", status);
+            return status;
+        }
         if (!candidate.present) continue;
         if (tlsCount == 16 || candidate.callbackCount || candidate.alignment > 256 ||
             candidate.initialData.size() > mm::PageSize4KB - 0x100 ||
@@ -1290,14 +1424,56 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
     // A failed preflight must leave the IAT untouched so callers may correct
     // image metadata or retry finalization without seeing already-patched RVAs.
     const auto binding = images_->bindAll();
-    if (binding != NtStatus::Success) return binding;
+    if (binding != NtStatus::Success) {
+        traceImageInitializationFailure("import binding", binding);
+        const auto failure = images_->bindingFailure();
+        MicantNetbootSerialWrite("[MicaNT Ps] SEC_IMAGE missing import ");
+        char failureText[128]{};
+        const size_t libraryLength = failure.library.size() < sizeof(failureText) - 1
+            ? failure.library.size() : sizeof(failureText) - 1;
+        if (libraryLength) std::memcpy(failureText, failure.library.data(), libraryLength);
+        MicantNetbootSerialWrite(failureText);
+        MicantNetbootSerialWrite("!");
+        std::memset(failureText, 0, sizeof(failureText));
+        const size_t symbolLength = failure.symbol.size() < sizeof(failureText) - 1
+            ? failure.symbol.size() : sizeof(failureText) - 1;
+        if (symbolLength) std::memcpy(failureText, failure.symbol.data(), symbolLength);
+        MicantNetbootSerialWrite(failureText);
+        if (failure.ordinal) {
+            MicantNetbootSerialWrite(" ordinal=");
+            MicantNetbootSerialWriteNumber(failure.ordinal);
+        }
+        MicantNetbootSerialWrite(" importer=");
+        std::memset(failureText, 0, sizeof(failureText));
+        const size_t importerLength = failure.importer.size() < sizeof(failureText) - 1
+            ? failure.importer.size() : sizeof(failureText) - 1;
+        if (importerLength) std::memcpy(failureText, failure.importer.data(), importerLength);
+        MicantNetbootSerialWrite(failureText);
+        MicantNetbootSerialWrite(" loaded=");
+        MicantNetbootSerialWriteNumber(images_->size());
+        for (size_t moduleIndex = 0; moduleIndex < images_->size(); ++moduleIndex) {
+            const auto* loaded = images_->module(moduleIndex);
+            if (!loaded) continue;
+            MicantNetbootSerialWrite(" ");
+            std::memset(failureText, 0, sizeof(failureText));
+            const size_t loadedLength = loaded->name.size() < sizeof(failureText) - 1
+                ? loaded->name.size() : sizeof(failureText) - 1;
+            if (loadedLength) std::memcpy(failureText, loaded->name.data(), loadedLength);
+            MicantNetbootSerialWrite(failureText);
+        }
+        MicantNetbootSerialWrite("\r\n");
+        return binding;
+    }
     for (size_t i = 0; i < images_->size() && !imageSectionBacked_; ++i) {
         const auto* module = images_->module(i);
         if (!module) __builtin_trap();
         uint32_t old{};
         const auto headerSize = (static_cast<size_t>(module->view.headers().optionalHeader.sizeOfHeaders) + mm::PageMask4KB) & ~mm::PageMask4KB;
         auto status = addressSpace_.protect(module->base, headerSize, mm::PAGE_READONLY, &old);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("image header protection", status);
+            return status;
+        }
         for (size_t j = 0; j < module->view.headers().fileHeader.numberOfSections; ++j) {
             const auto section = module->view.section(j);
             const size_t size = section.misc.virtualSize > section.sizeOfRawData ? section.misc.virtualSize : section.sizeOfRawData;
@@ -1308,26 +1484,41 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
                 (section.characteristics & pe::IMAGE_SCN_MEM_WRITE) ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
             status = addressSpace_.protect(module->base + section.virtualAddress,
                 (size + mm::PageMask4KB) & ~mm::PageMask4KB, protection, &old);
-            if (status != NtStatus::Success) return status;
+            if (status != NtStatus::Success) {
+                traceImageInitializationFailure("image section protection", status);
+                return status;
+            }
         }
         // Bootstrap images are loaded into private staging pages. Preserve
         // their now-installed PE protections as per-page maxima and close the
         // staging view before exposing the process.
         status = addressSpace_.prepareImageBinding(module->base, 0, 0, true);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("image binding preparation", status);
+            return status;
+        }
         status = addressSpace_.finalizeImageProtections(module->base);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("image protection finalization", status);
+            return status;
+        }
     }
     // Other process startup state remains uninitialized.
     if (!userPeb_) {
         auto status = addressSpace_.allocate(userPeb_, mm::PageSize4KB,
             mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("PEB allocation", status);
+            return status;
+        }
     }
     if (!userLoaderData_) {
         auto status = addressSpace_.allocate(userLoaderData_, mm::PageSize4KB,
             mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("loader data allocation", status);
+            return status;
+        }
     }
     if (!initializeLoaderMetadata(*images_, userLoaderData_,
             std::span<const std::u16string_view>{nativeImagePaths_.data(), images_->size()}))
@@ -1336,7 +1527,10 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
         if (!userProcessParameters_) {
             auto status = addressSpace_.allocate(userProcessParameters_, mm::PageSize4KB,
                 mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
-            if (status != NtStatus::Success) return status;
+            if (status != NtStatus::Success) {
+                traceImageInitializationFailure("process parameters allocation", status);
+                return status;
+            }
         }
         auto* parameters = reinterpret_cast<detail::UserProcessParameters*>(userProcessParameters_);
         *parameters = {};
@@ -1393,13 +1587,21 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
     std::unique_ptr<OwnedImageInput[]> inputs(new (std::nothrow_t{}) OwnedImageInput[16]);
     auto imageSet = std::unique_ptr<um::NativeUserImageSet64>(
         new (std::nothrow_t{}) um::NativeUserImageSet64{});
-    if (!commandLine || !inputs || !imageSet)
+    if (!commandLine || !inputs || !imageSet) {
+        traceImageInitializationFailure("initial storage", NtStatus::NoMemory);
         return NtStatus::NoMemory;
+    }
     ApiSetSchemaV6 apiSetSchema;
     imageSet->setApiSetHostResolver(&apiSetSchema,
         [](void* context, std::string_view contract, std::string_view importingModule,
            std::string_view& host) noexcept -> NtStatus {
-            return static_cast<ApiSetSchemaV6*>(context)->resolve(contract, importingModule, host);
+            auto status = static_cast<ApiSetSchemaV6*>(context)->resolve(
+                contract, importingModule, host);
+            if (status != NtStatus::Success && isUniversalCrtApiSet(contract)) {
+                host = "ucrtbase.dll";
+                return NtStatus::Success;
+            }
+            return status;
         });
     ApiSetResolverDetach detachApiSetResolver{imageSet.get()};
 
@@ -1423,7 +1625,10 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         auto rawBytes = std::unique_ptr<uint8_t[]>(new (std::nothrow_t{}) uint8_t[rawSize]);
         auto nameCopy = std::unique_ptr<char[]>(new (std::nothrow_t{}) char[moduleName.size()]);
         auto pathCopy = std::unique_ptr<char16_t[]>(new (std::nothrow_t{}) char16_t[modulePath.size()]);
-        if (!rawBytes || !nameCopy || !pathCopy) return NtStatus::NoMemory;
+        if (!rawBytes || !nameCopy || !pathCopy) {
+            traceImageInitializationFailure("dependency file-buffer allocation", NtStatus::NoMemory);
+            return NtStatus::NoMemory;
+        }
         size_t total{};
         while (total < rawSize) {
             size_t read{};
@@ -1449,18 +1654,24 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
             (executable && (!optional.addressOfEntryPoint ||
                             !view.executableRva(optional.addressOfEntryPoint))))
             return NtStatus::InvalidImageFormat;
-        if (!executable && optional.addressOfEntryPoint) return NtStatus::NotSupported;
+        if (!executable && optional.addressOfEntryPoint &&
+            !view.executableRva(optional.addressOfEntryPoint))
+            return NtStatus::InvalidImageFormat;
         std::memcpy(nameCopy.get(), moduleName.data(), moduleName.size());
         std::memcpy(pathCopy.get(), modulePath.data(), modulePath.size() * sizeof(char16_t));
         uintptr_t mappedBase{};
         status = mapFileImageAtAvailableBase(addressSpace_, sectionImage,
             sectionObjectReference, view, mappedBase);
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("dependency section mapping", status);
+            return status;
+        }
         status = imageSet->addClonedModule({nameCopy.get(), moduleName.size()},
             {rawBytes.get(), rawSize},
             {reinterpret_cast<uint8_t*>(mappedBase), sectionImage.getSize()}, mappedBase);
         if (status != NtStatus::Success) {
             (void)addressSpace_.unmapSharedPages(mappedBase, true);
+            traceImageInitializationFailure("dependency metadata allocation", status);
             return status;
         }
         inputs[index].bytes = std::move(rawBytes);
@@ -1475,7 +1686,13 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         std::string_view canonical = requestedLibrary;
         if (isApiSetContractName(requestedLibrary)) {
             const auto apiSetStatus = apiSetSchema.resolve(requestedLibrary, importingModule, canonical);
-            if (apiSetStatus != NtStatus::Success) return apiSetStatus;
+            if (apiSetStatus != NtStatus::Success) {
+                // The generated freestanding runtime exposes Microsoft's CRT
+                // API-set family through ucrtbase.dll. Other API-set families
+                // still require the mounted ApiSetSchema and fail explicitly.
+                if (!isUniversalCrtApiSet(requestedLibrary)) return apiSetStatus;
+                canonical = "ucrtbase.dll";
+            }
         }
         char canonicalLibraryStorage[132]{};
         std::string_view library = canonical;
@@ -1504,12 +1721,16 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         section::SectionObject* dependencySection{};
         dependencyStatus = openSystemImageSection(dependencyPath,
             dependencySectionHandle, dependencySectionReference, dependencySection);
+        if (dependencyStatus != NtStatus::Success)
+            traceImageInitializationFailure("dependency section", dependencyStatus);
         if (dependencyStatus == NtStatus::ObjectNameNotFound ||
             dependencyStatus == NtStatus::NoSuchFile)
             return NtStatus::NotSupported;
         if (dependencyStatus != NtStatus::Success) return dependencyStatus;
-        return appendImage(*dependencySection, dependencySectionReference.value,
+        dependencyStatus = appendImage(*dependencySection, dependencySectionReference.value,
                            library, dependencyPath, false, imageSet->size());
+        traceImageInitializationFailure("dependency image mapping", dependencyStatus);
+        return dependencyStatus;
     };
 
     char moduleNameStorage[260]{};
@@ -1517,7 +1738,10 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
     NtStatus status = buildImageModuleName(filePath, moduleNameStorage, moduleName);
     if (status != NtStatus::Success) return status;
     status = appendImage(image, sectionReference, moduleName, filePath, true, 0);
-    if (status != NtStatus::Success) return status;
+    if (status != NtStatus::Success) {
+        traceImageInitializationFailure("main image mapping", status);
+        return status;
+    }
 
     char16_t ntdllPathStorage[256]{};
     size_t ntdllPathLength{};
@@ -1532,7 +1756,10 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
     if (status != NtStatus::Success) return status;
     status = appendImage(*ntdllSection, ntdllSectionReference.value, "ntdll.dll", ntdllPath,
                          false, 1);
-    if (status != NtStatus::Success) return status;
+    if (status != NtStatus::Success) {
+        traceImageInitializationFailure("ntdll mapping", status);
+        return status;
+    }
 
     for (size_t moduleIndex = 0; moduleIndex < imageSet->size(); ++moduleIndex) {
         const auto* module = imageSet->module(moduleIndex);
@@ -1541,7 +1768,10 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
             [&](std::string_view library) noexcept -> NtStatus {
                 return appendSystemDependency(library, module->name);
             });
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("dependency loading", status);
+            return status;
+        }
     }
 
     // Import resolution can discover another image only by following an
@@ -1553,7 +1783,10 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
             [&](std::string_view library, std::string_view importingModule) noexcept -> NtStatus {
                 return appendSystemDependency(library, importingModule);
             });
-        if (status != NtStatus::Success) return status;
+        if (status != NtStatus::Success) {
+            traceImageInitializationFailure("forwarder loading", status);
+            return status;
+        }
         if (imageSet->size() == previousCount) break;
     }
 
@@ -1567,14 +1800,21 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
 
     status = finalizeNativeImages();
     if (status == NtStatus::NoSuchFile) return NtStatus::NotSupported;
-    if (status != NtStatus::Success) return status;
+    if (status != NtStatus::Success) {
+        traceImageInitializationFailure("image finalization", status);
+        return status;
+    }
     status = publishApiSetMap(addressSpace_, userPeb_, userApiSetMap_, userApiSetMapSize_,
                               apiSetSchema);
-    if (status != NtStatus::Success) return status;
+    if (status != NtStatus::Success) {
+        traceImageInitializationFailure("API-set map", status);
+        return status;
+    }
     uint64_t routine{};
     status = images_->resolve("ntdll.dll", "RtlUserThreadStart", 0, routine);
     if (status == NtStatus::Success)
         status = images_->resolve("ntdll.dll", "KiUserExceptionDispatcher", 0, routine);
+    traceImageInitializationFailure("NTDLL entry resolution", status);
     return status;
 }
 }

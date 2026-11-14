@@ -63,6 +63,7 @@ NtStatus createUserThreadHandle(EProcess& process, uintptr_t entry, size_t kerne
 NtStatus referenceThreadHandle(Handle handle, uint32_t access, EThread*& thread,
                                ob::ObjectHeader*& reference) noexcept;
 NtStatus referenceCurrentProcess(EProcess*& process, ob::ObjectHeader*& reference) noexcept;
+NtStatus referenceSystemProcess(EProcess*& process, ob::ObjectHeader*& reference) noexcept;
 NtStatus referenceCurrentThread(EThread*& thread, ob::ObjectHeader*& reference) noexcept;
 bool isProcessObject(const ob::ObjectHeader& header) noexcept;
 bool isThreadObject(const ob::ObjectHeader& header) noexcept;

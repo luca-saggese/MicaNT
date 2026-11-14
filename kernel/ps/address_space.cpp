@@ -9,6 +9,7 @@
 #include "micant/km/executive/ps_objects.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/shared/context.hpp"
+#include "micant/km/win32k/freestanding.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iterator>
@@ -336,7 +337,7 @@ NtStatus EProcess::initializeAddressSpace() noexcept {
         &root_, mapBootstrapManagedPage, unmapBootstrapManagedPage,
         mapBootstrapProtectManagedPage, mapBootstrapManagedView, unmapBootstrapManagedView,
         mapBootstrapGuardManagedPage, replaceBootstrapManagedPage};
-    if (!addressSpace_.configurePagingBackend(backend, BootstrapManagedBase, BootstrapManagedSize)) {
+    if (!addressSpace_.configurePagingBackend(backend, BootstrapUserAddressBase, BootstrapUserAddressSize)) {
         if (!destroyProcessPagingRoot(root_)) __builtin_trap();
         handles_.reset();
         return NtStatus::Unsuccessful;
@@ -401,6 +402,7 @@ NtStatus EProcess::closeAddressSpace() noexcept {
         if (status != NtStatus::Success) break;
     }
     if (status == NtStatus::Success) {
+        win32k::freestanding::releaseProcess(processId_);
         uint64_t flags{};
         __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
         if (!destroyProcessPagingRoot(root_)) status = NtStatus::Unsuccessful;
@@ -839,7 +841,7 @@ NtStatus EThread::initializeUserWithTls(EProcess& process, uintptr_t entry, size
     uintptr_t currentRoot{};
     __asm__ __volatile__("movq %%cr3, %0" : "=r"(currentRoot));
     if (currentRoot != process.getDirectoryTableBase() || !entry || userStackSize < mm::PageSize4KB ||
-        userStackSize > hal::amd64::BootstrapManagedSize || userStackSize > SIZE_MAX - mm::PageMask4KB ||
+        userStackSize > SIZE_MAX - mm::PageMask4KB ||
         !hal::amd64::bootstrapUserRange(entry, 1, false, true)) return NtStatus::InvalidParameter;
     if (tls.size() > 16) return NtStatus::NotImplemented;
     for (const auto& layout : tls) {
@@ -862,7 +864,6 @@ NtStatus EThread::initializeUserWithTls(EProcess& process, uintptr_t entry, size
     if (commitSize > SIZE_MAX - emergencyReserve) return NtStatus::InvalidParameter;
     const size_t minimumReserve = commitSize + emergencyReserve;
     if (stackSize < minimumReserve) stackSize = minimumReserve;
-    if (stackSize > hal::amd64::BootstrapManagedSize) return NtStatus::NoMemory;
     auto status = initialize(process, kernelStackSize, startUser, this);
     if (status != NtStatus::Success) return status;
     auto& space = process.getAddressSpace();
@@ -2001,7 +2002,6 @@ static NtStatus createThreadEx(Handle* threadHandle, uint32_t desiredAccess,
                 const size_t roundedCommit = stackSize <= SIZE_MAX - mm::PageMask4KB
                     ? (stackSize + mm::PageMask4KB) & ~mm::PageMask4KB : SIZE_MAX;
                 if (!stackSize || !maximumStackSize || stackSize > maximumStackSize ||
-                    maximumStackSize > hal::amd64::BootstrapManagedSize ||
                     roundedReserve < ps::MinimumUserExceptionStackReserve ||
                     roundedCommit > roundedReserve - mm::PageSize4KB)
                     result = NtStatus::InvalidParameter;

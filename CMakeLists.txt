@@ -285,6 +285,7 @@ if (MICANT_ENABLE_BAREMETAL)
         COMMAND "${CMAKE_COMMAND}" -DINPUT=${_ntdll_process_dll} -DOUTPUT=${_ntdll_process_header}
             -P "${CMAKE_SOURCE_DIR}/scripts/embed_binary.cmake"
         DEPENDS "${_ntdll_process_dll}" "${CMAKE_SOURCE_DIR}/scripts/embed_binary.cmake" VERBATIM)
+    add_custom_target(ntdll_process_image DEPENDS "${_ntdll_process_dll}")
 
     add_executable(ntoskrnl_core_baremetal
         "${_ntdll_probe_header}"
@@ -431,6 +432,7 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "fileimage"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
+    add_dependencies(file_image_boot ntdll_process_image)
     # The Ps loader rejects a DLL with a DllMain entry point because DLL
     # initializers are not part of M4. Publish the entry-point-free NTDLL
     # build separately so the file-backed image path can be verified without
@@ -441,7 +443,6 @@ if (MICANT_ENABLE_BAREMETAL)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_BINARY_DIR}/ntdll-process.dll"
             "${CMAKE_SOURCE_DIR}/build/fileimage-system32/ntdll.dll"
-        DEPENDS "${_ntdll_process_dll}"
     )
 
     add_library(ntdll_boot SHARED EXCLUDE_FROM_ALL
@@ -700,6 +701,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(ucrtbase_boot PRIVATE
         -nostdlib -Wl,--entry,DllMainCRTStartup
     )
+    target_link_libraries(ucrtbase_boot PRIVATE ntdll_boot)
     set_target_properties(ucrtbase_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "ucrtbase"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"

@@ -233,6 +233,9 @@ def main() -> int:
     parser.add_argument("--ovmf-code", type=Path, help="OVMF x86_64 code firmware image")
     parser.add_argument("--display", help="QEMU display backend (auto-detected by default)")
     parser.add_argument("--timeout", type=int, default=90, help="boot milestone timeout")
+    parser.add_argument("--memory-mib", type=int, default=1024,
+                        choices=(256, 512, 1024, 2048, 4096),
+                        help="QEMU RAM profile used by the bare-metal boot")
     parser.add_argument("--diagnostics-dir", type=Path,
                         help="new directory retaining serial/QEMU logs and the exact kernel/manifest")
     parser.add_argument(
@@ -349,6 +352,7 @@ def main() -> int:
                 "network_probe_boot",
                 "https_probe_boot",
                 "file_image_boot",
+                "explorer_runtime_boot",
             ]
         )
         write_manifest(
@@ -377,6 +381,8 @@ def main() -> int:
             str(args.timeout),
             "--stable-seconds",
             str(args.stable_seconds),
+            "--memory-mib",
+            str(args.memory_mib),
             "--display",
             "none" if args.headless else display,
         ]

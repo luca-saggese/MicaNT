@@ -80,13 +80,20 @@ constexpr uint64_t kNoAccessLeaf = uint64_t{1} << 11;
 constexpr uint64_t kUserBase = uint64_t{128} << 39;
 constexpr uint64_t kUserTebBase = kUserBase + 0x8000;
 constexpr uint64_t kDeviceBase = uint64_t{129} << 39;
-constexpr uint64_t kDeviceMappingWindowSize = 16 * 1024 * 1024;
+constexpr uint64_t kPhysicalAccessBase = uint64_t{132} << 39;
+// Slot 129 is a supervisor-only kernel mapping. Keep one page at its base
+// for the firmware-copy scratch mapping and use the rest as a demand-grown
+// device aperture instead of imposing the former 16 MiB framebuffer cap.
+constexpr uint64_t kDeviceMappingWindowSize = (uint64_t{1} << 39) - 4096;
 constexpr uint64_t kTestBase = uint64_t{130} << 39;
 constexpr uint64_t kKuserKernelAlias = uint64_t{131} << 39;
 constexpr uint64_t kKuserRootAlias = kKuserKernelAlias + 4096;
 constexpr uint64_t kUserStackBase = kUserBase + 4096;
 alignas(4096) uint64_t g_pml4[512]{};
-uint64_t g_deviceNext = kDeviceBase;
+alignas(4096) uint64_t g_physicalAccessTables[3][512]{};
+std::atomic_flag g_physicalAccessLock = ATOMIC_FLAG_INIT;
+uint64_t g_physicalAccessSavedFlags{};
+uint64_t g_deviceNext = kDeviceBase + 4096;
 struct BootstrapProtectedMmio { uint64_t first{}, last{}, owner{}; };
 BootstrapProtectedMmio g_protectedIommuMmio[16]{};
 size_t g_protectedIommuMmioCount{};
@@ -309,6 +316,24 @@ bool mappedRange(uint64_t address, size_t size, bool user, bool writable,
     }
 }
 
+uint64_t allocateIdentityMappedPageTable() noexcept {
+    auto& database = micant::mm::PfnDatabase::get();
+    const uint64_t pageCount = database.getTotalPages();
+    uint64_t firstPfn = 1;
+    while (firstPfn < pageCount) {
+        const uint64_t pfn = database.allocatePageInRange(firstPfn, pageCount - 1);
+        if (!pfn) return 0;
+        const uint64_t physical = pfn << micant::mm::PageShift4KB;
+        if (physical <= kPhysicalMask &&
+            mappedRange(physical, micant::mm::PageSize4KB, false, true, false) &&
+            walk(reinterpret_cast<uint64_t>(activePagingRoot()), physical) == physical)
+            return pfn;
+        database.freePage(pfn);
+        firstPfn = pfn + 1;
+    }
+    return 0;
+}
+
 bool bootstrapPagingContext() noexcept {
     // The bootstrap has only its BSP online; no remote TLB shootdown exists.
     uint64_t flags{}, cr3{};
@@ -372,7 +397,8 @@ void invalidatePage(uint64_t address) noexcept {
 
 bool ownedAddress(uint64_t address, bool user) noexcept {
     const uint64_t slot = address >> 39;
-    return user ? slot == 128 : slot == 129 || slot == 130 || slot == 131;
+    return user ? (slot == 128 || (slot >= 133 && slot < 256))
+                : slot == 129 || slot == 130 || slot == 131 || slot == 132;
 }
 
 bool emptyTable(const uint64_t* table) noexcept {
@@ -397,7 +423,7 @@ bool mapPage(uint64_t address, uint64_t physical, uint64_t flags,
     for (int shift = 39; shift > 12; shift -= 9) {
         uint64_t& entry = table[(address >> shift) & 511];
         if (entry == 0) {
-            const uint64_t pfn = failAfter == 0 ? 0 : database.allocatePage();
+            const uint64_t pfn = failAfter == 0 ? 0 : allocateIdentityMappedPageTable();
             if (!pfn) goto rollback;
             if (failAfter > 0) --failAfter;
             const uint64_t page = pfn << 12;
@@ -638,7 +664,7 @@ bool installKuserKernelAliases(uint64_t backingPhysical, uint64_t rootPhysical) 
     auto& database = micant::mm::PfnDatabase::get();
     uint64_t pfns[3]{};
     for (size_t index = 0; index < 3; ++index) {
-        pfns[index] = database.allocatePage(false);
+        pfns[index] = allocateIdentityMappedPageTable();
         if (!pfns[index] || pfns[index] > (kPhysicalMask >> 12)) break;
         const uint64_t page = pfns[index] << 12;
         if (!mappedRange(page, 4096, false, true, false) ||
@@ -1906,6 +1932,20 @@ void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noex
         // Keep the faulting service result available for bootstrap diagnosis.
         logTrapValue("[MicaNT Hal] Unhandled exception RAX=0x", frame[-2]);
         logTrapValue("[MicaNT Hal] Unhandled exception RDX=0x", frame[-4]);
+        // For same-CPL exceptions, the processor leaves the interrupted
+        // kernel RSP at frame+4. Capture a few words to identify the caller
+        // when a kernel #UD/#GP occurs inside a service.
+        const auto* kernelStack = frame + 4;
+        logTrapValue("[MicaNT Hal] Unhandled exception stack0=0x", kernelStack[0]);
+        logTrapValue("[MicaNT Hal] Unhandled exception stack1=0x", kernelStack[1]);
+        logTrapValue("[MicaNT Hal] Unhandled exception stack2=0x", kernelStack[2]);
+        logTrapValue("[MicaNT Hal] Unhandled exception stack3=0x", kernelStack[3]);
+        logTrapValue("[MicaNT Hal] User interrupt stack bounds=0x", MicantBootstrapUserInterruptStackBase);
+        logTrapValue("[MicaNT Hal] User interrupt stack top=0x", MicantBootstrapUserInterruptStackTop);
+        logTrapValue("[MicaNT Hal] Syscall stack bounds=0x", MicantBootstrapSyscallStackBase);
+        logTrapValue("[MicaNT Hal] Syscall stack top=0x", MicantBootstrapSyscallStackTop);
+        logTrapValue("[MicaNT Hal] Execution stack top=0x", MicantBootstrapExecutionStackTop);
+        logTrapValue("[MicaNT Hal] Interrupt stack floor=0x", MicantBootstrapInterruptStackFloor);
     }
     stopOnTrap();
 }
@@ -2378,14 +2418,28 @@ bool initializeBootstrapAddressSpace(void (*log)(const char*) noexcept) noexcept
         return false;
     }
     const auto* oldRoot = reinterpret_cast<const uint64_t*>(cr3 & kPhysicalMask);
-    if (oldRoot[128] || oldRoot[129] ||
+    if (oldRoot[128] || oldRoot[129] || oldRoot[130] || oldRoot[131] || oldRoot[132] ||
         walk(cr3, reinterpret_cast<uint64_t>(g_pml4)) !=
             reinterpret_cast<uint64_t>(g_pml4)) {
         return false;
     }
+    for (size_t slot = 133; slot < 256; ++slot)
+        if (oldRoot[slot]) return false;
     for (size_t index = 0; index < 512; ++index) {
         g_pml4[index] = oldRoot[index] & ~kUser;
     }
+    for (size_t level = 0; level < 3; ++level) {
+        const uint64_t virtualAddress = reinterpret_cast<uint64_t>(g_physicalAccessTables[level]);
+        const uint64_t physicalAddress = walk(cr3, virtualAddress);
+        if (!physicalAddress || (physicalAddress & mm::PageMask4KB)) return false;
+    }
+    const uint64_t pdpt = walk(cr3, reinterpret_cast<uint64_t>(g_physicalAccessTables[0]));
+    const uint64_t pd = walk(cr3, reinterpret_cast<uint64_t>(g_physicalAccessTables[1]));
+    const uint64_t pt = walk(cr3, reinterpret_cast<uint64_t>(g_physicalAccessTables[2]));
+    if (!pdpt || !pd || !pt) return false;
+    g_physicalAccessTables[0][0] = pd | kPresent | kWritable;
+    g_physicalAccessTables[1][0] = pt | kPresent | kWritable;
+    g_pml4[132] = pdpt | kPresent | kWritable | kOwnedTable;
     cpu::cpuWrmsr(cpu::MSR_EFER, cpu::cpuRdmsr(cpu::MSR_EFER) | cpu::EFER_NXE);
     // CR3 reload alone can retain firmware global translations.
     __asm__ __volatile__("movq %0, %%cr4" : : "r"(cr4 & ~uint64_t{128}) : "memory");
@@ -2425,7 +2479,7 @@ static bool createProcessPagingRootImpl(ProcessPagingRoot& root, int failAfter) 
     for (size_t index = 0; index < 2; ++index) {
         uint64_t& entry = g_pml4[129 + index];
         if (!entry) {
-            const uint64_t pfn = failAfter == 0 ? 0 : database.allocatePage();
+            const uint64_t pfn = failAfter == 0 ? 0 : allocateIdentityMappedPageTable();
             if (!pfn) { reclaimUnusedSharedRootSlots(); return false; }
             if (failAfter > 0) --failAfter;
             const uint64_t physical = pfn << mm::PageShift4KB;
@@ -2445,7 +2499,7 @@ static bool createProcessPagingRootImpl(ProcessPagingRoot& root, int failAfter) 
             return false;
         }
     }
-    const uint64_t pfn = failAfter == 0 ? 0 : database.allocatePage();
+    const uint64_t pfn = failAfter == 0 ? 0 : allocateIdentityMappedPageTable();
     if (!pfn) { reclaimUnusedSharedRootSlots(); return false; }
     const uint64_t physical = pfn << mm::PageShift4KB;
     if (physical > kPhysicalMask || !mappedRange(physical, 4096, false, true, false) ||
@@ -2457,7 +2511,7 @@ static bool createProcessPagingRootImpl(ProcessPagingRoot& root, int failAfter) 
     database.zeroPage(pfn);
     auto* table = reinterpret_cast<uint64_t*>(physical);
     for (size_t i = 0; i < 512; ++i) {
-        table[i] = i == 128 ? 0 : g_pml4[i] & ~kUser;
+        table[i] = (i == 128 || (i >= 133 && i < 256)) ? 0 : g_pml4[i] & ~kUser;
         // PML4[0] carries the read-only KUSER_SHARED_DATA alias at 0x7FFE0000.
         // Only that leaf and the clock shared page tables beneath it have U/S
         // set; all other low identity mappings remain supervisor-only.
@@ -2522,6 +2576,8 @@ bool destroyProcessPagingRoot(ProcessPagingRoot& root) noexcept {
     if (!*link) return false;
     auto* table = reinterpret_cast<const uint64_t*>(root.pfn << mm::PageShift4KB);
     if (table[128]) return false;
+    for (size_t slot = 133; slot < 256; ++slot)
+        if (table[slot]) return false;
     *link = root.next;
     const uint64_t pfn = root.pfn;
     root.pfn = 0;
@@ -2537,6 +2593,34 @@ uint64_t translateBootstrapAddress(const void* address) noexcept {
     }
     return walk(reinterpret_cast<uint64_t>(g_pml4),
                 reinterpret_cast<uint64_t>(address));
+}
+
+volatile uint8_t* mapBootstrapPhysicalPage(uint64_t physicalAddress) noexcept {
+    if (!g_addressSpaceReady || !physicalAddress || (physicalAddress & mm::PageMask4KB) ||
+        physicalAddress > kPhysicalMask) return nullptr;
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(g_physicalAccessSavedFlags) : : "memory");
+    while (g_physicalAccessLock.test_and_set(std::memory_order_acquire))
+        __asm__ __volatile__("pause");
+    auto& leaf = g_physicalAccessTables[2][0];
+    if (leaf & kPresent) {
+        g_physicalAccessLock.clear(std::memory_order_release);
+        if (g_physicalAccessSavedFlags & (uint64_t{1} << 9))
+            __asm__ __volatile__("sti" : : : "memory");
+        return nullptr;
+    }
+    leaf = mm::PageTableEntry::create(physicalAddress >> mm::PageShift4KB,
+        true, false, true).value;
+    invalidatePage(kPhysicalAccessBase);
+    return reinterpret_cast<volatile uint8_t*>(kPhysicalAccessBase);
+}
+
+void releaseBootstrapPhysicalPage() noexcept {
+    if (!(g_physicalAccessTables[2][0] & kPresent)) __builtin_trap();
+    g_physicalAccessTables[2][0] = 0;
+    invalidatePage(kPhysicalAccessBase);
+    const uint64_t savedFlags = g_physicalAccessSavedFlags;
+    g_physicalAccessLock.clear(std::memory_order_release);
+    if (savedFlags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
 }
 
 uint64_t translateBootstrapDmaRange(const void* address, size_t size) noexcept {
@@ -2579,11 +2663,13 @@ bool bootstrapUserRange(uint64_t address, size_t size, bool writable,
         if (writable || executable) return false;
         return mappedRange(address, size, true, false, false);
     }
-    if (address < kUserBase ||
-        address >= kUserBase + (uint64_t{1} << 39) ||
-        size > kUserBase + (uint64_t{1} << 39) - address) {
-        return false;
-    }
+    const bool bootstrapUserSlot = address >= kUserBase &&
+        address < kUserBase + (uint64_t{1} << 39) &&
+        size <= kUserBase + (uint64_t{1} << 39) - address;
+    const bool processUserRange = address >= BootstrapUserAddressBase &&
+        address - BootstrapUserAddressBase < BootstrapUserAddressSize &&
+        size <= BootstrapUserAddressSize - (address - BootstrapUserAddressBase);
+    if (!bootstrapUserSlot && !processUserRange) return false;
     return mappedRange(address, size, true, writable, executable);
 }
 
@@ -2593,8 +2679,8 @@ bool bootstrapKernelRange(uint64_t address, size_t size, bool writable) noexcept
 
 bool mapBootstrapManagedPage(void* context, uintptr_t address, uint64_t pfn,
                              uint32_t protection) noexcept {
-    if (!pagingContextMatches(context) || address < BootstrapManagedBase ||
-        address - BootstrapManagedBase >= BootstrapManagedSize ||
+    if (!pagingContextMatches(context) || address < BootstrapUserAddressBase ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
         (address & mm::PageMask4KB) || !pfn ||
         pfn > (kPhysicalMask >> mm::PageShift4KB) ||
         (protection != mm::PAGE_READWRITE && protection != mm::PAGE_READONLY &&
@@ -2613,22 +2699,46 @@ bool mapBootstrapManagedPage(void* context, uintptr_t address, uint64_t pfn,
     return true;
 }
 
+static void reclaimEmptyUserTables(uintptr_t address) noexcept {
+    uint64_t* parents[3]{};
+    uint64_t* children[3]{};
+    auto* table = activePagingRoot();
+    size_t depth{};
+    for (int shift = 39; shift > 12; shift -= 9) {
+        uint64_t& entry = table[(address >> shift) & 511];
+        if (!(entry & kPresent) || !(entry & kOwnedTable) || (entry & 128) ||
+            !(entry & kUser) || depth == 3) break;
+        parents[depth] = &entry;
+        children[depth] = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+        ++depth;
+        table = children[depth - 1];
+    }
+    auto& database = mm::PfnDatabase::get();
+    while (depth) {
+        --depth;
+        if (!emptyTable(children[depth])) break;
+        const uint64_t physical = *parents[depth] & kPhysicalMask;
+        *parents[depth] = 0;
+        invalidatePage(address);
+        database.freePage(physical >> mm::PageShift4KB);
+    }
+}
+
 static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const uint64_t* pfns,
                                         size_t count, uint32_t protection, int failAfter) noexcept {
     if (!pagingContextMatches(context) || !pfns || !count ||
-        address < BootstrapManagedBase || (address & mm::PageMask4KB) ||
-        address - BootstrapManagedBase >= BootstrapManagedSize ||
-        count > (BootstrapManagedSize - (address - BootstrapManagedBase)) / mm::PageSize4KB ||
+        address < BootstrapUserAddressBase || (address & mm::PageMask4KB) ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
+        count > (BootstrapUserAddressSize - (address - BootstrapUserAddressBase)) / mm::PageSize4KB ||
         (protection != mm::PAGE_READONLY && protection != mm::PAGE_READWRITE)) return false;
 
-    // This 16 MiB aligned window needs at most eight PTs, one PD and one
-    // PDPT. Upper levels are installed without any present leaf PTEs.
-    uint64_t* createdEntries[16]{};
-    uint64_t createdPfns[16]{};
-    size_t createdCount{};
+    // Rollback reclaims empty tables by walking the affected range. Its
+    // storage is constant regardless of the size of a VAD or image mapping.
     auto& database = mm::PfnDatabase::get();
     bool prepared = true;
+    size_t touchedPages{};
     for (size_t i = 0; i < count && prepared; ++i) {
+        touchedPages = i + 1;
         if (!pfns[i] || pfns[i] > (kPhysicalMask >> mm::PageShift4KB) ||
             isProtectedIommuPhysicalPage(pfns[i] << mm::PageShift4KB)) {
             prepared = false;
@@ -2639,8 +2749,7 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
         for (int shift = 39; shift > 12; shift -= 9) {
             uint64_t& entry = table[(va >> shift) & 511];
             if (!entry) {
-                if (createdCount == 16) { prepared = false; break; }
-                const uint64_t pfn = failAfter == 0 ? 0 : database.allocatePage();
+                const uint64_t pfn = failAfter == 0 ? 0 : allocateIdentityMappedPageTable();
                 if (!pfn) { prepared = false; break; }
                 if (failAfter > 0) --failAfter;
                 const uint64_t physical = pfn << 12;
@@ -2652,8 +2761,6 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
                 }
                 database.zeroPage(pfn);
                 entry = physical | kPresent | kWritable | kOwnedTable | kUser;
-                createdEntries[createdCount] = &entry;
-                createdPfns[createdCount++] = pfn;
             }
             if (!(entry & kPresent) || !(entry & kOwnedTable) || (entry & 128) ||
                 !(entry & kWritable) || !(entry & kUser) || (entry & kNoExecute)) {
@@ -2665,12 +2772,8 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
         if (prepared && table[(va >> 12) & 511]) prepared = false;
     }
     if (!prepared) {
-        while (createdCount) {
-            --createdCount;
-            *createdEntries[createdCount] = 0;
-            invalidatePage(address);
-            database.freePage(createdPfns[createdCount]);
-        }
+        for (size_t i = 0; i < touchedPages; ++i)
+            reclaimEmptyUserTables(address + i * mm::PageSize4KB);
         return false;
     }
     // Interrupts are disabled and only the BSP is running. No leaf can change
@@ -2694,8 +2797,8 @@ bool mapBootstrapManagedView(void* context, uintptr_t address, const uint64_t* p
 
 bool unmapBootstrapManagedView(void* context, uintptr_t address, size_t count) noexcept {
     if (!pagingContextMatches(context) || !count || (address & mm::PageMask4KB) ||
-        address < BootstrapManagedBase || address - BootstrapManagedBase >= BootstrapManagedSize ||
-        count > (BootstrapManagedSize - (address - BootstrapManagedBase)) / mm::PageSize4KB)
+        address < BootstrapUserAddressBase || address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
+        count > (BootstrapUserAddressSize - (address - BootstrapUserAddressBase)) / mm::PageSize4KB)
         return false;
     for (size_t i = 0; i < count; ++i) {
         const uintptr_t va = address + i * mm::PageSize4KB;
@@ -2724,24 +2827,24 @@ bool verifyBootstrapManagedViewRollback() noexcept {
     const uint64_t pfns[]{pfn, 0};
     bool ok = true;
     for (int failAfter = 0; failAfter <= 3; ++failAfter) {
-        if (mapBootstrapManagedViewImpl(nullptr, BootstrapManagedBase, pfns, 2,
+        if (mapBootstrapManagedViewImpl(nullptr, BootstrapUserAddressBase, pfns, 2,
                                         mm::PAGE_READWRITE, failAfter) ||
-            bootstrapUserRange(BootstrapManagedBase, mm::PageSize4KB, false) ||
+            bootstrapUserRange(BootstrapUserAddressBase, mm::PageSize4KB, false) ||
             database.getActiveCount() != held) {
             ok = false;
             break;
         }
     }
     if (ok) {
-        const uintptr_t occupied = BootstrapManagedBase + mm::PageSize4KB;
+        const uintptr_t occupied = BootstrapUserAddressBase + mm::PageSize4KB;
         const uint64_t pair[]{pfn, pfn};
         if (!mapBootstrapManagedPage(nullptr, occupied, pfn, mm::PAGE_READWRITE)) {
             ok = false;
         } else {
             const size_t mapped = database.getActiveCount();
-            if (unmapBootstrapManagedView(nullptr, BootstrapManagedBase, 2) ||
-                mapBootstrapManagedView(nullptr, BootstrapManagedBase, pair, 2, mm::PAGE_READWRITE) ||
-                bootstrapUserRange(BootstrapManagedBase, mm::PageSize4KB, false) ||
+            if (unmapBootstrapManagedView(nullptr, BootstrapUserAddressBase, 2) ||
+                mapBootstrapManagedView(nullptr, BootstrapUserAddressBase, pair, 2, mm::PAGE_READWRITE) ||
+                bootstrapUserRange(BootstrapUserAddressBase, mm::PageSize4KB, false) ||
                 !bootstrapUserRange(occupied, mm::PageSize4KB, true) ||
                 database.getActiveCount() != mapped) ok = false;
             if (!unmapBootstrapManagedPage(nullptr, occupied)) ok = false;
@@ -2752,8 +2855,8 @@ bool verifyBootstrapManagedViewRollback() noexcept {
 }
 
 bool unmapBootstrapManagedPage(void* context, uintptr_t address) noexcept {
-    if (!pagingContextMatches(context) || address < BootstrapManagedBase ||
-        address - BootstrapManagedBase >= BootstrapManagedSize ||
+    if (!pagingContextMatches(context) || address < BootstrapUserAddressBase ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
         (address & mm::PageMask4KB)) {
         return false;
     }
@@ -2762,8 +2865,8 @@ bool unmapBootstrapManagedPage(void* context, uintptr_t address) noexcept {
 
 bool replaceBootstrapManagedPage(void* context, uintptr_t address, uint64_t expectedPfn,
                                  uint64_t replacementPfn, uint32_t protection) noexcept {
-    if (!pagingContextMatches(context) || address < BootstrapManagedBase ||
-        address - BootstrapManagedBase >= BootstrapManagedSize || (address & mm::PageMask4KB) ||
+    if (!pagingContextMatches(context) || address < BootstrapUserAddressBase ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize || (address & mm::PageMask4KB) ||
         !expectedPfn || !replacementPfn || replacementPfn > (kPhysicalMask >> mm::PageShift4KB) ||
         (protection != mm::PAGE_READONLY && protection != mm::PAGE_READWRITE &&
          protection != mm::PAGE_EXECUTE_READ && protection != mm::PAGE_EXECUTE_READWRITE &&
@@ -2791,8 +2894,8 @@ bool replaceBootstrapManagedPage(void* context, uintptr_t address, uint64_t expe
 
 bool mapBootstrapProtectManagedPage(void* context, uintptr_t address,
                                     uint32_t protection) noexcept {
-    if (!pagingContextMatches(context) || address < BootstrapManagedBase ||
-        address - BootstrapManagedBase >= BootstrapManagedSize ||
+    if (!pagingContextMatches(context) || address < BootstrapUserAddressBase ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
         (address & mm::PageMask4KB) ||
         (protection != mm::PAGE_READONLY && protection != mm::PAGE_READWRITE &&
          protection != mm::PAGE_EXECUTE_READ && protection != mm::PAGE_EXECUTE_READWRITE &&
@@ -2826,8 +2929,8 @@ bool mapBootstrapProtectManagedPage(void* context, uintptr_t address,
 }
 
 bool mapBootstrapGuardManagedPage(void* context, uintptr_t address, bool guarded) noexcept {
-    if (!pagingContextMatches(context) || address < BootstrapManagedBase ||
-        address - BootstrapManagedBase >= BootstrapManagedSize || (address & mm::PageMask4KB)) return false;
+    if (!pagingContextMatches(context) || address < BootstrapUserAddressBase ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize || (address & mm::PageMask4KB)) return false;
     uint64_t* table = activePagingRoot();
     for (int shift = 39; shift > 12; shift -= 9) {
         const uint64_t entry = table[(address >> shift) & 511];
@@ -2861,8 +2964,8 @@ bool bootstrapQemuFaultTestsAvailable() noexcept {
 bool verifyBootstrapManagedPageFault(uintptr_t address, bool write,
                                      bool present) noexcept {
     if (!bootstrapQemuFaultTestsAvailable() || !bootstrapPagingContext() ||
-        address < BootstrapManagedBase ||
-        address - BootstrapManagedBase >= BootstrapManagedSize ||
+        address < BootstrapUserAddressBase ||
+        address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
         (write && !present) || (!write && present) || g_managedFaultArmed) return false;
 
     uint16_t cs{};
@@ -3062,8 +3165,8 @@ bool verifyManagedExecutablePage() noexcept {
         const mm::ProcessAddressSpace::PagingBackend backend{
             nullptr, mapBootstrapManagedPage, unmapBootstrapManagedPage, mapBootstrapProtectManagedPage,
             mapBootstrapManagedView, unmapBootstrapManagedView};
-        if (!space.configurePagingBackend(backend, BootstrapManagedBase, BootstrapManagedSize)) return false;
-        uintptr_t address = BootstrapManagedBase;
+        if (!space.configurePagingBackend(backend, BootstrapUserAddressBase, BootstrapUserAddressSize)) return false;
+        uintptr_t address = BootstrapUserAddressBase;
         if (space.allocate(address, mm::PageSize4KB, mm::MEM_RESERVE | mm::MEM_COMMIT,
                            mm::PAGE_READWRITE) != NtStatus::Success) return false;
         *reinterpret_cast<volatile uint8_t*>(address) = 0xcc; // CPL3 breakpoint instruction.
@@ -3318,7 +3421,7 @@ bool copyBootstrapFirmwareMemory(uint64_t physical, void* destination, size_t si
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0" : "=r"(flags) : : "memory");
     if (flags & (uint64_t{1} << 9)) return false;
-    constexpr uint64_t scratch = kDeviceBase + 16 * 1024 * 1024;
+    constexpr uint64_t scratch = kDeviceBase;
     if (!destination || !size || physical > kPhysicalMask + 4095 ||
         size - 1 > kPhysicalMask + 4095 - physical || !pagingContextMatches(nullptr)) return false;
     auto* out = static_cast<uint8_t*>(destination);
@@ -4664,7 +4767,7 @@ bool verifyRing3Transition() noexcept {
     __asm__ __volatile__("lidt %0" : : "m"(idtr) : "memory");
     // Exercise IDT restoration while the CPL3 probe table is actually active.
     if (bootstrapQemuFaultTestsAvailable() &&
-        !verifyBootstrapManagedPageFault(BootstrapManagedBase, false, false)) {
+        !verifyBootstrapManagedPageFault(BootstrapUserAddressBase, false, false)) {
         return false;
     }
     g_probeReturnRip = kUserBase + 11;

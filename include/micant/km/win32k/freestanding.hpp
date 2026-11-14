@@ -5,6 +5,9 @@
 
 namespace micant::win32k::freestanding {
 
-micant::NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept;
+micant::NtStatus dispatchRequest(MicaWin32kRequest& request,
+                                 uint64_t ownerProcessId) noexcept;
+void releaseProcess(uint64_t ownerProcessId) noexcept;
+void dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept;
 
 } // namespace micant::win32k::freestanding

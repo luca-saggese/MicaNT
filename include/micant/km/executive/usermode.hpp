@@ -1473,6 +1473,7 @@ public:
     struct BindingFailure {
         std::string_view library{};
         std::string_view symbol{};
+        std::string_view importer{};
         uint16_t ordinal{};
     };
 
@@ -1541,7 +1542,7 @@ public:
                     uint16_t ordinal, uint64_t& address) {
                     const NtStatus result = resolve(library, name, ordinal, address,
                                                     nullptr, current.name);
-                    if (result != NtStatus::Success) failure_ = {library, name, ordinal};
+                    if (result != NtStatus::Success) failure_ = {library, name, current.name, ordinal};
                     return result;
                 }, pass == 1, current.immutableImage());
             if (status != NtStatus::Success) return status;
@@ -1605,7 +1606,7 @@ public:
                         uint16_t ordinal, uint64_t& address) {
                         const NtStatus result = resolve(library, name, ordinal, address,
                                                         nullptr, current.name);
-                        if (result != NtStatus::Success) failure_ = {library, name, ordinal};
+                        if (result != NtStatus::Success) failure_ = {library, name, current.name, ordinal};
                         return result;
                     }, pass == 1, current.immutableImage());
                 if (status != NtStatus::Success) return status;

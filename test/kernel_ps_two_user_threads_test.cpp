@@ -16,6 +16,7 @@ uint32_t bootstrapEventObjectCount() noexcept;
 }
 
 namespace {
+static_assert(micant::hal::amd64::BootstrapUserAddressBase + 0x3700 == 0x428000003700ULL);
 size_t readyNonPassiveWorkThreadCount() noexcept {
     auto count = micant::ke::PriorityScheduler::get().getReadyThreadCount();
     for (const auto& worker : micant::ke::passive_work::detail::workers)
@@ -46,13 +47,21 @@ void serialWriteHex(uint32_t value) noexcept {
 }
 bool drainDeferredDeletes(uintptr_t kernelRoot, uintptr_t processRoot) noexcept {
     if (!micant::hal::amd64::switchProcessPagingRootByPhysical(kernelRoot)) return false;
+    auto* current = micant::ke::KeGetCurrentThread();
+    if (!current) return false;
     uint64_t flags{};
-    __asm__ __volatile__("pushfq; popq %0; sti" : "=r"(flags) : : "memory");
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const auto priority = current->priority;
+    current->priority = micant::ke::PRIORITY_IDLE;
+    if (micant::ke::g_CurrentCpu.serviceDeferredCleanup)
+        micant::ke::g_CurrentCpu.serviceDeferredCleanup();
     const uint64_t start = micant::hal::amd64::bootstrapSchedulerClockTicks();
+    __asm__ __volatile__("sti" : : : "memory");
     for (size_t spin = 0; spin < 50000000 && micant::io::IoDeferredFileDeletesPending() &&
          micant::hal::amd64::bootstrapSchedulerClockTicks() - start < 100; ++spin)
         __asm__ __volatile__("pause");
     __asm__ __volatile__("cli" : : : "memory");
+    current->priority = priority;
     const bool drained = !micant::io::IoDeferredFileDeletesPending();
     const bool restored = micant::hal::amd64::switchProcessPagingRootByPhysical(processRoot);
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
@@ -216,10 +225,10 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "cmpq $0, 48(%r14)\nje 42f\n"
         // CPL3 native wait timeout coverage: a relative one millisecond wait
         // on an unsignaled event returns STATUS_TIMEOUT.
-        "movabsq $0x400020003700, %r8\nmovq $-10000, (%r8)\nmovq %rbx, %rcx\nxorl %edx, %edx\n"
+        "movabsq $0x428000003700, %r8\nmovq $-10000, (%r8)\nmovq %rbx, %rcx\nxorl %edx, %edx\n"
         "callq *8(%r15)\ncmpq $0x102, %rax\njne 31f\n"
-        "42: movabsq $0x400020003708, %rax\nmovq $1, (%rax)\n"
-        "movabsq $0x400020003708, %rax\nmovq $1, (%rax)\n"
+        "42: movabsq $0x428000003708, %rax\nmovq $1, (%rax)\n"
+        "movabsq $0x428000003708, %rax\nmovq $1, (%rax)\n"
         // NtAlertThread marks this thread alerted; an alertable delay consumes
         // that alert and returns STATUS_ALERTED without sleeping.
         "movq $-2, %rcx\ncallq *112(%r15)\ntestl %eax, %eax\njnz 33f\n"
@@ -227,12 +236,12 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         // handle must fail without changing the alert state.
         "xorl %ecx, %ecx\ncallq *112(%r15)\ncmpl $0xc0000008, %eax\nje .Lmicant_alert_invalid_handle\n"
         "movl $0xc0000250, %edx\njmp 8f\n.Lmicant_alert_invalid_handle:\n"
-        "movabsq $0x400020003700, %rdx\nmovq $-10000, (%rdx)\nmovl $1, %ecx\n"
+        "movabsq $0x428000003700, %rdx\nmovq $-10000, (%rdx)\nmovl $1, %ecx\n"
         "callq *104(%r15)\ncmpq $0x101, %rax\njne 34f\n"
         // A queued user APC must break an alertable wait with USER_APC and
         // run its callback on the real CPL3 return path before the caller
         // resumes after the syscall.
-        "movabsq $0x400020003700, %rax\nmovq $0, (%rax)\n"
+        "movabsq $0x428000003700, %rax\nmovq $0, (%rax)\n"
         "movq $-2, %rcx\nleaq MicantTestUserApc(%rip), %rdx\n"
         "xorl %r8d, %r8d\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
         "testl %eax, %eax\njz 35f\nmovl %eax, %edx\njmp 8f\n35:\n"
@@ -243,17 +252,17 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "movl $0xc0000251, %edx\njmp 8f\n.Lmicant_queue_invalid_handle:\n"
         "movq %rbx, %rcx\nmovl $1, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\n"
         "cmpq $0xc0, %rax\nje 36f\nmovl $0xc000024c, %edx\njmp 8f\n36:\n"
-        "movabsq $0x400020003700, %rax\ncmpq $0x41504321, (%rax)\nje 37f\n"
+        "movabsq $0x428000003700, %rax\ncmpq $0x41504321, (%rax)\nje 37f\n"
         "movl $0xc000024d, %edx\njmp 8f\n37:\n"
         // Alertable delay is another user APC return boundary; deliver the
         // next queued routine before returning STATUS_USER_APC to this code.
         "movq $-2, %rcx\nleaq MicantTestUserApcSecond(%rip), %rdx\n"
         "xorl %r8d, %r8d\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\ncallq *120(%r15)\n"
         "testl %eax, %eax\njz .Lmicant_delay_apc_queued\nmovl %eax, %edx\njmp 8f\n"
-        ".Lmicant_delay_apc_queued:\nmovabsq $0x400020003710, %rdx\nmovq $-10000, (%rdx)\n"
+        ".Lmicant_delay_apc_queued:\nmovabsq $0x428000003710, %rdx\nmovq $-10000, (%rdx)\n"
         "movl $1, %ecx\ncallq *104(%r15)\ncmpq $0xc0, %rax\n"
         "je .Lmicant_delay_apc_returned\nmovl $0xc000024e, %edx\njmp 8f\n"
-        ".Lmicant_delay_apc_returned:\nmovabsq $0x400020003700, %rax\n"
+        ".Lmicant_delay_apc_returned:\nmovabsq $0x428000003700, %rax\n"
         "cmpq $0x41504322, (%rax)\nje .Lmicant_delay_apc_called\n"
         "movl $0xc000024f, %edx\njmp 8f\n.Lmicant_delay_apc_called:\n"
         // Thread A allocates and checks a page through the native syscall.
@@ -273,7 +282,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "movq %r12, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
         "testl %eax, %eax\njnz 9f\n10: movl $0xc0000022, %edx\njmp 8f\n"
         // Thread B signals A, then blocks until A signals its event.
-        "3: movabsq $0x400020003708, %r10\n39: cmpq $0, (%r10)\nje 39b\n"
+        "3: movabsq $0x428000003708, %r10\n39: cmpq $0, (%r10)\nje 39b\n"
         "movq %rbx, %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
         "testl %eax, %eax\njnz 9f\n"
         "movq %r12, %rcx\nxorl %edx, %edx\nxorl %r8d, %r8d\ncallq *8(%r15)\n"
@@ -290,13 +299,13 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         // argument in a Windows-ABI nonvolatile register across NtTestAlert.
         "MicantApcThreadStart: pushq %r12\nmovq %rcx, %r12\n"
         "movl $0x170, %eax\nsyscall\n"
-        "movabsq $0x400020003700, %r10\ncmpq $0x41504322, (%r10)\njne 43f\n"
+        "movabsq $0x428000003700, %r10\ncmpq $0x41504322, (%r10)\njne 43f\n"
         "movq $0x12345678, (%r12)\nmovl $0xc0000123, %eax\npopq %r12\nretq\n"
         "43: movl $0xc0000022, %eax\npopq %r12\nretq\n"
         ".globl MicantTestUserApc\n"
-        "MicantTestUserApc: movabsq $0x400020003700, %rax\nmovq $0x41504321, (%rax)\nretq\n"
+        "MicantTestUserApc: movabsq $0x428000003700, %rax\nmovq $0x41504321, (%rax)\nretq\n"
         ".globl MicantTestUserApcSecond\n"
-        "MicantTestUserApcSecond: movabsq $0x400020003700, %rax\n"
+        "MicantTestUserApcSecond: movabsq $0x428000003700, %rax\n"
         "cmpq $0x41504321, (%rax)\njne 46f\nmovq $0x41504322, (%rax)\nretq\n"
         "46: movq $0x415043ff, (%rax)\nretq\n"
         ".globl MicantApcFaultThreadStart\n"
@@ -337,7 +346,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
     __asm__ __volatile__(
         "pushq %r12\npushq %r13\npushq %r15\nmovq %rcx, %r12\nmovq 0(%r12), %r15\n"
         "xorl %r13d, %r13d\nsubq $0x180, %rsp\n"
-        "movabsq $0x400020003700, %rax\nmovq $0, (%rax)\n"
+        "movabsq $0x428000003700, %rax\nmovq $0, (%rax)\n"
         "movq $0, 0x60(%rsp)\nmovq $0, 0x68(%rsp)\nmovq $0, 0x70(%rsp)\nmovq $0, 0x78(%rsp)\n"
         // Current process and thread pseudo handles are waitable; while each
         // object is still live, a zero-time wait must report timeout.
@@ -612,14 +621,8 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ncmpl $0xc000000d, %eax\nje 50f\n"
         "movl %eax, %r13d\njmp 90f\n50: cmpq $0, 0x70(%rsp)\nje 51f\n"
         "movl $0xc000023c, %r13d\njmp 90f\n51:\n"
-        "movq $0, 0x70(%rsp)\nleaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\n"
-        "xorl %r8d, %r8d\nmovq 0x60(%rsp), %r9\n"
-        "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
-        "leaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\n"
-        "movq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $0x1001000, 0x48(%rsp)\n"
-        "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ncmpl $0xc000000d, %eax\nje 52f\n"
-        "movl %eax, %r13d\njmp 90f\n52: cmpq $0, 0x70(%rsp)\nje 53f\n"
-        "movl $0xc000023d, %r13d\njmp 90f\n53:\n"
+        // The kernel-side NtCreateThreadEx regression below exercises a
+        // successful 20 MiB reserve and reclaims its VAD/PFNs.
         // Stack rounding must reject size_t overflow without publishing an
         // object handle.
         "movq $0, 0x70(%rsp)\nleaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\n"
@@ -671,7 +674,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq 0x70(%rsp), %rcx\ncallq *88(%r15)\ntestl %eax, %eax\njz 17f\nmovl $0xc000021b, %r13d\njmp 90f\n17:\n"
         // Terminating a never-started thread with a queued user APC must
         // rundown the APC, signal the thread object and preserve the exit code.
-        "movabsq $0x400020003700, %rax\nmovq $0, (%rax)\nmovq $0, 0x70(%rsp)\n"
+        "movabsq $0x428000003700, %rax\nmovq $0, (%rax)\nmovq $0, 0x70(%rsp)\n"
         "leaq 0x70(%rsp), %rcx\nmovl $0x00100051, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
         "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nmovq %r12, %rax\n"
         "movq %rax, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\n"
@@ -691,7 +694,7 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movl $0xc0000298, %r13d\njmp 90f\n.Lmicant_apc_terminate_status:\n"
         "cmpl $0xc0000120, 0xb0(%rsp)\nje .Lmicant_apc_terminate_marker\n"
         "movl $0xc0000292, %r13d\njmp 90f\n.Lmicant_apc_terminate_marker:\n"
-        "movabsq $0x400020003700, %rax\ncmpq $0, (%rax)\nje .Lmicant_apc_terminate_close\n"
+        "movabsq $0x428000003700, %rax\ncmpq $0, (%rax)\nje .Lmicant_apc_terminate_close\n"
         "movl $0xc0000293, %r13d\njmp 90f\n.Lmicant_apc_terminate_close:\n"
         "movq 0x70(%rsp), %rcx\ncallq *88(%r15)\ntestl %eax, %eax\njz .Lmicant_apc_terminate_done\n"
         "movl $0xc0000299, %r13d\njmp 90f\n.Lmicant_apc_terminate_done:\n"
@@ -776,7 +779,7 @@ __attribute__((noinline)) bool testNativePeerThread(micant::Handle process, uint
     Handle oversizedReserveThread{};
     const auto oversizedReserveStatus = sys::NtCreateThreadEx(&oversizedReserveThread,
         ob::SYNCHRONIZE, nullptr, process, entry, 0, 1, 0,
-        mm::PageSize4KB, hal::amd64::BootstrapManagedSize + mm::PageSize4KB, nullptr);
+        mm::PageSize4KB, SIZE_MAX, nullptr);
     auto malformedAttributes = attrs;
     malformedAttributes.entries[1].attribute = PS_ATTRIBUTE_CLIENT_ID;
     Handle malformedAttributeThread{};
@@ -1021,6 +1024,13 @@ __attribute__((noinline)) bool testNativeThreadExecution(micant::Handle processH
             : *reinterpret_cast<const uint64_t*>(resultAddress) == 0x12345678) &&
         (!growStack || *(reinterpret_cast<const uint64_t*>(resultAddress) + 1) ==
                            initialStackLimit - 5 * mm::PageSize4KB);
+    if (growStack && !called) {
+        serialWrite("[MicaNT Ps] Stack growth result/exit/expected=");
+        serialWriteHex(static_cast<uint32_t>(*reinterpret_cast<const uint64_t*>(resultAddress)));
+        serialWrite("/"); serialWriteHex(static_cast<uint32_t>(thread->exitStatus()));
+        serialWrite("/"); serialWriteHex(static_cast<uint32_t>(initialStackLimit - 5 * mm::PageSize4KB));
+        serialWrite("\r\n");
+    }
     if (ring3ProcessCreate && !called) {
         serialWrite("[MicaNT Ps] Ring 3 process test status=");
         serialWriteHex(static_cast<uint32_t>(*reinterpret_cast<const uint64_t*>(resultAddress + 8)));
@@ -1133,7 +1143,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
             sys::NtClose(sourceFirst) != NtStatus::Success || sys::NtClose(sourceSecond) != NtStatus::Success ||
             !hal::amd64::switchProcessPagingRootByPhysical(process.getDirectoryTableBase())) return false;
         progress.stage = "synthetic image construction";
-        const uintptr_t code = hal::amd64::BootstrapManagedBase;
+        const uintptr_t code = hal::amd64::BootstrapUserAddressBase;
         constexpr uintptr_t dataRva = 3 * mm::PageSize4KB;
         const auto* program = reinterpret_cast<const uint8_t*>(MicantTwoUserThreads);
         const size_t programSize = reinterpret_cast<uintptr_t>(MicantTwoUserThreadsEnd) - reinterpret_cast<uintptr_t>(program);
@@ -1235,27 +1245,38 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto unboundFirst = *reinterpret_cast<uint64_t*>(code + imports.firstThunk);
         if (process.finalizeNativeImages() != NtStatus::NoSuchFile ||
             *reinterpret_cast<uint64_t*>(code + imports.firstThunk) != unboundFirst) return false;
+        serialWrite("[MicaNT Ps] Import preflight rollback confirmed\r\n");
         pe::PeImageView64 dll;
         if (dll.inspect(std::span<const uint8_t>{nativeDll}) != NtStatus::Success) return false;
+        serialWrite("[MicaNT Ps] NTDLL fixture validated\r\n");
         const size_t beforeDuplicate = mm::PfnDatabase::get().getActiveCount();
         const auto duplicateStatus = process.loadNativeImage("fixture.exe", std::span<const uint8_t>{nativeDll});
         if (duplicateStatus != NtStatus::ObjectNameCollision ||
             mm::PfnDatabase::get().getActiveCount() != beforeDuplicate) return false;
+        serialWrite("[MicaNT Ps] Duplicate image rejection verified\r\n");
         text.characteristics |= pe::IMAGE_SCN_MEM_WRITE;
         std::memcpy(file + 64 + sizeof(nt), &text, sizeof(text));
+        serialWrite("[MicaNT Ps] Starting W+X conflict mapping\r\n");
         const auto wxStatus = process.loadNativeImage("wx.exe", std::span<const uint8_t>{file});
+        serialWrite("[MicaNT Ps] W+X conflict mapping returned\r\n");
         text.characteristics &= ~pe::IMAGE_SCN_MEM_WRITE;
         std::memcpy(file + 64 + sizeof(nt), &text, sizeof(text));
+        serialWrite("[MicaNT Ps] Draining image cleanup\r\n");
         if (!drainDeferredDeletes(previous, process.getDirectoryTableBase())) return false;
+        serialWrite("[MicaNT Ps] Image cleanup drained\r\n");
         // W+X is a valid PE protection; this image still conflicts with the
         // fixture already mapped at the same preferred address.
         if (wxStatus != NtStatus::Conflict || mm::PfnDatabase::get().getActiveCount() != beforeDuplicate)
             return false;
+        serialWrite("[MicaNT Ps] W+X conflict rollback verified\r\n");
+        serialWrite("[MicaNT Ps] Mapping NTDLL image\r\n");
         if (process.loadNativeImage("ntdll.dll", std::span<const uint8_t>{nativeDll}, dllPath) != NtStatus::Success)
             return false;
+        serialWrite("[MicaNT Ps] NTDLL image mapped\r\n");
         progress.stage = "TLS module construction";
         static constinit uint8_t tlsDllFile[1024]{};
-        constexpr uintptr_t tlsDllBase = hal::amd64::BootstrapManagedBase + 0xe00000;
+        constexpr uintptr_t tlsDllBase = hal::amd64::BootstrapUserAddressBase +
+            size_t{200} * 1024 * 1024;
         static constinit pe::ImageNtHeaders64 tlsNt{};
         tlsNt = {};
         tlsNt.signature = pe::NT_SIGNATURE;
@@ -1291,9 +1312,12 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         constexpr uint64_t secondSeed = 0x1020304050607080ULL;
         std::memcpy(tlsDllFile + 512 + 0x80, &secondSeed, sizeof(secondSeed));
         std::memcpy(tlsDllFile + 512 + 0x90, &uninitializedTlsIndex, sizeof(uninitializedTlsIndex));
+        serialWrite("[MicaNT Ps] Mapping DLL beyond prior VAD window\r\n");
         if (process.loadNativeImage("tls.dll", std::span<const uint8_t>{tlsDllFile}, tlsPath) != NtStatus::Success)
             return false;
+        serialWrite("[MicaNT Ps] DLL beyond prior VAD window mapped\r\n");
         if (process.setNativeProcessParameters(executablePath, commandLine) != NtStatus::Success) return false;
+        serialWrite("[MicaNT Ps] Process parameters set\r\n");
         // Finalization reads the immutable image snapshot, not the writable
         // process mapping. Inject the unsupported metadata into that snapshot.
         auto* loadedTls = reinterpret_cast<pe::ImageTlsDirectory64*>(image->metadata.get() + dataRva);
@@ -1301,13 +1325,17 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         loadedTls->addressOfCallBacks = code + dataRva + 0x68;
         callbacks[0] = code + mm::PageSize4KB;
         callbacks[1] = 0;
+        serialWrite("[MicaNT Ps] Finalizing image callbacks rejection\r\n");
         const auto callbackStatus = process.finalizeNativeImages();
+        serialWrite("[MicaNT Ps] Image callbacks rejection returned\r\n");
         loadedTls->addressOfCallBacks = 0;
         callbacks[0] = 0;
         const bool callbackRejectedWithoutTlsMutation =
             *reinterpret_cast<uint32_t*>(code + tlsLayout.indexRva) == uninitializedTlsIndex &&
             *reinterpret_cast<uint32_t*>(tlsDllBase + mm::PageSize4KB + 0x90) == uninitializedTlsIndex;
+        serialWrite("[MicaNT Ps] Finalizing native images\r\n");
         const auto finalizeStatus = process.finalizeNativeImages();
+        serialWrite("[MicaNT Ps] Native images finalized\r\n");
         if (callbackStatus != NtStatus::NotImplemented || !callbackRejectedWithoutTlsMutation ||
             finalizeStatus != NtStatus::Success || process.userTlsLayouts().size() != 2 ||
             *reinterpret_cast<uint32_t*>(code + tlsLayout.indexRva) != 0 ||
@@ -1360,6 +1388,15 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto partialStackReapStatus = first.reap();
         if (partialStackReapStatus != NtStatus::Success ||
             mm::PfnDatabase::get().getActiveCount() != beforeThread) return false;
+        // Stack reserve follows the process VAD and PFN commit budget; it is
+        // not capped at the former 16 MiB bootstrap constant.
+        const size_t largeStackReserve = size_t{20} * 1024 * 1024;
+        const auto largeStackStatus = first.initializeUser(
+            process, entry, 32768, largeStackReserve, 8 * mm::PageSize4KB, false);
+        if (largeStackStatus != NtStatus::Success) return false;
+        const auto largeStackReapStatus = first.reap();
+        if (largeStackReapStatus != NtStatus::Success ||
+            mm::PfnDatabase::get().getActiveCount() != beforeThread) return false;
         // Compose a separate process and initial user thread through the
         // private Ps factory, then roll it back before its entry executes.
         Handle createdProcess{}, createdThread{};
@@ -1376,18 +1413,27 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto factoryStatus = ps::detail::createBootstrapUserProcess(processImages, executablePath, commandLine, 32768,
                 32768, preemptive, ob::SYNCHRONIZE | 1 | 2 | 0x80, ob::SYNCHRONIZE,
                 createdProcess, createdThread);
+        serialWrite("[MicaNT Ps] Bootstrap process factory returned\r\n");
         if (factoryStatus != NtStatus::Success || !createdProcess || !createdThread) return false;
         progress.stage = "native peer thread rights";
+        serialWrite("[MicaNT Ps] Checking native peer thread rights\r\n");
         if (!testNativePeerThread(createdProcess, entry)) return false;
+        serialWrite("[MicaNT Ps] Native peer thread rights checked\r\n");
         progress.stage = "native thread execution";
+        serialWrite("[MicaNT Ps] Starting native thread execution check\r\n");
         if (!testNativeThreadExecution(createdProcess, createdThread, entry, previous,
                                        process.getDirectoryTableBase())) return false;
+        serialWrite("[MicaNT Ps] Native thread execution check passed\r\n");
         progress.stage = "native stack growth";
+        serialWrite("[MicaNT Ps] Starting native stack growth\r\n");
         if (!testNativeThreadExecution(createdProcess, createdThread, entry, previous,
                                        process.getDirectoryTableBase(), true)) return false;
+        serialWrite("[MicaNT Ps] Native stack growth passed\r\n");
         progress.stage = "Ring 3 process and thread syscalls";
+        serialWrite("[MicaNT Ps] Starting Ring 3 process syscall suite\r\n");
         if (!testNativeThreadExecution(createdProcess, createdThread, entry, previous,
                 process.getDirectoryTableBase(), false, true, code + imports.firstThunk)) return false;
+        serialWrite("[MicaNT Ps] Ring 3 process syscall suite passed\r\n");
         progress.stage = "kernel clone lifetime";
         Handle clonedProcess{};
         const auto cloneStatus = sys::NtCreateProcessEx(&clonedProcess,

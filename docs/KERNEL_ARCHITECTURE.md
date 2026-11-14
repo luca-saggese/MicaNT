@@ -197,7 +197,7 @@ owner; the archived kernel itself must never be restored as a second kernel.
 
 | Legacy function area | Canonical destination | Current migration status |
 |---|---|---|
-| UEFI handover and loader data | `kernel/init/`, shared boot contract | Versioned POD handoff and bounded, strided memory map validated; usable pages in the first 256 MiB enrolled, higher RAM deferred explicitly |
+| UEFI handover and loader data | `kernel/init/`, shared boot contract | Versioned POD handoff; the UEFI map buffer and normalized descriptor array grow from actual map size; PFN metadata covers conventional RAM extents and high PFNs use a validated HAL aperture. the AMD64 process backend uses lower-half PML4 slots 133–255 (61.5 TiB), avoiding bootstrap-owned slots; 2/4 GiB QEMU profiles reached an allocate/write/free/reallocate probe above 1 GiB |
 | Serial debug | `Hal` / AMD64 platform | Bootstrap kernel initializes COM1 and emits verified serial milestones; HAL ownership is pending |
 | IDT and exceptions | `Ke` + `Hal` / AMD64 | Diagnostic GDT/TSS/IDT and checked #BP/#PF returns verified in QEMU; general exception dispatch pending |
 | APIC and timer | `Hal` + `Ke` | Headers/contracts exist; modular bare-metal initialization is not verified |

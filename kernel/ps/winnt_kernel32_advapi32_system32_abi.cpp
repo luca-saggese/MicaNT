@@ -11,6 +11,15 @@ extern "C" {
 __declspec(dllimport) int32_t __stdcall NtQuerySystemTime(int64_t* systemTime) noexcept;
 __declspec(dllimport) int32_t __stdcall NtQueryPerformanceCounter(
     int64_t* performanceCounter, int64_t* performanceFrequency) noexcept;
+__declspec(dllimport) int32_t __stdcall NtDelayExecution(
+    uint8_t alertable, const int64_t* delayInterval) noexcept;
+__declspec(dllimport) int32_t __stdcall NtYieldExecution() noexcept;
+__declspec(dllimport) int32_t __stdcall NtProtectVirtualMemory(
+    void* process, void** base, size_t* size, uint32_t newProtection,
+    uint32_t* oldProtection) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryVirtualMemory(
+    void* process, const void* base, uint32_t informationClass,
+    void* information, size_t informationLength, size_t* returnLength) noexcept;
 
 struct Kernel32SystemTime {
     uint16_t year, month, dayOfWeek, day, hour, minute, second, milliseconds;
@@ -393,6 +402,282 @@ __declspec(dllexport) uint64_t __stdcall GetTickCount64() noexcept {
     return *shared;
 }
 
+struct UserListEntry64 { uintptr_t next, previous; };
+struct UserUnicodeString64 { uint16_t length, maximumLength; uint32_t padding; const wchar_t* buffer; };
+struct WinCriticalSection64 {
+    void* debugInfo;
+    int32_t lockCount;
+    int32_t recursionCount;
+    uintptr_t owningThread;
+    void* lockSemaphore;
+    uintptr_t spinCount;
+};
+static_assert(sizeof(WinCriticalSection64) == 40);
+
+static uintptr_t CurrentPeb() noexcept {
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (teb < 0x10000 || teb > 0x00007FFFFFFF0000ULL - 0x60) return 0;
+    const uintptr_t peb = *reinterpret_cast<const uintptr_t*>(teb + 0x60);
+    return peb >= 0x10000 && peb < 0x00007FFFFFFF0000ULL ? peb : 0;
+}
+
+static uintptr_t FindModule(const wchar_t* name) noexcept {
+    const uintptr_t peb = CurrentPeb();
+    if (!peb) return 0;
+    if (!name) return *reinterpret_cast<const uintptr_t*>(peb + 0x10);
+    const uintptr_t loader = *reinterpret_cast<const uintptr_t*>(peb + 0x18);
+    if (loader < 0x10000 || loader >= 0x00007FFFFFFF0000ULL - 0x28) return 0;
+    const uintptr_t headAddress = loader + 0x20;
+    const auto* head = reinterpret_cast<const UserListEntry64*>(headAddress);
+    uintptr_t link = head->next;
+    for (size_t count = 0; count < 32 && link != headAddress; ++count) {
+        if (link < 0x10010 || link >= 0x00007FFFFFFF0000ULL) return 0;
+        const uintptr_t entry = link - 0x10;
+        const uintptr_t base = *reinterpret_cast<const uintptr_t*>(entry + 0x30);
+        const auto& fullName = *reinterpret_cast<const UserUnicodeString64*>(entry + 0x48);
+        if (base && fullName.buffer && !(fullName.length & 1)) {
+            const size_t length = fullName.length / sizeof(wchar_t);
+            size_t pathBase{};
+            for (size_t i = 0; i < length; ++i)
+                if (fullName.buffer[i] == L'\\' || fullName.buffer[i] == L'/') pathBase = i + 1;
+            size_t nameBase{};
+            for (size_t i = 0; name[i]; ++i)
+                if (name[i] == L'\\' || name[i] == L'/') nameBase = i + 1;
+            size_t i = pathBase, j = nameBase;
+            for (; i < length && name[j]; ++i, ++j) {
+                wchar_t a = fullName.buffer[i], b = name[j];
+                if (a > 0x7f || b > 0x7f) break;
+                if (a >= L'A' && a <= L'Z') a += L'a' - L'A';
+                if (b >= L'A' && b <= L'Z') b += L'a' - L'A';
+                if (a != b) break;
+            }
+            if (i == length && name[j] == 0) return base;
+        }
+        link = reinterpret_cast<const UserListEntry64*>(link)->next;
+    }
+    return 0;
+}
+
+__declspec(dllexport) void* __stdcall GetModuleHandleW(const wchar_t* name) noexcept {
+    return reinterpret_cast<void*>(FindModule(name));
+}
+
+__declspec(dllexport) void* __stdcall GetProcAddress(void* module, const char* name) noexcept {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    if (!name || !FindModule(nullptr) || !base || base >= 0x00007FFFFFFF0000ULL) return nullptr;
+    bool loaded = false;
+    const uintptr_t peb = CurrentPeb();
+    const uintptr_t loader = peb ? *reinterpret_cast<const uintptr_t*>(peb + 0x18) : 0;
+    if (loader < 0x10000 || loader >= 0x00007FFFFFFF0000ULL - 0x28) return nullptr;
+    const uintptr_t headAddress = loader + 0x20;
+    uintptr_t link = reinterpret_cast<const UserListEntry64*>(headAddress)->next;
+    for (size_t count = 0; count < 32 && link != headAddress; ++count) {
+        if (link < 0x10010 || link >= 0x00007FFFFFFF0000ULL) return nullptr;
+        if (*reinterpret_cast<const uintptr_t*>(link - 0x10 + 0x30) == base) { loaded = true; break; }
+        link = reinterpret_cast<const UserListEntry64*>(link)->next;
+    }
+    if (!loaded) return nullptr;
+    const auto* image = reinterpret_cast<const uint8_t*>(base);
+    if (*reinterpret_cast<const uint16_t*>(image) != 0x5a4d) return nullptr;
+    const uint32_t peOffset = *reinterpret_cast<const uint32_t*>(image + 0x3c);
+    if (peOffset > 0x100000) return nullptr;
+    const auto* pe = image + peOffset;
+    if (*reinterpret_cast<const uint32_t*>(pe) != 0x00004550 ||
+        *reinterpret_cast<const uint16_t*>(pe + 24) != 0x20b) return nullptr;
+    const uint32_t imageSize = *reinterpret_cast<const uint32_t*>(pe + 24 + 56);
+    const uint32_t exportRva = *reinterpret_cast<const uint32_t*>(pe + 24 + 112);
+    const uint32_t exportSize = *reinterpret_cast<const uint32_t*>(pe + 24 + 116);
+    if (imageSize < 0x1000 || exportRva > imageSize || exportSize < 40 ||
+        exportSize > imageSize - exportRva) return nullptr;
+    const auto* directory = image + exportRva;
+    const uint32_t ordinalBase = *reinterpret_cast<const uint32_t*>(directory + 16);
+    const uint32_t functionCount = *reinterpret_cast<const uint32_t*>(directory + 20);
+    const uint32_t nameCount = *reinterpret_cast<const uint32_t*>(directory + 24);
+    const uint32_t functions = *reinterpret_cast<const uint32_t*>(directory + 28);
+    const uint32_t names = *reinterpret_cast<const uint32_t*>(directory + 32);
+    const uint32_t ordinals = *reinterpret_cast<const uint32_t*>(directory + 36);
+    if (!functionCount || nameCount > functionCount || functions > imageSize ||
+        functionCount * 4ULL > imageSize - functions || names > imageSize ||
+        nameCount * 4ULL > imageSize - names || ordinals > imageSize ||
+        nameCount * 2ULL > imageSize - ordinals) return nullptr;
+    uint32_t functionIndex = UINT32_MAX;
+    const uintptr_t ordinal = reinterpret_cast<uintptr_t>(name);
+    if (ordinal <= 0xffff) {
+        if (ordinal < ordinalBase || ordinal - ordinalBase >= functionCount) return nullptr;
+        functionIndex = static_cast<uint32_t>(ordinal - ordinalBase);
+    } else {
+        for (uint32_t i = 0; i < nameCount; ++i) {
+            const uint32_t nameRva = *reinterpret_cast<const uint32_t*>(image + names + i * 4ULL);
+            if (!nameRva || nameRva >= imageSize) return nullptr;
+            const char* candidate = reinterpret_cast<const char*>(image + nameRva);
+            size_t j{};
+            while (j < 512 && candidate[j] && name[j] && candidate[j] == name[j]) ++j;
+            if (j < 512 && candidate[j] == 0 && name[j] == 0) {
+                functionIndex = *reinterpret_cast<const uint16_t*>(image + ordinals + i * 2ULL);
+                break;
+            }
+        }
+    }
+    if (functionIndex >= functionCount) return nullptr;
+    const uint32_t rva = *reinterpret_cast<const uint32_t*>(image + functions + functionIndex * 4ULL);
+    if (!rva || rva >= imageSize || (rva >= exportRva && rva - exportRva < exportSize)) return nullptr;
+    return reinterpret_cast<void*>(base + rva);
+}
+
+__declspec(dllexport) void __stdcall Sleep(uint32_t milliseconds) noexcept {
+    if (!milliseconds) { (void)NtYieldExecution(); return; }
+    const int64_t interval = -static_cast<int64_t>(milliseconds) * 10000;
+    (void)NtDelayExecution(0, &interval);
+}
+
+__declspec(dllexport) int32_t __stdcall VirtualProtect(
+    void* address, size_t size, uint32_t protection, uint32_t* oldProtection) noexcept {
+    if (!address || !size || !oldProtection) return 0;
+    void* base = address;
+    size_t regionSize = size;
+    uint32_t previous{};
+    const int32_t status = NtProtectVirtualMemory(reinterpret_cast<void*>(~uintptr_t{0}),
+        &base, &regionSize, protection, &previous);
+    if (status < 0) return 0;
+    *oldProtection = previous;
+    return 1;
+}
+
+struct Kernel32MemoryBasicInformation64 {
+    void* baseAddress;
+    void* allocationBase;
+    uint32_t allocationProtect;
+    uint16_t partitionId;
+    uint16_t reserved;
+    size_t regionSize;
+    uint32_t state;
+    uint32_t protect;
+    uint32_t type;
+    uint32_t padding;
+};
+static_assert(sizeof(Kernel32MemoryBasicInformation64) == 48);
+
+__declspec(dllexport) size_t __stdcall VirtualQuery(
+    const void* address, Kernel32MemoryBasicInformation64* information,
+    size_t informationLength) noexcept {
+    if (!information || informationLength < sizeof(*information)) {
+        SetLastError(87);
+        return 0;
+    }
+    size_t returned{};
+    const int32_t status = NtQueryVirtualMemory(reinterpret_cast<void*>(~uintptr_t{0}),
+        address, 0, information, sizeof(*information), &returned);
+    if (status < 0) {
+        SetLastError(status == static_cast<int32_t>(0xC0000003u) ? 87u : 487u);
+        return 0;
+    }
+    return returned;
+}
+
+__declspec(dllexport) void __stdcall InitializeCriticalSection(void* section) noexcept {
+    auto* cs = static_cast<WinCriticalSection64*>(section);
+    if (!cs) return;
+    cs->debugInfo = nullptr; cs->lockCount = -1; cs->recursionCount = 0;
+    cs->owningThread = 0; cs->lockSemaphore = nullptr; cs->spinCount = 0;
+}
+
+__declspec(dllexport) int32_t __stdcall InitializeCriticalSectionEx(
+    void* section, uint32_t spinCount, uint32_t flags) noexcept {
+    if (!section || (flags & ~0x01000000U)) return 0;
+    InitializeCriticalSection(section);
+    static_cast<WinCriticalSection64*>(section)->spinCount = spinCount;
+    return 1;
+}
+
+__declspec(dllexport) void __stdcall EnterCriticalSection(void* section) noexcept {
+    auto* cs = static_cast<WinCriticalSection64*>(section);
+    if (!cs) return;
+    uint32_t thread{}; __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(thread));
+    if (!thread) return;
+    if (cs->owningThread == thread) { ++cs->recursionCount; return; }
+    for (;;) {
+        int32_t expected = -1;
+        if (__atomic_compare_exchange_n(&cs->lockCount, &expected, 0, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            cs->owningThread = thread; cs->recursionCount = 1; return;
+        }
+        (void)NtYieldExecution();
+    }
+}
+
+__declspec(dllexport) void __stdcall LeaveCriticalSection(void* section) noexcept {
+    auto* cs = static_cast<WinCriticalSection64*>(section);
+    uint32_t thread{}; __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(thread));
+    if (!cs || !thread || cs->owningThread != thread || cs->recursionCount <= 0) return;
+    if (--cs->recursionCount == 0) {
+        cs->owningThread = 0;
+        __atomic_store_n(&cs->lockCount, -1, __ATOMIC_RELEASE);
+    }
+}
+
+__declspec(dllexport) void __stdcall DeleteCriticalSection(void* section) noexcept {
+    auto* cs = static_cast<WinCriticalSection64*>(section);
+    if (!cs) return;
+    if (__atomic_load_n(&cs->lockCount, __ATOMIC_ACQUIRE) == -1) {
+        cs->lockCount = 0; cs->recursionCount = 0; cs->owningThread = 0;
+    }
+}
+
+__declspec(dllexport) void* __stdcall TlsGetValue(uint32_t index) noexcept {
+    uintptr_t teb{}; __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb || index >= 64) { SetLastError(87); return nullptr; }
+    const uintptr_t vector = *reinterpret_cast<const uintptr_t*>(teb + 0x58);
+    SetLastError(0);
+    if (!vector) return nullptr;
+    return reinterpret_cast<void*>(reinterpret_cast<const uintptr_t*>(vector)[index]);
+}
+
+__declspec(dllexport) void __stdcall RtlCaptureContext(void* context) noexcept {
+    using Function = void (__stdcall *)(void*) noexcept;
+    const auto function = reinterpret_cast<Function>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlCaptureContext"));
+    if (function) function(context);
+}
+__declspec(dllexport) [[noreturn]] void __stdcall RtlRestoreContext(void* context, void* record) noexcept {
+    using Function = void (__stdcall *)(void*, void*) noexcept;
+    const auto function = reinterpret_cast<Function>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlRestoreContext"));
+    if (function) function(context, record);
+    __builtin_trap();
+}
+
+__declspec(dllexport) void* __stdcall RtlLookupFunctionEntry(
+    uint64_t controlPc, uint64_t* imageBase, void* historyTable) noexcept {
+    using Function = void* (__stdcall *)(uint64_t, uint64_t*, void*) noexcept;
+    const auto function = reinterpret_cast<Function>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlLookupFunctionEntry"));
+    return function ? function(controlPc, imageBase, historyTable) : nullptr;
+}
+
+__declspec(dllexport) void* __stdcall RtlVirtualUnwind(
+    uint32_t handlerType, uint64_t imageBase, uint64_t controlPc,
+    void* functionEntry, void* context, void** handlerData,
+    uint64_t* establisherFrame, void* contextPointers) noexcept {
+    using Function = void* (__stdcall *)(uint32_t, uint64_t, uint64_t, void*,
+        void*, void**, uint64_t*, void*) noexcept;
+    const auto function = reinterpret_cast<Function>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlVirtualUnwind"));
+    return function ? function(handlerType, imageBase, controlPc, functionEntry,
+        context, handlerData, establisherFrame, contextPointers) : nullptr;
+}
+
+__declspec(dllexport) [[noreturn]] void __stdcall RtlUnwindEx(
+    void* targetFrame, void* targetIp, void* exceptionRecord, void* returnValue,
+    void* context, void* historyTable) noexcept {
+    using Function = void (__stdcall *)(void*, void*, void*, void*, void*, void*) noexcept;
+    const auto function = reinterpret_cast<Function>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlUnwindEx"));
+    if (function) function(targetFrame, targetIp, exceptionRecord, returnValue,
+                           context, historyTable);
+    __builtin_trap();
+}
+
 }
 
 #else
@@ -539,20 +824,148 @@ void* Kernel32_LoadLibraryW(const wchar_t* lpLibFileName) noexcept {
     return Kernel32_LoadLibraryExW(lpLibFileName, nullptr, 0);
 }
 
-void* Kernel32_GetModuleHandleW(const wchar_t* /*lpModuleName*/) noexcept {
-    return reinterpret_cast<void*>(static_cast<uintptr_t>(0x00007FF700000000ULL));
+struct UserListEntry64 { uintptr_t next, previous; };
+struct UserUnicodeString64 { uint16_t length, maximumLength; uint32_t padding; const wchar_t* buffer; };
+
+static uintptr_t CurrentPebAddress() noexcept {
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (teb < 0x10000 || teb > 0x00007FFFFFFF0000ULL - 0x60) return 0;
+    const auto peb = *reinterpret_cast<const uintptr_t*>(teb + 0x60);
+    return peb >= 0x10000 && peb < 0x00007FFFFFFF0000ULL ? peb : 0;
+}
+
+static wchar_t FoldAscii(wchar_t value) noexcept {
+    return value >= L'A' && value <= L'Z' ? value + (L'a' - L'A') : value;
+}
+
+static bool EqualModuleName(const wchar_t* fullPath, uint16_t byteLength,
+                            const wchar_t* requested) noexcept {
+    if (!fullPath || !requested || (byteLength & 1)) return false;
+    const size_t count = byteLength / sizeof(wchar_t);
+    size_t pathBase{};
+    for (size_t i = 0; i < count; ++i)
+        if (fullPath[i] == L'\\' || fullPath[i] == L'/') pathBase = i + 1;
+    size_t requestedBase{};
+    for (size_t i = 0; requested[i]; ++i)
+        if (requested[i] == L'\\' || requested[i] == L'/') requestedBase = i + 1;
+    size_t i = pathBase;
+    size_t j = requestedBase;
+    for (; i < count && requested[j]; ++i, ++j) {
+        if (FoldAscii(fullPath[i]) != FoldAscii(requested[j])) return false;
+        if (fullPath[i] > 0x7f || requested[j] > 0x7f) return false;
+    }
+    return i == count && requested[j] == 0;
+}
+
+static bool IsLoadedModule(uintptr_t peb, uintptr_t moduleBase) noexcept {
+    if (!peb || moduleBase < 0x10000 || moduleBase >= 0x00007FFFFFFF0000ULL) return false;
+    const uintptr_t loader = *reinterpret_cast<const uintptr_t*>(peb + 0x18);
+    if (loader < 0x10000 || loader >= 0x00007FFFFFFF0000ULL - 0x28) return false;
+    const uintptr_t headAddress = loader + 0x20;
+    const auto* head = reinterpret_cast<const UserListEntry64*>(headAddress);
+    uintptr_t link = head->next;
+    for (size_t count = 0; count < 32 && link != headAddress; ++count) {
+        if (link < 0x10000 + 0x10 || link >= 0x00007FFFFFFF0000ULL) return false;
+        const uintptr_t entry = link - 0x10;
+        if (*reinterpret_cast<const uintptr_t*>(entry + 0x30) == moduleBase) return true;
+        link = reinterpret_cast<const UserListEntry64*>(link)->next;
+    }
+    return false;
+}
+
+void* Kernel32_GetModuleHandleW(const wchar_t* moduleName) noexcept {
+    const uintptr_t peb = CurrentPebAddress();
+    if (!peb) return nullptr;
+    if (!moduleName) return reinterpret_cast<void*>(
+        *reinterpret_cast<const uintptr_t*>(peb + 0x10));
+    const uintptr_t loader = *reinterpret_cast<const uintptr_t*>(peb + 0x18);
+    if (loader < 0x10000 || loader >= 0x00007FFFFFFF0000ULL - 0x28) return nullptr;
+    const uintptr_t headAddress = loader + 0x20;
+    const auto* head = reinterpret_cast<const UserListEntry64*>(headAddress);
+    uintptr_t link = head->next;
+    for (size_t count = 0; count < 32 && link != headAddress; ++count) {
+        if (link < 0x10000 + 0x10 || link >= 0x00007FFFFFFF0000ULL) return nullptr;
+        const uintptr_t entry = link - 0x10;
+        const uintptr_t base = *reinterpret_cast<const uintptr_t*>(entry + 0x30);
+        const auto& path = *reinterpret_cast<const UserUnicodeString64*>(entry + 0x48);
+        if (base && EqualModuleName(path.buffer, path.length, moduleName))
+            return reinterpret_cast<void*>(base);
+        link = reinterpret_cast<const UserListEntry64*>(link)->next;
+    }
+    return nullptr;
 }
 
 void* Kernel32_GetProcAddress(void* hModule, const char* lpProcName) noexcept {
-    if (!hModule || !lpProcName) return nullptr;
-    return reinterpret_cast<void*>(&Kernel32_QueryPerformanceCounter);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(hModule);
+    const uintptr_t peb = CurrentPebAddress();
+    if (!base || !lpProcName || !IsLoadedModule(peb, base)) return nullptr;
+    const auto* image = reinterpret_cast<const uint8_t*>(base);
+    if (*reinterpret_cast<const uint16_t*>(image) != 0x5a4d) return nullptr;
+    const uint32_t peOffset = *reinterpret_cast<const uint32_t*>(image + 0x3c);
+    if (peOffset > 0x100000 || peOffset > UINTPTR_MAX - 0x108) return nullptr;
+    const auto* peHeader = image + peOffset;
+    if (*reinterpret_cast<const uint32_t*>(peHeader) != 0x00004550) return nullptr;
+    const uint16_t optionalMagic = *reinterpret_cast<const uint16_t*>(peHeader + 24);
+    if (optionalMagic != 0x20b) return nullptr;
+    const uint32_t imageSize = *reinterpret_cast<const uint32_t*>(peHeader + 24 + 56);
+    const uint32_t directoryCount = *reinterpret_cast<const uint32_t*>(peHeader + 24 + 108);
+    if (imageSize < 0x1000 || directoryCount == 0) return nullptr;
+    const uint32_t exportRva = *reinterpret_cast<const uint32_t*>(peHeader + 24 + 112);
+    const uint32_t exportSize = *reinterpret_cast<const uint32_t*>(peHeader + 24 + 116);
+    if (!exportRva || exportSize < 40 || exportRva > imageSize || exportSize > imageSize - exportRva)
+        return nullptr;
+    const auto* exports = image + exportRva;
+    const uint32_t ordinalBase = *reinterpret_cast<const uint32_t*>(exports + 16);
+    const uint32_t functionCount = *reinterpret_cast<const uint32_t*>(exports + 20);
+    const uint32_t nameCount = *reinterpret_cast<const uint32_t*>(exports + 24);
+    const uint32_t functionsRva = *reinterpret_cast<const uint32_t*>(exports + 28);
+    const uint32_t namesRva = *reinterpret_cast<const uint32_t*>(exports + 32);
+    const uint32_t ordinalsRva = *reinterpret_cast<const uint32_t*>(exports + 36);
+    if (!functionCount || functionCount > imageSize / 4 || nameCount > functionCount ||
+        functionsRva > imageSize || functionCount * 4ULL > imageSize - functionsRva ||
+        namesRva > imageSize || nameCount * 4ULL > imageSize - namesRva ||
+        ordinalsRva > imageSize || nameCount * 2ULL > imageSize - ordinalsRva) return nullptr;
+    uint32_t index = UINT32_MAX;
+    const uintptr_t nameValue = reinterpret_cast<uintptr_t>(lpProcName);
+    if (nameValue <= 0xffff) {
+        const uint32_t ordinal = static_cast<uint32_t>(nameValue);
+        if (ordinal < ordinalBase || ordinal - ordinalBase >= functionCount) return nullptr;
+        index = ordinal - ordinalBase;
+    } else {
+        for (uint32_t i = 0; i < nameCount; ++i) {
+            const uint32_t nameRva = *reinterpret_cast<const uint32_t*>(image + namesRva + i * 4ULL);
+            if (!nameRva || nameRva >= imageSize) return nullptr;
+            const char* candidate = reinterpret_cast<const char*>(image + nameRva);
+            size_t j{};
+            while (j < 512 && candidate[j] && lpProcName[j] && candidate[j] == lpProcName[j]) ++j;
+            if (j < 512 && candidate[j] == 0 && lpProcName[j] == 0) {
+                const uint16_t ordinalIndex = *reinterpret_cast<const uint16_t*>(image + ordinalsRva + i * 2ULL);
+                if (ordinalIndex >= functionCount) return nullptr;
+                index = ordinalIndex;
+                break;
+            }
+        }
+    }
+    if (index == UINT32_MAX) return nullptr;
+    const uint32_t functionRva = *reinterpret_cast<const uint32_t*>(image + functionsRva + index * 4ULL);
+    if (!functionRva || functionRva >= imageSize ||
+        (functionRva >= exportRva && functionRva - exportRva < exportSize)) return nullptr;
+    return reinterpret_cast<void*>(base + functionRva);
 }
 
 int32_t Kernel32_FreeLibrary(void* hLibModule) noexcept {
     return hLibModule ? 1 : 0;
 }
 
-void Kernel32_Sleep(uint32_t /*dwMilliseconds*/) noexcept {}
+void Kernel32_Sleep(uint32_t milliseconds) noexcept {
+    if (milliseconds == 0) {
+        (void)NtYieldExecution();
+        return;
+    }
+    const int64_t interval = -static_cast<int64_t>(milliseconds) * 10000;
+    (void)NtDelayExecution(0, &interval);
+}
 int32_t Kernel32_SwitchToThread() noexcept { return 1; }
 uint32_t Kernel32_GetCurrentProcessId() noexcept { return 4096U; }
 uint32_t Kernel32_GetCurrentThreadId() noexcept { return 4100U; }

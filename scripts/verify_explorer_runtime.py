@@ -39,7 +39,24 @@ class PeSymbols:
     """Bounded file-backed PE32+ import/export reader; it never executes an image."""
 
     def __init__(self, path: Path) -> None:
-        inspect_pe(path, "WINDOWS_GUI", allow_imports=True)
+        is_dll = path.suffix.lower() == ".dll"
+        expected_subsystem = "WINDOWS_GUI"
+        if is_dll:
+            data = path.read_bytes()
+            if len(data) < 0x40 or data[:2] != b"MZ":
+                raise RuntimeError(f"{path}: missing DOS signature")
+            pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+            if pe_offset > len(data) - 24 or data[pe_offset:pe_offset + 4] != b"PE\0\0":
+                raise RuntimeError(f"{path}: invalid PE signature or header offset")
+            subsystem_offset = pe_offset + 24 + 68
+            if subsystem_offset + 2 > len(data):
+                raise RuntimeError(f"{path}: truncated PE subsystem field")
+            subsystem = struct.unpack_from("<H", data, subsystem_offset)[0]
+            expected_subsystem = {1: "NATIVE", 2: "WINDOWS_GUI"}.get(subsystem, "")
+            if not expected_subsystem:
+                raise RuntimeError(f"{path}: unsupported DLL PE subsystem {subsystem}")
+        inspect_pe(path, expected_subsystem, allow_imports=True,
+                   allow_no_entry_point=is_dll)
         self.path = path
         self.data = path.read_bytes()
         pe = self.unpack("<I", 0x3C)[0]

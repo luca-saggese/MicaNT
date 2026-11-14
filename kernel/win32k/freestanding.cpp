@@ -10,6 +10,15 @@ constexpr size_t kMessageCapacity = 256;
 constexpr uint64_t kHandleTag = 0x4D4E570000000000ULL;
 constexpr uint32_t kWmQuit = 0x0012;
 constexpr uint32_t kWmNcCreate = 0x0081;
+constexpr uint32_t kWmActivate = 0x0006;
+constexpr uint32_t kWmSetFocus = 0x0007;
+constexpr uint32_t kWmMouseMove = 0x0200;
+constexpr uint32_t kWmLButtonDown = 0x0201;
+constexpr uint32_t kWmLButtonUp = 0x0202;
+constexpr uint32_t kWmRButtonDown = 0x0204;
+constexpr uint32_t kWmRButtonUp = 0x0205;
+constexpr uint32_t kWmMButtonDown = 0x0207;
+constexpr uint32_t kWmMButtonUp = 0x0208;
 constexpr int32_t kSwShowMinimized = 2;
 constexpr int32_t kSwMinimize = 6;
 constexpr int32_t kGwlpWndProc = -4;
@@ -40,6 +49,7 @@ struct WindowClass {
     uint16_t name[MICANT_WIN32K_TEXT_CAPACITY]{};
     uint16_t atom{};
     uint64_t windowProcedure{};
+    uint64_t ownerProcessId{};
     bool active{};
 };
 
@@ -53,6 +63,8 @@ struct Window {
     int32_t x{}, y{}, width{}, height{};
     uint32_t style{}, extendedStyle{};
     uint16_t classAtom{};
+    uint64_t ownerProcessId{};
+    uint64_t zOrder{};
     bool active{}, visible{}, iconic{};
 };
 
@@ -61,6 +73,7 @@ struct QueuedMessage {
     int64_t lParam{};
     uint32_t message{}, time{};
     int32_t x{}, y{};
+    uint64_t ownerProcessId{};
     bool active{};
 };
 
@@ -71,8 +84,9 @@ uint16_t g_nextAtom{1};
 uint32_t g_nextGeneration{1};
 uint32_t g_messageTime{};
 uint64_t g_foregroundWindow{};
-int32_t g_quitCode{};
-bool g_quitPending{};
+uint64_t g_nextZOrder{};
+int32_t g_mouseX{-1}, g_mouseY{-1};
+uint32_t g_mouseButtons{};
 
 bool equalText(const uint16_t* first, const uint16_t* second) noexcept {
     for (size_t index = 0; index < MICANT_WIN32K_TEXT_CAPACITY; ++index) {
@@ -96,20 +110,29 @@ void copyText(uint16_t* destination, const uint16_t* source) noexcept {
     }
 }
 
-WindowClass* findClass(const uint16_t* name) noexcept {
+WindowClass* findClass(const uint16_t* name, uint64_t ownerProcessId) noexcept {
     for (auto& windowClass : g_classes) {
-        if (windowClass.active && equalText(windowClass.name, name)) {
+        if (windowClass.active && windowClass.ownerProcessId == ownerProcessId &&
+            equalText(windowClass.name, name)) {
             return &windowClass;
         }
     }
     return nullptr;
 }
 
-Window* findWindow(uint64_t handle) noexcept {
+Window* findWindow(uint64_t handle, uint64_t ownerProcessId) noexcept {
     if (!handle) return nullptr;
     for (auto& window : g_windows) {
-        if (window.active && window.handle == handle) return &window;
+        if (window.active && window.handle == handle &&
+            window.ownerProcessId == ownerProcessId) return &window;
     }
+    return nullptr;
+}
+
+Window* findWindowAny(uint64_t handle) noexcept {
+    if (!handle) return nullptr;
+    for (auto& window : g_windows)
+        if (window.active && window.handle == handle) return &window;
     return nullptr;
 }
 
@@ -133,19 +156,53 @@ bool enqueue(const QueuedMessage& message) noexcept {
     return false;
 }
 
+uint64_t nextZOrder() noexcept {
+    if (g_nextZOrder == UINT64_MAX) {
+        uint64_t order = 0;
+        for (auto& window : g_windows)
+            if (window.active) window.zOrder = ++order;
+        g_nextZOrder = order;
+    }
+    return ++g_nextZOrder;
+}
+
+Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
+    Window* topmost{};
+    for (auto& window : g_windows) {
+        const int64_t localX = static_cast<int64_t>(x) - window.x;
+        const int64_t localY = static_cast<int64_t>(y) - window.y;
+        if (!window.active || !window.visible || window.iconic || localX < 0 ||
+            localY < 0 || localX >= window.width || localY >= window.height) continue;
+        if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
+    }
+    return topmost;
+}
+
+bool enqueueWindowMessage(const Window& window, uint32_t message,
+                          uint64_t wParam, int64_t lParam,
+                          int32_t x = 0, int32_t y = 0) noexcept {
+    return enqueue(QueuedMessage{
+        .hwnd = window.handle, .wParam = wParam, .lParam = lParam,
+        .message = message, .time = ++g_messageTime,
+        .x = x, .y = y,
+        .ownerProcessId = window.ownerProcessId, .active = true});
+}
+
 bool messageMatches(const QueuedMessage& message,
-                    const MicaWin32kRequest& request) noexcept {
+                    const MicaWin32kRequest& request,
+                    uint64_t ownerProcessId) noexcept {
     const uint64_t requestedWindow = request.args[0];
     const uint32_t minimum = static_cast<uint32_t>(request.args[1]);
     const uint32_t maximum = static_cast<uint32_t>(request.args[2]);
-    return (!requestedWindow || requestedWindow == message.hwnd) &&
+    return message.ownerProcessId == ownerProcessId &&
+           (!requestedWindow || requestedWindow == message.hwnd) &&
            (!minimum || message.message >= minimum) &&
            (!maximum || message.message <= maximum);
 }
 
-bool dequeue(MicaWin32kRequest& request) noexcept {
+bool dequeue(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
     for (auto& message : g_messages) {
-        if (!message.active || !messageMatches(message, request)) continue;
+        if (!message.active || !messageMatches(message, request, ownerProcessId)) continue;
         request.messageHwnd = message.hwnd;
         request.messageWParam = message.wParam;
         request.messageLParam = message.lParam;
@@ -156,32 +213,21 @@ bool dequeue(MicaWin32kRequest& request) noexcept {
         if (request.args[3]) message.active = false;
         return true;
     }
-    if (g_quitPending &&
-        (!request.args[0] || request.args[0] == 0) &&
-        (!request.args[1] || kWmQuit >= request.args[1]) &&
-        (!request.args[2] || kWmQuit <= request.args[2])) {
-        request.messageHwnd = 0;
-        request.messageWParam = static_cast<uint64_t>(g_quitCode);
-        request.messageLParam = 0;
-        request.messageId = kWmQuit;
-        request.messageTime = ++g_messageTime;
-        if (request.args[3]) g_quitPending = false;
-        return true;
-    }
     return false;
 }
 
-NtStatus registerClass(MicaWin32kRequest& request) noexcept {
+NtStatus registerClass(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
     if (!terminatedText(request.className) || request.className[0] == 0) {
         return NtStatus::InvalidParameter;
     }
-    if (findClass(request.className)) return NtStatus::ObjectNameCollision;
+    if (findClass(request.className, ownerProcessId)) return NtStatus::ObjectNameCollision;
     for (auto& windowClass : g_classes) {
         if (windowClass.active) continue;
         windowClass.active = true;
         windowClass.atom = g_nextAtom++;
         if (g_nextAtom == 0) g_nextAtom = 1;
         windowClass.windowProcedure = request.args[0];
+        windowClass.ownerProcessId = ownerProcessId;
         copyText(windowClass.name, request.className);
         request.result = windowClass.atom;
         return NtStatus::Success;
@@ -189,15 +235,19 @@ NtStatus registerClass(MicaWin32kRequest& request) noexcept {
     return NtStatus::InsufficientResources;
 }
 
-NtStatus createWindow(MicaWin32kRequest& request) noexcept {
+NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
     if (!terminatedText(request.className) || !terminatedText(request.title)) {
         return NtStatus::InvalidParameter;
     }
-    const auto* windowClass = findClass(request.className);
+    const auto* windowClass = findClass(request.className, ownerProcessId);
     if (!windowClass) return NtStatus::ObjectNameNotFound;
     const int64_t width = static_cast<int64_t>(request.args[4]);
     const int64_t height = static_cast<int64_t>(request.args[5]);
-    if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+    const int64_t x = static_cast<int64_t>(request.args[2]);
+    const int64_t y = static_cast<int64_t>(request.args[3]);
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
+        x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX ||
+        x + width > INT32_MAX || y + height > INT32_MAX) {
         return NtStatus::InvalidParameter;
     }
     for (size_t index = 0; index < kWindowCapacity; ++index) {
@@ -210,11 +260,13 @@ NtStatus createWindow(MicaWin32kRequest& request) noexcept {
         window.menu = request.args[7];
         window.extendedStyle = static_cast<uint32_t>(request.args[0]);
         window.style = static_cast<uint32_t>(request.args[1]);
-        window.x = static_cast<int32_t>(request.args[2]);
-        window.y = static_cast<int32_t>(request.args[3]);
+        window.x = static_cast<int32_t>(x);
+        window.y = static_cast<int32_t>(y);
         window.width = static_cast<int32_t>(width);
         window.height = static_cast<int32_t>(height);
         window.classAtom = windowClass->atom;
+        window.ownerProcessId = ownerProcessId;
+        window.zOrder = nextZOrder();
         window.windowProcedure = windowClass->windowProcedure;
         window.visible = (window.style & 0x10000000u) != 0;
         copyText(window.title, request.title);
@@ -227,16 +279,16 @@ NtStatus createWindow(MicaWin32kRequest& request) noexcept {
 
 } // namespace
 
-NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
+NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
     StateLockGuard lock;
     request.result = 0;
     switch (request.operation) {
         case MICANT_WIN32K_OP_REGISTER_CLASS:
-            return registerClass(request);
+            return registerClass(request, ownerProcessId);
         case MICANT_WIN32K_OP_CREATE_WINDOW:
-            return createWindow(request);
+            return createWindow(request, ownerProcessId);
         case MICANT_WIN32K_OP_DESTROY_WINDOW: {
-            auto* window = findWindow(request.args[0]);
+            auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             window->active = false;
             if (g_foregroundWindow == window->handle) g_foregroundWindow = 0;
@@ -244,39 +296,53 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SHOW_WINDOW: {
-            auto* window = findWindow(request.args[0]);
+            auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t command = static_cast<int32_t>(request.args[1]);
             const bool wasVisible = window->visible;
             window->visible = command != 0;
             window->iconic = command == kSwShowMinimized ||
                              command == kSwMinimize;
-            if (window->visible) g_foregroundWindow = window->handle;
+            if (window->visible) {
+                window->zOrder = nextZOrder();
+                g_foregroundWindow = window->handle;
+            }
             request.result = wasVisible;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_WINDOW_POS: {
-            auto* window = findWindow(request.args[0]);
+            auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             const uint32_t flags = static_cast<uint32_t>(request.args[5]);
+            int64_t x = window->x;
+            int64_t y = window->y;
+            int64_t width = window->width;
+            int64_t height = window->height;
             if (!(flags & 0x0002u)) {
-                window->x = static_cast<int32_t>(request.args[1]);
-                window->y = static_cast<int32_t>(request.args[2]);
+                x = static_cast<int64_t>(request.args[1]);
+                y = static_cast<int64_t>(request.args[2]);
             }
             if (!(flags & 0x0001u)) {
-                const int64_t width = static_cast<int64_t>(request.args[3]);
-                const int64_t height = static_cast<int64_t>(request.args[4]);
-                if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
-                    return NtStatus::InvalidParameter;
-                }
-                window->width = static_cast<int32_t>(width);
-                window->height = static_cast<int32_t>(height);
+                width = static_cast<int64_t>(request.args[3]);
+                height = static_cast<int64_t>(request.args[4]);
+            }
+            if (width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
+                x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX ||
+                x + width > INT32_MAX || y + height > INT32_MAX)
+                return NtStatus::InvalidParameter;
+            window->x = static_cast<int32_t>(x);
+            window->y = static_cast<int32_t>(y);
+            window->width = static_cast<int32_t>(width);
+            window->height = static_cast<int32_t>(height);
+            if (request.args[6] == 0) {
+                window->zOrder = nextZOrder();
+                g_foregroundWindow = window->handle;
             }
             request.result = 1;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_POST_MESSAGE: {
-            if (request.args[0] && !findWindow(request.args[0])) {
+            if (request.args[0] && !findWindow(request.args[0], ownerProcessId)) {
                 return NtStatus::InvalidHandle;
             }
             const QueuedMessage message{
@@ -287,6 +353,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
                 .time = ++g_messageTime,
                 .x = 0,
                 .y = 0,
+                .ownerProcessId = ownerProcessId,
                 .active = true,
             };
             if (!enqueue(message)) return NtStatus::InsufficientResources;
@@ -294,17 +361,18 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SEND_MESSAGE:
-            if (request.args[0] && !findWindow(request.args[0])) {
+            if (request.args[0] && !findWindow(request.args[0], ownerProcessId)) {
                 return NtStatus::InvalidHandle;
             }
             return NtStatus::Success;
         case MICANT_WIN32K_OP_POST_QUIT:
-            g_quitCode = static_cast<int32_t>(request.args[0]);
-            g_quitPending = true;
-            return NtStatus::Success;
+            return enqueue(QueuedMessage{
+                .wParam = request.args[0], .message = kWmQuit,
+                .time = ++g_messageTime, .ownerProcessId = ownerProcessId,
+                .active = true}) ? NtStatus::Success : NtStatus::InsufficientResources;
         case MICANT_WIN32K_OP_PEEK_MESSAGE:
         case MICANT_WIN32K_OP_GET_MESSAGE:
-            if (dequeue(request)) {
+            if (dequeue(request, ownerProcessId)) {
                 request.result = 1;
                 return NtStatus::Success;
             }
@@ -312,8 +380,12 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
                 ? NtStatus::Timeout : NtStatus::Success;
         case MICANT_WIN32K_OP_GET_CLIENT_RECT:
         case MICANT_WIN32K_OP_GET_WINDOW_RECT: {
-            const auto* window = findWindow(request.args[0]);
+            const auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
+            if (request.operation == MICANT_WIN32K_OP_GET_WINDOW_RECT &&
+                (window->x > INT32_MAX - window->width ||
+                 window->y > INT32_MAX - window->height))
+                return NtStatus::InvalidParameter;
             request.rect = request.operation == MICANT_WIN32K_OP_GET_CLIENT_RECT
                 ? MicaWin32kRect{0, 0, window->width, window->height}
                 : MicaWin32kRect{window->x, window->y,
@@ -323,13 +395,13 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
         }
         case MICANT_WIN32K_OP_ENUM_WINDOWS: {
             for (const auto& window : g_windows) {
-                if (!window.active || window.parent) continue;
+                if (!window.active || window.ownerProcessId != ownerProcessId || window.parent) continue;
                 request.windowHandles[request.result++] = window.handle;
             }
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_GET_WINDOW_TEXT: {
-            const auto* window = findWindow(request.args[0]);
+            const auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             copyText(request.text, window->title);
             while (request.result < MICANT_WIN32K_TEXT_CAPACITY &&
@@ -339,23 +411,22 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_IS_WINDOW_VISIBLE: {
-            const auto* window = findWindow(request.args[0]);
+            const auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             request.result = window->visible;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_IS_ICONIC: {
-            const auto* window = findWindow(request.args[0]);
+            const auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             request.result = window->iconic;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_GET_FOREGROUND_WINDOW:
-            request.result = findWindow(g_foregroundWindow)
-                ? g_foregroundWindow : 0;
+            request.result = g_foregroundWindow;
             return NtStatus::Success;
         case MICANT_WIN32K_OP_SET_WINDOW_LONG: {
-            auto* window = findWindow(request.args[0]);
+            auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t index = static_cast<int32_t>(request.args[1]);
             if (index == kGwlpUserData) {
@@ -370,7 +441,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_GET_WINDOW_LONG: {
-            const auto* window = findWindow(request.args[0]);
+            const auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t index = static_cast<int32_t>(request.args[1]);
             if (index == kGwlpUserData) {
@@ -383,13 +454,79 @@ NtStatus dispatchRequest(MicaWin32kRequest& request) noexcept {
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_DEF_WINDOW_PROC:
-            if (request.args[0] && !findWindow(request.args[0])) {
+            if (request.args[0] && !findWindow(request.args[0], ownerProcessId)) {
                 return NtStatus::InvalidHandle;
             }
             request.result = static_cast<uint32_t>(request.args[1]) == kWmNcCreate;
             return NtStatus::Success;
         default:
             return NtStatus::NotSupported;
+    }
+}
+
+void releaseProcess(uint64_t ownerProcessId) noexcept {
+    if (!ownerProcessId) return;
+    StateLockGuard lock;
+    for (auto& message : g_messages)
+        if (message.active && message.ownerProcessId == ownerProcessId) message.active = false;
+    for (auto& window : g_windows) {
+        if (!window.active || window.ownerProcessId != ownerProcessId) continue;
+        if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
+        window = {};
+    }
+    for (auto& windowClass : g_classes)
+        if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
+}
+
+void dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
+    StateLockGuard lock;
+    const int32_t x = event.x;
+    const int32_t y = event.y;
+    const uint32_t previousButtons = g_mouseButtons;
+    const uint32_t currentButtons = event.buttons & 0x07u;
+    const bool moved = x != g_mouseX || y != g_mouseY;
+    g_mouseButtons = currentButtons;
+    g_mouseX = x;
+    g_mouseY = y;
+    auto* target = topmostVisibleWindow(x, y);
+    if (!target) return;
+
+    uint32_t keyState = 0;
+    if (currentButtons & 0x01u) keyState |= 0x0001u;
+    if (currentButtons & 0x02u) keyState |= 0x0002u;
+    if (currentButtons & 0x04u) keyState |= 0x0010u;
+    const auto localX64 = static_cast<int64_t>(x) - target->x;
+    const auto localY64 = static_cast<int64_t>(y) - target->y;
+    const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
+    const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
+    const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
+    if (moved && !enqueueWindowMessage(*target, kWmMouseMove, keyState,
+                                      packedPoint, x, y))
+        return;
+
+    constexpr uint32_t buttonMasks[] = {0x01u, 0x02u, 0x04u};
+    constexpr uint32_t downMessages[] = {
+        kWmLButtonDown, kWmRButtonDown, kWmMButtonDown};
+    constexpr uint32_t upMessages[] = {
+        kWmLButtonUp, kWmRButtonUp, kWmMButtonUp};
+    for (size_t index = 0; index < 3; ++index) {
+        const uint32_t mask = buttonMasks[index];
+        if ((previousButtons & mask) == (currentButtons & mask)) continue;
+        if (currentButtons & mask) {
+            if (g_foregroundWindow != target->handle) {
+                auto* previous = findWindowAny(g_foregroundWindow);
+                if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
+                    return;
+                g_foregroundWindow = target->handle;
+                if (!enqueueWindowMessage(*target, kWmActivate, 1, 0) ||
+                    !enqueueWindowMessage(*target, kWmSetFocus, 0, 0)) return;
+            }
+            if (!enqueueWindowMessage(*target, downMessages[index], keyState,
+                                      packedPoint, x, y)) return;
+        } else if (!enqueueWindowMessage(*target, upMessages[index], keyState,
+                                         packedPoint, x, y)) {
+            return;
+        }
     }
 }
 

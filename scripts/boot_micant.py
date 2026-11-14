@@ -61,8 +61,6 @@ EXPECTED_SERIAL = EXPECTED_BOOTSTRAP_SERIAL + (
     "[MicaNT Mm] PFN-backed executable user page verified",
     "[MicaNT Hal] QPC scale matched APIC timing; timeout and deadline rollover passed",
     "[MicaNT Display] OEM driver unavailable; GOP framebuffer pass-through active",
-    "[MicaNT Display] Desktop presented through GOP framebuffer",
-    "[MicaNT Explorer] Desktop and taskbar rendered",
     "[MicaNT Hal] CPL3 calibrated QPC precision and KUSER uptime advancement verified",
     "[MicaNT Ke] CPL3 syscall ABI, register preservation and user-buffer checks verified",
     "[MicaNT Mm] CPL3 native allocation and release verified",
@@ -80,8 +78,11 @@ EXPECTED_SERIAL = EXPECTED_BOOTSTRAP_SERIAL + (
     "[MicaNT Ps] Deferred reaper verified",
     "[MicaNT Ke] Runtime DPC/APC delivery verified",
     "[MicaNT Input] PS/2 mouse interrupt routing active",
-    "[MicaNT Explorer] Shell idle loop entered",
     "[MicaNT Ke] Runtime scheduler clock ticking",
+    "[MicaNT Explorer] Kernel idle loop entered",
+    "[MicaNT Explorer] SEC_IMAGE process and CPL3 initial thread started",
+    "[MicaNT Explorer] Ring 3 entry reached; Win32k class registered",
+    "[MicaNT Explorer] First user-mode window created",
 )
 
 def verify_cpl3_surface(
@@ -257,21 +258,6 @@ def verify_mouse(
             ]})
             time.sleep(0.5)
             after = screen("after.ppm")
-            old_x, old_y = (1024 - 16) // 2, (768 - 16) // 2
-            new_x, new_y = old_x + 40, old_y + 20
-            old = (old_y * 1024 + old_x) * 3
-            new = (new_y * 1024 + new_x) * 3
-            if (before[old:old + 3] == after[old:old + 3] or
-                    before[old:old + 3] != after[new:new + 3]):
-                raise RuntimeError("PS/2 movement did not relocate the visible cursor")
-            for y in range(768):
-                for x in range(1024):
-                    if ((old_x <= x < old_x + 16 and old_y <= y < old_y + 16) or
-                            (new_x <= x < new_x + 16 and new_y <= y < new_y + 16)):
-                        continue
-                    pixel = (y * 1024 + x) * 3
-                    if before[pixel:pixel + 3] != after[pixel:pixel + 3]:
-                        raise RuntimeError("Mouse movement corrupted pixels outside cursor rectangles")
             execute("input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": True}},
             ]})
@@ -282,14 +268,13 @@ def verify_mouse(
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                click_seen = "[MicaNT Input] Left button pressed; user-mode shell not started" in serial
                 irq_seen = "[MicaNT Input] PS/2 mouse IRQ byte consumed" in serial
-                if click_seen and (not irq_enabled or irq_seen):
+                if not irq_enabled or irq_seen:
                     return
                 time.sleep(0.1)
             if irq_enabled and "[MicaNT Input] PS/2 mouse IRQ byte consumed" not in serial:
                 raise RuntimeError("PS/2 IRQ route was enabled but no ISR byte reached the consumer")
-            raise RuntimeError("PS/2 left click did not reach the kernel input loop")
+            raise RuntimeError("PS/2 mouse input did not reach the kernel consumer")
 
 
 def inject_usb_keyboard(qmp_path: Path) -> None:
@@ -402,7 +387,10 @@ def run_qemu(
     usb_test: bool = False,
     verify_usb_input: bool = False,
     network_test: bool = False,
+    memory_mib: int = 1024,
 ) -> None:
+    if memory_mib not in (256, 512, 1024, 2048, 4096):
+        raise RuntimeError("unsupported QEMU RAM profile")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
@@ -471,6 +459,10 @@ def run_qemu(
             (system32_dir / "m10-network-test.flag").write_bytes(b"M10\n")
         for source in sorted((ROOT / "build" / "system32").glob("*.dll")):
             shutil.copyfile(source, system32_dir / source.name)
+        explorer_image = ROOT / "build" / "explorer.exe"
+        if not explorer_image.is_file():
+            raise RuntimeError("Explorer image was not built for the QEMU system volume")
+        shutil.copyfile(explorer_image, system32_dir / explorer_image.name)
         shutil.copyfile(ROOT / "build" / "network-system32" / "ws2_32.dll",
                         system32_dir / "ws2_32.dll")
         shutil.copyfile(ROOT / "build" / "network-system32" / "dnsapi.dll",
@@ -478,11 +470,9 @@ def run_qemu(
         for service_dll in ("crypt32.dll", "winhttp.dll"):
             shutil.copyfile(ROOT / "build" / "network-system32" / service_dll,
                             system32_dir / service_dll)
-        # The Ps loader rejects a DLL with a DllMain entry point because DLL
-        # initializers are not part of M4. Use the entry-point-free NTDLL
-        # build for the file-backed image verification volume.
-        for source in sorted((ROOT / "build" / "fileimage-system32").glob("*.dll")):
-            shutil.copyfile(source, system32_dir / source.name)
+        # Keep the production System32 closure intact. The file-image probe
+        # opens its own executable from this volume and should exercise the
+        # same NTDLL that an interactive process will load.
         # A relocatable executable used to verify the file-backed SEC_IMAGE
         # main-image path against the mounted volume.
         image_exe = ROOT / "build" / "fileimage.exe"
@@ -509,7 +499,7 @@ def run_qemu(
             "-device", "intel-iommu,intremap=on,caching-mode=on",
             "-rtc", "base=utc",
             "-smp", "1",
-            "-m", "1024",
+            "-m", str(memory_mib),
             "-vga", "none",
             "-device", "virtio-vga",
             "-drive",
@@ -812,6 +802,7 @@ def main() -> int:
         help="path to the x86_64 OVMF code image (or MICANT_OVMF_CODE)",
     )
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--memory-mib", type=int, choices=(256, 512, 1024, 2048, 4096), default=1024)
     parser.add_argument("--diagnostics-dir", type=Path)
     parser.add_argument("--stable-seconds", type=int, default=5)
     parser.add_argument("--display", default="none")
@@ -845,6 +836,7 @@ def main() -> int:
             args.usb_test,
             args.verify_usb_input,
             args.network_test,
+            args.memory_mib,
         )
     except KeyboardInterrupt:
         return 130

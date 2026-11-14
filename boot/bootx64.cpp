@@ -14,6 +14,7 @@
 #include "micant/km/hal/bootvid.hpp"
 #include "micant/km/hal/cpu.hpp"
 #include "micant/km/executive/usermode.hpp"
+#include "micant/km/executive/mm.hpp"
 #include "micant/km/hal/highhalf.hpp"
 #include "micant/km/hal/idt.hpp"
 #include "micant/km/hal/smp.hpp"
@@ -1467,7 +1468,7 @@ private:
     uefi::EfiSystemTable* m_systemTable{nullptr};
     uefi::EfiGraphicsOutputProtocol* m_gop{nullptr};
     boot::LoaderParameterBlock m_lpb{};
-    boot::UefiKernelHandoffV7 m_handoff{};
+    boot::UefiKernelHandoffV8 m_handoff{};
     bootvid::BootVideoDriver m_videoDriver{};
     uefi::EfiTime m_bootTime{};
     bool m_hasBootTime{false};
@@ -1510,8 +1511,8 @@ public:
             m_cpuFreqMHz = m_hw.cpuMeasuredMHz;
             if (tscFrequencyHz) {
                 using micant::shared::boot_time::BootClockFlagsV1;
-                m_handoff.clock.clockCalibration.tscFrequencyHz = tscFrequencyHz;
-                m_handoff.clock.clockCalibration.flags = BootClockFlagsV1::InvariantTsc;
+                m_handoff.pci.clock.clockCalibration.tscFrequencyHz = tscFrequencyHz;
+                m_handoff.pci.clock.clockCalibration.flags = BootClockFlagsV1::InvariantTsc;
             }
         }
 
@@ -1694,16 +1695,16 @@ public:
         using micant::shared::time::EfiAdjustForDaylight;
         using micant::shared::time::EfiInDaylight;
         using micant::shared::time::EfiUnspecifiedTimeZone;
-        m_handoff.clock.time.systemTime = {};
+        m_handoff.pci.clock.time.systemTime = {};
         m_hasBootTime = m_systemTable && m_systemTable->runtimeServices &&
             m_systemTable->runtimeServices->getTime &&
             m_systemTable->runtimeServices->getTime(&m_bootTime, nullptr) ==
                 uefi::EFI_SUCCESS;
         if (!m_hasBootTime) return;
 
-        m_handoff.clock.time.systemTime.source = SampleSource::UefiRuntimeGetTime;
-        m_handoff.clock.time.systemTime.timeZoneMinutes = m_bootTime.TimeZone;
-        m_handoff.clock.time.systemTime.daylight = m_bootTime.Daylight;
+        m_handoff.pci.clock.time.systemTime.source = SampleSource::UefiRuntimeGetTime;
+        m_handoff.pci.clock.time.systemTime.timeZoneMinutes = m_bootTime.TimeZone;
+        m_handoff.pci.clock.time.systemTime.daylight = m_bootTime.Daylight;
         micant::shared::time::SystemTimeFields fields{
             m_bootTime.Year, m_bootTime.Month, m_bootTime.Day,
             m_bootTime.Hour, m_bootTime.Minute, m_bootTime.Second,
@@ -1714,20 +1715,20 @@ public:
             micant::shared::time::isValid(fields);
         if ((m_bootTime.Daylight & ~(EfiAdjustForDaylight | EfiInDaylight)) != 0 ||
             !dateValid) {
-            m_handoff.clock.time.systemTime.status = SampleStatus::InvalidFirmwareData;
+            m_handoff.pci.clock.time.systemTime.status = SampleStatus::InvalidFirmwareData;
         } else if (static_cast<uint16_t>(m_bootTime.TimeZone) == EfiUnspecifiedTimeZone) {
             // EFI_TIME with an unspecified zone is local wall time. Preserve it
             // as such; never silently label it UTC in the kernel.
-            m_handoff.clock.time.systemTime.status = SampleStatus::LocalTimeZoneUnspecified;
+            m_handoff.pci.clock.time.systemTime.status = SampleStatus::LocalTimeZoneUnspecified;
         } else if (m_bootTime.TimeZone < -1440 || m_bootTime.TimeZone > 1440) {
-            m_handoff.clock.time.systemTime.status = SampleStatus::InvalidFirmwareData;
+            m_handoff.pci.clock.time.systemTime.status = SampleStatus::InvalidFirmwareData;
         } else {
             uint64_t utc{};
             if (!micant::shared::time::toUtc100ns(fields, m_bootTime.TimeZone, utc)) {
-                m_handoff.clock.time.systemTime.status = SampleStatus::InvalidFirmwareData;
+                m_handoff.pci.clock.time.systemTime.status = SampleStatus::InvalidFirmwareData;
             } else {
-                m_handoff.clock.time.systemTime.utcTime100ns = utc;
-                m_handoff.clock.time.systemTime.status = SampleStatus::UtcValid;
+                m_handoff.pci.clock.time.systemTime.utcTime100ns = utc;
+                m_handoff.pci.clock.time.systemTime.status = SampleStatus::UtcValid;
             }
         }
     }
@@ -1741,26 +1742,34 @@ public:
      */
     bool buildLoaderParameterBlock(std::span<const uefi::EfiMemoryDescriptor> memoryMap) {
         m_lpb = uefi::BuildLpbFromUefi(m_systemTable, m_gop, memoryMap);
-        m_handoff.clock.time.oem.legacy = uefi::BuildKernelHandoffFromUefi(m_systemTable, m_gop, memoryMap);
-        m_handoff.clock.time.oem.legacy.version = boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES;
-        m_handoff.clock.time.oem.legacy.size = sizeof(m_handoff);
-        m_handoff.clock.time.oem.moduleCapacity = boot::UEFI_KERNEL_HANDOFF_MAX_OEM_MODULES;
+        m_handoff.pci.clock.time.oem.legacy = uefi::BuildKernelHandoffFromUefi(m_systemTable, m_gop, memoryMap);
+        m_handoff.pci.clock.time.oem.legacy.version = boot::UEFI_KERNEL_HANDOFF_VERSION_DYNAMIC_PFN;
+        m_handoff.pci.clock.time.oem.legacy.size = sizeof(m_handoff);
+        m_handoff.pci.clock.time.oem.moduleCapacity = boot::UEFI_KERNEL_HANDOFF_MAX_OEM_MODULES;
         captureBootTimeSample();
         return true;
     }
 
     void updateMemoryMap(const void* memoryMap, uint64_t memoryMapSize,
                          uint64_t descriptorSize, uint32_t descriptorVersion) noexcept {
-        m_handoff.clock.time.oem.legacy.memoryMapAddress = reinterpret_cast<uint64_t>(memoryMap);
-        m_handoff.clock.time.oem.legacy.memoryMapSize = memoryMapSize;
-        m_handoff.clock.time.oem.legacy.memoryMapDescriptorSize = static_cast<uint32_t>(descriptorSize);
-        m_handoff.clock.time.oem.legacy.memoryMapDescriptorVersion = descriptorVersion;
+        m_handoff.pci.clock.time.oem.legacy.memoryMapAddress = reinterpret_cast<uint64_t>(memoryMap);
+        m_handoff.pci.clock.time.oem.legacy.memoryMapSize = memoryMapSize;
+        m_handoff.pci.clock.time.oem.legacy.memoryMapDescriptorSize = static_cast<uint32_t>(descriptorSize);
+        m_handoff.pci.clock.time.oem.legacy.memoryMapDescriptorVersion = descriptorVersion;
+    }
+
+    void setPfnBootstrapStorage(void* metadata, uint64_t metadataSize,
+                                void* ranges, uint64_t rangeCapacity) noexcept {
+        m_handoff.pfnMetadataAddress = reinterpret_cast<uint64_t>(metadata);
+        m_handoff.pfnMetadataSize = metadataSize;
+        m_handoff.availableRangesAddress = reinterpret_cast<uint64_t>(ranges);
+        m_handoff.availableRangesCapacity = rangeCapacity;
     }
 
     bool addBootDriverModule(const boot::KernelBootModuleV1& module,
         const wchar_t* baseName, const wchar_t* fullName) {
-        if (!baseName || !fullName || m_handoff.clock.time.oem.moduleCount >= m_handoff.clock.time.oem.moduleCapacity ||
-            m_handoff.clock.time.oem.moduleCount >= boot::UEFI_KERNEL_HANDOFF_MAX_OEM_MODULES ||
+        if (!baseName || !fullName || m_handoff.pci.clock.time.oem.moduleCount >= m_handoff.pci.clock.time.oem.moduleCapacity ||
+            m_handoff.pci.clock.time.oem.moduleCount >= boot::UEFI_KERNEL_HANDOFF_MAX_OEM_MODULES ||
             module.image.base == 0 || module.image.size == 0 || module.image.entryPoint == 0)
             return false;
         const auto sameBaseName = [](const char* left, const char* right) noexcept {
@@ -1768,11 +1777,11 @@ public:
             while (*left && *right && *left == *right) { ++left; ++right; }
             return *left == *right;
         };
-        for (uint32_t i = 0; i < m_handoff.clock.time.oem.moduleCount; ++i) {
-            if (sameBaseName(m_handoff.clock.time.oem.modules[i].baseName, module.baseName))
+        for (uint32_t i = 0; i < m_handoff.pci.clock.time.oem.moduleCount; ++i) {
+            if (sameBaseName(m_handoff.pci.clock.time.oem.modules[i].baseName, module.baseName))
                 return false;
         }
-        m_handoff.clock.time.oem.modules[m_handoff.clock.time.oem.moduleCount++] = module;
+        m_handoff.pci.clock.time.oem.modules[m_handoff.pci.clock.time.oem.moduleCount++] = module;
         m_lpb.bootModules.push_back({
             .baseDllName = baseName,
             .fullDllName = fullName,
@@ -1785,7 +1794,7 @@ public:
     }
 
     void setUserImageFile(boot::KernelBootFileV1 image) noexcept {
-        m_handoff.clock.time.oem.legacy.userImageFile = image;
+        m_handoff.pci.clock.time.oem.legacy.userImageFile = image;
     }
 
     /**
@@ -2051,7 +2060,7 @@ public:
     }
 
     void collectFirmwarePciResources() noexcept {
-        auto& handoff = m_handoff;
+        auto& handoff = m_handoff.pci;
         handoff.pciBarCount = 0;
         handoff.pciInventoryComplete = 0;
         auto* bs = m_systemTable ? m_systemTable->bootServices : nullptr;
@@ -2166,7 +2175,7 @@ public:
 
     [[nodiscard]] const boot::LoaderParameterBlock& getLpb() const noexcept { return m_lpb; }
     [[nodiscard]] boot::LoaderParameterBlock& getLpb() noexcept { return m_lpb; }
-    [[nodiscard]] const boot::UefiKernelHandoffV7& getHandoff() const noexcept {
+    [[nodiscard]] const boot::UefiKernelHandoffV8& getHandoff() const noexcept {
         return m_handoff;
     }
     [[nodiscard]] bootvid::BootVideoDriver& getVideoDriver() noexcept { return m_videoDriver; }
@@ -2287,6 +2296,40 @@ using micant::bootloader::loadFileFromEfiSystemPartition;
 /**
  * @brief Standard UEFI PE32+ Application Entry Point (bootx64.efi)
  */
+namespace {
+alignas(16) uint8_t s_initialMemoryMapBuffer[65536];
+uint8_t* s_memoryMapBuffer = s_initialMemoryMapBuffer;
+uint64_t s_memoryMapCapacity = sizeof(s_initialMemoryMapBuffer);
+bool s_memoryMapBufferFromPool{};
+
+micant::uefi::EfiStatus getCompleteMemoryMap(
+    micant::uefi::EfiBootServices* services, uint64_t& mapSize, uint64_t& mapKey,
+    uint64_t& descriptorSize, uint32_t& descriptorVersion) noexcept {
+    if (!services || !services->getMemoryMap) return micant::uefi::EFI_INVALID_PARAMETER;
+    for (;;) {
+        mapSize = s_memoryMapCapacity;
+        const auto status = services->getMemoryMap(&mapSize,
+            reinterpret_cast<micant::uefi::EfiMemoryDescriptor*>(s_memoryMapBuffer),
+            &mapKey, &descriptorSize, &descriptorVersion);
+        if (status == micant::uefi::EFI_SUCCESS) return status;
+        if (status != micant::uefi::EFI_BUFFER_TOO_SMALL || !services->allocatePool ||
+            mapSize > UINT64_MAX - 16 * sizeof(micant::uefi::EfiMemoryDescriptor)) return status;
+        const uint64_t capacity = mapSize + 16 * sizeof(micant::uefi::EfiMemoryDescriptor);
+        using AllocatePool = micant::uefi::EfiStatus (*)(micant::uefi::EfiMemoryType, uint64_t, void**);
+        const auto allocate = reinterpret_cast<AllocatePool>(services->allocatePool);
+        void* expanded{};
+        const auto allocationStatus = allocate(micant::uefi::EfiMemoryType::EfiLoaderData,
+                                                capacity, &expanded);
+        if (allocationStatus != micant::uefi::EFI_SUCCESS || !expanded) return allocationStatus;
+        if (s_memoryMapBufferFromPool && services->freePool)
+            (void)services->freePool(s_memoryMapBuffer);
+        s_memoryMapBuffer = static_cast<uint8_t*>(expanded);
+        s_memoryMapCapacity = capacity;
+        s_memoryMapBufferFromPool = true;
+    }
+}
+}
+
 extern "C" micant::uefi::EfiStatus EfiMain(
     micant::uefi::EfiHandle imageHandle,
     micant::uefi::EfiSystemTable* systemTable
@@ -2328,19 +2371,13 @@ extern "C" micant::uefi::EfiStatus EfiMain(
     }
 
     // 3. Query physical memory map
-    alignas(16) static uint8_t s_memoryMapBuffer[65536];
-    uint64_t memoryMapSize = sizeof(s_memoryMapBuffer);
+    uint64_t memoryMapSize = s_memoryMapCapacity;
     uint64_t mapKey = 0;
     uint64_t descriptorSize = sizeof(micant::uefi::EfiMemoryDescriptor);
     uint32_t descriptorVersion = 1;
 
-    micant::uefi::EfiStatus mapStatus = systemTable->bootServices->getMemoryMap(
-        &memoryMapSize,
-        reinterpret_cast<micant::uefi::EfiMemoryDescriptor*>(s_memoryMapBuffer),
-        &mapKey,
-        &descriptorSize,
-        &descriptorVersion
-    );
+    micant::uefi::EfiStatus mapStatus = getCompleteMemoryMap(systemTable->bootServices,
+        memoryMapSize, mapKey, descriptorSize, descriptorVersion);
 
     if (mapStatus == micant::uefi::EFI_SUCCESS) {
         if (systemTable->conOut) {
@@ -2353,16 +2390,27 @@ extern "C" micant::uefi::EfiStatus EfiMain(
         }
 
         if (descriptorSize >= sizeof(micant::uefi::EfiMemoryDescriptor)) {
-            size_t descCount = memoryMapSize / descriptorSize;
-            alignas(16) static micant::uefi::EfiMemoryDescriptor s_normalizedMap[512];
-            size_t validCount = (descCount < 512) ? descCount : 512;
+            const size_t descCount = static_cast<size_t>(memoryMapSize / descriptorSize);
+            void* normalizedStorage{};
+            using AllocatePool = micant::uefi::EfiStatus (*)(micant::uefi::EfiMemoryType, uint64_t, void**);
+            const auto allocatePool = reinterpret_cast<AllocatePool>(systemTable->bootServices->allocatePool);
+            const uint64_t normalizedBytes = static_cast<uint64_t>(descCount) *
+                sizeof(micant::uefi::EfiMemoryDescriptor);
+            if (descCount && (!allocatePool || normalizedBytes / sizeof(micant::uefi::EfiMemoryDescriptor) != descCount ||
+                allocatePool(micant::uefi::EfiMemoryType::EfiLoaderData,
+                    normalizedBytes, &normalizedStorage) != micant::uefi::EFI_SUCCESS || !normalizedStorage)) {
+                micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: cannot normalize complete UEFI memory map.\r\n");
+                return micant::uefi::EFI_OUT_OF_RESOURCES;
+            }
+            auto* normalizedMap = static_cast<micant::uefi::EfiMemoryDescriptor*>(normalizedStorage);
+            const size_t validCount = descCount;
             uint64_t totalRamBytes = 0;
             uint64_t freeRamBytes = 0;
             for (size_t i = 0; i < validCount; ++i) {
                 const auto* descPtr = reinterpret_cast<const micant::uefi::EfiMemoryDescriptor*>(
                     s_memoryMapBuffer + (i * descriptorSize)
                 );
-                s_normalizedMap[i] = *descPtr;
+                normalizedMap[i] = *descPtr;
                 uint64_t bytes = descPtr->numberOfPages * 4096;
                 if (descPtr->type == 7) { // EfiConventionalMemory (Free RAM)
                     freeRamBytes += bytes;
@@ -2373,7 +2421,9 @@ extern "C" micant::uefi::EfiStatus EfiMain(
             }
             engine.setRealRamMetrics(totalRamBytes, freeRamBytes);
             engine.detectSiliconTelemetry();
-            engine.buildLoaderParameterBlock(std::span{s_normalizedMap, validCount});
+            engine.buildLoaderParameterBlock(std::span{normalizedMap, validCount});
+            if (normalizedStorage && systemTable->bootServices->freePool)
+                (void)systemTable->bootServices->freePool(normalizedStorage);
         }
 
         if (systemTable->conOut) {
@@ -2705,14 +2755,59 @@ extern "C" micant::uefi::EfiStatus EfiMain(
     micant::bootloader::UartSerial::print("\r\n[MicaNT Boot] Calling ExitBootServices to terminate UEFI firmware...\r\n");
 
     engine.collectFirmwarePciResources();
-    memoryMapSize = sizeof(s_memoryMapBuffer);
-    mapStatus = systemTable->bootServices->getMemoryMap(
-        &memoryMapSize,
-        reinterpret_cast<micant::uefi::EfiMemoryDescriptor*>(s_memoryMapBuffer),
-        &mapKey,
-        &descriptorSize,
-        &descriptorVersion
-    );
+    // Reserve PFN metadata and a range array from UEFI before taking the final
+    // map. Their sizes follow the highest conventional PFN and the map-buffer
+    // descriptor capacity; both allocations then appear as LoaderData.
+    memoryMapSize = s_memoryMapCapacity;
+    mapStatus = getCompleteMemoryMap(systemTable->bootServices,
+        memoryMapSize, mapKey, descriptorSize, descriptorVersion);
+    if (mapStatus != micant::uefi::EFI_SUCCESS ||
+        descriptorSize < sizeof(micant::uefi::EfiMemoryDescriptor) ||
+        memoryMapSize % descriptorSize) {
+        micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: memory map unavailable for PFN sizing.\r\n");
+        return mapStatus;
+    }
+    uint64_t highestConventionalPfn{};
+    const size_t descriptorCount = static_cast<size_t>(memoryMapSize / descriptorSize);
+    for (size_t index = 0; index < descriptorCount; ++index) {
+        micant::uefi::EfiMemoryDescriptor descriptor{};
+        std::memcpy(&descriptor, s_memoryMapBuffer + index * descriptorSize, sizeof(descriptor));
+        if (descriptor.type != static_cast<uint32_t>(micant::uefi::EfiMemoryType::EfiConventionalMemory) ||
+            !descriptor.numberOfPages || descriptor.numberOfPages >
+                (UINT64_MAX - descriptor.physicalStart) / 4096) continue;
+        const uint64_t end = descriptor.physicalStart + descriptor.numberOfPages * 4096;
+        const uint64_t lastPfn = end / 4096;
+        if (lastPfn > highestConventionalPfn) highestConventionalPfn = lastPfn;
+    }
+    if (!highestConventionalPfn || highestConventionalPfn >
+            UINT64_MAX / sizeof(micant::mm::Mmpfn)) {
+        micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: PFN metadata size overflow.\r\n");
+        return micant::uefi::EFI_OUT_OF_RESOURCES;
+    }
+    const uint64_t metadataBytes = highestConventionalPfn * sizeof(micant::mm::Mmpfn);
+    micant::bootloader::UartSerial::print("[MicaNT Boot] Dynamic PFN entries/bytes=");
+    micant::bootloader::UartSerial::printHex64(highestConventionalPfn);
+    micant::bootloader::UartSerial::print("/");
+    micant::bootloader::UartSerial::printHex64(metadataBytes);
+    micant::bootloader::UartSerial::print("\r\n");
+    const uint64_t rangeCapacity = s_memoryMapCapacity /
+        sizeof(micant::uefi::EfiMemoryDescriptor) + 1;
+    const uint64_t rangeBytes = rangeCapacity * sizeof(micant::mm::PhysicalPageRange);
+    using AllocatePool = micant::uefi::EfiStatus (*)(micant::uefi::EfiMemoryType, uint64_t, void**);
+    const auto allocatePool = reinterpret_cast<AllocatePool>(systemTable->bootServices->allocatePool);
+    void* pfnMetadata{};
+    void* pfnRanges{};
+    if (!allocatePool || allocatePool(micant::uefi::EfiMemoryType::EfiLoaderData,
+            metadataBytes, &pfnMetadata) != micant::uefi::EFI_SUCCESS || !pfnMetadata ||
+        allocatePool(micant::uefi::EfiMemoryType::EfiLoaderData,
+            rangeBytes, &pfnRanges) != micant::uefi::EFI_SUCCESS || !pfnRanges) {
+        micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: dynamic PFN bootstrap allocation failed.\r\n");
+        return micant::uefi::EFI_OUT_OF_RESOURCES;
+    }
+    engine.setPfnBootstrapStorage(pfnMetadata, metadataBytes, pfnRanges, rangeCapacity);
+    memoryMapSize = s_memoryMapCapacity;
+    mapStatus = getCompleteMemoryMap(systemTable->bootServices,
+        memoryMapSize, mapKey, descriptorSize, descriptorVersion);
     if (mapStatus != micant::uefi::EFI_SUCCESS ||
         descriptorSize < sizeof(micant::uefi::EfiMemoryDescriptor)) {
         micant::bootloader::UartSerial::print(
@@ -2726,14 +2821,9 @@ extern "C" micant::uefi::EfiStatus EfiMain(
     engine.refreshBootTimeSample();
     micant::uefi::EfiStatus exitStatus = engine.exitBootServices(mapKey);
     if (exitStatus != micant::uefi::EFI_SUCCESS) {
-        memoryMapSize = sizeof(s_memoryMapBuffer);
-        mapStatus = systemTable->bootServices->getMemoryMap(
-            &memoryMapSize,
-            reinterpret_cast<micant::uefi::EfiMemoryDescriptor*>(s_memoryMapBuffer),
-            &mapKey,
-            &descriptorSize,
-            &descriptorVersion
-        );
+        memoryMapSize = s_memoryMapCapacity;
+        mapStatus = getCompleteMemoryMap(systemTable->bootServices,
+            memoryMapSize, mapKey, descriptorSize, descriptorVersion);
         if (mapStatus != micant::uefi::EFI_SUCCESS ||
             descriptorSize < sizeof(micant::uefi::EfiMemoryDescriptor)) {
             micant::bootloader::UartSerial::print(
@@ -2762,7 +2852,7 @@ extern "C" micant::uefi::EfiStatus EfiMain(
         const micant::boot::UefiKernelHandoffV3* handoff
     );
     auto pfnKernel = reinterpret_cast<PfnKiSystemStartup>(micant::bootloader::s_ntoskrnlEntryPoint);
-    pfnKernel(&engine.getHandoff().clock.time.oem.legacy);
+    pfnKernel(&engine.getHandoff().pci.clock.time.oem.legacy);
 
     while (true) {
 #if defined(__x86_64__)

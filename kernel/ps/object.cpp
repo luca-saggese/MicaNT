@@ -5,6 +5,8 @@
 #include <new>
 #include <cstring>
 
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+
 namespace micant::ps::detail {
 namespace {
 ob::ObjectType processType;
@@ -606,6 +608,7 @@ NtStatus createBootstrapUserProcess(std::span<const BootstrapProcessImage> image
                                         interruptible, threadAccess, threadResult, thread);
     }
     if (targetActive && !hal::amd64::switchProcessPagingRootByPhysical(previousRoot)) __builtin_trap();
+    if (targetActive) MicantNetbootSerialWrite("[MicaNT Ps] Target process CR3 restored\r\n");
     if (status == NtStatus::Success) {
         const bool kuserReady = hal::amd64::bootstrapKuserSharedDataReady();
         if (kuserReady) {
@@ -618,10 +621,14 @@ NtStatus createBootstrapUserProcess(std::span<const BootstrapProcessImage> image
             }
             if (switchedForMapping &&
                 !hal::amd64::switchProcessPagingRootByPhysical(previousRoot)) __builtin_trap();
+            if (switchedForMapping) MicantNetbootSerialWrite("[MicaNT Ps] KUSER mapping CR3 restored\r\n");
         }
     }
     if (status == NtStatus::Success) {
+        MicantNetbootSerialWrite("[MicaNT Ps] Preparing initial thread readiness\r\n");
         status = thread->ready();
+        if (status == NtStatus::Success)
+            MicantNetbootSerialWrite("[MicaNT Ps] Initial thread ready\r\n");
     }
     if (status != NtStatus::Success) {
         if (thread) {
@@ -672,6 +679,18 @@ NtStatus referenceCurrentProcess(EProcess*& process, ob::ObjectHeader*& referenc
     ob::detail::HandleTableGuard guard;
     process = ke::KeGetCurrentProcess();
     reference = process ? ProcessObjectFactory::header(*process) : nullptr;
+    if (!reference) { process = nullptr; return NtStatus::InvalidHandle; }
+    reference->addReference();
+    return NtStatus::Success;
+}
+
+NtStatus referenceSystemProcess(EProcess*& process, ob::ObjectHeader*& reference) noexcept {
+    process = nullptr;
+    reference = nullptr;
+    const auto status = getSystemProcess(process);
+    if (status != NtStatus::Success || !process) return status;
+    ob::detail::HandleTableGuard guard;
+    reference = ProcessObjectFactory::header(*process);
     if (!reference) { process = nullptr; return NtStatus::InvalidHandle; }
     reference->addReference();
     return NtStatus::Success;

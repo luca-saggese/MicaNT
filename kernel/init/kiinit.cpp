@@ -9,6 +9,7 @@
 #include "micant/km/executive/ob.hpp"
 #include "micant/km/executive/ps.hpp"
 #include "micant/km/executive/ps_objects.hpp"
+#include "micant/km/executive/usermode.hpp"
 #include "micant/km/executive/section.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/km/executive/io.hpp"
@@ -39,6 +40,10 @@
 #include <memory>
 #include <new>
 #include <span>
+
+namespace micant::sys {
+NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& reference) noexcept;
+}
 
 namespace micant::tcpip::kernel_api {
 bool hasAdapter() noexcept { return NetworkStack::get().hasAdapter(); }
@@ -139,12 +144,8 @@ constexpr uint32_t kWidth = 1024;
 constexpr uint32_t kHeight = 768;
 constexpr uint32_t kTaskbarHeight = 40;
 constexpr uint32_t kCursorSize = 16;
-constexpr size_t kBootstrapPfnCount = 65536;
-constexpr size_t kMaximumMemoryDescriptors = 1024;
-alignas(4096) micant::mm::Mmpfn g_bootPfnMetadata[kBootstrapPfnCount]{};
-micant::uefi::EfiMemoryDescriptor g_bootMemoryDescriptors[kMaximumMemoryDescriptors]{};
-micant::mm::PhysicalPageRange g_bootAvailableRanges[kMaximumMemoryDescriptors + 1]{};
 alignas(16) uint32_t g_explorerSurface[kWidth * kHeight]{};
+size_t g_bootPfnCount{};
 uint32_t g_cursorFrame[kCursorSize * kCursorSize]{};
 micant::boot_driver::KernelServices g_displayServices{};
 micant::boot_driver::DisplayDevice g_display{};
@@ -355,7 +356,7 @@ void firstContextEntry() noexcept {
         actualCr3 != micant::ke::g_CurrentCpu.currentCr3)
         stopWithError("[MicaNT Ke] First thread CR3 mismatch\r\n");
     if (g_contextSection) {
-        uintptr_t privateAddress = micant::hal::amd64::BootstrapManagedBase;
+        uintptr_t privateAddress = micant::hal::amd64::BootstrapUserAddressBase;
         uintptr_t sharedAddress = privateAddress + micant::mm::ProcessAddressSpace::AllocationGranularity;
         size_t viewSize = micant::mm::PageSize4KB;
         size_t privateSize = viewSize;
@@ -386,8 +387,8 @@ void firstContextEntry() noexcept {
         stopWithError("[MicaNT Ke] First context resume verification failed\r\n");
     }
     if (g_contextSection &&
-        (*reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapManagedBase) != 0x11111111 ||
-         *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapManagedBase +
+        (*reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapUserAddressBase) != 0x11111111 ||
+         *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapUserAddressBase +
              micant::mm::ProcessAddressSpace::AllocationGranularity) != 0x33333333))
         stopWithError("[MicaNT Ps] First process isolation failed\r\n");
     for (size_t index = 0; index < 16; ++index) {
@@ -408,7 +409,7 @@ void secondContextEntry() noexcept {
         actualCr3 != micant::ke::g_CurrentCpu.currentCr3)
         stopWithError("[MicaNT Ke] Second thread CR3 mismatch\r\n");
     if (g_contextSection) {
-        uintptr_t privateAddress = micant::hal::amd64::BootstrapManagedBase;
+        uintptr_t privateAddress = micant::hal::amd64::BootstrapUserAddressBase;
         uintptr_t sharedAddress = privateAddress + micant::mm::ProcessAddressSpace::AllocationGranularity;
         size_t viewSize = micant::mm::PageSize4KB;
         size_t privateSize = viewSize;
@@ -441,7 +442,7 @@ void secondContextEntry() noexcept {
         stopWithError("[MicaNT Ke] Second context resume verification failed\r\n");
     }
     if (g_contextSection &&
-        *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapManagedBase) != 0x44444444)
+        *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapUserAddressBase) != 0x44444444)
         stopWithError("[MicaNT Ps] Second process isolation failed\r\n");
     for (size_t index = 0; index < 16; ++index) {
         if (pattern[index] != 0xB200 + index) {
@@ -451,8 +452,8 @@ void secondContextEntry() noexcept {
     g_contextOrder = g_contextOrder * 10 + 2;
     if (g_contextSection) {
         if (!MicantVerifyContextSwitch(&g_secondContextThread, &g_bootContextThread) ||
-            *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapManagedBase) != 0x44444444 ||
-            *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapManagedBase +
+            *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapUserAddressBase) != 0x44444444 ||
+            *reinterpret_cast<volatile uint64_t*>(micant::hal::amd64::BootstrapUserAddressBase +
                 micant::mm::ProcessAddressSpace::AllocationGranularity) != 0x33333333)
             stopWithError("[MicaNT Ps] Surviving process changed after cleanup\r\n");
     }
@@ -633,31 +634,56 @@ void serialWriteNumber(uint64_t value) noexcept {
     serialWrite(text + index);
 }
 
+bool readBootMemoryDescriptor(const micant::boot::UefiKernelHandoffV3& handoff,
+                              size_t index,
+                              micant::uefi::EfiMemoryDescriptor& descriptor) noexcept {
+    if (!handoff.memoryMapDescriptorSize ||
+        index >= handoff.memoryMapSize / handoff.memoryMapDescriptorSize ||
+        index > (UINT64_MAX - handoff.memoryMapAddress) / handoff.memoryMapDescriptorSize)
+        return false;
+    const uint64_t address = handoff.memoryMapAddress +
+        index * handoff.memoryMapDescriptorSize;
+    if (!micant::hal::amd64::bootstrapKernelRange(
+            address, sizeof(descriptor), false)) return false;
+    std::memcpy(&descriptor, reinterpret_cast<const void*>(address), sizeof(descriptor));
+    return true;
+}
+
 volatile uint8_t* physicalPageBytes(uint64_t pfn) noexcept {
-    const uint64_t address = pfn * 4096;
-    if (pfn < 256 || pfn >= kBootstrapPfnCount ||
-        !micant::hal::amd64::bootstrapKernelRange(address, 4096, true) ||
-        micant::hal::amd64::translateBootstrapAddress(
-            reinterpret_cast<const void*>(address)) != address) {
-        stopWithError("[MicaNT Mm] Physical page lacks writable supervisor identity backing\r\n");
-    }
-    return reinterpret_cast<volatile uint8_t*>(address);
+    if (pfn < 256 || pfn >= g_bootPfnCount || pfn > UINT64_MAX / 4096)
+        stopWithError("[MicaNT Mm] PFN is outside validated bootstrap RAM\r\n");
+    auto* bytes = micant::hal::amd64::mapBootstrapPhysicalPage(pfn * 4096);
+    if (!bytes) stopWithError("[MicaNT Mm] Validated physical page mapping failed\r\n");
+    return bytes;
 }
 
 void zeroPhysicalPage(uint64_t pfn) noexcept {
     auto* bytes = physicalPageBytes(pfn);
     for (size_t index = 0; index < 4096; ++index) bytes[index] = 0;
+    micant::hal::amd64::releaseBootstrapPhysicalPage();
 }
 
 void* mapBootstrapHeapPages(uint64_t firstPfn, size_t pageCount) noexcept {
-    if (firstPfn < 256 || !pageCount || firstPfn >= kBootstrapPfnCount ||
-        pageCount > kBootstrapPfnCount - firstPfn) {
+    const uint64_t totalPages = g_bootPfnCount;
+    if (firstPfn < 256 || !pageCount || firstPfn >= totalPages ||
+        pageCount > totalPages - firstPfn) {
         return nullptr;
     }
+    if (firstPfn > UINT64_MAX / 4096 || pageCount > (UINT64_MAX / 4096) - firstPfn)
+        return nullptr;
+    const uint64_t physicalStart = firstPfn * 4096;
+    // The bootstrap executive heap retains a pointer for the allocation's
+    // lifetime, so an ephemeral PFN aperture is not a valid heap mapping.
+    // Accept only a complete, contiguous identity mapping here; Mm accesses
+    // other validated RAM through the temporary HAL aperture.
     for (size_t index = 0; index < pageCount; ++index) {
-        (void)physicalPageBytes(firstPfn + index);
+        const uint64_t physical = firstPfn + index;
+        if (physical >= g_bootPfnCount || physical > UINT64_MAX / 4096 ||
+            micant::hal::amd64::translateBootstrapAddress(
+                reinterpret_cast<const void*>(static_cast<uintptr_t>(physical * 4096))) != physical * 4096)
+            return nullptr;
     }
-    return reinterpret_cast<void*>(firstPfn * 4096);
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(physicalStart));
 }
 
 micant::NtStatus probeBootstrapRange(uintptr_t address, size_t size, bool writable,
@@ -727,28 +753,51 @@ bool verifyKernelObjectHandles() noexcept {
 void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) noexcept {
     using namespace micant;
     const uint64_t descriptorCount = handoff.memoryMapSize / handoff.memoryMapDescriptorSize;
+    const auto& dynamic = *reinterpret_cast<const boot::UefiKernelHandoffV8*>(&handoff);
+    if (handoff.version != boot::UEFI_KERNEL_HANDOFF_VERSION_DYNAMIC_PFN ||
+        dynamic.pfnMetadataSize % sizeof(mm::Mmpfn) ||
+        dynamic.pfnMetadataSize / sizeof(mm::Mmpfn) > SIZE_MAX ||
+        dynamic.availableRangesCapacity > SIZE_MAX ||
+        dynamic.availableRangesCapacity < descriptorCount + 1 ||
+        dynamic.availableRangesCapacity > SIZE_MAX / sizeof(mm::PhysicalPageRange) ||
+        !dynamic.pfnMetadataAddress || !dynamic.availableRangesAddress) {
+        stopWithError("[MicaNT Mm] Missing or invalid dynamic PFN bootstrap storage\r\n");
+    }
+    const size_t metadataCount = static_cast<size_t>(dynamic.pfnMetadataSize / sizeof(mm::Mmpfn));
+    g_bootPfnCount = metadataCount;
+    serialWrite("[MicaNT Mm] Dynamic PFN storage entries=");
+    serialWriteNumber(metadataCount);
+    serialWrite(" descriptors=");
+    serialWriteNumber(descriptorCount);
+    serialWrite("\r\n");
+    auto metadata = std::span(reinterpret_cast<mm::Mmpfn*>(dynamic.pfnMetadataAddress), metadataCount);
+    auto ranges = std::span(reinterpret_cast<mm::PhysicalPageRange*>(dynamic.availableRangesAddress),
+                            static_cast<size_t>(dynamic.availableRangesCapacity));
     if (handoff.memoryMapDescriptorVersion != 1 ||
-        descriptorCount > kMaximumMemoryDescriptors ||
         !hal::amd64::bootstrapKernelRange(
             handoff.memoryMapAddress, handoff.memoryMapSize, false) ||
         !hal::amd64::bootstrapKernelRange(
-            reinterpret_cast<uint64_t>(g_bootPfnMetadata), sizeof(g_bootPfnMetadata), true)) {
+            dynamic.pfnMetadataAddress, dynamic.pfnMetadataSize, true) ||
+        !hal::amd64::bootstrapKernelRange(
+            dynamic.availableRangesAddress,
+            dynamic.availableRangesCapacity * sizeof(mm::PhysicalPageRange), true)) {
         stopWithError("[MicaNT Mm] Invalid, unsupported or unmapped firmware memory map\r\n");
     }
     size_t rangeCount{};
     uint64_t deferredPages{};
     for (size_t index = 0; index < descriptorCount; ++index) {
-        auto& descriptor = g_bootMemoryDescriptors[index];
-        std::memcpy(&descriptor, reinterpret_cast<const void*>(
-            handoff.memoryMapAddress + index * handoff.memoryMapDescriptorSize),
-            sizeof(descriptor));
+        uefi::EfiMemoryDescriptor descriptor{};
+        if (!readBootMemoryDescriptor(handoff, index, descriptor))
+            stopWithError("[MicaNT Mm] Firmware memory map descriptor is inaccessible\r\n");
         if ((descriptor.physicalStart & 4095) || !descriptor.numberOfPages ||
             descriptor.numberOfPages > (UINT64_MAX - descriptor.physicalStart) / 4096) {
             stopWithError("[MicaNT Mm] Invalid physical range in firmware memory map\r\n");
         }
         const uint64_t end = descriptor.physicalStart + descriptor.numberOfPages * 4096;
         for (size_t previous = 0; previous < index; ++previous) {
-            const auto& other = g_bootMemoryDescriptors[previous];
+            uefi::EfiMemoryDescriptor other{};
+            if (!readBootMemoryDescriptor(handoff, previous, other))
+                stopWithError("[MicaNT Mm] Firmware memory map descriptor is inaccessible\r\n");
             if (descriptor.physicalStart < other.physicalStart + other.numberOfPages * 4096 &&
                 other.physicalStart < end) {
                 stopWithError("[MicaNT Mm] Overlapping firmware memory descriptors\r\n");
@@ -761,7 +810,8 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
             uint64_t first = descriptor.physicalStart / 4096;
             uint64_t last = end / 4096;
             if (first < 256) first = 256;
-            if (last > kBootstrapPfnCount) last = kBootstrapPfnCount;
+            if (last > metadata.size())
+                stopWithError("[MicaNT Mm] PFN metadata does not cover conventional RAM\r\n");
             if (first < last) {
                 // The standard KUSER_SHARED_DATA VA overlays the low identity
                 // map. Its displaced physical page must stay out of the PFN
@@ -771,37 +821,52 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
                 if (displacedPfn >= first && displacedPfn < last) {
                     if (first < displacedPfn) {
                         const uint64_t count = displacedPfn - first;
-                        g_bootAvailableRanges[rangeCount++] = {first, count};
+                        if (rangeCount == ranges.size())
+                            stopWithError("[MicaNT Mm] UEFI range storage exhausted\r\n");
+                        ranges[rangeCount++] = {first, count};
                         enrolled += count;
                     }
                     if (displacedPfn + 1 < last) {
                         const uint64_t count = last - (displacedPfn + 1);
-                        g_bootAvailableRanges[rangeCount++] = {displacedPfn + 1, count};
+                        if (rangeCount == ranges.size())
+                            stopWithError("[MicaNT Mm] UEFI range storage exhausted\r\n");
+                        ranges[rangeCount++] = {displacedPfn + 1, count};
                         enrolled += count;
                     }
                 } else {
                     enrolled = last - first;
-                    g_bootAvailableRanges[rangeCount++] = {first, enrolled};
+                    if (rangeCount == ranges.size())
+                        stopWithError("[MicaNT Mm] UEFI range storage exhausted\r\n");
+                    ranges[rangeCount++] = {first, enrolled};
                 }
             }
         }
         deferredPages += descriptor.numberOfPages - enrolled;
     }
     auto& database = mm::PfnDatabase::get();
+    serialWrite("[MicaNT Mm] Initializing PFN database from UEFI ranges\r\n");
     if (database.initializeFromBootMemory(
-            g_bootPfnMetadata, std::span(g_bootAvailableRanges, rangeCount),
+            metadata, std::span(ranges.data(), rangeCount),
             zeroPhysicalPage) != NtStatus::Success ||
         database.getFreeCount() < 3 || database.getZeroedCount() != 0 ||
         database.getActiveCount() != 0) {
         stopWithError("[MicaNT Mm] Canonical PFN database initialization failed\r\n");
     }
+    serialWrite("[MicaNT Mm] Dynamic PFN database initialized\r\n");
     const size_t initialFree = database.getFreeCount();
+    serialWrite("[MicaNT Mm] PFN probe allocate\r\n");
     const uint64_t pfn = database.allocatePage(false);
+    serialWrite("[MicaNT Mm] PFN probe returned ");
+    serialWriteNumber(pfn);
+    serialWrite("\r\n");
     if (!pfn || database.getActiveCount() != 1) {
         stopWithError("[MicaNT Mm] Physical allocation failed\r\n");
     }
+    serialWrite("[MicaNT Mm] PFN probe access\r\n");
     auto* bytes = physicalPageBytes(pfn);
+    serialWrite("[MicaNT Mm] PFN probe access valid\r\n");
     for (size_t index = 0; index < 4096; ++index) bytes[index] = 0xA5;
+    hal::amd64::releaseBootstrapPhysicalPage();
     database.referencePage(pfn);
     database.freePage(pfn);
     if (database.getActiveCount() != 1) {
@@ -809,11 +874,13 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     }
     database.freePage(pfn);
     database.zeroPage(pfn);
+    bytes = physicalPageBytes(pfn);
     for (size_t index = 0; index < 4096; ++index) {
         if (bytes[index] != 0) {
             stopWithError("[MicaNT Mm] Physical zeroing verification failed\r\n");
         }
     }
+    hal::amd64::releaseBootstrapPhysicalPage();
     if (database.getZeroedCount() != 1 || database.allocatePage(true) != pfn) {
         stopWithError("[MicaNT Mm] Zeroed physical page allocation failed\r\n");
     }
@@ -822,17 +889,49 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     if (!contiguous || database.getActiveCount() != 2) {
         stopWithError("[MicaNT Mm] Contiguous physical allocation failed\r\n");
     }
-    physicalPageBytes(contiguous)[0] = 0x37;
-    physicalPageBytes(contiguous + 1)[4095] = 0x79;
-    if (physicalPageBytes(contiguous)[0] != 0x37 ||
-        physicalPageBytes(contiguous + 1)[4095] != 0x79) {
+    auto* firstContiguous = physicalPageBytes(contiguous);
+    firstContiguous[0] = 0x37;
+    hal::amd64::releaseBootstrapPhysicalPage();
+    auto* secondContiguous = physicalPageBytes(contiguous + 1);
+    secondContiguous[4095] = 0x79;
+    hal::amd64::releaseBootstrapPhysicalPage();
+    firstContiguous = physicalPageBytes(contiguous);
+    const bool firstByteValid = firstContiguous[0] == 0x37;
+    hal::amd64::releaseBootstrapPhysicalPage();
+    secondContiguous = physicalPageBytes(contiguous + 1);
+    const bool lastByteValid = secondContiguous[4095] == 0x79;
+    hal::amd64::releaseBootstrapPhysicalPage();
+    if (!firstByteValid || !lastByteValid) {
         stopWithError("[MicaNT Mm] Physical frame backing verification failed\r\n");
     }
     database.freeContiguousPages(contiguous, 2);
     if (database.getActiveCount() != 0 || database.getFreeCount() != initialFree) {
         stopWithError("[MicaNT Mm] Physical release accounting failed\r\n");
     }
-    serialWrite("[MicaNT Mm] Bootstrap PFN window: first 256 MiB; usable pages=");
+    constexpr uint64_t oldPfnBoundary = (uint64_t{1} << 30) / mm::PageSize4KB;
+    const uint64_t highPfn = database.getTotalPages() > oldPfnBoundary
+        ? database.allocatePageInRange(oldPfnBoundary, database.getTotalPages() - 1) : 0;
+    if (highPfn) {
+        auto* highBytes = physicalPageBytes(highPfn);
+        highBytes[0] = 0x6d;
+        highBytes[4095] = 0xa7;
+        const bool highPageMapped = highBytes[0] == 0x6d && highBytes[4095] == 0xa7;
+        hal::amd64::releaseBootstrapPhysicalPage();
+        database.freePage(highPfn);
+        database.zeroPage(highPfn);
+        const uint64_t reclaimed = database.allocatePageInRange(highPfn, highPfn);
+        if (!highPageMapped || reclaimed != highPfn) {
+            stopWithError("[MicaNT Mm] PFN above 1 GiB mapping/reclamation failed\r\n");
+        }
+        database.freePage(reclaimed);
+        if (database.getActiveCount() != 0 || database.getFreeCount() != initialFree) {
+            stopWithError("[MicaNT Mm] High PFN cleanup accounting failed\r\n");
+        }
+        serialWrite("[MicaNT Mm] PFN above 1 GiB mapped, used and reclaimed\r\n");
+    }
+    serialWrite("[MicaNT Mm] UEFI-sized PFN metadata pages=");
+    serialWriteNumber(database.getTotalPages());
+    serialWrite("; usable pages=");
     serialWriteNumber(initialFree);
     serialWrite("; deferred conventional pages=");
     serialWriteNumber(deferredPages);
@@ -1662,8 +1761,7 @@ bool fallbackPresentFrame(void* context, const uint32_t* pixels, uint32_t width,
     auto* target = static_cast<GopDisplayContext*>(context);
     if (!target || !target->Pixels || !pixels || !width || !height || pitch < width ||
         !target->Width || !target->Height || target->Pitch < target->Width) return false;
-    if (target->Pitch > UINT64_MAX / sizeof(uint32_t) ||
-        target->Height > UINT64_MAX / (static_cast<uint64_t>(target->Pitch) * sizeof(uint32_t)) ||
+    if (target->Height > UINT64_MAX / (static_cast<uint64_t>(target->Pitch) * sizeof(uint32_t)) ||
         static_cast<uint64_t>(target->Height) * target->Pitch * sizeof(uint32_t) >
             target->ByteSize) return false;
     const int64_t srcLeft = dstX < 0 ? -static_cast<int64_t>(dstX) : 0;
@@ -1696,8 +1794,8 @@ bool fallbackPresentFrame(void* context, const uint32_t* pixels, uint32_t width,
 bool initializeGopFramebuffer(const micant::boot::KernelFramebufferV1& framebuffer,
                               bool logFallback = true) noexcept {
     if (!framebuffer.physicalBase || !framebuffer.size ||
-        framebuffer.size > 16 * 1024 * 1024 ||
-        framebuffer.size > SIZE_MAX || framebuffer.width < 320 ||
+        framebuffer.size > SIZE_MAX || framebuffer.physicalBase > UINT64_MAX - framebuffer.size ||
+        framebuffer.width < 320 ||
         framebuffer.height < 200 || framebuffer.pixelsPerScanLine < framebuffer.width ||
         framebuffer.pixelFormat > 1 || (framebuffer.physicalBase & 3)) return false;
     if (g_displayUsingGopFallback && g_display.PresentFrame == fallbackPresentFrame &&
@@ -1785,7 +1883,8 @@ bool validHandoff(const micant::boot::UefiKernelHandoffV3* handoff) noexcept {
          handoff->version != micant::boot::UEFI_KERNEL_HANDOFF_VERSION_OEM_MODULES &&
          handoff->version != micant::boot::UEFI_KERNEL_HANDOFF_VERSION_SYSTEM_TIME &&
          handoff->version != micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION &&
-         handoff->version != micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) ||
+         handoff->version != micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES &&
+         handoff->version != micant::boot::UEFI_KERNEL_HANDOFF_VERSION_DYNAMIC_PFN) ||
         handoff->size < sizeof(*handoff) ||
         handoff->memoryMapAddress == 0 ||
         handoff->memoryMapSize > UINT64_MAX - handoff->memoryMapAddress ||
@@ -1793,9 +1892,19 @@ bool validHandoff(const micant::boot::UefiKernelHandoffV3* handoff) noexcept {
         handoff->memoryMapSize < handoff->memoryMapDescriptorSize) {
         return false;
     }
+    if (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_DYNAMIC_PFN) {
+        const auto& dynamic = *reinterpret_cast<const micant::boot::UefiKernelHandoffV8*>(handoff);
+        if (handoff->size < sizeof(dynamic) || !dynamic.pfnMetadataAddress ||
+            !dynamic.pfnMetadataSize || !dynamic.availableRangesAddress ||
+            !dynamic.availableRangesCapacity ||
+            dynamic.pfnMetadataSize > UINT64_MAX - dynamic.pfnMetadataAddress ||
+            dynamic.availableRangesCapacity > UINT64_MAX / sizeof(micant::mm::PhysicalPageRange) ||
+            dynamic.availableRangesCapacity * sizeof(micant::mm::PhysicalPageRange) >
+                UINT64_MAX - dynamic.availableRangesAddress) return false;
+    }
     const auto& userImage = handoff->userImageFile;
     if ((userImage.base == 0) != (userImage.size == 0) ||
-        userImage.size > 16 * 1024 * 1024 ||
+        userImage.size > SIZE_MAX ||
         userImage.size > UINT64_MAX - userImage.base) {
         return false;
     }
@@ -1803,20 +1912,22 @@ bool validHandoff(const micant::boot::UefiKernelHandoffV3* handoff) noexcept {
     if (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_OEM_MODULES ||
         handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_SYSTEM_TIME ||
         handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION ||
-        handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
+        handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
         const micant::boot::UefiKernelHandoffV4* extendedV4{};
         if (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_SYSTEM_TIME ||
             handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION ||
-            handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
+            handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
             const bool hasCalibration = handoff->version ==
                     micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION ||
-                handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES;
-            const bool hasPciInventory = handoff->version ==
+                handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES;
+            const bool hasPciInventory = handoff->version >=
                 micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES;
-            if (handoff->size < (hasCalibration
+            if (handoff->size < (handoff->version ==
+                    micant::boot::UEFI_KERNEL_HANDOFF_VERSION_DYNAMIC_PFN
+                    ? sizeof(micant::boot::UefiKernelHandoffV8) : (hasCalibration
                     ? (hasPciInventory ? sizeof(micant::boot::UefiKernelHandoffV7)
                                        : sizeof(micant::boot::UefiKernelHandoffV6))
-                    : sizeof(micant::boot::UefiKernelHandoffV5))) return false;
+                    : sizeof(micant::boot::UefiKernelHandoffV5)))) return false;
             const auto& sample = hasCalibration
                 ? (hasPciInventory
                     ? reinterpret_cast<const micant::boot::UefiKernelHandoffV7*>(handoff)->clock.time.systemTime
@@ -1907,7 +2018,7 @@ bool validHandoff(const micant::boot::UefiKernelHandoffV3* handoff) noexcept {
             while (nameLength < sizeof(module.baseName) && module.baseName[nameLength])
                 ++nameLength;
             if (!nameLength || nameLength == sizeof(module.baseName) ||
-                image.base == 0 || image.size == 0 || image.size > 16 * 1024 * 1024 ||
+                image.base == 0 || image.size == 0 || image.size > SIZE_MAX ||
                 image.size > UINT64_MAX - image.base || image.entryPoint < image.base ||
                 image.entryPoint - image.base >= image.size ||
                 (module.flags & micant::boot::BOOT_MODULE_FLAG_BOOT_START_DRIVER) == 0 ||
@@ -1951,7 +2062,7 @@ bool inventoryFirmwarePciBars(const micant::boot::UefiKernelHandoffV3& handoff) 
         return micant::hal::amd64::readPciConfig32(bus, device, function, offset, value) ==
             PciConfigAccessResult::Success;
     };
-    const auto* snapshot = handoff.version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
+    const auto* snapshot = handoff.version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
         ? reinterpret_cast<const micant::boot::UefiKernelHandoffV7*>(&handoff) : nullptr;
     bool matched[micant::boot::UEFI_KERNEL_HANDOFF_MAX_PCI_BARS]{};
     bool complete = snapshot && snapshot->pciInventoryComplete == 1;
@@ -2074,7 +2185,8 @@ bool inventoryFirmwarePciBars(const micant::boot::UefiKernelHandoffV3& handoff) 
 bool initializeFirmwareResourceReservations(const micant::boot::UefiKernelHandoffV3& handoff) noexcept {
     const size_t count = handoff.memoryMapSize / handoff.memoryMapDescriptorSize;
     for (size_t i = 0; i < count; ++i) {
-        const auto& d = g_bootMemoryDescriptors[i];
+        micant::uefi::EfiMemoryDescriptor d{};
+        if (!readBootMemoryDescriptor(handoff, i, d)) return false;
         if (d.type == static_cast<uint32_t>(micant::uefi::EfiMemoryType::EfiMemoryMappedIO) ||
             d.type == static_cast<uint32_t>(micant::uefi::EfiMemoryType::EfiMemoryMappedIOPortSpace))
             continue;
@@ -2119,7 +2231,7 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
         ? reinterpret_cast<const micant::boot::UefiKernelHandoffV5*>(handoff)->oem
         : (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION
             ? reinterpret_cast<const micant::boot::UefiKernelHandoffV6*>(handoff)->time.oem
-            : (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
+            : (handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
                 ? reinterpret_cast<const micant::boot::UefiKernelHandoffV7*>(handoff)->clock.time.oem
                 : *reinterpret_cast<const micant::boot::UefiKernelHandoffV4*>(handoff)));
     bool displayReady = false;
@@ -2173,20 +2285,147 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
         stopWithError("[MicaNT Display] OEM and GOP display paths unavailable\r\n");
 }
 
-void drawExplorerDesktop() noexcept {
-    micant::explorer::DrawDesktop(
-        g_explorerSurface, kWidth, kHeight - kTaskbarHeight
-    );
-    micant::explorer::DrawTaskbar(
-        g_explorerSurface, kWidth, kHeight, kTaskbarHeight, nullptr, 0, "QEMU"
-    );
-    if (!g_display.PresentFrame(g_display.Context, g_explorerSurface,
-                               kWidth, kHeight, kWidth, 0, 0)) {
-        stopWithError("[MicaNT Display] Desktop presentation failed\r\n");
+// Start the generated shell from the mounted system volume through Io, SEC_IMAGE,
+// Ps, and the normal user-thread bootstrap. Keep the published process handle
+// for the lifetime of the initial interactive session.
+micant::Handle g_explorerProcessHandle{};
+micant::Handle g_explorerProcessId{};
+
+bool launchExplorerProcess() noexcept {
+    using namespace micant;
+    char16_t path[256]{};
+    size_t directoryLength{};
+    auto result = io::IoQuerySystemDirectory(path, std::size(path), directoryLength);
+    if (result != NtStatus::Success || !directoryLength || directoryLength >= std::size(path)) {
+        serialWrite("[MicaNT Explorer] System directory unavailable status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
     }
-    serialWrite(g_displayUsingGopFallback
-        ? "[MicaNT Display] Desktop presented through GOP framebuffer\r\n"
-        : "[MicaNT Display] Desktop presented through boot-start display .sys\r\n");
+    size_t length = directoryLength;
+    if (path[length - 1] != u'\\') {
+        if (length + 1 >= std::size(path)) return false;
+        path[length++] = u'\\';
+    }
+    constexpr char16_t imageName[] = u"explorer.exe";
+    if (length + (std::size(imageName) - 1) >= std::size(path)) return false;
+    std::memcpy(path + length, imageName, (std::size(imageName) - 1) * sizeof(char16_t));
+    length += std::size(imageName) - 1;
+
+    Handle file{};
+    result = io::IoOpenBackendFile(&file, 0x0021, {path, length});
+    if (result != NtStatus::Success) {
+        serialWrite("[MicaNT Explorer] Open System32 image failed status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+    Handle imageSection{};
+    result = sys::NtCreateSectionFromKernel(&imageSection, section::SECTION_ALL_ACCESS,
+        nullptr, nullptr, mm::PAGE_EXECUTE_READ, section::SEC_FILE | section::SEC_IMAGE, file);
+    const auto fileClose = sys::NtClose(file);
+    if (result == NtStatus::Success && fileClose != NtStatus::Success) result = fileClose;
+    if (result != NtStatus::Success) {
+        serialWrite("[MicaNT Explorer] SEC_IMAGE creation failed status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+
+    ob::ObjectHeader* sectionReference{};
+    result = sys::referenceProcessImageSection(imageSection, sectionReference);
+    if (sectionReference) ob::ObDereferenceObject(sectionReference);
+    if (result != NtStatus::Success) {
+        (void)sys::NtClose(imageSection);
+        serialWrite("[MicaNT Explorer] SEC_IMAGE handle reference failed status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+    ps::EProcess* systemProcess{};
+    ob::ObjectHeader* systemReference{};
+    Handle systemProcessHandle{};
+    result = ps::detail::referenceSystemProcess(systemProcess, systemReference);
+    if (result == NtStatus::Success && systemProcess)
+        result = ps::detail::publishProcessHandle(*systemProcess, systemReference,
+            0x001FFFFF, 0, systemProcessHandle);
+    else if (result == NtStatus::Success)
+        result = NtStatus::InvalidHandle;
+    if (systemReference) ob::ObDereferenceObject(systemReference);
+    if (result != NtStatus::Success) {
+        (void)sys::NtClose(imageSection);
+        serialWrite("[MicaNT Explorer] System parent process unavailable status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+
+    result = sys::NtCreateProcessExFromKernel(&g_explorerProcessHandle,
+        0x001FFFFF, nullptr, systemProcessHandle, 0, imageSection, 0, 0, false);
+    const auto parentClose = sys::NtClose(systemProcessHandle);
+    const auto sectionClose = sys::NtClose(imageSection);
+    if (result == NtStatus::Success && parentClose != NtStatus::Success) result = parentClose;
+    if (result == NtStatus::Success && sectionClose != NtStatus::Success) result = sectionClose;
+    if (result != NtStatus::Success) {
+        g_explorerProcessHandle = 0;
+        serialWrite("[MicaNT Explorer] Ps process creation failed status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+
+    ps::EProcess* process{};
+    ob::ObjectHeader* processReference{};
+    result = ps::detail::referenceProcessHandle(g_explorerProcessHandle, 0,
+                                                 process, processReference);
+    if (result == NtStatus::Success && process)
+        g_explorerProcessId = process->processId();
+    uintptr_t entryPoint{};
+    if (result == NtStatus::Success && process && process->nativeImages()) {
+        const auto* mainImage = process->nativeImages()->module(0);
+        if (mainImage && mainImage->view.headers().optionalHeader.addressOfEntryPoint &&
+            mainImage->base <= UINTPTR_MAX - mainImage->view.headers().optionalHeader.addressOfEntryPoint)
+            entryPoint = mainImage->base + mainImage->view.headers().optionalHeader.addressOfEntryPoint;
+        else
+            result = NtStatus::InvalidImageFormat;
+    } else if (result == NtStatus::Success) {
+        result = NtStatus::InvalidImageFormat;
+    }
+    if (processReference) ob::ObDereferenceObject(processReference);
+    if (result != NtStatus::Success) {
+        (void)sys::NtTerminateProcess(g_explorerProcessHandle, result);
+        (void)sys::NtClose(g_explorerProcessHandle);
+        g_explorerProcessHandle = 0;
+        g_explorerProcessId = 0;
+        serialWrite("[MicaNT Explorer] Loaded image metadata invalid status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+
+    Handle thread{};
+    result = sys::NtCreateThreadExFromKernel(&thread, 0x001FFFFF, nullptr,
+        g_explorerProcessHandle, entryPoint, 0, 1, 0, 0, 0, nullptr);
+    if (result == NtStatus::Success) result = sys::NtResumeThread(thread, nullptr);
+    if (thread) {
+        const auto threadClose = sys::NtClose(thread);
+        if (result == NtStatus::Success && threadClose != NtStatus::Success) result = threadClose;
+    }
+    if (result != NtStatus::Success) {
+        (void)sys::NtTerminateProcess(g_explorerProcessHandle, result);
+        (void)sys::NtClose(g_explorerProcessHandle);
+        g_explorerProcessHandle = 0;
+        g_explorerProcessId = 0;
+        serialWrite("[MicaNT Explorer] Initial user thread failed status=");
+        serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite("\r\n");
+        return false;
+    }
+    serialWrite("[MicaNT Explorer] SEC_IMAGE process and CPL3 initial thread started\r\n");
+    serialWrite("[MicaNT Explorer] PID=");
+    serialWriteNumber(static_cast<uint32_t>(process ? process->processId() : 0));
+    serialWrite("\r\n");
+    return true;
 }
 
 void restoreCursorBackground(uint32_t x, uint32_t y) noexcept {
@@ -3132,6 +3371,18 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(sys::NtFlushInstructionCache(static_cast<Handle>(first),
             reinterpret_cast<const void*>(second), static_cast<size_t>(args.third)));
     }
+    if (number == sys::SSN_NtQueryVirtualMemory) {
+        uint64_t stackArguments[2]{};
+        if (args.userStack > UINT64_MAX - 48 ||
+            ex::ExSafeCopyFromUser(stackArguments,
+                reinterpret_cast<const void*>(args.userStack + 40),
+                sizeof(stackArguments)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        return status(sys::NtQueryVirtualMemory(static_cast<Handle>(first),
+            static_cast<uintptr_t>(second), static_cast<uint32_t>(args.third),
+            reinterpret_cast<void*>(args.fourth), static_cast<size_t>(stackArguments[0]),
+            reinterpret_cast<size_t*>(stackArguments[1])));
+    }
     if (number == sys::SSN_NtProtectVirtualMemory) {
         uint64_t oldProtection{};
         if (args.userStack > UINT64_MAX - 40 ||
@@ -3317,11 +3568,39 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             request.flags != 0) {
             return status(NtStatus::InvalidParameter);
         }
-        const NtStatus requestStatus =
-            win32k::freestanding::dispatchRequest(request);
+        auto* process = ke::KeGetCurrentProcess();
+        // The isolated pre-Executive CPL3 ABI probe has no Ps owner yet. Its
+        // objects use owner zero and are explicitly torn down by the probe;
+        // every process-backed request is keyed by its allocated Ps ID.
+        if (request.operation == MICANT_WIN32K_OP_PUMP_INPUT) {
+            MicaWin32kInputEvent event{};
+            if (pollMouseInput(event)) {
+                win32k::freestanding::dispatchMouseInput(event);
+                request.result = 1;
+            }
+            return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
+                                               &request, sizeof(request)));
+        }
+        const NtStatus requestStatus = win32k::freestanding::dispatchRequest(
+            request, process ? process->processId() : 0);
         if (requestStatus != NtStatus::Success) return status(requestStatus);
         const NtStatus resultStatus = ex::ExSafeCopyToUser(
             reinterpret_cast<void*>(first), &request, sizeof(request));
+        static bool explorerEntryObserved = false;
+        static bool explorerWindowObserved = false;
+        const auto* currentProcess = ke::KeGetCurrentProcess();
+        const bool fromExplorer = g_explorerProcessId && currentProcess &&
+            currentProcess->processId() == g_explorerProcessId;
+        if (fromExplorer && resultStatus == NtStatus::Success &&
+            request.operation == MICANT_WIN32K_OP_REGISTER_CLASS && !explorerEntryObserved) {
+            explorerEntryObserved = true;
+            serialWrite("[MicaNT Explorer] Ring 3 entry reached; Win32k class registered\r\n");
+        }
+        if (fromExplorer && resultStatus == NtStatus::Success &&
+            request.operation == MICANT_WIN32K_OP_CREATE_WINDOW && !explorerWindowObserved) {
+            explorerWindowObserved = true;
+            serialWrite("[MicaNT Explorer] First user-mode window created\r\n");
+        }
         return status(resultStatus);
     }
     return status(NtStatus::NotSupported);
@@ -3466,11 +3745,9 @@ bool pollMouseInput(MicaWin32kInputEvent& event) noexcept {
             continue;
         }
 
-        restoreCursorBackground(g_mouseX, g_mouseY);
         g_mouseX = clampedX;
         g_mouseY = clampedY;
         g_mouseButtons = buttons;
-        drawMouseCursor(g_mouseX, g_mouseY);
         event = {static_cast<int32_t>(g_mouseX), static_cast<int32_t>(g_mouseY),
                  buttons, ++g_mouseSequence};
         return true;
@@ -3479,7 +3756,6 @@ bool pollMouseInput(MicaWin32kInputEvent& event) noexcept {
 }
 
 [[noreturn]] void runMouseShell(bool clockActive) noexcept {
-    drawMouseCursor(g_mouseX, g_mouseY);
     if (clockActive) {
         const uint64_t initialTicks = micant::hal::amd64::bootstrapSchedulerClockTicks();
         __asm__ __volatile__("sti" : : : "memory");
@@ -3491,17 +3767,12 @@ bool pollMouseInput(MicaWin32kInputEvent& event) noexcept {
             stopWithError("[MicaNT Ke] Runtime scheduler clock failed\r\n");
         serialWrite("[MicaNT Ke] Runtime scheduler clock ticking\r\n");
     }
-    uint32_t buttons{};
+    serialWrite("[MicaNT Explorer] Kernel idle loop entered\r\n");
+    if (!launchExplorerProcess())
+        stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
     for (;;) {
         if (clockActive && micant::hal::amd64::bootstrapSchedulerClockFailed())
             stopWithError("[MicaNT Ke] Runtime scheduler dispatch failed\r\n");
-        MicaWin32kInputEvent event{};
-        if (pollMouseInput(event)) {
-            if ((event.buttons & 1) && !(buttons & 1)) {
-                serialWrite("[MicaNT Input] Left button pressed; user-mode shell not started\r\n");
-            }
-            buttons = event.buttons;
-        }
         __asm__ __volatile__("pause");
     }
 }
@@ -3776,8 +4047,8 @@ extern "C" micant::NtStatus KiSystemStartup(
     // Enable the canonical clock and its shared user view before the real
     // CPL3 native-image probe executes time syscalls and reads KUSER data.
     if (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION ||
-        handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
-        const auto& calibration = handoff->version ==
+        handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
+        const auto& calibration = handoff->version >=
                 micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
             ? reinterpret_cast<const micant::boot::UefiKernelHandoffV7*>(handoff)->clock.clockCalibration
             : reinterpret_cast<const micant::boot::UefiKernelHandoffV6*>(handoff)->clockCalibration;
@@ -3801,13 +4072,11 @@ extern "C" micant::NtStatus KiSystemStartup(
     initializeBootStartDrivers(handoff);
     auto& bootNetworkStack = micant::tcpip::NetworkStack::get();
     bootNetworkStack.initialize();
-    drawExplorerDesktop();
-    serialWrite("[MicaNT Explorer] Desktop and taskbar rendered\r\n");
     bool utcSeeded = false;
     if (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_SYSTEM_TIME ||
         handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION ||
-        handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
-        const auto& sample = handoff->version ==
+        handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) {
+        const auto& sample = handoff->version >=
                 micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
             ? reinterpret_cast<const micant::boot::UefiKernelHandoffV7*>(handoff)->clock.time.systemTime
             : (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION
@@ -3826,8 +4095,8 @@ extern "C" micant::NtStatus KiSystemStartup(
     } else {
         if ((handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_SYSTEM_TIME ||
              handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION ||
-             handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) &&
-            (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
+             handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES) &&
+            (handoff->version >= micant::boot::UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES
                 ? reinterpret_cast<const micant::boot::UefiKernelHandoffV7*>(handoff)->clock.time.systemTime.status
                 : (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION
                     ? reinterpret_cast<const micant::boot::UefiKernelHandoffV6*>(handoff)->time.systemTime.status
@@ -3950,7 +4219,6 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (clockActive && startMouseInterrupt())
         serialWrite("[MicaNT Input] PS/2 mouse interrupt routing active\r\n");
     if (!clockActive) serialWrite("[MicaNT Ke] Runtime scheduler clock unavailable\r\n");
-    serialWrite("[MicaNT Explorer] Shell idle loop entered\r\n");
     runMouseShell(clockActive);
 }
 

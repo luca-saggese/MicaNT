@@ -76,7 +76,7 @@ bool initializeBootstrapSectionServices() noexcept {
         {nullptr, hal::amd64::mapBootstrapManagedPage, hal::amd64::unmapBootstrapManagedPage,
          hal::amd64::mapBootstrapProtectManagedPage, hal::amd64::mapBootstrapManagedView,
          hal::amd64::unmapBootstrapManagedView, nullptr, hal::amd64::replaceBootstrapManagedPage},
-        hal::amd64::BootstrapManagedBase, hal::amd64::BootstrapManagedSize);
+        hal::amd64::BootstrapUserAddressBase, hal::amd64::BootstrapUserAddressSize);
 }
 
 // Resolve a process image candidate using the canonical section type and
@@ -237,6 +237,56 @@ NtStatus NtProtectVirtualMemory(Handle process, uintptr_t* base, size_t* regionS
                     return status;
                 }, &output);
         }
+    }
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return result;
+}
+
+NtStatus NtQueryVirtualMemory(Handle process, uintptr_t baseAddress,
+                              uint32_t informationClass, void* information,
+                              size_t informationLength, size_t* returnLength) noexcept {
+    struct MemoryBasicInformation64 {
+        uintptr_t baseAddress;
+        uintptr_t allocationBase;
+        uint32_t allocationProtect;
+        uint16_t partitionId;
+        uint16_t reserved;
+        size_t regionSize;
+        uint32_t state;
+        uint32_t protect;
+        uint32_t type;
+        uint32_t padding;
+    };
+    static_assert(sizeof(MemoryBasicInformation64) == 48);
+    if (process != InvalidHandleValue) return NtStatus::NotSupported;
+    if (informationClass != 0) return NtStatus::InvalidInfoClass;
+    if (!information) return NtStatus::InvalidParameter;
+    if (informationLength < sizeof(MemoryBasicInformation64)) return NtStatus::InfoLengthMismatch;
+    const auto* current = ke::KeGetCurrentThread();
+    const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    auto result = ex::ProbeForWrite(information, sizeof(MemoryBasicInformation64),
+                                    alignof(MemoryBasicInformation64), mode);
+    if (result == NtStatus::Success && returnLength)
+        result = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(size_t), mode);
+    MemoryBasicInformation64 output{};
+    mm::ProcessAddressSpace::QueryRegion region{};
+    if (result == NtStatus::Success && !currentAddressSpace().queryRegion(baseAddress, region))
+        result = NtStatus::InvalidParameter;
+    if (result == NtStatus::Success) {
+        output.baseAddress = region.baseAddress;
+        output.allocationBase = region.allocationBase;
+        output.allocationProtect = region.allocationProtect;
+        output.regionSize = region.regionSize;
+        output.state = region.state;
+        output.protect = region.protect;
+        output.type = region.type;
+        result = ex::ExSafeCopyToUser(information, &output, sizeof(output), mode);
+    }
+    if (result == NtStatus::Success && returnLength) {
+        const size_t written = sizeof(output);
+        result = ex::ExSafeCopyToUser(returnLength, &written, sizeof(written), mode);
     }
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
     return result;
@@ -560,9 +610,9 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
     // SEC_IMAGE may be mapped at a caller-specified alternate base. When no
     // base is specified, fall back to an available range if the PE preferred
     // range is occupied or outside this address-space backend's window.
-    const bool preferredInWindow = target >= hal::amd64::BootstrapManagedBase &&
-        target - hal::amd64::BootstrapManagedBase < hal::amd64::BootstrapManagedSize &&
-        length <= hal::amd64::BootstrapManagedSize - (target - hal::amd64::BootstrapManagedBase);
+    const bool preferredInWindow = target >= hal::amd64::BootstrapUserAddressBase &&
+        target - hal::amd64::BootstrapUserAddressBase < hal::amd64::BootstrapUserAddressSize &&
+        length <= hal::amd64::BootstrapUserAddressSize - (target - hal::amd64::BootstrapUserAddressBase);
     bool imageNotAtBase = false;
     status = withInterruptsDisabled([&]() noexcept {
         auto& space = currentAddressSpace();

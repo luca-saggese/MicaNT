@@ -1037,6 +1037,63 @@ void callVectoredContinueHandlers(ExceptionPointers64& pointers) noexcept {
 }
 }
 
+extern "C" __declspec(dllexport) RuntimeFunction64* RtlLookupFunctionEntry(
+    uint64_t controlPc, uint64_t* imageBase, void* /*historyTable*/) noexcept {
+    ImageView64 image{};
+    if (!findImage(static_cast<uintptr_t>(controlPc), image)) return nullptr;
+    auto* function = lookupFunction(image, static_cast<uintptr_t>(controlPc));
+    if (function && imageBase) *imageBase = image.base;
+    return function;
+}
+
+extern "C" __declspec(dllexport) void* RtlVirtualUnwind(
+    uint32_t handlerType, uint64_t imageBase, uint64_t controlPc,
+    RuntimeFunction64* functionEntry, micant::CONTEXT* context,
+    void** handlerData, uint64_t* establisherFrame,
+    void* /*contextPointers*/) noexcept {
+    if (!context || handlerType > UnwindFlagTerminationHandler) return nullptr;
+    ImageView64 image{};
+    if (!findImage(static_cast<uintptr_t>(controlPc), image) || image.base != imageBase)
+        return nullptr;
+    auto* tableFunction = lookupFunction(image, static_cast<uintptr_t>(controlPc));
+    if (functionEntry) {
+        const uintptr_t tableBegin = image.base + image.exceptionRva;
+        const uintptr_t tableEnd = tableBegin + image.exceptionSize;
+        const uintptr_t supplied = reinterpret_cast<uintptr_t>(functionEntry);
+        if (!image.exceptionRva || supplied < tableBegin || supplied > tableEnd - sizeof(RuntimeFunction64) ||
+            functionEntry->beginAddress != (tableFunction ? tableFunction->beginAddress : UINT32_MAX) ||
+            functionEntry->endAddress != (tableFunction ? tableFunction->endAddress : UINT32_MAX) ||
+            functionEntry->unwindInfo != (tableFunction ? tableFunction->unwindInfo : UINT32_MAX))
+            return nullptr;
+        tableFunction = functionEntry;
+    }
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb) return nullptr;
+    const uint64_t stackBase = *reinterpret_cast<const uint64_t*>(teb + 8);
+    const uint64_t stackLimit = *reinterpret_cast<const uint64_t*>(teb + 16);
+    if (stackLimit >= stackBase || stackBase - stackLimit < sizeof(uint64_t)) return nullptr;
+
+    UnwindState64 state{};
+    const uint64_t* sourceRegisters = &context->Rax;
+    for (size_t i = 0; i < 16; ++i) state.registers[i] = sourceRegisters[i];
+    state.rip = controlPc;
+    for (size_t i = 0; i < 16; ++i) state.xmm[i] = context->FltSave.XmmRegisters[i];
+    uint64_t frame{};
+    void* handler{};
+    void* data{};
+    if (!unwindFrame(image, static_cast<uintptr_t>(controlPc), state, tableFunction,
+                     handlerType, stackLimit, stackBase, frame, handler, data)) return nullptr;
+    uint64_t* targetRegisters = &context->Rax;
+    for (size_t i = 0; i < 16; ++i) targetRegisters[i] = state.registers[i];
+    context->Rip = state.rip;
+    if (context->ContextFlags & CONTEXT_FLOATING_POINT)
+        for (size_t i = 0; i < 16; ++i) context->FltSave.XmmRegisters[i] = state.xmm[i];
+    if (handlerData) *handlerData = data;
+    if (establisherFrame) *establisherFrame = frame;
+    return handler;
+}
+
 extern "C" __declspec(dllexport) int32_t RtlDispatchException(
     ExceptionRecord64* record, micant::CONTEXT* context) noexcept {
     if (!record || !context) return 0;
@@ -1601,13 +1658,120 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtCreateProcessEx(
 #endif
 }
 
-// Initial AMD64 thread entry receives the caller's routine and parameter in
-// RCX/RDX. Returning from the routine terminates this thread with its result.
-__attribute__((naked, noreturn)) __declspec(dllexport) void RtlUserThreadStart(void*, void*) noexcept {
-    __asm__ __volatile__(
-        "andq $-16, %rsp\nsubq $32, %rsp\nmovq %rcx, %rax\nmovq %rdx, %rcx\n"
-        "callq *%rax\nmovl %eax, %edx\nmovq $-2, %rcx\nmovq %rcx, %r10\n"
-        "movq $0x53, %rax\nsyscall\nud2\n");
+struct UserListEntry64 { uintptr_t next, previous; };
+struct UserLoaderData64 {
+    uint32_t length;
+    uint8_t initialized;
+    uint8_t reserved[3];
+    uint64_t ssHandle;
+    UserListEntry64 loadOrder;
+    UserListEntry64 memoryOrder;
+    UserListEntry64 initializationOrder;
+};
+struct UserLoaderEntry64 {
+    UserListEntry64 loadOrder;
+    UserListEntry64 memoryOrder;
+    UserListEntry64 initializationOrder;
+    uintptr_t dllBase;
+    uintptr_t entryPoint;
+    uint32_t sizeOfImage;
+    uint32_t reserved;
+    uint16_t fullNameLength, fullNameMaximum;
+    uint32_t fullNamePadding;
+    const char16_t* fullNameBuffer;
+    uint16_t baseNameLength, baseNameMaximum;
+    uint32_t baseNamePadding;
+    const char16_t* baseNameBuffer;
+    uint32_t flags;
+};
+static_assert(offsetof(UserLoaderData64, initializationOrder) == 0x30);
+static_assert(offsetof(UserLoaderEntry64, initializationOrder) == 0x20);
+static_assert(offsetof(UserLoaderEntry64, dllBase) == 0x30);
+static_assert(offsetof(UserLoaderEntry64, entryPoint) == 0x38);
+static_assert(offsetof(UserLoaderEntry64, flags) == 0x68);
+
+extern "C" __declspec(dllexport) uint64_t NtYieldExecution() noexcept;
+
+// The kernel enters this routine for each new user thread. The first thread
+// initializes file-backed DLLs in the PEB's loader order before calling the
+// executable entrypoint; later threads wait for that transaction to finish.
+__declspec(dllexport) [[noreturn]] void RtlUserThreadStart(
+    void* startRoutine, void* parameter) noexcept {
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb) {
+        (void)NtTerminateThread(reinterpret_cast<void*>(~uintptr_t{1}),
+                                static_cast<int32_t>(0xC000000Du));
+        __builtin_trap();
+    }
+    const uintptr_t peb = *reinterpret_cast<const uintptr_t*>(teb + 0x60);
+    const uintptr_t loaderAddress = peb ? *reinterpret_cast<const uintptr_t*>(peb + 0x18) : 0;
+    if (loaderAddress < 0x10000 || loaderAddress >= 0x00007FFFFFFF0000ULL - 0x40) {
+        (void)NtTerminateThread(reinterpret_cast<void*>(~uintptr_t{1}),
+                                static_cast<int32_t>(0xC0000142u));
+        __builtin_trap();
+    }
+    auto* loader = reinterpret_cast<UserLoaderData64*>(loaderAddress);
+    uint8_t expected{};
+    if (__atomic_compare_exchange_n(&loader->initialized, &expected, 1, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        uintptr_t attached[16]{};
+        size_t attachedCount{};
+        const uintptr_t headAddress = loaderAddress + offsetof(UserLoaderData64, initializationOrder);
+        uintptr_t link = loader->initializationOrder.next;
+        bool initialized = true;
+        for (size_t count = 0; link != headAddress && count < 16; ++count) {
+            if (link < 0x10020 || link >= 0x00007FFFFFFF0000ULL) { initialized = false; break; }
+            auto* entry = reinterpret_cast<UserLoaderEntry64*>(link -
+                offsetof(UserLoaderEntry64, initializationOrder));
+            const uintptr_t next = entry->initializationOrder.next;
+            if ((entry->flags & 0x4) && entry->entryPoint) {
+                using DllEntry = int32_t (__stdcall *)(void*, uint32_t, void*) noexcept;
+                const auto dllEntry = reinterpret_cast<DllEntry>(entry->entryPoint);
+                if (!dllEntry(reinterpret_cast<void*>(entry->dllBase), 1, nullptr)) {
+                    initialized = false;
+                    break;
+                }
+                attached[attachedCount++] = reinterpret_cast<uintptr_t>(entry);
+            }
+            link = next;
+        }
+        if (link != headAddress) initialized = false;
+        if (!initialized) {
+            while (attachedCount) {
+                auto* entry = reinterpret_cast<UserLoaderEntry64*>(attached[--attachedCount]);
+                using DllEntry = int32_t (__stdcall *)(void*, uint32_t, void*) noexcept;
+                reinterpret_cast<DllEntry>(entry->entryPoint)(
+                    reinterpret_cast<void*>(entry->dllBase), 0, nullptr);
+            }
+            __atomic_store_n(&loader->initialized, 3, __ATOMIC_RELEASE);
+            (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}),
+                                     static_cast<int32_t>(0xC0000142u));
+            __builtin_trap();
+        }
+        __atomic_store_n(&loader->initialized, 2, __ATOMIC_RELEASE);
+    } else {
+        uint8_t state{};
+        do {
+            state = __atomic_load_n(&loader->initialized, __ATOMIC_ACQUIRE);
+            if (state == 1) (void)NtYieldExecution();
+        } while (state == 1);
+        if (state != 2) {
+            (void)NtTerminateThread(reinterpret_cast<void*>(~uintptr_t{1}),
+                                    static_cast<int32_t>(0xC0000142u));
+            __builtin_trap();
+        }
+    }
+
+    if (!startRoutine) {
+        (void)NtTerminateThread(reinterpret_cast<void*>(~uintptr_t{1}),
+                                static_cast<int32_t>(0xC000000Du));
+        __builtin_trap();
+    }
+    using UserEntry = uint32_t (__stdcall *)(void*) noexcept;
+    const uint32_t exitCode = reinterpret_cast<UserEntry>(startRoutine)(parameter);
+    (void)NtTerminateThread(reinterpret_cast<void*>(~uintptr_t{1}), static_cast<int32_t>(exitCode));
+    __builtin_trap();
 }
 
 __attribute__((naked)) __declspec(dllexport) uint64_t NtShutdownSystem(uint32_t /*action*/) noexcept {
@@ -1890,7 +2054,10 @@ __attribute__((naked)) __declspec(dllexport) uint64_t NtGdiPresentSurface(const 
 #endif
 }
 
-__declspec(dllexport) uint64_t NtQueryVirtualMemory() noexcept { return 0; }
+__attribute__((naked)) __declspec(dllexport) int32_t NtQueryVirtualMemory(
+    void*, const void*, uint32_t, void*, size_t, size_t*) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x23, %eax\n\tsyscall\n\tretq\n");
+}
 
 // ============================================================================
 // 2. RTL Runtime Library Functions

@@ -79,8 +79,11 @@ bool destroyProcessPagingRoot(ProcessPagingRoot& root) noexcept;
 // IRQ-disabled, single-CPU bootstrap test of PFN-backed paging and reclamation.
 bool verifyBootstrapPageTables() noexcept;
 // Bootstrap CR3 only; callbacks require the BSP with interrupts disabled.
-inline constexpr uintptr_t BootstrapManagedBase = (uintptr_t{128} << 39) + 0x20000000;
-inline constexpr size_t BootstrapManagedSize = 16 * 1024 * 1024;
+// The process backend uses canonical lower-half PML4 slots not reserved by
+// the bootstrap kernel (slots 133 through 255). This is address-space reach,
+// not a per-process reservation or commit budget.
+inline constexpr uintptr_t BootstrapUserAddressBase = uintptr_t{133} << 39;
+inline constexpr size_t BootstrapUserAddressSize = size_t{123} << 39;
 bool mapBootstrapManagedPage(void* context, uintptr_t address, uint64_t pfn,
                              uint32_t protection) noexcept;
 bool mapBootstrapManagedView(void* context, uintptr_t address, const uint64_t* pfns,
@@ -98,6 +101,10 @@ bool bootstrapQemuFaultTestsAvailable() noexcept;
 bool verifyBootstrapManagedPageFault(uintptr_t address, bool write,
                                      bool present) noexcept;
 uint64_t translateBootstrapAddress(const void* address) noexcept;
+// Single-page supervisor aperture for validated PFN-backed RAM access.
+// Release must follow every successful map before yielding or returning.
+volatile uint8_t* mapBootstrapPhysicalPage(uint64_t physicalAddress) noexcept;
+void releaseBootstrapPhysicalPage() noexcept;
 // Returns the first physical byte only when the complete non-empty range is
 // mapped by the bootstrap page tables to contiguous physical pages within the
 // bootstrap physical-address mask. The caller must keep the kernel-owned

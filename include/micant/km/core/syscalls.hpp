@@ -136,6 +136,10 @@ NtStatus NtProtectVirtualMemory(
     uint32_t* oldProtect
 );
 
+NtStatus NtQueryVirtualMemory(Handle processHandle, uintptr_t baseAddress,
+    uint32_t informationClass, void* information, size_t informationLength,
+    size_t* returnLength) noexcept;
+
 NtStatus NtFlushInstructionCache(Handle processHandle, const void* baseAddress, size_t size);
 
 // File & I/O

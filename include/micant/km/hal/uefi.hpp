@@ -21,6 +21,7 @@ inline constexpr uint64_t EFI_BAD_BUFFER_SIZE      = 0x8000000000000004ULL;
 inline constexpr uint64_t EFI_BUFFER_TOO_SMALL     = 0x8000000000000005ULL;
 inline constexpr uint64_t EFI_NOT_READY            = 0x8000000000000006ULL;
 inline constexpr uint64_t EFI_DEVICE_ERROR         = 0x8000000000000007ULL;
+inline constexpr uint64_t EFI_OUT_OF_RESOURCES     = 0x8000000000000009ULL;
 inline constexpr uint64_t EFI_NOT_FOUND            = 0x800000000000000EULL;
 
 using EfiHandle = void*;

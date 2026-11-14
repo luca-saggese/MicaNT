@@ -50,6 +50,7 @@ inline constexpr uint32_t UEFI_KERNEL_HANDOFF_VERSION_OEM_MODULES = 4;
 inline constexpr uint32_t UEFI_KERNEL_HANDOFF_VERSION_SYSTEM_TIME = 5;
 inline constexpr uint32_t UEFI_KERNEL_HANDOFF_VERSION_CLOCK_CALIBRATION = 6;
 inline constexpr uint32_t UEFI_KERNEL_HANDOFF_VERSION_PCI_RESOURCES = 7;
+inline constexpr uint32_t UEFI_KERNEL_HANDOFF_VERSION_DYNAMIC_PFN = 8;
 inline constexpr uint32_t UEFI_KERNEL_HANDOFF_MAX_PCI_BARS = 256;
 inline constexpr uint32_t UEFI_KERNEL_HANDOFF_MAX_OEM_MODULES = 8;
 inline constexpr uint32_t BOOT_MODULE_FLAG_BOOT_START_DRIVER = 0x00000001;
@@ -129,8 +130,17 @@ struct UefiKernelHandoffV7 {
     uint32_t pciInventoryComplete{}, reserved{};
     FirmwarePciBarV1 pciBars[UEFI_KERNEL_HANDOFF_MAX_PCI_BARS]{};
 };
+struct UefiKernelHandoffV8 {
+    UefiKernelHandoffV7 pci{};
+    uint64_t pfnMetadataAddress{};
+    uint64_t pfnMetadataSize{};
+    uint64_t availableRangesAddress{};
+    uint64_t availableRangesCapacity{};
+};
 static_assert(sizeof(FirmwarePciBarV1) == 24);
 static_assert(offsetof(UefiKernelHandoffV7, clock) == 0);
+static_assert(offsetof(UefiKernelHandoffV8, pci) == 0);
+static_assert(offsetof(UefiKernelHandoffV8, pfnMetadataAddress) == sizeof(UefiKernelHandoffV7));
 
 static_assert(std::is_standard_layout_v<UefiKernelHandoffV3>);
 static_assert(std::is_trivially_copyable_v<UefiKernelHandoffV3>);

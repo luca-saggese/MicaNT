@@ -256,7 +256,6 @@ int32_t MicaWin32kShowWindow(void* hwnd, int32_t command) {
 
 int32_t MicaWin32kSetWindowPos(void* hwnd, void* after, int32_t x,
     int32_t y, int32_t width, int32_t height, uint32_t flags) {
-    (void)after;
     MicaWin32kRequest value{};
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
     value.args[1] = static_cast<uint64_t>(static_cast<int64_t>(x));
@@ -264,6 +263,7 @@ int32_t MicaWin32kSetWindowPos(void* hwnd, void* after, int32_t x,
     value.args[3] = static_cast<uint64_t>(static_cast<int64_t>(width));
     value.args[4] = static_cast<uint64_t>(static_cast<int64_t>(height));
     value.args[5] = flags;
+    value.args[6] = reinterpret_cast<uint64_t>(after);
     return request(MICANT_WIN32K_OP_SET_WINDOW_POS, value) && value.result;
 }
 
@@ -338,6 +338,8 @@ intptr_t MicaWin32kDefWindowProcW(void* hwnd, uint32_t message,
 int32_t MicaWin32kPeekMessageW(MicaWin32kMessage* output, void* hwnd,
     uint32_t minimum, uint32_t maximum, uint32_t remove) {
     if (!output) return 0;
+    MicaWin32kRequest input{};
+    (void)request(MICANT_WIN32K_OP_PUMP_INPUT, input);
     MicaWin32kRequest value{};
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
     value.args[1] = minimum;
@@ -351,6 +353,8 @@ int32_t MicaWin32kPeekMessageW(MicaWin32kMessage* output, void* hwnd,
 int32_t MicaWin32kGetMessageW(MicaWin32kMessage* output, void* hwnd,
     uint32_t minimum, uint32_t maximum) {
     if (!output) return -1;
+    MicaWin32kRequest input{};
+    (void)request(MICANT_WIN32K_OP_PUMP_INPUT, input);
     MicaWin32kRequest value{};
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
     value.args[1] = minimum;

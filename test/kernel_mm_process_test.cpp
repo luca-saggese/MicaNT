@@ -34,11 +34,11 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
             nullptr, mapBootstrapManagedPage, unmapBootstrapManagedPage,
             mapBootstrapProtectManagedPage
         };
-        if (!space.configurePagingBackend(backend, BootstrapManagedBase, BootstrapManagedSize))
+        if (!space.configurePagingBackend(backend, BootstrapUserAddressBase, BootstrapUserAddressSize))
             return 1;
-        uintptr_t base = BootstrapManagedBase;
+        uintptr_t base = BootstrapUserAddressBase;
         if (space.allocate(base, 3 * PageSize4KB, MEM_RESERVE, PAGE_READWRITE) != NtStatus::Success ||
-            base != BootstrapManagedBase || space.getRegionCount() != 1 ||
+            base != BootstrapUserAddressBase || space.getRegionCount() != 1 ||
             space.getCommitCharge() != 0 ||
             bootstrapUserRange(base, PageSize4KB, false)) return 2;
         uintptr_t overlap = base + PageSize4KB;
@@ -71,7 +71,7 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
             !bootstrapUserRange(base, PageSize4KB, false, true) ||
             bootstrapUserRange(base, PageSize4KB, true) ||
             space.free(base, 0, MEM_RELEASE) != NtStatus::Success) return 26;
-        uintptr_t first = BootstrapManagedBase;
+        uintptr_t first = BootstrapUserAddressBase;
         uintptr_t second = first + PageSize4KB;
         {
             section::SectionObject section(PageSize4KB, section::SEC_COMMIT, PAGE_READWRITE);
@@ -104,11 +104,11 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
         ProcessAddressSpace space;
         FailingSectionMap fault{};
         if (!space.configurePagingBackend({&fault, mapUntilSecond, unmapSectionPage},
-                                          BootstrapManagedBase, BootstrapManagedSize)) return 16;
+                                          BootstrapUserAddressBase, BootstrapUserAddressSize)) return 16;
         section::SectionObject section(2 * PageSize4KB, section::SEC_COMMIT, PAGE_READWRITE);
         if (section.getInitializationStatus() != NtStatus::Success) return 17;
         const auto backing = section.getBackingReference();
-        uintptr_t address = BootstrapManagedBase;
+        uintptr_t address = BootstrapUserAddressBase;
         if (space.mapSharedPages(address, 2 * PageSize4KB, PAGE_READWRITE,
                                  backing.pfns, backing.pageCount, backing.context,
                                  backing.acquire, backing.release) != NtStatus::Unsuccessful ||
@@ -121,13 +121,13 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
                                  backing.pfns, backing.pageCount, backing.context,
                                  backing.acquire, backing.release) != NtStatus::Unsuccessful ||
             address != 0 || space.getRegionCount() != 1 ||
-            !bootstrapUserRange(BootstrapManagedBase, PageSize4KB, true)) return 19;
+            !bootstrapUserRange(BootstrapUserAddressBase, PageSize4KB, true)) return 19;
         fault.blockUnmap = false;
         fault.successfulMaps = 0;
         if (space.mapSharedPages(address, PageSize4KB, PAGE_READWRITE,
                                  backing.pfns, backing.pageCount, backing.context,
                                  backing.acquire, backing.release) != NtStatus::Success ||
-            address != BootstrapManagedBase || space.getRegionCount() != 1 ||
+            address != BootstrapUserAddressBase || space.getRegionCount() != 1 ||
             space.unmapSharedPages(address) != NtStatus::Success) return 20;
     }
     {
@@ -152,11 +152,11 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
                 &second, mapBootstrapManagedPage, unmapBootstrapManagedPage,
                 mapBootstrapProtectManagedPage, mapBootstrapManagedView, unmapBootstrapManagedView};
             valid = valid && section.getInitializationStatus() == NtStatus::Success &&
-                firstSpace.configurePagingBackend(firstBackend, BootstrapManagedBase, BootstrapManagedSize) &&
-                secondSpace.configurePagingBackend(secondBackend, BootstrapManagedBase, BootstrapManagedSize);
+                firstSpace.configurePagingBackend(firstBackend, BootstrapUserAddressBase, BootstrapUserAddressSize) &&
+                secondSpace.configurePagingBackend(secondBackend, BootstrapUserAddressBase, BootstrapUserAddressSize);
             const auto backing = section.getBackingReference();
-            uintptr_t privateFirst = BootstrapManagedBase, privateSecond = BootstrapManagedBase;
-            uintptr_t sharedFirst = BootstrapManagedBase + ProcessAddressSpace::AllocationGranularity;
+            uintptr_t privateFirst = BootstrapUserAddressBase, privateSecond = BootstrapUserAddressBase;
+            uintptr_t sharedFirst = BootstrapUserAddressBase + ProcessAddressSpace::AllocationGranularity;
             uintptr_t sharedSecond = sharedFirst;
             if (valid) valid = switchProcessPagingRoot(&first);
             if (valid) {
@@ -226,9 +226,9 @@ extern "C" int MicantTestMmManagedProtection() noexcept {
             nullptr, mapBootstrapManagedPage, unmapBootstrapManagedPage,
             mapBootstrapProtectManagedPage
         };
-        if (!space.configurePagingBackend(backend, BootstrapManagedBase, BootstrapManagedSize))
+        if (!space.configurePagingBackend(backend, BootstrapUserAddressBase, BootstrapUserAddressSize))
             return 1;
-        uintptr_t base = BootstrapManagedBase;
+        uintptr_t base = BootstrapUserAddressBase;
         if (space.allocate(base, 128 * 1024, MEM_RESERVE, PAGE_READWRITE) != NtStatus::Success ||
             space.getCommitCharge() != 0) return 2;
         uintptr_t committed = base + PageSize4KB;

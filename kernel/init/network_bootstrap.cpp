@@ -114,8 +114,7 @@ NtStatus readSystemImage(const char16_t* leaf, NativeImage& image) noexcept {
     if (status != NtStatus::Success) return status;
     const uint64_t fileSize = object->size();
     ob::ObDereferenceObject(reference);
-    constexpr uint64_t MaximumImageSize = 16 * 1024 * 1024;
-    if (!fileSize || fileSize > MaximumImageSize || fileSize > SIZE_MAX)
+    if (!fileSize || fileSize > SIZE_MAX)
         return NtStatus::InvalidImageFormat;
     image.size = static_cast<size_t>(fileSize);
     image.bytes.reset(new (std::nothrow_t{}) uint8_t[image.size]);
