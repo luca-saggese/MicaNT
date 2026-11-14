@@ -1051,6 +1051,73 @@ public:
         return services && adapterServices_.load(std::memory_order_acquire) == services;
     }
 
+#if defined(MICANT_BOOTSTRAP_NETWORK_SELFTEST)
+    // Exercise malformed receive traffic through the same bounded NDIS RX
+    // queue and passive parser used by the real miniport. This is only present
+    // in the explicit QEMU network-test kernel build.
+    [[nodiscard]] bool runMalformedRxSelfTest() noexcept {
+        if (!initialized_ || !hasAdapter() || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+            return false;
+
+        auto inject = [this](const uint8_t* bytes, size_t length) noexcept {
+            if (!receiveAdapterFrame(std::span<const uint8_t>(bytes, length))) return false;
+            drainRxFrames(this);
+            ke::SpinLockGuard guard(rxQueueLock_);
+            return rxQueueCount_ == 0;
+        };
+        std::array<uint8_t, 64> frame{};
+        if (!inject(frame.data(), 5)) return false; // Truncated Ethernet header.
+
+        const auto makeEthernet = [this, &frame](uint16_t etherType) noexcept {
+            frame.fill(0);
+            auto* ethernet = reinterpret_cast<ndis::EthernetHeader*>(frame.data());
+            ethernet->destMac = localMac_;
+            ethernet->srcMac = ndis::MacAddress(0x02, 0x4D, 0x10, 0x00, 0x00, 0x01);
+            ethernet->setEtherType(etherType);
+        };
+        makeEthernet(ndis::ETHERTYPE_ARP);
+        if (!inject(frame.data(), ndis::ETH_HLEN + 2)) return false; // Truncated ARP.
+
+        makeEthernet(ndis::ETHERTYPE_IPV4);
+        auto* ip = reinterpret_cast<Ipv4Header*>(frame.data() + ndis::ETH_HLEN);
+        ip->verIhl = 0x44; // Invalid IPv4 IHL.
+        ip->setTotalLength(sizeof(Ipv4Header));
+        ip->ttl = 64;
+        if (!inject(frame.data(), ndis::ETH_HLEN + sizeof(Ipv4Header))) return false;
+
+        makeEthernet(ndis::ETHERTYPE_IPV4);
+        ip = reinterpret_cast<Ipv4Header*>(frame.data() + ndis::ETH_HLEN);
+        ip->verIhl = 0x45;
+        ip->setTotalLength(sizeof(Ipv4Header) - 1); // Total length shorter than IHL.
+        ip->ttl = 64;
+        if (!inject(frame.data(), ndis::ETH_HLEN + sizeof(Ipv4Header))) return false;
+
+        makeEthernet(ndis::ETHERTYPE_IPV4);
+        ip = reinterpret_cast<Ipv4Header*>(frame.data() + ndis::ETH_HLEN);
+        ip->verIhl = 0x45;
+        ip->setTotalLength(sizeof(Ipv4Header) + sizeof(UdpHeader));
+        ip->ttl = 64;
+        ip->protocol = IPPROTO_UDP;
+        ip->checksum = calculateInternetChecksum(ip, sizeof(Ipv4Header));
+        auto* udp = reinterpret_cast<UdpHeader*>(frame.data() + ndis::ETH_HLEN + sizeof(Ipv4Header));
+        udp->setLength(sizeof(UdpHeader) - 1); // Invalid UDP length.
+        if (!inject(frame.data(), ndis::ETH_HLEN + sizeof(Ipv4Header) + sizeof(UdpHeader))) return false;
+
+        makeEthernet(ndis::ETHERTYPE_IPV4);
+        ip = reinterpret_cast<Ipv4Header*>(frame.data() + ndis::ETH_HLEN);
+        ip->verIhl = 0x45;
+        ip->setTotalLength(sizeof(Ipv4Header) + 8);
+        ip->ttl = 64;
+        ip->protocol = IPPROTO_TCP;
+        ip->checksum = calculateInternetChecksum(ip, sizeof(Ipv4Header));
+        if (!inject(frame.data(), ndis::ETH_HLEN + sizeof(Ipv4Header) + 8)) return false;
+
+        makeEthernet(ndis::ETHERTYPE_IPV6);
+        if (!inject(frame.data(), ndis::ETH_HLEN + 1)) return false; // Truncated IPv6 header.
+        return true;
+    }
+#endif
+
     void initialize() noexcept {
         std::lock_guard<Mutex> guard(mutex_);
         initialized_ = adapterServices_.load(std::memory_order_acquire) != nullptr &&
@@ -1086,7 +1153,7 @@ public:
 #if defined(MICANT_FREESTANDING)
     static void receiveIndication(void* context, const uint8_t* frame, size_t length) noexcept {
         auto* stack = static_cast<NetworkStack*>(context);
-        if (stack && frame) stack->receiveAdapterFrame(std::span<const uint8_t>(frame, length));
+        if (stack && frame) (void)stack->receiveAdapterFrame(std::span<const uint8_t>(frame, length));
     }
 #endif
 
@@ -1095,8 +1162,8 @@ public:
     // the packet in a bounded resident ring and parse it on the existing
     // canonical passive worker. This also prevents receive callback reentrancy
     // into a miniport PollReceive/TX critical section. Queue exhaustion drops.
-    void receiveAdapterFrame(std::span<const uint8_t> frame) noexcept {
-        if (frame.empty() || frame.size() > RxFrameCapacity) return;
+    [[nodiscard]] bool receiveAdapterFrame(std::span<const uint8_t> frame) noexcept {
+        if (frame.empty() || frame.size() > RxFrameCapacity) return false;
         bool queued = false;
         {
             ke::SpinLockGuard guard(rxQueueLock_);
@@ -1110,6 +1177,7 @@ public:
             }
         }
         if (queued) (void)ke::passive_work::queue(rxWork_);
+        return queued;
     }
 
     static constexpr size_t RxQueueSlots = 32;

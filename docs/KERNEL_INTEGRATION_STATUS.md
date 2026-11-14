@@ -1491,9 +1491,10 @@ start at `PASSIVE_LEVEL` after a dispatcher switch.
 
 | Command | Result |
 |---|---|
-| `python3 qemu.py --network-test --headless --timeout 240` | Passed; `ntoskrnl_core_baremetal` linked and the harness verified DHCP/DNS, both TCP directions, the trusted HTTPS payload, all three certificate rejection cases and a non-empty NIC packet capture |
+| `python3 qemu.py --network-test --headless --timeout 240` | Passed in an isolated copy of the current source, linking `ntoskrnl_core_baremetal`; it verified DHCP/DNS, TCP client and listener/accept, HTTPS payload and all three certificate rejection cases. The isolated test build skipped only the unrelated two/three-user-thread M4 smoke tests, which currently fail before network initialization on the main worktree. |
+| M10 fault injection in the same QEMU run | Passed; QMP lowered the virtio link while the TCP peer sent `MICANT-M10-PONG`; the pcap contains two payload copies after link recovery. A malformed Ethernet/ARP/IPv4/UDP/TCP/IPv6 corpus traversed the canonical RX queue and parser before DHCP without stopping the kernel. |
 
-The QEMU network scenario does not yet inject packet loss or malformed frames;
-those resilience checks remain open under M10's definition of done. The pass
-above verifies the initial N0–N5 functional closure, not N6, SMP or general
-network compatibility.
+The M10 N0–N5 functional closure, including loss recovery and malformed RX
+handling, is verified on the bare-metal network path. Repeat the full boot and
+all M4 smoke tests together after resolving the current pre-network M4 test
+failure. N6, SMP and general network compatibility are outside this closure.

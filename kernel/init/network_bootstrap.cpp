@@ -131,6 +131,12 @@ NtStatus acquireBootDhcpLease() noexcept {
     auto& network = tcpip::NetworkStack::get();
     if (!network.isInitialized() || !network.hasAdapter()) return NtStatus::DeviceNotReady;
     const bool networkTest = networkTestEnabled();
+#if defined(MICANT_BOOTSTRAP_NETWORK_SELFTEST)
+    if (networkTest) {
+        if (!network.runMalformedRxSelfTest()) return NtStatus::Unsuccessful;
+        MicantNetbootSerialWrite("[MicaNT Net] Malformed RX frame corpus passed through NDIS queue\r\n");
+    }
+#endif
     if (networkTest) seedConfiguredNetworkTestUtc();
 
     NativeImage executable{}, ntdll{}, winsock{}, dnsapi{};

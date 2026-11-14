@@ -314,6 +314,7 @@ def main() -> int:
                 "-DMICANT_ENABLE_BAREMETAL:BOOL=ON",
                 f"-DMICANT_BOOTSTRAP_RUNTIME_SELFTEST:BOOL={'ON' if args.runtime_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_TIMER_SELFTEST:BOOL={'ON' if args.timer_selftest else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_NETWORK_SELFTEST:BOOL={'ON' if args.network_test else 'OFF'}",
             ]
         )
         if args.check_explorer:

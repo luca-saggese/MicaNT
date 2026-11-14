@@ -129,6 +129,77 @@ def verify_cpl3_surface(
                 )
 
 
+def set_qemu_network_link(qmp_path: Path, up: bool) -> None:
+    """Toggle the M10 virtio link through QMP to force real TCP retransmission."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            greeting = json.loads(stream.readline())
+            if "QMP" not in greeting:
+                raise RuntimeError("QEMU did not send a QMP greeting")
+            stream.write(b'{"execute":"qmp_capabilities"}\n')
+            stream.flush()
+            while True:
+                response = json.loads(stream.readline())
+                if "error" in response:
+                    raise RuntimeError(f"QMP capability negotiation failed: {response['error']}")
+                if "return" in response:
+                    break
+            command = json.dumps({
+                "execute": "set_link",
+                "arguments": {"name": "micant_virtio_net", "up": up},
+            }).encode() + b"\n"
+            stream.write(command)
+            stream.flush()
+            while True:
+                response = json.loads(stream.readline())
+                if "error" in response:
+                    raise RuntimeError(f"QMP set_link failed: {response['error']}")
+                if "return" in response:
+                    return
+
+
+def count_tcp_payload_frames(capture: Path, payload: bytes) -> int:
+    """Count captured IPv4/TCP frames carrying the exact payload bytes."""
+    data = capture.read_bytes()
+    if len(data) < 24:
+        return 0
+    magic = data[:4]
+    if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+        byteorder = "little"
+    elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+        byteorder = "big"
+    else:
+        raise RuntimeError("QEMU M10 capture is not a classic pcap file")
+    offset = 24
+    matches = 0
+    while offset + 16 <= len(data):
+        captured = int.from_bytes(data[offset + 8:offset + 12], byteorder)
+        offset += 16
+        if captured > len(data) - offset:
+            break
+        frame = memoryview(data)[offset:offset + captured]
+        offset += captured
+        if len(frame) < 14 or int.from_bytes(frame[12:14], "big") != 0x0800:
+            continue
+        if len(frame) < 34 or frame[23] != 6:
+            continue
+        ip_header = (frame[14] & 0x0F) * 4
+        tcp_start = 14 + ip_header
+        if ip_header < 20 or tcp_start + 20 > len(frame):
+            continue
+        tcp_header = ((frame[tcp_start + 12] >> 4) & 0x0F) * 4
+        payload_start = tcp_start + tcp_header
+        ip_length = int.from_bytes(frame[16:18], "big")
+        payload_end = min(14 + ip_length, len(frame))
+        if tcp_header < 20 or payload_start > payload_end:
+            continue
+        if bytes(frame[payload_start:payload_end]) == payload:
+            matches += 1
+    return matches
+
+
 def verify_mouse(
     qmp_path: Path,
     temp: Path,
@@ -475,7 +546,7 @@ def run_qemu(
             command.extend([
                 "-netdev",
                 f"user,id=micant_net,dns=10.0.2.3,hostfwd=tcp:127.0.0.1:{network_inbound_port}-:18081",
-                "-device", "virtio-net-pci,netdev=micant_net,disable-legacy=on",
+                "-device", "virtio-net-pci,id=micant_virtio_net,netdev=micant_net,disable-legacy=on",
                 "-object",
                 f"filter-dump,id=micant_net_capture,netdev=micant_net,file={network_capture_path}",
             ])
@@ -496,6 +567,7 @@ def run_qemu(
         surface_verified = False
         usb_input_sent = False
         network_outbound_peer_done = False
+        network_loss_injected = False
         network_inbound_peer_done = False
 
         with qemu_output_path.open("w", encoding="utf-8") as qemu_output:
@@ -540,7 +612,15 @@ def run_qemu(
                                     received.extend(block)
                                 if bytes(received) != expected_payload:
                                     raise RuntimeError("Ring 3 TCP probe sent an unexpected payload")
-                                peer_connection.sendall(b"MICANT-M10-PONG")
+                                set_qemu_network_link(temp / "qmp.sock", False)
+                                try:
+                                    peer_connection.sendall(b"MICANT-M10-PONG")
+                                    # Exceed the peer's initial TCP retransmit
+                                    # timeout while the guest link is down.
+                                    time.sleep(2.2)
+                                finally:
+                                    set_qemu_network_link(temp / "qmp.sock", True)
+                                network_loss_injected = True
                             network_outbound_peer_done = True
                     if (network_test and not network_inbound_peer_done and network_inbound_port and
                             "MicaNT guest TCP listener ready." in serial_log):
@@ -582,6 +662,7 @@ def run_qemu(
                             "[MicaNT DHCP] Ring 3 DORA lease acquired through Winsock/AFD" in serial_log and
                             "DNS A record for example.com resolved through Winsock/AFD." in serial_log and
                             "M10 TCP client exchange passed" in serial_log and
+                            "[MicaNT Net] Malformed RX frame corpus passed through NDIS queue" in serial_log and
                             "M10 TCP listen/accept exchange passed" in serial_log and
                             "M10 HTTPS trusted payload passed" in serial_log and
                             "M10 HTTPS mismatched host rejected" in serial_log and
@@ -591,7 +672,16 @@ def run_qemu(
                             network_outbound_peer_done and network_inbound_peer_done):
                         if not network_capture_path.is_file() or network_capture_path.stat().st_size <= 24:
                             raise RuntimeError("QEMU M10 test completed without captured NIC packets")
-                        print("QEMU Ring 3 DHCP, DNS, TCP Winsock/AFD and HTTPS certificate validation passed.", flush=True)
+                        if not network_loss_injected:
+                            raise RuntimeError("QEMU M10 packet-loss fault was not injected")
+                        retransmissions = count_tcp_payload_frames(
+                            network_capture_path, b"MICANT-M10-PONG")
+                        if retransmissions < 2:
+                            raise RuntimeError(
+                                "QEMU M10 packet-loss recovery lacked a captured TCP payload retransmission "
+                                f"(observed {retransmissions})"
+                            )
+                        print("QEMU Ring 3 DHCP, DNS, TCP retransmission, malformed RX and HTTPS validation passed.", flush=True)
                         return
                     if (verify_usb_input and not usb_input_sent and
                             "USB host: matched HID interrupt interface" in serial_log):
