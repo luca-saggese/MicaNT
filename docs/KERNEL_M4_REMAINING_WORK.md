@@ -128,6 +128,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   stack, TEB o membership del thread. La fixture CPL3 controlla inoltre che
   un copyout non valido di `PreviousSuspendCount` in `NtResumeThread` non
   rimuova la sospensione: il wait a timeout zero successivo resta in timeout.
+  La nuova prova CPL3 termina inoltre un thread sospeso con un APC pendente e
+  controlla stato di uscita, wait segnalato, mancata esecuzione dell'APC e
+  chiusura dell'handle.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
@@ -199,6 +202,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 ## Stato QEMU annotato
 
+- Verifica integrata del test CPL3 di terminazione del thread sospeso con APC
+  pendente: `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-suspended-apc-retry` è passata. Sono verdi i marker di
+  creazione/ripresa user, i self-test bootstrap a due e tre thread, SEC_IMAGE,
+  timer-preemption Ring 0/Ring 3, DPC/APC, reaper, PS/2 e seriale stabile per 5s.
 - Verifica integrata dei pseudo-handle current-process/current-thread in
   `NtWaitForSingleObject`, insieme ai test process flags e resume copyout:
   `python3 qemu.py --headless --timeout 120 --diagnostics-dir
