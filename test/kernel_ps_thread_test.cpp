@@ -1102,7 +1102,10 @@ bool testUserModeProcessOpenAccess() noexcept {
     bool valid = ps::detail::createProcessObject(target, targetReference, &security,
         0x0001 | ob::SYNCHRONIZE, &processAccess) == NtStatus::Success && target && targetReference;
     if (!valid) g_attachFailureStage = 41;
-    Handle processHandle{}, deniedHandle{}, allowedHandle{};
+    Handle processHandle{}, deniedHandle{}, allowedHandle{}, debugHandle{};
+    se::FreestandingAccessToken* callerToken{};
+    ob::ObjectHeader* callerTokenReference{};
+    uint64_t originalPrivileges{};
     if (valid) valid = ps::detail::publishProcessHandle(*target, targetReference, processAccess, 0,
         processHandle) == NtStatus::Success && processHandle;
     if (!valid) g_attachFailureStage = 42;
@@ -1119,11 +1122,28 @@ bool testUserModeProcessOpenAccess() noexcept {
     const bool previousMode = currentThread->previousUserMode;
     if (valid) currentThread->previousUserMode = true;
     if (valid) {
+        valid = target->referencePrimaryToken(callerToken, callerTokenReference) == NtStatus::Success &&
+            callerToken && callerTokenReference && !se::SeTokenHasPrivilegeFreestanding(callerToken, 20);
+        if (valid) originalPrivileges = callerToken->EnabledPrivileges;
+    }
+    if (valid) {
         deniedHandle = 0xdead;
         valid = ps::detail::openProcessByClientId({target->processId(), 0}, 0x0001, 0, deniedHandle) ==
             NtStatus::AccessDenied && deniedHandle == 0;
         valid = valid && ps::detail::openProcessByClientId({target->processId(), 0}, 0x0010, 0,
             allowedHandle) == NtStatus::Success && allowedHandle;
+    }
+    if (valid) {
+        callerToken->EnabledPrivileges |= uint64_t{1} << 20; // SeDebugPrivilege
+        valid = ps::detail::openProcessByClientId({target->processId(), 0}, 0x0001, 0,
+            debugHandle) == NtStatus::Success && debugHandle;
+        const auto* entry = debugHandle ? target->getHandleTable().getEntry(debugHandle) : nullptr;
+        valid = valid && entry && entry->grantedAccess == 0x0001;
+        callerToken->EnabledPrivileges = originalPrivileges;
+        if (debugHandle) {
+            valid = valid && target->getHandleTable().closeHandle(debugHandle) == NtStatus::Success;
+            debugHandle = 0;
+        }
     }
     currentThread->previousUserMode = previousMode;
     if (attached) ke::KeUnstackDetachProcess(&attach);
@@ -1137,6 +1157,7 @@ bool testUserModeProcessOpenAccess() noexcept {
     if (!valid) g_attachFailureStage = 44;
     if (openedReference) ob::ObDereferenceObject(openedReference);
     if (allowedHandle && target) (void)target->getHandleTable().closeHandle(allowedHandle);
+    if (debugHandle && target) (void)target->getHandleTable().closeHandle(debugHandle);
     if (target && processHandle && !target->isTerminating())
         (void)target->terminateOther(NtStatus::Success);
     if (processHandle && target && target->isTerminating())
@@ -1144,6 +1165,7 @@ bool testUserModeProcessOpenAccess() noexcept {
     if (!valid) g_attachFailureStage = 45;
     if (processHandle) (void)sys::NtClose(processHandle);
     if (targetReference) ob::ObDereferenceObject(targetReference);
+    if (callerTokenReference) se::SeDereferenceFreestandingToken(callerTokenReference);
     if (identityReference) se::SeDereferenceFreestandingToken(identityReference);
     valid = valid && mm::PfnDatabase::get().getActiveCount() == activePages &&
         ps::detail::bootstrapProcessObjectCount() == processObjects;

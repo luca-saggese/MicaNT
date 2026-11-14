@@ -51,7 +51,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   Kernel/User e ai diritti specifici dei percorsi nativi supportati, inclusi
   token/DACL, handle pseudo e attributi di sicurezza. Un handle con diritti
   insufficienti deve fallire con lo status previsto senza pubblicare handle o
-  oggetti parziali.
+  oggetti parziali. Il test kernel UserMode verifica ora `NtOpenProcess` negato
+  dalla DACL senza `SeDebugPrivilege` e consentito con il privilegio abilitato,
+  controllando i diritti concessi e ripristinando il token. Restano i casi di
+  creazione/uso generali, KernelMode e handle pseudo.
 - [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
   processi.** Verificare diritti concessi, callback Ob, handle ereditabili,
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
@@ -173,4 +176,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   and event waits verified`, e il click desktop; il runner ha poi fallito sul
   controllo IRQ PS/2. Dunque il caso DACL è stato eseguito in QEMU, ma questo
   run non è una verifica integrata completa.
+- Verifica integrata completa dopo il supporto `OBJ_INHERIT` di
+  `NtCreateEvent` e il test UserMode di `SeDebugPrivilege`:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-open-debug-privilege` è passato. Build/link bare-metal,
+  test CPL3, input PS/2 e stabilità seriale per 5 secondi sono verdi. I tentativi
+  sperimentali di inheritance CPL3 non hanno superato il fixture e sono stati
+  rimossi; la prova end-to-end resta aperta.
 
