@@ -1280,7 +1280,7 @@ bool testClientIdOpenRights() noexcept {
     using namespace micant;
     g_attachFailureStage = 30;
     const size_t active = mm::PfnDatabase::get().getActiveCount();
-    Handle processHandle{}, threadHandle{}, openedProcess{}, openedThread{};
+    Handle processHandle{}, threadHandle{}, openedProcess{}, openedThread{}, threadByTidOnly{};
     ps::EProcess* process{};
     ps::EThread* thread{};
     if (ps::detail::createProcessHandle(ob::SYNCHRONIZE, processHandle, process) != NtStatus::Success ||
@@ -1309,6 +1309,17 @@ bool testClientIdOpenRights() noexcept {
     ClientId threadId{process->processId(), thread->kernelThread()->tid};
     valid = valid && sys::NtOpenThread(&openedThread, 0x0040, &openAttributes, &threadId) == NtStatus::Success &&
         openedThread;
+    ClientId threadIdWithoutProcess{0, thread->kernelThread()->tid};
+    valid = valid && sys::NtOpenThread(&threadByTidOnly, 0x0040, &openAttributes,
+        &threadIdWithoutProcess) == NtStatus::Success && threadByTidOnly;
+    Handle mismatchedThread{};
+    ClientId mismatchedThreadId{process->processId() + 1, thread->kernelThread()->tid};
+    valid = valid && sys::NtOpenThread(&mismatchedThread, 0x0040, &openAttributes,
+        &mismatchedThreadId) == NtStatus::InvalidCid && !mismatchedThread;
+    if (mismatchedThread) {
+        valid = sys::NtClose(mismatchedThread) == NtStatus::Success && valid;
+        mismatchedThread = 0;
+    }
     ps::EThread* openedThreadObject{};
     ob::ObjectHeader* threadReference{};
     if (valid) valid = ps::detail::referenceThreadHandle(openedThread, 0x0040,
@@ -1351,15 +1362,18 @@ bool testClientIdOpenRights() noexcept {
     const auto reapStatus = thread->cancelBeforeStart() == NtStatus::Success
         ? thread->reap() : NtStatus::Unsuccessful;
     const auto closeOpenedThread = openedThread ? sys::NtClose(openedThread) : NtStatus::Success;
+    const auto closeThreadByTidOnly = threadByTidOnly ? sys::NtClose(threadByTidOnly) : NtStatus::Success;
     const auto closeOpenedProcess = openedProcess ? sys::NtClose(openedProcess) : NtStatus::Success;
     const auto closeThread = sys::NtClose(threadHandle);
     const auto closeProcess = sys::NtClose(processHandle);
     if (reapStatus != NtStatus::Success) g_attachFailureStage = 37;
-    else if (closeOpenedThread != NtStatus::Success || closeOpenedProcess != NtStatus::Success ||
+    else if (closeOpenedThread != NtStatus::Success || closeThreadByTidOnly != NtStatus::Success ||
+             closeOpenedProcess != NtStatus::Success ||
              closeThread != NtStatus::Success || closeProcess != NtStatus::Success)
         g_attachFailureStage = 38;
     else if (mm::PfnDatabase::get().getActiveCount() != active) g_attachFailureStage = 39;
-    valid = valid && userAccess && reapStatus == NtStatus::Success && closeOpenedThread == NtStatus::Success &&
+    valid = valid && userAccess && reapStatus == NtStatus::Success &&
+        closeOpenedThread == NtStatus::Success && closeThreadByTidOnly == NtStatus::Success &&
         closeOpenedProcess == NtStatus::Success && closeThread == NtStatus::Success &&
         closeProcess == NtStatus::Success && mm::PfnDatabase::get().getActiveCount() == active;
     return valid;

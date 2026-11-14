@@ -60,7 +60,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   controllando i diritti concessi e ripristinando il token. QEMU verifica anche
   che `NtOpenProcess` e `NtOpenThread` in KernelMode ignorino un deny ACE senza
   concedere diritti oltre quelli richiesti. Restano i casi di creazione/uso
-  generali e handle pseudo. QEMU CPL3 verifica anche
+  generali e handle pseudo. QEMU verifica inoltre `NtOpenThread` con il solo
+  `UniqueThread`, rifiuta un `UniqueProcess` non corrispondente e non pubblica
+  handle nel caso negativo. QEMU CPL3 verifica anche
   che un `NtCreateThreadEx` con self-relative security descriptor e DACL vuota
   ritorni `STATUS_ACCESS_DENIED` senza pubblicare l'handle.
 - [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
