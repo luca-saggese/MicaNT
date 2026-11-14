@@ -62,6 +62,10 @@ struct FreestandingAccessToken {
     uint32_t GroupCount{};
     uint32_t IntegrityLevel{};
     uint64_t EnabledPrivileges{};
+    // Kernel-assigned logon identity and interactive session. Zero denotes a
+    // bootstrap/system token with no user logon session.
+    uint64_t AuthenticationId{};
+    uint32_t SessionId{};
     bool IsPrimary{true};
     bool IsSystem{};
     // Embedded storage gives duplicated tokens independent default DACLs.
@@ -69,7 +73,25 @@ struct FreestandingAccessToken {
     [[nodiscard]] bool hasEnabledGroup(const SidValue& sid) const noexcept;
     [[nodiscard]] bool matchesSid(const SidValue& sid, bool includeDenyOnly) const noexcept;
 };
+struct FreestandingLogonTokenRequest {
+    static constexpr size_t MaximumGroups = FreestandingAccessToken::MaximumGroups;
+    SidValue UserSid{};
+    SidValue PrimaryGroup{};
+    std::array<TokenGroupValue, MaximumGroups> Groups{};
+    uint32_t GroupCount{};
+    uint32_t IntegrityLevel{};
+    uint64_t EnabledPrivileges{};
+};
 [[nodiscard]] NtStatus SeCreateFreestandingPrimaryToken(bool system,
+    FreestandingAccessToken*& token, ob::ObjectHeader*& reference) noexcept;
+// Kernel-only local interactive logon token issuance. The caller must pass
+// the referenced primary token of the actual requesting process, never claims
+// copied from user mode. Only the SYSTEM authority token carrying both
+// SeCreateTokenPrivilege and SeTcbPrivilege is accepted. AuthenticationId is
+// allocated by Se; this first implementation assigns console SessionId 1.
+[[nodiscard]] NtStatus SeCreateFreestandingLogonToken(
+    const FreestandingAccessToken* issuer, ob::ObjectHeader* issuerReference,
+    const FreestandingLogonTokenRequest& request,
     FreestandingAccessToken*& token, ob::ObjectHeader*& reference) noexcept;
 [[nodiscard]] NtStatus SeDuplicateFreestandingPrimaryToken(
     const FreestandingAccessToken& source, FreestandingAccessToken*& token,

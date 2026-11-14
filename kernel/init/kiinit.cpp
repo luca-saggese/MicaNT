@@ -5168,3 +5168,7 @@ int main(int argc, char* argv[]) {
 }
 
 #endif
+extern "C" bool MicantTestSeFreestandingLogonToken() noexcept;
+    if (!MicantTestSeFreestandingLogonToken())
+        stopWithError("[MicaNT Se] Logon token issuance verification failed\r\n");
+    serialWrite("[MicaNT Se] Logon token authority, claims and identity verified\r\n");

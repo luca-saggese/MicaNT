@@ -5,6 +5,7 @@
 namespace micant::se {
 namespace {
 ob::ObjectType g_FreestandingTokenType{};
+std::atomic<uint64_t> g_NextInteractiveAuthenticationId{1};
 
 void deleteFreestandingToken(ob::ObjectHeader* header) {
     header->as<FreestandingAccessToken>()->~FreestandingAccessToken();
@@ -22,6 +23,52 @@ SidValue makeSid(uint32_t authority, uint8_t count,
     if (count > 1) sid.SubAuthority[1] = b;
     if (count > 2) sid.SubAuthority[2] = c;
     return sid;
+}
+
+bool isSystemSid(const SidValue& sid) noexcept {
+    return sid.Revision == 1 && sid.SubAuthorityCount == 1 &&
+        sid.IdentifierAuthority[0] == 0 && sid.IdentifierAuthority[1] == 0 &&
+        sid.IdentifierAuthority[2] == 0 && sid.IdentifierAuthority[3] == 0 &&
+        sid.IdentifierAuthority[4] == 0 && sid.IdentifierAuthority[5] == 5 &&
+        sid.SubAuthority[0] == 18;
+}
+
+bool validSidValue(const SidValue& sid) noexcept;
+
+bool isValidInteractiveLogonRequest(const FreestandingLogonTokenRequest& request) noexcept {
+    if (!validSidValue(request.UserSid) || isSystemSid(request.UserSid) ||
+        !validSidValue(request.PrimaryGroup) || request.GroupCount == 0 ||
+        request.GroupCount > request.Groups.size() ||
+        (request.IntegrityLevel != 0x1000 && request.IntegrityLevel != 0x2000))
+        return false;
+
+    // The first interactive-token slice allows only ordinary local-user
+    // privileges. Authority-bearing privileges remain confined to bootstrap
+    // system tokens until token assignment and elevation policies are wired.
+    constexpr uint64_t allowedPrivileges = (uint64_t{1} << 17) | // SeBackupPrivilege
+        (uint64_t{1} << 18) | // SeRestorePrivilege
+        (uint64_t{1} << 19) | // SeShutdownPrivilege
+        (uint64_t{1} << 20) | // SeDebugPrivilege (LSA policy-controlled)
+        (uint64_t{1} << 23);  // SeChangeNotifyPrivilege
+    if (request.EnabledPrivileges & ~allowedPrivileges) return false;
+
+    constexpr uint32_t allowedGroupAttributes = 0x00000001 | 0x00000002 |
+        0x00000004 | 0x00000008 | 0x00000010 | 0x00000020;
+    bool primaryGroupPresent = false;
+    for (size_t i = 0; i < request.GroupCount; ++i) {
+        const auto& group = request.Groups[i];
+        if (!validSidValue(group.Sid) || isSystemSid(group.Sid) ||
+            (group.Attributes & ~allowedGroupAttributes) != 0 ||
+            ((group.Attributes & 0x00000010) &&
+             (group.Attributes & (0x00000002 | 0x00000004 | 0x00000008)))) return false;
+        if (group.Sid.equals(request.UserSid)) return false;
+        for (size_t prior = 0; prior < i; ++prior)
+            if (request.Groups[prior].Sid.equals(group.Sid)) return false;
+        if (group.Sid.equals(request.PrimaryGroup) &&
+            (group.Attributes & 0x00000004) && !(group.Attributes & 0x00000010))
+            primaryGroupPresent = true;
+    }
+    return primaryGroupPresent;
 }
 
 bool validSidValue(const SidValue& sid) noexcept {
@@ -115,9 +162,10 @@ NtStatus SeCreateFreestandingPrimaryToken(bool system,
         addGroup(*created, makeSid(5, 2, 32, 556)); // Network Configuration Operators
         addGroup(*created, makeSid(5, 1, 11)); // Authenticated Users
         addGroup(*created, makeSid(1, 1, 0)); // Everyone
-        // SeAssignPrimaryTokenPrivilege and SeTcbPrivilege, using their
+        // SeCreateTokenPrivilege, SeAssignPrimaryTokenPrivilege and
+        // SeTcbPrivilege, using their
         // documented LUID low parts as the bounded bitmap index.
-        created->EnabledPrivileges |= (uint64_t{1} << 3) | (uint64_t{1} << 7);
+        created->EnabledPrivileges |= (uint64_t{1} << 2) | (uint64_t{1} << 3) | (uint64_t{1} << 7);
         created->EnabledPrivileges |= uint64_t{1} << 20; // SeDebugPrivilege
         created->EnabledPrivileges |= uint64_t{1} << 29; // SeImpersonatePrivilege
     } else {
@@ -142,6 +190,63 @@ NtStatus SeCreateFreestandingPrimaryToken(bool system,
         defaultDacl.Dacl[1] = {makeSid(5, 1, 7), ob::GENERIC_ALL, FreestandingAceType::Allow};
     }
     defaultDacl.AceCount = 2;
+    token = created;
+    reference = header;
+    return NtStatus::Success;
+}
+
+NtStatus SeCreateFreestandingLogonToken(const FreestandingAccessToken* issuer,
+    ob::ObjectHeader* issuerReference, const FreestandingLogonTokenRequest& request,
+    FreestandingAccessToken*& token, ob::ObjectHeader*& reference) noexcept {
+    token = nullptr;
+    reference = nullptr;
+    if (!SeIsFreestandingTokenObject(issuer, issuerReference) || !issuer->IsPrimary ||
+        !issuer->IsSystem || !SeTokenHasPrivilegeFreestanding(issuer, 2) ||
+        !SeTokenHasPrivilegeFreestanding(issuer, 7)) return NtStatus::PrivilegeNotHeld;
+    if (!isValidInteractiveLogonRequest(request)) return NtStatus::InvalidParameter;
+
+    initializeTokenType();
+    void* body{};
+    ob::ObjectHeader* header{};
+    const auto status = ob::ObCreateObject(ob::KernelMode, &g_FreestandingTokenType,
+        nullptr, sizeof(FreestandingAccessToken), &body, &header);
+    if (status != NtStatus::Success) return status;
+
+    auto* created = new (body) FreestandingAccessToken{};
+    // Authentication IDs are unique for this boot. Session 1 is the only
+    // supported interactive console session in this initial contract.
+    auto nextAuthenticationId = g_NextInteractiveAuthenticationId.load(std::memory_order_relaxed);
+    while (nextAuthenticationId != 0 && nextAuthenticationId != UINT64_MAX &&
+           !g_NextInteractiveAuthenticationId.compare_exchange_weak(
+               nextAuthenticationId, nextAuthenticationId + 1,
+               std::memory_order_relaxed, std::memory_order_relaxed)) {}
+    if (nextAuthenticationId == 0 || nextAuthenticationId == UINT64_MAX) {
+        ob::ObDereferenceObject(header);
+        return NtStatus::InvalidParameter;
+    }
+    created->AuthenticationId = nextAuthenticationId;
+    created->SessionId = 1;
+    created->UserSid = request.UserSid;
+    created->DefaultOwner = request.UserSid;
+    created->PrimaryGroup = request.PrimaryGroup;
+    created->GroupCount = request.GroupCount;
+    for (size_t i = 0; i < request.GroupCount; ++i) created->Groups[i] = request.Groups[i];
+    created->IntegrityLevel = request.IntegrityLevel;
+    created->EnabledPrivileges = request.EnabledPrivileges;
+    created->IsPrimary = true;
+    created->IsSystem = false;
+
+    auto& dacl = created->DefaultDacl;
+    dacl.Owner = created->DefaultOwner;
+    dacl.OwnerPresent = true;
+    dacl.Group = created->PrimaryGroup;
+    dacl.GroupPresent = true;
+    dacl.DaclPresent = true;
+    dacl.DaclNull = false;
+    dacl.Dacl[0] = {created->UserSid, ob::GENERIC_ALL, FreestandingAceType::Allow};
+    dacl.Dacl[1] = {created->PrimaryGroup,
+        ob::GENERIC_READ | ob::GENERIC_EXECUTE | ob::READ_CONTROL, FreestandingAceType::Allow};
+    dacl.AceCount = 2;
     token = created;
     reference = header;
     return NtStatus::Success;

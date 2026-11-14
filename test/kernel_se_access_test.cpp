@@ -8,6 +8,67 @@ micant::se::SidValue makeTestSid(uint32_t rid) noexcept {
     sid.SubAuthority[0] = rid;
     return sid;
 }
+
+micant::se::SidValue makeTestSid(uint32_t first, uint32_t second) noexcept {
+    auto sid = makeTestSid(first);
+    sid.SubAuthorityCount = 2;
+    sid.SubAuthority[1] = second;
+    return sid;
+}
+
+}
+
+extern "C" bool MicantTestSeFreestandingLogonToken() noexcept {
+    using namespace micant;
+    using namespace micant::se;
+    FreestandingAccessToken* systemIssuer{};
+    ob::ObjectHeader* systemIssuerReference{};
+    FreestandingAccessToken* ordinaryIssuer{};
+    ob::ObjectHeader* ordinaryIssuerReference{};
+    FreestandingAccessToken* issued{};
+    ob::ObjectHeader* issuedReference{};
+    bool valid = SeCreateFreestandingPrimaryToken(true, systemIssuer, systemIssuerReference) ==
+        NtStatus::Success && systemIssuer && systemIssuerReference;
+    if (valid) valid = SeCreateFreestandingPrimaryToken(false, ordinaryIssuer,
+        ordinaryIssuerReference) == NtStatus::Success && ordinaryIssuer && ordinaryIssuerReference;
+
+    FreestandingLogonTokenRequest request{};
+    request.UserSid = makeTestSid(21, 1001); // S-1-5-21-1001
+    request.PrimaryGroup = makeTestSid(32, 545); // S-1-5-32-545
+    request.Groups[0] = {request.PrimaryGroup, 0x00000004}; // enabled primary group
+    request.Groups[1] = {makeTestSid(11), 0x00000004}; // Authenticated Users
+    request.GroupCount = 2;
+    request.IntegrityLevel = 0x2000;
+    request.EnabledPrivileges = uint64_t{1} << 23;
+
+    if (valid) valid = SeCreateFreestandingLogonToken(ordinaryIssuer,
+        ordinaryIssuerReference, request, issued, issuedReference) == NtStatus::PrivilegeNotHeld &&
+        !issued && !issuedReference;
+    auto malformed = request;
+    malformed.GroupCount = 0;
+    if (valid) valid = SeCreateFreestandingLogonToken(systemIssuer,
+        systemIssuerReference, malformed, issued, issuedReference) == NtStatus::InvalidParameter &&
+        !issued && !issuedReference;
+    malformed = request;
+    malformed.EnabledPrivileges |= uint64_t{1} << 2; // SeCreateTokenPrivilege
+    if (valid) valid = SeCreateFreestandingLogonToken(systemIssuer,
+        systemIssuerReference, malformed, issued, issuedReference) == NtStatus::InvalidParameter &&
+        !issued && !issuedReference;
+
+    if (valid) valid = SeCreateFreestandingLogonToken(systemIssuer,
+        systemIssuerReference, request, issued, issuedReference) == NtStatus::Success &&
+        issued && issuedReference && issued->AuthenticationId != 0 && issued->SessionId == 1 &&
+        issued->UserSid.equals(request.UserSid) && issued->PrimaryGroup.equals(request.PrimaryGroup) &&
+        issued->GroupCount == request.GroupCount &&
+        issued->Groups[0].Sid.equals(request.Groups[0].Sid) &&
+        issued->Groups[0].Attributes == request.Groups[0].Attributes &&
+        issued->Groups[1].Sid.equals(request.Groups[1].Sid) &&
+        issued->IntegrityLevel == request.IntegrityLevel &&
+        issued->EnabledPrivileges == request.EnabledPrivileges && !issued->IsSystem && issued->IsPrimary;
+    if (issuedReference) SeDereferenceFreestandingToken(issuedReference);
+    if (ordinaryIssuerReference) SeDereferenceFreestandingToken(ordinaryIssuerReference);
+    if (systemIssuerReference) SeDereferenceFreestandingToken(systemIssuerReference);
+    return valid;
 }
 
 extern "C" bool MicantTestSeFreestandingAccess() noexcept {
