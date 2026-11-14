@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -368,6 +369,11 @@ def main() -> int:
             return 0
 
         firmware = find_ovmf(args.ovmf_code)
+        if platform.system() == "Darwin" and platform.machine().lower() in ("arm64", "aarch64"):
+            print("[MicaNT QEMU] Notice: Host is Apple Silicon (Darwin ARM64).", flush=True)
+            print("[MicaNT QEMU] Launching AMD64 guest via QEMU TCG software emulation (-accel tcg).", flush=True)
+            print("[MicaNT QEMU] Note: Emulated timers and memory ordering may exhibit jitter compared to bare-metal x86.", flush=True)
+
         boot_command = [
             sys.executable,
             str(SCRIPTS / "boot_micant.py"),

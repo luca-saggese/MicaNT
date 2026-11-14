@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -426,6 +427,21 @@ def run_qemu(
         raise RuntimeError("qemu-system-x86_64 was not found on PATH")
     if not ovmf_code.is_file():
         raise RuntimeError(f"OVMF code image does not exist: {ovmf_code}")
+
+    is_apple_silicon_tcg = (
+        platform.system() == "Darwin"
+        and platform.machine().lower() in ("arm64", "aarch64")
+    )
+    if is_apple_silicon_tcg:
+        print(
+            "[MicaNT Boot] Notice: Running AMD64 kernel under QEMU TCG software emulation on Apple Silicon.",
+            flush=True,
+        )
+        print(
+            "[MicaNT Boot] TCG translates x86_64 to ARM64 in software; scaling timeout by 2x to accommodate JIT latency.",
+            flush=True,
+        )
+        timeout = max(timeout, timeout * 2)
 
     kernel = ROOT / "build" / "baremetal" / "ntoskrnl.exe"
     bootloader = ROOT / "build" / "esp" / "EFI" / "BOOT" / "BOOTX64.EFI"
