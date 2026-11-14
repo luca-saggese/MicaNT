@@ -108,7 +108,8 @@ enum class PageLocation : uint8_t {
     ModifiedNoWriteList  = 4,
     ActiveAndValid       = 5,
     TransitionPage       = 6,
-    BadPageList          = 7
+    BadPageList          = 7,
+    ReservedPage         = 8
 };
 
 struct Mmpfn {
@@ -491,18 +492,27 @@ public:
         return pfn;
     }
 
-    // Keep firmware page-table pages that remain referenced by the kernel's
-    // inherited identity mappings out of every allocator list. They are
-    // reserved rather than active: Mm did not acquire an owning reference and
-    // must never release them as ordinary allocated pages.
+    // Keep permanently owned page-table pages out of allocator lists. Existing
+    // firmware tables have no Mm reference; newly built bootstrap tables may
+    // transfer their sole active reference to permanent reserved ownership.
     [[nodiscard]] bool reservePage(uint64_t pfn) noexcept {
         Guard guard(*this);
         if (!pfn || pfn >= entries_.size()) return false;
         auto& entry = entries_[static_cast<size_t>(pfn)];
-        if (entry.location == PageLocation::BadPageList) return true;
-        if (entry.location == PageLocation::ActiveAndValid) return false;
+        if (entry.location == PageLocation::BadPageList ||
+            entry.location == PageLocation::ReservedPage) return true;
+        if (entry.location == PageLocation::ActiveAndValid) {
+            if (entry.referenceCount != 1 || activeCount_ == 0) return false;
+            --activeCount_;
+            entry.location = PageLocation::ReservedPage;
+            entry.referenceCount = 0;
+            entry.modified = false;
+            entry.flink = 0;
+            entry.blink = 0;
+            return true;
+        }
         if (listFor(entry.location) && !removeFromListLocked(pfn)) return false;
-        entry.location = PageLocation::BadPageList;
+        entry.location = PageLocation::ReservedPage;
         entry.referenceCount = 0;
         entry.modified = false;
         entry.flink = 0;
@@ -539,6 +549,7 @@ public:
         if (pfn == 0 || pfn >= entries_.size()) return;
         auto& entry = entries_[static_cast<size_t>(pfn)];
         if (entry.location == PageLocation::BadPageList ||
+            entry.location == PageLocation::ReservedPage ||
             entry.referenceCount == UINT32_MAX) return;
         if (entry.referenceCount == 0) {
             if (!removeFromListLocked(pfn)) return;
@@ -552,7 +563,8 @@ public:
         Guard guard(*this);
         if (pfn == 0 || pfn >= entries_.size()) return;
         auto& entry = entries_[static_cast<size_t>(pfn)];
-        if (entry.location == PageLocation::BadPageList) return;
+        if (entry.location == PageLocation::BadPageList ||
+            entry.location == PageLocation::ReservedPage) return;
 #if defined(MICANT_FREESTANDING)
         if (!zeroPhysicalPage_) __builtin_trap();
 #endif
@@ -587,6 +599,12 @@ public:
         return location == PageLocation::FreePageList ||
             location == PageLocation::ZeroedPageList ||
             location == PageLocation::StandbyPageList;
+    }
+
+    [[nodiscard]] bool isReservedPage(uint64_t pfn) const noexcept {
+        Guard guard(*this);
+        return pfn != 0 && pfn < entries_.size() &&
+            entries_[static_cast<size_t>(pfn)].location == PageLocation::ReservedPage;
     }
 
     [[nodiscard]] bool copyPage(uint64_t destinationPfn, uint64_t sourcePfn) noexcept {

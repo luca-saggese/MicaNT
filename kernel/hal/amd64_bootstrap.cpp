@@ -79,6 +79,10 @@ constexpr uint64_t kGuardLeaf = uint64_t{1} << 10;
 constexpr uint64_t kNoAccessLeaf = uint64_t{1} << 11;
 constexpr uint64_t kUserBase = uint64_t{128} << 39;
 constexpr uint64_t kUserTebBase = kUserBase + 0x8000;
+// Slot 128 remains the user TEB range. Slot 127 is supervisor-only and is
+// outside the process VAD arena (133–255), so it can alias managed PFNs.
+constexpr uint64_t kManagedPhysicalAliasBase = uint64_t{127} << 39;
+constexpr uint64_t kManagedPhysicalAliasSize = uint64_t{1} << 39;
 constexpr uint64_t kDeviceBase = uint64_t{129} << 39;
 constexpr uint64_t kPhysicalAccessBase = uint64_t{132} << 39;
 // Slot 129 is a supervisor-only kernel mapping. Keep one page at its base
@@ -108,6 +112,8 @@ bool isProtectedIommuPhysicalPage(uint64_t physical) noexcept {
     return false;
 }
 bool g_addressSpaceReady{};
+bool g_managedPhysicalAliasReady{};
+uint64_t g_managedPhysicalAliasPdptPhysical{};
 micant::hal::amd64::ProcessPagingRoot* g_processPagingRoots{};
 bool g_ownedSharedRootSlots[2]{};
 alignas(4096) uint8_t g_kuserSharedPage[4096]{};
@@ -244,8 +250,38 @@ uint64_t g_managedFaultError{};
 volatile bool g_managedFaultArmed{};
 volatile bool g_managedFaultObserved{};
 
+bool managedPhysicalAliasMaps(uint64_t physical) noexcept {
+    if (!g_managedPhysicalAliasReady || physical >= kManagedPhysicalAliasSize ||
+        !g_managedPhysicalAliasPdptPhysical) return false;
+    const uint64_t virtualAddress = kManagedPhysicalAliasBase + physical;
+    const auto* pdpt = reinterpret_cast<const uint64_t*>(g_managedPhysicalAliasPdptPhysical);
+    const uint64_t pdptEntry = pdpt[(virtualAddress >> 30) & 511];
+    if (!(pdptEntry & kPresent) || !(pdptEntry & kOwnedTable)) return false;
+    const auto* pd = reinterpret_cast<const uint64_t*>(pdptEntry & kPhysicalMask);
+    const uint64_t pdEntry = pd[(virtualAddress >> 21) & 511];
+    if (!(pdEntry & kPresent) || !(pdEntry & kOwnedTable)) return false;
+    const auto* pt = reinterpret_cast<const uint64_t*>(pdEntry & kPhysicalMask);
+    const uint64_t pte = pt[(virtualAddress >> micant::mm::PageShift4KB) & 511];
+    return (pte & kPresent) && (pte & kPhysicalMask) ==
+        (physical & ~micant::mm::PageMask4KB);
+}
+
+uint64_t* pageTablePointer(uint64_t physical) noexcept {
+    physical &= kPhysicalMask;
+    if (physical == reinterpret_cast<uint64_t>(g_pml4)) return g_pml4;
+    if (managedPhysicalAliasMaps(physical))
+        return reinterpret_cast<uint64_t*>(kManagedPhysicalAliasBase + physical);
+    return reinterpret_cast<uint64_t*>(physical);
+}
+
+uint64_t activePagingRootPhysical() noexcept {
+    uint64_t cr3{};
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
+    return cr3 & kPhysicalMask;
+}
+
 uint64_t walk(uint64_t root, uint64_t address) noexcept {
-    auto* table = reinterpret_cast<const uint64_t*>(root & kPhysicalMask);
+    auto* table = pageTablePointer(root);
     for (int shift = 39; shift >= 12; shift -= 9) {
         const uint64_t entry = table[(address >> shift) & 511];
         if ((entry & kPresent) == 0) {
@@ -258,14 +294,14 @@ uint64_t walk(uint64_t root, uint64_t address) noexcept {
         if (shift == 12) {
             return (entry & kPhysicalMask) | (address & 4095);
         }
-        table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+        table = pageTablePointer(entry);
     }
     return 0;
 }
 
 bool queryPagingPermissions(uint64_t root, uint64_t address,
                            bool& userAccessible, bool& writable) noexcept {
-    auto* table = reinterpret_cast<const uint64_t*>(root & kPhysicalMask);
+    auto* table = pageTablePointer(root);
     userAccessible = true;
     writable = true;
     for (int shift = 39; shift >= 12; shift -= 9) {
@@ -275,15 +311,13 @@ bool queryPagingPermissions(uint64_t root, uint64_t address,
         writable = writable && (entry & kWritable);
         if ((shift == 30 || shift == 21) && (entry & 128)) return true;
         if (shift == 12) return true;
-        table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+        table = pageTablePointer(entry);
     }
     return false;
 }
 
 uint64_t* activePagingRoot() noexcept {
-    uint64_t cr3{};
-    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
-    return reinterpret_cast<uint64_t*>(cr3 & kPhysicalMask);
+    return pageTablePointer(activePagingRootPhysical());
 }
 
 bool mappedRange(uint64_t address, size_t size, bool user, bool writable,
@@ -312,7 +346,7 @@ bool mappedRange(uint64_t address, size_t size, bool user, bool writable,
                 break;
             }
             if (shift == 12) break;
-            table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+            table = pageTablePointer(entry);
         }
         if (userAccessible != user) return false;
         if (end - page < 4096) return true;
@@ -322,6 +356,13 @@ bool mappedRange(uint64_t address, size_t size, bool user, bool writable,
 uint64_t allocateIdentityMappedPageTable() noexcept {
     auto& database = micant::mm::PfnDatabase::get();
     const uint64_t pageCount = database.getTotalPages();
+    if (g_managedPhysicalAliasReady) {
+        if (pageCount <= 1) return 0;
+        const uint64_t aliasPageLimit = kManagedPhysicalAliasSize >>
+            micant::mm::PageShift4KB;
+        const uint64_t lastPfn = std::min(pageCount - 1, aliasPageLimit - 1);
+        return database.allocatePageInRange(1, lastPfn);
+    }
     uint64_t firstPfn = 1;
     while (firstPfn < pageCount) {
         const uint64_t pfn = database.allocatePageInRange(firstPfn, pageCount - 1);
@@ -329,7 +370,7 @@ uint64_t allocateIdentityMappedPageTable() noexcept {
         const uint64_t physical = pfn << micant::mm::PageShift4KB;
         if (physical <= kPhysicalMask &&
             mappedRange(physical, micant::mm::PageSize4KB, false, true, false) &&
-            walk(reinterpret_cast<uint64_t>(activePagingRoot()), physical) == physical)
+            walk(activePagingRootPhysical(), physical) == physical)
             return pfn;
         database.freePage(pfn);
         firstPfn = pfn + 1;
@@ -387,7 +428,7 @@ private:
 
 bool pagingContextMatches(void* context) noexcept {
     if (!bootstrapPagingContext()) return false;
-    const auto active = reinterpret_cast<uint64_t>(activePagingRoot());
+    const auto active = activePagingRootPhysical();
     if (!context) return active == reinterpret_cast<uint64_t>(g_pml4);
     for (const auto* root = g_processPagingRoots; root; root = root->next)
         if (root == context) return (root->pfn << micant::mm::PageShift4KB) == active;
@@ -431,7 +472,7 @@ bool mapPage(uint64_t address, uint64_t physical, uint64_t flags,
             if (failAfter > 0) --failAfter;
             const uint64_t page = pfn << 12;
             if (page > kPhysicalMask || !mappedRange(page, 4096, false, true, false) ||
-                walk(reinterpret_cast<uint64_t>(activePagingRoot()), page) != page) {
+                walk(activePagingRootPhysical(), page) != page) {
                 database.freePage(pfn);
                 goto rollback;
             }
@@ -445,7 +486,7 @@ bool mapPage(uint64_t address, uint64_t physical, uint64_t flags,
             (entry & kNoExecute)) {
             goto rollback;
         }
-        table = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+        table = pageTablePointer(entry);
     }
     {
         uint64_t& leaf = table[(address >> 12) & 511];
@@ -515,7 +556,7 @@ public:
         g_kuserAliasPageTable[slot] = physical | kPresent | kWritable | kNoExecute;
         invalidatePage(address);
         if (!mappedRange(address, 4096, false, true, false) ||
-            walk(reinterpret_cast<uint64_t>(activePagingRoot()), address) != physical) {
+            walk(activePagingRootPhysical(), address) != physical) {
             g_kuserAliasPageTable[slot] = 0;
             invalidatePage(address);
             return nullptr;
@@ -590,7 +631,7 @@ bool installKuserUserMapping(uint64_t physical, uint64_t rootPhysical) noexcept 
     constexpr uint64_t address = micant::UserSharedDataAddress;
     if (!bootstrapPagingContext() || (physical & 4095) ||
         physical > kPhysicalMask || !physical || isProtectedIommuPhysicalPage(physical) ||
-        reinterpret_cast<uint64_t>(activePagingRoot()) != reinterpret_cast<uint64_t>(g_pml4) ||
+        activePagingRootPhysical() != reinterpret_cast<uint64_t>(g_pml4) ||
         !rootPhysical || (rootPhysical & 4095) || rootPhysical > kPhysicalMask)
         return fail("[MicaNT Hal] KUSER map precondition failed\r\n");
 
@@ -671,7 +712,7 @@ bool installKuserKernelAliases(uint64_t backingPhysical, uint64_t rootPhysical) 
         if (!pfns[index] || pfns[index] > (kPhysicalMask >> 12)) break;
         const uint64_t page = pfns[index] << 12;
         if (!mappedRange(page, 4096, false, true, false) ||
-            walk(reinterpret_cast<uint64_t>(activePagingRoot()), page) != page)
+            walk(activePagingRootPhysical(), page) != page)
             break;
         database.zeroPage(pfns[index]);
     }
@@ -686,9 +727,9 @@ bool installKuserKernelAliases(uint64_t backingPhysical, uint64_t rootPhysical) 
     const uint64_t pdptPhysical = pfns[0] << 12;
     const uint64_t pdPhysical = pfns[1] << 12;
     const uint64_t ptPhysical = pfns[2] << 12;
-    auto* pdpt = reinterpret_cast<uint64_t*>(pdptPhysical);
-    auto* pd = reinterpret_cast<uint64_t*>(pdPhysical);
-    auto* pt = reinterpret_cast<uint64_t*>(ptPhysical);
+    auto* pdpt = pageTablePointer(pdptPhysical);
+    auto* pd = pageTablePointer(pdPhysical);
+    auto* pt = pageTablePointer(ptPhysical);
     if (!mappedRange(pdptPhysical, 4096, false, true, false) ||
         !mappedRange(pdPhysical, 4096, false, true, false) ||
         !mappedRange(ptPhysical, 4096, false, true, false)) {
@@ -719,10 +760,10 @@ bool installKuserKernelAliases(uint64_t backingPhysical, uint64_t rootPhysical) 
     invalidatePage(kKuserRootAlias);
     invalidatePage(aliasPageTableVa);
     g_kuserAliasPageTable = reinterpret_cast<uint64_t*>(aliasPageTableVa);
-    return walk(reinterpret_cast<uint64_t>(activePagingRoot()), kKuserKernelAlias) ==
+    return walk(activePagingRootPhysical(), kKuserKernelAlias) ==
             backingPhysical &&
-        walk(reinterpret_cast<uint64_t>(activePagingRoot()), kKuserRootAlias) == rootPhysical &&
-        walk(reinterpret_cast<uint64_t>(activePagingRoot()), aliasPageTableVa) == ptPhysical &&
+        walk(activePagingRootPhysical(), kKuserRootAlias) == rootPhysical &&
+        walk(activePagingRootPhysical(), aliasPageTableVa) == ptPhysical &&
         mappedRange(kKuserKernelAlias, 4096, false, true, false) &&
         mappedRange(kKuserRootAlias, 4096, false, true, false) &&
         mappedRange(aliasPageTableVa, 4096, false, true, false);
@@ -741,7 +782,7 @@ bool unmapPage(uint64_t address, bool user) noexcept {
         if (!(*entry & kPresent) || !(*entry & kOwnedTable) || (*entry & 128) ||
             ((*entry & kUser) != (user ? kUser : 0))) return false;
         parents[level] = entry;
-        table = reinterpret_cast<uint64_t*>(*entry & kPhysicalMask);
+        table = pageTablePointer(*entry);
         tables[level++] = table;
     }
     uint64_t& leaf = table[(address >> 12) & 511];
@@ -886,7 +927,6 @@ uintptr_t MicantBootstrapSyscallStackFloor{};
 volatile uint64_t MicantTimerTicks{};
 volatile bool MicantTimerPreemptionEnabled{};
 volatile bool MicantTimerDispatchFailed{};
-volatile uint32_t MicantTimerDispatchFailureReason{};
 micant::ke::KThread* MicantTimerBootThread{};
 bool MicantTimerBootQueued{};
 uint64_t MicantTimerBootDeadline{24};
@@ -930,7 +970,6 @@ void MicantBootstrapTimerDispatch() noexcept {
         micant::hal::amd64::updateBootstrapKuserSharedData() !=
             micant::hal::amd64::BootstrapClockStatus::Success) {
         MicantTimerDispatchFailed = true;
-        MicantTimerDispatchFailureReason |= 1u;
     }
 #if defined(MICANT_FREESTANDING) && defined(MICANT_BAREMETAL)
     micant::ke::clock_timer::onClockInterrupt();
@@ -949,12 +988,10 @@ void MicantBootstrapTimerDispatch() noexcept {
     if (!current || g_syscallCpu.kernelRsp != expectedSyscallStack ||
         micant::cpu::CpuHardwareEngine::get().getTss().rsp0 != expectedInterruptStack) {
         MicantTimerDispatchFailed = true;
-        MicantTimerDispatchFailureReason |= 2u;
     }
     if (MicantTimerBootThread && MicantTimerTicks >= MicantTimerBootDeadline && !MicantTimerBootQueued) {
         if (!scheduler.readyKThread(MicantTimerBootThread)) {
             MicantTimerDispatchFailed = true;
-            MicantTimerDispatchFailureReason |= 4u;
         }
         else MicantTimerBootQueued = true;
     }
@@ -962,7 +999,6 @@ void MicantBootstrapTimerDispatch() noexcept {
     if (next && !KiSwapContext(current, next, current != g_CurrentCpu.idleThread)) {
         if (!scheduler.cancelQuantumPreemption(current, next)) __builtin_trap();
         MicantTimerDispatchFailed = true;
-        MicantTimerDispatchFailureReason |= 8u;
     }
     KeLowerIrql(previous);
 }
@@ -1781,7 +1817,7 @@ void MicantProbePageFault(const uint64_t* frame) noexcept {
             const uint64_t entry = table[(page >> shift) & 511];
             logTrapValue("[MicaNT Hal] PF PTE=0x", entry);
             if (!(entry & kPresent) || (shift > 12 && (entry & 128))) break;
-            if (shift > 12) table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+            if (shift > 12) table = pageTablePointer(entry);
         }
         stopOnTrap();
     }
@@ -2447,8 +2483,8 @@ bool initializeBootstrapAddressSpace(void (*log)(const char*) noexcept) noexcept
     if (cr4 & (uint64_t{1} << 12)) {
         return false;
     }
-    const auto* oldRoot = reinterpret_cast<const uint64_t*>(cr3 & kPhysicalMask);
-    if (oldRoot[128] || oldRoot[129] || oldRoot[130] || oldRoot[131] || oldRoot[132] ||
+    const auto* oldRoot = pageTablePointer(cr3);
+    if (oldRoot[127] || oldRoot[128] || oldRoot[129] || oldRoot[130] || oldRoot[131] || oldRoot[132] ||
         walk(cr3, reinterpret_cast<uint64_t>(g_pml4)) !=
             reinterpret_cast<uint64_t>(g_pml4)) {
         return false;
@@ -2490,7 +2526,7 @@ static void reclaimUnusedSharedRootSlots() noexcept {
         if (!g_ownedSharedRootSlots[index]) continue;
         uint64_t& entry = g_pml4[129 + index];
         if (!entry) { g_ownedSharedRootSlots[index] = false; continue; }
-        auto* table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+        auto* table = pageTablePointer(entry);
         if (!emptyTable(table)) continue;
         const uint64_t pfn = (entry & kPhysicalMask) >> mm::PageShift4KB;
         entry = 0;
@@ -2539,7 +2575,7 @@ static bool createProcessPagingRootImpl(ProcessPagingRoot& root, int failAfter) 
         return false;
     }
     database.zeroPage(pfn);
-    auto* table = reinterpret_cast<uint64_t*>(physical);
+    auto* table = pageTablePointer(physical);
     for (size_t i = 0; i < 512; ++i) {
         table[i] = (i == 128 || (i >= 133 && i < 256)) ? 0 : g_pml4[i] & ~kUser;
         // PML4[0] carries the read-only KUSER_SHARED_DATA alias at 0x7FFE0000.
@@ -2585,6 +2621,7 @@ bool switchProcessPagingRoot(const ProcessPagingRoot* root) noexcept {
     if (!currentKnown || !targetKnown) return false;
     const uint64_t target = root ? root->pfn << mm::PageShift4KB : reinterpret_cast<uint64_t>(g_pml4);
     __asm__ __volatile__("movq %0, %%cr3" : : "r"(target) : "memory");
+    ke::g_CurrentCpu.currentCr3 = target;
     return true;
 }
 
@@ -2600,12 +2637,12 @@ bool switchProcessPagingRootByPhysical(uintptr_t physicalRoot) noexcept {
 
 bool destroyProcessPagingRoot(ProcessPagingRoot& root) noexcept {
     if (!bootstrapPagingContext() || !root.pfn) return false;
-    if (reinterpret_cast<uint64_t>(activePagingRoot()) == (root.pfn << mm::PageShift4KB)) return false;
+    if (activePagingRootPhysical() == (root.pfn << mm::PageShift4KB)) return false;
     auto** link = &g_processPagingRoots;
     while (*link && *link != &root) link = &(*link)->next;
     if (!*link) return false;
-    auto* table = reinterpret_cast<const uint64_t*>(root.pfn << mm::PageShift4KB);
-    if (table[128]) return false;
+    auto* table = pageTablePointer(root.pfn << mm::PageShift4KB);
+    if (table[127] != g_pml4[127] || table[128]) return false;
     for (size_t slot = 133; slot < 256; ++slot)
         if (table[slot]) return false;
     *link = root.next;
@@ -2784,7 +2821,7 @@ static void reclaimEmptyUserTables(uintptr_t address) noexcept {
         if (!(entry & kPresent) || !(entry & kOwnedTable) || (entry & 128) ||
             !(entry & kUser) || depth == 3) break;
         parents[depth] = &entry;
-        children[depth] = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+        children[depth] = pageTablePointer(entry);
         ++depth;
         table = children[depth - 1];
     }
@@ -2829,7 +2866,7 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
                 if (failAfter > 0) --failAfter;
                 const uint64_t physical = pfn << 12;
                 if (physical > kPhysicalMask || !mappedRange(physical, 4096, false, true, false) ||
-                    walk(reinterpret_cast<uint64_t>(activePagingRoot()), physical) != physical) {
+                    walk(activePagingRootPhysical(), physical) != physical) {
                     database.freePage(pfn);
                     prepared = false;
                     break;
@@ -2842,7 +2879,7 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
                 prepared = false;
                 break;
             }
-            table = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+            table = pageTablePointer(entry);
         }
         if (prepared && table[(va >> 12) & 511]) prepared = false;
     }
@@ -2857,7 +2894,7 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
         const uintptr_t va = address + i * mm::PageSize4KB;
         uint64_t* table = activePagingRoot();
         for (int shift = 39; shift > 12; shift -= 9)
-            table = reinterpret_cast<uint64_t*>(table[(va >> shift) & 511] & kPhysicalMask);
+            table = pageTablePointer(table[(va >> shift) & 511]);
         table[(va >> 12) & 511] = mm::PageTableEntry::create(
             pfns[i], protection == mm::PAGE_READWRITE, true, true).value;
         invalidatePage(va);
@@ -2882,7 +2919,7 @@ bool unmapBootstrapManagedView(void* context, uintptr_t address, size_t count) n
             const uint64_t entry = table[(va >> shift) & 511];
             if (!(entry & kPresent) || !(entry & kOwnedTable) || (entry & 128) || !(entry & kUser))
                 return false;
-            table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+            table = pageTablePointer(entry);
         }
         if (!(table[(va >> 12) & 511] & kPresent)) return false;
     }
@@ -2952,7 +2989,7 @@ bool replaceBootstrapManagedPage(void* context, uintptr_t address, uint64_t expe
         const uint64_t entry = table[(address >> shift) & 511];
         if (!(entry & kPresent) || !(entry & kOwnedTable) || (entry & 128) ||
             !(entry & kUser) || !(entry & kWritable) || (entry & kNoExecute)) return false;
-        table = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+        table = pageTablePointer(entry);
     }
     uint64_t& leaf = table[(address >> 12) & 511];
     if (!(leaf & (kPresent | kNoAccessLeaf)) || !(leaf & kUser) || (leaf & kGuardLeaf) ||
@@ -2984,7 +3021,7 @@ bool mapBootstrapProtectManagedPage(void* context, uintptr_t address,
             !(entry & kUser) || !(entry & kWritable) || (entry & kNoExecute)) {
             return false;
         }
-        table = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+        table = pageTablePointer(entry);
     }
     uint64_t& leaf = table[(address >> 12) & 511];
     if (!(leaf & kUser) || (leaf & kGuardLeaf) ||
@@ -3010,7 +3047,7 @@ bool mapBootstrapGuardManagedPage(void* context, uintptr_t address, bool guarded
     for (int shift = 39; shift > 12; shift -= 9) {
         const uint64_t entry = table[(address >> shift) & 511];
         if (!(entry & kPresent) || !(entry & kOwnedTable) || (entry & 128) || !(entry & kUser)) return false;
-        table = reinterpret_cast<uint64_t*>(entry & kPhysicalMask);
+        table = pageTablePointer(entry);
     }
     uint64_t& leaf = table[(address >> 12) & 511];
     if (!(leaf & kUser) || !(leaf & kWritable)) return false;
@@ -3178,6 +3215,92 @@ bool reserveBootstrapPageTableStorage(size_t& reservedPages) noexcept {
     const size_t availableAfter = database.getFreeCount() + database.getZeroedCount();
     if (availableAfter > availableBefore) return false;
     reservedPages = availableBefore - availableAfter;
+    return true;
+}
+
+bool initializeBootstrapManagedPhysicalAlias() noexcept {
+    if (!bootstrapPagingContext() || g_managedPhysicalAliasReady || g_pml4[127])
+        return false;
+    auto& database = mm::PfnDatabase::get();
+    const uint64_t pageCount = database.getTotalPages();
+    const uint64_t aliasPageLimit = kManagedPhysicalAliasSize >> mm::PageShift4KB;
+
+    const auto allocateTable = [&]() noexcept -> uint64_t {
+        const uint64_t pfn = allocateIdentityMappedPageTable();
+        if (!pfn || !database.zeroAllocatedPage(pfn)) {
+            if (pfn) database.freePage(pfn);
+            return 0;
+        }
+        return pfn << mm::PageShift4KB;
+    };
+    const uint64_t pdptPhysical = allocateTable();
+    if (!pdptPhysical) return false;
+    g_managedPhysicalAliasPdptPhysical = pdptPhysical;
+    g_pml4[127] = pdptPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
+
+    const auto addManagedPage = [&](uint64_t pfn) noexcept -> bool {
+        if (!pfn) return true;
+        if (pfn >= pageCount) return false;
+        // Slot 127 is a bootstrap page-table pointer aperture. High PFN data
+        // remains managed by Mm and is accessed through the serialized
+        // temporary physical-page mapping; it does not need a direct alias.
+        if (pfn >= aliasPageLimit) return true;
+        const uint64_t physical = pfn << mm::PageShift4KB;
+        const uint64_t virtualAddress = kManagedPhysicalAliasBase + physical;
+        auto* pdpt = reinterpret_cast<uint64_t*>(pdptPhysical);
+        const size_t pdptIndex = static_cast<size_t>((virtualAddress >> 30) & 511);
+        uint64_t& pdptEntry = pdpt[pdptIndex];
+        uint64_t pdPhysical = pdptEntry & kPhysicalMask;
+        if (!(pdptEntry & kPresent)) {
+            pdPhysical = allocateTable();
+            if (!pdPhysical) return false;
+            pdptEntry = pdPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
+        } else if (!(pdptEntry & kOwnedTable) || (pdptEntry & 128)) {
+            return false;
+        }
+        auto* pd = reinterpret_cast<uint64_t*>(pdPhysical);
+        const size_t pdIndex = static_cast<size_t>((virtualAddress >> 21) & 511);
+        uint64_t& pdEntry = pd[pdIndex];
+        uint64_t ptPhysical = pdEntry & kPhysicalMask;
+        if (!(pdEntry & kPresent)) {
+            ptPhysical = allocateTable();
+            if (!ptPhysical) return false;
+            pdEntry = ptPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
+        } else if (!(pdEntry & kOwnedTable) || (pdEntry & 128)) {
+            return false;
+        }
+        auto* pt = reinterpret_cast<uint64_t*>(ptPhysical);
+        uint64_t& pte = pt[(virtualAddress >> mm::PageShift4KB) & 511];
+        const uint64_t mapping = physical | kPresent | kWritable | kNoExecute;
+        if (pte && pte != mapping) return false;
+        pte = mapping;
+        return true;
+    };
+
+    // The alias contains only descriptor-validated PFNs accepted by Mm. It
+    // skips holes, MMIO and all firmware types absent from the PFN database.
+    // The second pass maps table pages allocated while constructing the tree;
+    // repeat if adding those aliases needs another intermediate table.
+    for (;;) {
+        const size_t activeBefore = database.getActiveCount();
+        for (uint64_t pfn = 1; pfn < pageCount; ++pfn) {
+            if (database.isAvailablePage(pfn) || database.isActivePage(pfn) ||
+                database.isReservedPage(pfn)) {
+                if (!addManagedPage(pfn)) return false;
+            }
+        }
+        if (database.getActiveCount() == activeBefore) break;
+    }
+
+    // These page-table PFNs are permanent HAL-owned structures. Transfer
+    // their sole allocation references to the reserved PFN state so ordinary
+    // process and image lifetime snapshots only see reclaimable allocations.
+    for (uint64_t pfn = 1; pfn < pageCount; ++pfn) {
+        if (database.isActivePage(pfn) && !database.reservePage(pfn)) return false;
+    }
+
+    __asm__ __volatile__("movq %%cr3, %%rax; movq %%rax, %%cr3" : : : "rax", "memory");
+    g_managedPhysicalAliasReady = true;
     return true;
 }
 
@@ -3471,7 +3594,7 @@ static bool hasOnlyOwnerIommuMapping(uint64_t root, uint64_t tablePhysical,
                                      bool userAccessible = true) noexcept {
     if (!tablePhysical || walk(root, tablePhysical) != tablePhysical ||
         !mappedRange(tablePhysical, 4096, false, false, false)) return false;
-    const auto* table = reinterpret_cast<const uint64_t*>(tablePhysical);
+    const auto* table = pageTablePointer(tablePhysical);
     const unsigned shift = 12 + 9 * (level - 1);
     for (uint64_t i = 0; i < 512; ++i) {
         const uint64_t entry = table[i];
@@ -3785,7 +3908,6 @@ static bool verifyClockInterruptDelivery(BootstrapLocalApic& apic) noexcept {
         logTrapValue("[MicaNT Hal] Timer lock masked=0x", lockMaskedInterrupts);
         logTrapValue("[MicaNT Hal] Timer IRQL masked=0x", irqlMaskedClock);
         logTrapValue("[MicaNT Hal] Timer delivered=0x", delivered);
-        logTrapValue("[MicaNT Hal] Timer failure reason=0x", MicantTimerDispatchFailureReason);
     }
     return success;
 }
@@ -3895,7 +4017,6 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
     g_idt[0xd1] = gate(reinterpret_cast<uint64_t>(MicantBootstrapTimerInterrupt));
     g_idt[0xff] = gate(reinterpret_cast<uint64_t>(MicantBootstrapSpuriousInterrupt));
     MicantTimerTicks = 0;
-    MicantTimerDispatchFailureReason = 0;
     g_clockIrqlMaskReady = true;
     setBootstrapClockIrqlMask(ke::KeGetCurrentIrql());
     apic[0xf0 / 4] = (savedSvr & ~0xffu) | 0x1ff;
@@ -3910,7 +4031,6 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
         MicantTimerTicks = 0;
         MicantTimerBootThread = nullptr;
         MicantTimerDispatchFailed = false;
-        MicantTimerDispatchFailureReason = 0;
         MicantTimerPreemptionEnabled = preemptionVerified;
         userPreemption = preemptionVerified && MicantTestPsUserPreemption() &&
             MicantTimerTicks > 0 && !MicantTimerDispatchFailed;
@@ -4219,7 +4339,6 @@ bool startBootstrapSchedulerClock() noexcept {
     g_idt[0xd1] = gate(reinterpret_cast<uint64_t>(MicantBootstrapTimerInterrupt));
     g_idt[0xff] = gate(reinterpret_cast<uint64_t>(MicantBootstrapSpuriousInterrupt));
     MicantTimerTicks = 0;
-    MicantTimerDispatchFailureReason = 0;
     MicantTimerBootThread = nullptr;
     MicantTimerDispatchFailed = false;
     MicantTimerPreemptionEnabled = true;
@@ -4602,7 +4721,7 @@ bool bootstrapKuserSharedDataReady() noexcept { return g_kuserSharedMappingReady
 
 bool mapBootstrapKuserSharedDataForRoot(uint64_t rootPhysical) noexcept {
     if (!g_kuserSharedMappingReady || !g_kuserBackingPhysical) return false;
-    if (reinterpret_cast<uint64_t>(activePagingRoot()) != reinterpret_cast<uint64_t>(g_pml4))
+    if (activePagingRootPhysical() != reinterpret_cast<uint64_t>(g_pml4))
         return false;
     const bool mapped = installKuserUserMapping(g_kuserBackingPhysical, rootPhysical);
     if (g_log) {
@@ -4694,7 +4813,7 @@ BootstrapClockStatus initializeBootstrapKuserSharedData() noexcept {
     shared->timeZoneBiasHigh2 = 0;
     shared->timeZoneId = 1; // UTC standard time until a zone provider is configured.
     const auto updateStatus = updateBootstrapKuserSharedData();
-    const uint64_t root = reinterpret_cast<uint64_t>(activePagingRoot());
+    const uint64_t root = activePagingRootPhysical();
     const uint64_t kernelBacking = walk(root, kKuserKernelAlias) & ~uint64_t{4095};
     const uint64_t userBacking = walk(root, micant::UserSharedDataAddress) & ~uint64_t{4095};
     bool aliasUser{}, aliasWritable{}, userUser{}, userWritable{};

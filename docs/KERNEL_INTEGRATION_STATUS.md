@@ -25,45 +25,58 @@ specification. The compatibility inventory is
   assumed identity mapping.
 - The bootstrap executive heap maps individually allocated PFNs into
   supervisor RW/NX kernel VA and rolls back partially mapped allocations. The
-  heap uses the existing architecture-derived PML4 slot; page-table PFNs still
-  require identity-mapped storage in the current bootstrap backend. The
-  supervisor device aperture grows in slot 129; its first page remains
-  reserved for firmware-copy scratch mappings. The former 16 MiB framebuffer
-  and staged-image validation caps have been removed.
+  heap uses the existing architecture-derived PML4 slot. HAL page-table walks
+  now follow PFN-backed aliases instead of assuming every allocated table is
+  identity-mapped. The bootstrap pointer aperture occupies supervisor PML4
+  slot 127 and spans its architectural 512 GiB; it is a page-table access
+  phase limit, not a cap on PFN enrollment or ordinary page data. PFNs outside
+  that aperture remain accessible through the validated, serialized temporary
+  physical-page mapping. The supervisor device aperture grows in slot 129; its
+  first page remains reserved for firmware-copy scratch mappings. The former
+  16 MiB framebuffer and staged-image validation caps have been removed.
 - Process VAD backend reach spans lower-half user PML4 slots 133–255
   (architecture-derived 61.5 TiB); bootstrap-owned slots 129–132 remain
   supervisor mappings. PE preferred-base checks and stack allocation no
   longer use the former 16 MiB window as a general limit. QEMU reaches the
   20 MiB reserved-stack test and maps a DLL at 200 MiB, beyond the former
   128 MiB window.
-- QEMU 512 MiB initializes 130,804 PFN entries and 32,399 usable pages. The
-  file-backed SEC_IMAGE process test passes, but Explorer dependency loading
-  returns `STATUS_NO_MEMORY` with 16,295 PFNs still free. The 1 GiB profile
-  initializes 261,876 entries and 161,935 usable pages; the 20 MiB stack,
-  200 MiB DLL, syscall, file-backed SEC_IMAGE, and PFN cleanup checks pass.
-  Explorer reaches image finalization and explicitly returns
-  `STATUS_NOT_IMPLEMENTED` for unsupported TLS callbacks, with 74,472 PFNs
+- QEMU 512 MiB initializes 130,804 PFN entries and 32,328 usable pages. The
+  high-PFN check is correctly skipped because this profile has no RAM above
+  1 GiB. The 20 MiB stack, 200 MiB DLL, rollback, two/three-thread, file-backed
+  SEC_IMAGE, and timer-preempted kernel/CPL3 checks pass. Explorer dependency
+  loading then reports real `STATUS_NO_MEMORY` with 16,224 free PFNs (about
+  63 MiB); this is resource exhaustion in the 512 MiB profile, not an address
+  window rejection.
+- At 1 GiB, 261,876 PFNs and 161,611 usable pages are initialized; the large
+  stack/DLL, image cleanup, and timer checks pass. Explorer gets past the old
+  mapping failure and returns the explicit `STATUS_NOT_IMPLEMENTED` for TLS
+  callbacks, an independent loader limitation.
+- At 2 GiB, 524,020 PFNs and 420,176 usable pages are initialized. The PFN
+  above-1-GiB map/copy/read/reclaim probe, exhaustion and partial rollback,
+  large stack/DLL, file-backed SEC_IMAGE, and timer-preempted kernel/CPL3 checks
+  pass. Explorer reaches the same TLS callback limitation with 332,714 PFNs
   free.
-- At 2 GiB, 524,020 entries and 421,007 usable pages are initialized. The
-  high-PFN map/copy/read/reclaim probe, real PFN exhaustion and partial heap
-  rollback test, 20 MiB stack, 200 MiB DLL, CPL3 syscall tests, and file-backed
-  SEC_IMAGE cleanup pass. Explorer reaches the same TLS callback limitation
-  with 333,545 PFNs free, so that error is independent of memory pressure.
-- At 4 GiB, UEFI reports 1,572,864 PFN entries and 933,003 usable pages. The
-  high-PFN probe, file-backed SEC_IMAGE cleanup, 20 MiB stack, 200 MiB DLL,
-  and timer-preempted kernel/CPL3 context tests pass. Two runs failed the live
-  timer checkpoint; a subsequent run passed it and reached Explorer's explicit
-  TLS callback rejection with 845,541 PFNs free. At 256 MiB, OVMF reports
-  `Out of Resources` before starting the bootloader.
-- UEFI endpoint and hole sample checks pass, including a large unavailable
-  physical gap. The active 32-page EFI stack/handoff descriptor is excluded,
-  and APIC MMIO remains supervisor-only at CPL3. These checks do not yet prove
-  arbitrary multi-node fragmented RAM coverage or MMIO descriptor accounting.
-- Remaining work: implement and verify HAL page-table access for PFNs outside
-  the identity-mapped range; resolve the 512 MiB memory-pressure failure; make
-  4 GiB timer verification stable; and rerun Explorer after the independent TLS
-  callback limitation is implemented. This migration remains incomplete and
-  is not a verified end-to-end milestone.
+- At 4 GiB, UEFI reports 1,572,864 PFN entries and 931,171 usable pages; a
+  PFN above 1 GiB is actually mapped, written, copied, read back, freed, and
+  reclaimed. The thread, large stack/DLL, and process image mapping tests run
+  before the file-backed probe. In this profile the AHCI driver declines to
+  start because a safe DMA provider is unavailable; no system directory is
+  mounted, so file-backed Explorer cannot proceed. No unsafe DMA fallback was
+  enabled. At 256 MiB, both OVMF disk boot entries report `Out of Resources`
+  and fall through to the UEFI shell before the MicaNT loader starts.
+- UEFI descriptor boundary samples verify included/excluded regions and a
+  large unavailable physical hole; the active 32-page EFI stack/handoff
+  descriptor is excluded, and APIC MMIO remains supervisor-only at CPL3. The
+  QEMU map exposed no `EfiMemoryMappedIO` descriptor, so descriptor-type MMIO
+  exclusion is validated by the enrollment rules but not exercised by this
+  profile. Arbitrary multi-node physical fragmentation is not represented by
+  this single-QEMU profile.
+- The PFN and address-space migration is implemented and exercised in the
+  canonical bare-metal kernel. Remaining end-to-end limits are the actual
+  512 MiB OOM, unsupported Explorer TLS callbacks at 1/2 GiB, and the 4 GiB
+  profile's unavailable safe DMA/filesystem path. Explorer is not reported as
+  fully running; the previous artificial mapping failure is passed at 1/2 GiB,
+  and the subsequent TLS limitation is explicit.
 
 ## Verified baseline
 

@@ -945,13 +945,17 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     serialWrite("[MicaNT Mm] Inherited page-table PFNs reserved=");
     serialWriteNumber(reservedPageTables);
     serialWrite("\r\n");
+    if (!hal::amd64::initializeBootstrapManagedPhysicalAlias())
+        stopWithError("[MicaNT Mm] Could not map managed PFNs for HAL page tables\r\n");
+    serialWrite("[MicaNT Mm] Supervisor managed-PFN alias initialized\r\n");
+    const size_t baselineActive = database.getActiveCount();
     const size_t initialFree = database.getFreeCount();
     serialWrite("[MicaNT Mm] PFN probe allocate\r\n");
     const uint64_t pfn = database.allocatePage(false);
     serialWrite("[MicaNT Mm] PFN probe returned ");
     serialWriteNumber(pfn);
     serialWrite("\r\n");
-    if (!pfn || database.getActiveCount() != 1) {
+    if (!pfn || database.getActiveCount() != baselineActive + 1) {
         stopWithError("[MicaNT Mm] Physical allocation failed\r\n");
     }
     serialWrite("[MicaNT Mm] PFN probe access\r\n");
@@ -961,7 +965,7 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     hal::amd64::releaseBootstrapPhysicalPage();
     database.referencePage(pfn);
     database.freePage(pfn);
-    if (database.getActiveCount() != 1) {
+    if (database.getActiveCount() != baselineActive + 1) {
         stopWithError("[MicaNT Mm] Referenced physical page released too early\r\n");
     }
     database.freePage(pfn);
@@ -978,7 +982,7 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     }
     database.freePage(pfn);
     const uint64_t contiguous = database.allocateContiguousPages(2);
-    if (!contiguous || database.getActiveCount() != 2) {
+    if (!contiguous || database.getActiveCount() != baselineActive + 2) {
         stopWithError("[MicaNT Mm] Contiguous physical allocation failed\r\n");
     }
     auto* firstContiguous = physicalPageBytes(contiguous);
@@ -997,7 +1001,7 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
         stopWithError("[MicaNT Mm] Physical frame backing verification failed\r\n");
     }
     database.freeContiguousPages(contiguous, 2);
-    if (database.getActiveCount() != 0 || database.getFreeCount() != initialFree) {
+    if (database.getActiveCount() != baselineActive || database.getFreeCount() != initialFree) {
         stopWithError("[MicaNT Mm] Physical release accounting failed\r\n");
     }
     constexpr uint64_t oldPfnBoundary = (uint64_t{1} << 30) / mm::PageSize4KB;
@@ -1042,7 +1046,7 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
             stopWithError("[MicaNT Mm] PFN above 1 GiB map/copy/reclamation failed\r\n");
         }
         database.freePage(reclaimed);
-        if (database.getActiveCount() != 0 || database.getFreeCount() != initialFree) {
+        if (database.getActiveCount() != baselineActive || database.getFreeCount() != initialFree) {
             stopWithError("[MicaNT Mm] High PFN cleanup accounting failed\r\n");
         }
         serialWrite("[MicaNT Mm] PFN above 1 GiB mapped, used and reclaimed\r\n");

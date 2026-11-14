@@ -79,6 +79,7 @@ bool destroyProcessPagingRoot(ProcessPagingRoot& root) noexcept;
 // IRQ-disabled, single-CPU bootstrap test of PFN-backed paging and reclamation.
 bool verifyBootstrapPageTables() noexcept;
 bool reserveBootstrapPageTableStorage(size_t& reservedPages) noexcept;
+bool initializeBootstrapManagedPhysicalAlias() noexcept;
 uintptr_t reserveBootstrapKernelHeapRange(size_t pageCount) noexcept;
 bool releaseBootstrapKernelHeapRange(uintptr_t address, size_t pageCount) noexcept;
 bool mapBootstrapKernelHeapPage(uintptr_t address, uint64_t pfn) noexcept;

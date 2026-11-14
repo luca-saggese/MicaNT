@@ -50,33 +50,35 @@ struct ScopedReference {
 
 // Build the system DLL path the same way the Ps loader does, so the test
 // exercises the real mounted-volume lookup instead of a hardcoded path.
-bool buildSystemPath(const char* leaf, char16_t* output, size_t capacity,
-                     size_t& length) noexcept {
+micant::NtStatus buildSystemPath(const char* leaf, char16_t* output, size_t capacity,
+                                 size_t& length) noexcept {
     using namespace micant;
+    length = 0;
+    if (!leaf || !output || !capacity) return NtStatus::InvalidParameter;
     char16_t directory[256]{};
     size_t directoryLength{};
-    if (io::IoQuerySystemDirectory(directory, sizeof(directory) / sizeof(directory[0]),
-                                   directoryLength) != NtStatus::Success)
-        return false;
+    const auto status = io::IoQuerySystemDirectory(directory,
+        sizeof(directory) / sizeof(directory[0]), directoryLength);
+    if (status != NtStatus::Success) return status;
     if (!directoryLength || directoryLength >= sizeof(directory) / sizeof(directory[0]))
-        return false;
+        return NtStatus::InvalidDeviceState;
     size_t written{};
     for (size_t index = 0; index < directoryLength; ++index) {
         if (!directory[index]) break;
-        if (written + 1 >= capacity) return false;
+        if (written + 1 >= capacity) return NtStatus::BufferTooSmall;
         output[written++] = directory[index];
     }
     if (!written || output[written - 1] != u'\\') {
-        if (written + 1 >= capacity) return false;
+        if (written + 1 >= capacity) return NtStatus::BufferTooSmall;
         output[written++] = u'\\';
     }
     for (size_t index = 0; leaf[index]; ++index) {
-        if (written + 1 >= capacity) return false;
+        if (written + 1 >= capacity) return NtStatus::BufferTooSmall;
         output[written++] = static_cast<char16_t>(static_cast<uint8_t>(leaf[index]));
     }
     output[written] = 0;
     length = written;
-    return true;
+    return NtStatus::Success;
 }
 
 // Process and section deletion is deferred to the existing passive reaper
@@ -121,41 +123,64 @@ bool drainDeferredCleanup(size_t expectedActivePages) noexcept {
 // validated SEC_IMAGE section and initializes a process image.
 extern "C" bool MicantTestPsFileBackedImage() noexcept {
     using namespace micant;
-    if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return false;
+    if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) {
+        reportFailure("[MicaNT Ps] SEC_IMAGE test IRQL", NtStatus::InvalidDeviceState);
+        return false;
+    }
 
-    if (!drainDeferredCleanup(mm::PfnDatabase::get().getActiveCount())) return false;
+    if (!drainDeferredCleanup(mm::PfnDatabase::get().getActiveCount())) {
+        reportFailure("[MicaNT Ps] SEC_IMAGE initial cleanup", NtStatus::Unsuccessful);
+        return false;
+    }
     const size_t activeBefore = mm::PfnDatabase::get().getActiveCount();
     char16_t imagePath[256]{};
     size_t imagePathLength{};
-    if (!buildSystemPath("fileimage.exe", imagePath, sizeof(imagePath) / sizeof(imagePath[0]),
-                         imagePathLength))
+    const auto pathStatus = buildSystemPath("fileimage.exe", imagePath,
+        sizeof(imagePath) / sizeof(imagePath[0]), imagePathLength);
+    if (pathStatus != NtStatus::Success) {
+        reportFailure("[MicaNT Ps] SEC_IMAGE system path", pathStatus);
         return false;
+    }
 
     {
         // The file must be reachable through the canonical Io backend, which
         // is what proves the volume is mounted and the stream identity
         // resolves.
         ScopedHandle fileHandle;
-        if (io::IoOpenBackendFile(&fileHandle.value, 0x0021,
-                                  {imagePath, imagePathLength}) != NtStatus::Success)
+        const auto openStatus = io::IoOpenBackendFile(&fileHandle.value, 0x0021,
+            {imagePath, imagePathLength});
+        if (openStatus != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE file open", openStatus);
             return false;
+        }
 
         ScopedHandle sectionHandle;
         auto status = sys::NtCreateSectionFromKernel(&sectionHandle.value,
             section::SECTION_ALL_ACCESS, nullptr, nullptr, mm::PAGE_EXECUTE_READ,
             section::SEC_FILE | section::SEC_IMAGE, fileHandle.value);
-        if (status != NtStatus::Success) return false;
+        if (status != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE section create", status);
+            return false;
+        }
 
         ScopedReference sectionReference;
         status = sys::referenceProcessImageSection(sectionHandle.value, sectionReference.value);
-        if (status != NtStatus::Success || !sectionReference.value) return false;
+        if (status != NtStatus::Success || !sectionReference.value) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE section reference", status);
+            return false;
+        }
         auto* image = sectionReference.value->as<section::SectionObject>();
         if (!image || !image->getFileSize() || !image->getSize() || !image->getImageBase() ||
-            image->getFileName().empty())
+            image->getFileName().empty()) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE section metadata", NtStatus::InvalidImageFormat);
             return false;
+        }
         // The section must have been built from the file bytes, not from a
         // synthetic in-memory PE: the recorded name is the opened path.
-        if (image->getFileName().size() != imagePathLength) return false;
+        if (image->getFileName().size() != imagePathLength) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE source path", NtStatus::InvalidImageFormat);
+            return false;
+        }
         for (size_t index = 0; index < imagePathLength; ++index)
             if (image->getFileName()[index] != imagePath[index]) return false;
 
