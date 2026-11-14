@@ -251,7 +251,7 @@ inline ImageStatus DecodePng(std::span<const uint8_t> in, ImageFrame& output,
             seenIdat=true;
             if(n>limits.maxIntermediateBytes||compressedBytes>limits.maxIntermediateBytes-n)return ImageStatus::ImageTooLarge;
             compressedBytes+=n;
-        }else if(std::memcmp(type,"IEND",4)==0){if(n!=0)return ImageStatus::MalformedData;haveEnd=true;off+=12;break;
+        }else if(std::memcmp(type,"IEND",4)==0){if(n!=0)return ImageStatus::MalformedData;haveEnd=true;off+=static_cast<size_t>(n)+8;break;
         }else if(std::memcmp(type,"PLTE",4)==0){
             if(!haveHeader||seenIdat||havePalette||n==0||n>768||n%3!=0)return ImageStatus::MalformedData;
             havePalette=true;

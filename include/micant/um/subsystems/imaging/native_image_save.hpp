@@ -34,6 +34,7 @@ inline ImageStatus EncodeImageFile(const wchar_t* path, const ImageFrame& frame,
     name.maximumLength = static_cast<uint16_t>(pathBytes + sizeof(wchar_t));
     name.buffer = path;
     ObjectAttributes attributes{};
+    attributes.length = sizeof(ObjectAttributes);
     attributes.objectName = &name;
     attributes.attributes = OBJ_CASE_INSENSITIVE;
 

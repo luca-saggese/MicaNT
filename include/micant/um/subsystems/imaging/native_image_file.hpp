@@ -30,6 +30,7 @@ inline ImageStatus DecodeImageFileWithAccess(const wchar_t* path, ImageFrame& ou
     name.maximumLength = static_cast<uint16_t>(pathBytes + sizeof(wchar_t));
     name.buffer = path;
     ObjectAttributes attributes{};
+    attributes.length = sizeof(ObjectAttributes);
     attributes.objectName = &name;
     attributes.attributes = OBJ_CASE_INSENSITIVE;
 

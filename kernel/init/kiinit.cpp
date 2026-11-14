@@ -3256,6 +3256,66 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         }
         return status(copy);
     }
+    if (number == sys::SSN_NtQueryInformationFile) {
+        uint64_t informationClass{};
+        if (args.userStack > UINT64_MAX - 40 ||
+            ex::ExSafeCopyFromUser(&informationClass,
+                reinterpret_cast<const void*>(args.userStack + 40), sizeof(informationClass)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        auto* ioStatusAddress = reinterpret_cast<IoStatusBlock*>(second);
+        auto* information = reinterpret_cast<void*>(args.third);
+        const uint32_t informationLength = static_cast<uint32_t>(args.fourth);
+        if (!ioStatusAddress || informationLength > 1024 * 1024 ||
+            ex::ProbeForWrite(ioStatusAddress, sizeof(IoStatusBlock), alignof(IoStatusBlock)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+
+        NtStatus queryStatus = NtStatus::Success;
+        uint32_t informationBytes{};
+        if (informationClass == static_cast<uint64_t>(FileInformationClass::FileStandardInformation)) {
+            if (!information || informationLength < sizeof(FileStandardInformation)) {
+                queryStatus = NtStatus::InfoLengthMismatch;
+            } else if (ex::ProbeForWrite(information, sizeof(FileStandardInformation),
+                                         alignof(FileStandardInformation)) != NtStatus::Success) {
+                queryStatus = NtStatus::AccessViolation;
+            } else {
+                constexpr uint32_t fileReadAttributes = 0x00000080;
+                ke::KThread* issuingThread = ke::KeGetCurrentThread();
+                if (!issuingThread || !issuingThread->owningProcess || !issuingThread->kernelStackTop ||
+                    ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) {
+                    queryStatus = NtStatus::InvalidDeviceRequest;
+                } else {
+                    io::FileObject* file{};
+                    ob::ObjectHeader* reference{};
+                    queryStatus = io::IoReferenceFileHandle(static_cast<Handle>(first),
+                        fileReadAttributes, file, reference);
+                    if (queryStatus == NtStatus::Success) {
+                        __asm__ __volatile__("swapgs" : : : "memory");
+                        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+                        const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
+                        if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
+                        const uint64_t fileSize = file->size();
+                        if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
+                        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+                        __asm__ __volatile__("swapgs" : : : "memory");
+                        FileStandardInformation result{};
+                        result.allocationSize.quadPart = static_cast<int64_t>(fileSize);
+                        result.endOfFile.quadPart = static_cast<int64_t>(fileSize);
+                        result.numberOfLinks = 1;
+                        result.directory = false;
+                        queryStatus = ex::ExSafeCopyToUser(information, &result, sizeof(result));
+                        if (queryStatus == NtStatus::Success) informationBytes = sizeof(result);
+                        ob::ObDereferenceObject(reference);
+                    }
+                }
+            }
+        } else {
+            queryStatus = NtStatus::NotSupported;
+        }
+        const IoStatusBlock result{queryStatus, informationBytes};
+        if (ex::ExSafeCopyToUser(ioStatusAddress, &result, sizeof(result)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        return status(queryStatus);
+    }
     if (number == sys::SSN_NtDeviceIoControlFile) {
         uint64_t extra[6]{};
         if (args.userStack > UINT64_MAX - 40 ||
