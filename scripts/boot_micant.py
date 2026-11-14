@@ -265,15 +265,71 @@ def verify_mouse(
             execute("input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": False}},
             ]})
+            for down in (True, False):
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": down,
+                        "key": {"type": "qcode", "data": "ret"},
+                    },
+                }]})
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if "[MicaNT Explorer] First application window created" in serial_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Explorer did not dispatch Enter into an application window action")
+            time.sleep(0.5)
+            opened = screen("app-window.ppm")
+            visible_pixels = sum(
+                1 for offset in range(0, len(after), 3)
+                if after[offset:offset + 3] != opened[offset:offset + 3]
+            )
+            if visible_pixels < 10000:
+                raise RuntimeError("Explorer's user-mode application window was not presented")
+            for down in (True, False):
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": down,
+                        "key": {"type": "qcode", "data": "esc"},
+                    },
+                }]})
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
                 irq_seen = "[MicaNT Input] PS/2 mouse IRQ byte consumed" in serial
-                if not irq_enabled or irq_seen:
+                explorer_key_seen = (
+                    "[MicaNT Explorer] Keyboard input queued to the active window" in serial
+                )
+                explorer_mouse_seen = (
+                    "[MicaNT Explorer] Mouse click queued to the hit window" in serial
+                )
+                explorer_application_window_closed = (
+                    "[MicaNT Explorer] Application window destroyed by its owner" in serial
+                )
+                if (not irq_enabled or irq_seen) and explorer_mouse_seen and explorer_key_seen and explorer_application_window_closed:
+                    time.sleep(0.5)
+                    interactive = screen("interactive.ppm")
+                    changed_pixels = sum(
+                        1 for offset in range(0, len(opened), 3)
+                        if opened[offset:offset + 3] != interactive[offset:offset + 3]
+                    )
+                    if changed_pixels < 10000:
+                        raise RuntimeError(
+                            "Explorer destroyed its application window but did not redraw scanout"
+                        )
                     return
                 time.sleep(0.1)
             if irq_enabled and "[MicaNT Input] PS/2 mouse IRQ byte consumed" not in serial:
                 raise RuntimeError("PS/2 IRQ route was enabled but no ISR byte reached the consumer")
+            if "[MicaNT Explorer] Keyboard input queued to the active window" not in serial:
+                raise RuntimeError("Keyboard input did not reach Explorer's active window queue")
+            if "[MicaNT Explorer] Mouse click queued to the hit window" not in serial:
+                raise RuntimeError("Mouse click did not reach an Explorer window queue")
+            if "[MicaNT Explorer] Application window destroyed by its owner" not in serial:
+                raise RuntimeError("Explorer did not dispatch Escape into window cleanup")
             raise RuntimeError("PS/2 mouse input did not reach the kernel consumer")
 
 
@@ -756,7 +812,7 @@ def run_qemu(
                                 verify_mouse(
                                     temp / "qmp.sock", temp, serial_path, diagnostics_dir,
                                 )
-                                print("PS/2 movement, scanout updates and left-click delivery passed.", flush=True)
+                                print("Explorer mouse/keyboard window dispatch, scanout and window cleanup passed.", flush=True)
                             result = (
                                 "timer self-test" if timer_selftest else
                                 "C++ runtime self-test" if runtime_selftest else

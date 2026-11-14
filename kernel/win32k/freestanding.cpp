@@ -19,6 +19,9 @@ constexpr uint32_t kWmRButtonDown = 0x0204;
 constexpr uint32_t kWmRButtonUp = 0x0205;
 constexpr uint32_t kWmMButtonDown = 0x0207;
 constexpr uint32_t kWmMButtonUp = 0x0208;
+constexpr uint32_t kWmKeyDown = 0x0100;
+constexpr uint32_t kWmKeyUp = 0x0101;
+constexpr uint32_t kWmChar = 0x0102;
 constexpr int32_t kSwShowMinimized = 2;
 constexpr int32_t kSwMinimize = 6;
 constexpr int32_t kGwlpWndProc = -4;
@@ -478,7 +481,7 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
 }
 
-void dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
+bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     StateLockGuard lock;
     const int32_t x = event.x;
     const int32_t y = event.y;
@@ -489,7 +492,7 @@ void dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     g_mouseX = x;
     g_mouseY = y;
     auto* target = topmostVisibleWindow(x, y);
-    if (!target) return;
+    if (!target) return false;
 
     uint32_t keyState = 0;
     if (currentButtons & 0x01u) keyState |= 0x0001u;
@@ -502,13 +505,14 @@ void dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
     if (moved && !enqueueWindowMessage(*target, kWmMouseMove, keyState,
                                       packedPoint, x, y))
-        return;
+        return false;
 
     constexpr uint32_t buttonMasks[] = {0x01u, 0x02u, 0x04u};
     constexpr uint32_t downMessages[] = {
         kWmLButtonDown, kWmRButtonDown, kWmMButtonDown};
     constexpr uint32_t upMessages[] = {
         kWmLButtonUp, kWmRButtonUp, kWmMButtonUp};
+    bool buttonDelivered = false;
     for (size_t index = 0; index < 3; ++index) {
         const uint32_t mask = buttonMasks[index];
         if ((previousButtons & mask) == (currentButtons & mask)) continue;
@@ -516,18 +520,38 @@ void dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
             if (g_foregroundWindow != target->handle) {
                 auto* previous = findWindowAny(g_foregroundWindow);
                 if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
-                    return;
+                    return false;
                 g_foregroundWindow = target->handle;
                 if (!enqueueWindowMessage(*target, kWmActivate, 1, 0) ||
-                    !enqueueWindowMessage(*target, kWmSetFocus, 0, 0)) return;
+                    !enqueueWindowMessage(*target, kWmSetFocus, 0, 0)) return false;
             }
             if (!enqueueWindowMessage(*target, downMessages[index], keyState,
-                                      packedPoint, x, y)) return;
+                                      packedPoint, x, y)) return false;
+            buttonDelivered = true;
         } else if (!enqueueWindowMessage(*target, upMessages[index], keyState,
                                          packedPoint, x, y)) {
-            return;
+            return false;
+        } else {
+            buttonDelivered = true;
         }
     }
+    return buttonDelivered;
+}
+
+bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
+    StateLockGuard lock;
+    auto* target = findWindowAny(g_foregroundWindow);
+    if (!target || !target->visible || target->iconic || !event.virtualKey) return false;
+    const bool down = (event.flags & 0x01u) != 0;
+    const uint64_t lParam = (static_cast<uint64_t>(event.sequence & 0xFFu) << 16) |
+                            (down ? 1u : ((1u << 30) | (1u << 31)));
+    if (!enqueueWindowMessage(*target, down ? kWmKeyDown : kWmKeyUp,
+                              event.virtualKey, static_cast<int64_t>(lParam))) return false;
+    if (down && event.character) {
+        if (!enqueueWindowMessage(*target, kWmChar, event.character,
+                                  static_cast<int64_t>(lParam))) return false;
+    }
+    return true;
 }
 
 } // namespace micant::win32k::freestanding

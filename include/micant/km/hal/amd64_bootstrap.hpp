@@ -148,6 +148,8 @@ bool bootstrapSchedulerClockActive() noexcept;
 uintptr_t bootstrapKernelPagingRoot() noexcept;
 // Installs the BSP IRQ12 gate and leaves the IOAPIC route masked.
 bool prepareBootstrapPs2Interrupt(uint32_t& gsi) noexcept;
+bool prepareBootstrapPs2KeyboardInterrupt(uint32_t& gsi) noexcept;
+bool popBootstrapPs2KeyboardByte(uint8_t& byte, bool& lost) noexcept;
 // Synchronize the BSP's Ke IRQL with the local APIC priority classes.
 void setBootstrapClockIrqlMask(uint8_t irql) noexcept;
 uint64_t bootstrapSchedulerClockTicks() noexcept;

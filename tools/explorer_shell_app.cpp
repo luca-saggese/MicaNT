@@ -258,6 +258,7 @@ void openView(View view) noexcept {
             ShowWindow(existing.hwnd, SW_RESTORE);
             SetWindowPos(existing.hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             redrawDesktop();
+            present(existing.hwnd);
             return;
         }
     }
@@ -313,8 +314,8 @@ void openView(View view) noexcept {
         return;
     }
     drawAppWindow(*app);
-    present(app->hwnd);
     redrawDesktop();
+    present(app->hwnd);
 }
 
 void toggleStart() noexcept {
@@ -358,6 +359,14 @@ void updateClock() noexcept {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NCCREATE) return 1;
+    if (hwnd == g.desktop && message == WM_KEYDOWN && wParam == VK_RETURN) {
+        openView(View::MyComputer);
+        return 0;
+    }
+    if (message == WM_KEYDOWN && wParam == VK_ESCAPE && appFromHwnd(hwnd)) {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 0;
+    }
     if (hwnd == g.taskbar && message == WM_LBUTTONUP) {
         const int32_t x = static_cast<int16_t>(static_cast<uint32_t>(lParam) & 0xFFFFU);
         const int32_t y = static_cast<int16_t>((static_cast<uint32_t>(lParam) >> 16) & 0xFFFFU);

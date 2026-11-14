@@ -1675,6 +1675,19 @@ active through the five-second stable-serial window. QMP also confirms display
 scanout, PS/2 movement, and left-click delivery. This accepts E1. The serial
 evidence is `build/explorer-ring3-main-e1-final/serial.log`.
 
+E2 is now accepted by `build/explorer-ring3-main-e2-accepted/serial.log` and
+the accompanying `app-window.ppm` / `interactive.ppm` scanout captures. QMP
+movement and click reach the Win32k hit window; Enter on the desktop creates a
+real Explorer application window through its user-mode window procedure; its
+paint changes the scanout; Escape is queued to the active window and Explorer
+destroys that window before redrawing the desktop. The boot path now enables
+both PS/2 IRQ1 and IRQ12, drains keyboard make/break bytes through the existing
+`kbdclass` driver, and routes key messages into the process-scoped Win32k queue.
+The shell paints the desktop before presenting the newly opened application
+window so its pixels remain visible. This is a single-process software surface
+path; it does not provide protected per-window surfaces or a standalone Ring 3
+compositor.
+
 The protection-finalization hang was caused by a recursively destroyed
 `unique_ptr` journal node per committed image page. `finalizeImageProtections`
 now allocates a contiguous journal sized from the VAD commit charge, validates
@@ -1688,10 +1701,12 @@ unsupported on bare metal for now.
 | Command | Result |
 |---|---|
 | `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal explorer_runtime_boot` | Passed; modular kernel and Explorer dependency closure linked |
-| `python3 qemu.py --headless --timeout 180 --memory-mib 1024` | Passed; real Explorer Ring 3 entry, class registration and first user-mode window observed, then stable for 5 seconds; QMP display/input checks passed |
+| `python3 qemu.py --headless --timeout 180 --memory-mib 1024` | Passed for E1; real Explorer Ring 3 entry, class registration and first user-mode window observed, then stable for 5 seconds |
+| `python3 qemu.py --headless --timeout 180 --memory-mib 1024` (E2) | Passed; QMP mouse click and keyboard Enter/Escape traversed Explorer's window queue, user-mode app paint changed scanout, owner destruction redrew it; serial remained stable for 5 seconds |
 
-E2 remains open: the initial user-mode window is real, but interactive control
-of independent windows, event-queue behavior, focus, movement, resizing and
-close/cleanup have not been accepted. E3 has no standalone Ring 3 compositor.
-E4 has not presented Explorer through the canonical VirtIO driver. E5 has no
-evidence of GPU composition submission and completion. E6 has not been run.
+E2 acceptance covers one interactive Explorer application window and its
+owner-driven close. Multiple independently overlapped/moved/resized windows
+remain E3 acceptance. E3 has no standalone Ring 3 compositor yet, and app
+surfaces are still held in the current Win32k client DLL arena. E4 has not
+presented Explorer through the canonical VirtIO driver. E5 has no evidence of
+GPU composition submission and completion. E6 has not been run.

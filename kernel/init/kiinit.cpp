@@ -22,6 +22,7 @@
 #include "micant/km/core/passive_work.hpp"
 #include "micant/km/drivers/usb/usb_host_baremetal.hpp"
 #include "micant/km/drivers/input/input_device_baremetal.hpp"
+#include "micant/km/drivers/input/kbdclass_contract.hpp"
 #include "micant/km/fsrtl/fat_boot.hpp"
 #include "micant/km/core/syscalls.hpp"
 #include "micant/km/win32k/freestanding.hpp"
@@ -202,6 +203,7 @@ uint32_t g_mouseY = (kHeight - kCursorSize) / 2;
 uint32_t g_mouseButtons{};
 uint32_t g_mouseSequence{};
 bool pollMouseInput(MicaWin32kInputEvent& event) noexcept;
+void pollKeyboardInput() noexcept;
 micant::ke::KThread g_bootContextThread{};
 micant::ke::KThread g_firstContextThread{};
 micant::ke::KThread g_secondContextThread{};
@@ -266,6 +268,7 @@ Ps2ByteRing g_ps2MouseRing{};
 Ps2ByteRing g_ps2KeyboardRing{};
 bool g_ps2InterruptMode{};
 uint8_t g_ps2Configuration{};
+bool g_ps2KeyboardInterruptActive{};
 
 void pushPs2Byte(Ps2ByteRing& ring, uint8_t data, bool fromInterrupt) noexcept {
     const uint8_t next = static_cast<uint8_t>((ring.write + 1) & 127);
@@ -2456,6 +2459,7 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
 // for the lifetime of the initial interactive session.
 micant::Handle g_explorerProcessHandle{};
 micant::Handle g_explorerProcessId{};
+bool g_explorerApplicationWindowLive{};
 
 bool launchExplorerProcess() noexcept {
     using namespace micant;
@@ -3767,10 +3771,68 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         // objects use owner zero and are explicitly torn down by the probe;
         // every process-backed request is keyed by its allocated Ps ID.
         if (request.operation == MICANT_WIN32K_OP_PUMP_INPUT) {
+            bool keyboardQueued = false;
+            static bool explorerMouseClickObserved = false;
+            pollKeyboardInput();
             MicaWin32kInputEvent event{};
             if (pollMouseInput(event)) {
-                win32k::freestanding::dispatchMouseInput(event);
+                const bool clickQueued = win32k::freestanding::dispatchMouseInput(event);
+                auto* inputProcess = ke::KeGetCurrentProcess();
+                if (clickQueued && !explorerMouseClickObserved && inputProcess &&
+                    inputProcess->processId() == g_explorerProcessId) {
+                    explorerMouseClickObserved = true;
+                    serialWrite("[MicaNT Explorer] Mouse click queued to the hit window\r\n");
+                }
                 request.result = 1;
+            }
+            for (unsigned count = 0; count < 32; ++count) {
+                km::hid::KEYBOARD_INPUT_DATA packet{};
+                if (!km::hid::KbdClassPopInputData(packet)) break;
+                uint16_t virtualKey = 0;
+                uint8_t character = 0;
+                switch (packet.MakeCode) {
+                    case 0x01: virtualKey = 0x1B; break;
+                    case 0x0E: virtualKey = 0x08; break;
+                    case 0x0F: virtualKey = 0x09; break;
+                    case 0x1C: virtualKey = 0x0D; break;
+                    case 0x1D: virtualKey = 0x11; break;
+                    case 0x2A: case 0x36: virtualKey = 0x10; break;
+                    case 0x38: virtualKey = 0x12; break;
+                    case 0x39: virtualKey = 0x20; character = ' '; break;
+                    default:
+                        if (packet.MakeCode >= 0x10 && packet.MakeCode <= 0x19) {
+                            constexpr char row[] = "qwertyuiop";
+                            character = static_cast<uint8_t>(row[packet.MakeCode - 0x10]);
+                        } else if (packet.MakeCode >= 0x1E && packet.MakeCode <= 0x26) {
+                            constexpr char row[] = "asdfghjkl";
+                            character = static_cast<uint8_t>(row[packet.MakeCode - 0x1E]);
+                        } else if (packet.MakeCode >= 0x2C && packet.MakeCode <= 0x32) {
+                            constexpr char row[] = "zxcvbnm";
+                            character = static_cast<uint8_t>(row[packet.MakeCode - 0x2C]);
+                        } else if (packet.MakeCode >= 0x02 && packet.MakeCode <= 0x0A) {
+                            character = static_cast<uint8_t>('1' + packet.MakeCode - 0x02);
+                        } else if (packet.MakeCode == 0x0B) {
+                            character = '0';
+                        }
+                        if (character) virtualKey = character >= 'a' && character <= 'z'
+                            ? static_cast<uint16_t>(character - 'a' + 'A') : character;
+                        break;
+                }
+                if (!virtualKey) continue;
+                MicaWin32kKeyboardEvent key{};
+                key.virtualKey = virtualKey;
+                key.character = (packet.Flags & km::hid::KEY_BREAK) ? 0 : character;
+                key.flags = (packet.Flags & km::hid::KEY_BREAK) ? 0 : 1;
+                key.sequence = packet.MakeCode;
+                keyboardQueued |= win32k::freestanding::dispatchKeyboardInput(key);
+                request.result = 1;
+            }
+            static bool explorerKeyboardInputObserved = false;
+            auto* inputProcess = ke::KeGetCurrentProcess();
+            if (keyboardQueued && !explorerKeyboardInputObserved && inputProcess &&
+                inputProcess->processId() == g_explorerProcessId) {
+                explorerKeyboardInputObserved = true;
+                serialWrite("[MicaNT Explorer] Keyboard input queued to the active window\r\n");
             }
             return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
                                                &request, sizeof(request)));
@@ -3781,7 +3843,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const NtStatus resultStatus = ex::ExSafeCopyToUser(
             reinterpret_cast<void*>(first), &request, sizeof(request));
         static bool explorerEntryObserved = false;
-        static bool explorerWindowObserved = false;
+        static uint32_t explorerWindowCreateCount = 0;
         const auto* currentProcess = ke::KeGetCurrentProcess();
         const bool fromExplorer = g_explorerProcessId && currentProcess &&
             currentProcess->processId() == g_explorerProcessId;
@@ -3791,9 +3853,20 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             serialWrite("[MicaNT Explorer] Ring 3 entry reached; Win32k class registered\r\n");
         }
         if (fromExplorer && resultStatus == NtStatus::Success &&
-            request.operation == MICANT_WIN32K_OP_CREATE_WINDOW && !explorerWindowObserved) {
-            explorerWindowObserved = true;
-            serialWrite("[MicaNT Explorer] First user-mode window created\r\n");
+            request.operation == MICANT_WIN32K_OP_CREATE_WINDOW) {
+            ++explorerWindowCreateCount;
+            if (explorerWindowCreateCount == 1)
+                serialWrite("[MicaNT Explorer] First user-mode window created\r\n");
+            else if (explorerWindowCreateCount == 4) {
+                g_explorerApplicationWindowLive = true;
+                serialWrite("[MicaNT Explorer] First application window created\r\n");
+            }
+        }
+        if (fromExplorer && resultStatus == NtStatus::Success &&
+            request.operation == MICANT_WIN32K_OP_DESTROY_WINDOW &&
+            g_explorerApplicationWindowLive) {
+            g_explorerApplicationWindowLive = false;
+            serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
         }
         return status(resultStatus);
     }
@@ -3882,9 +3955,35 @@ bool startMouseInterrupt() noexcept {
         if (!waitForControllerInput())
             stopWithError("[MicaNT Input] i8042 rollback timed out\r\n");
         writePort(0x60, oldConfiguration);
+        if (!g_ps2KeyboardInterruptActive)
+            micant::hal::amd64::setBootstrapPs2InterruptMode(false);
+        return false;
+    }
+    return true;
+}
+
+bool startKeyboardInterrupt() noexcept {
+    uint32_t gsi{};
+    if (!micant::hal::amd64::prepareBootstrapPs2KeyboardInterrupt(gsi)) return false;
+    const uint8_t oldConfiguration = g_ps2Configuration;
+    if (!waitForControllerInput()) return false;
+    writePort(0x64, 0x60);
+    if (!waitForControllerInput())
+        stopWithError("[MicaNT Input] i8042 keyboard configuration timed out\r\n");
+    micant::hal::amd64::setBootstrapPs2InterruptMode(true);
+    writePort(0x60, oldConfiguration | 0x01u);
+    if (!micant::hal::amd64::unmaskBootstrapIoApicRoute(gsi, 0x20)) {
+        if (!waitForControllerInput())
+            stopWithError("[MicaNT Input] i8042 keyboard rollback timed out\r\n");
+        writePort(0x64, 0x60);
+        if (!waitForControllerInput())
+            stopWithError("[MicaNT Input] i8042 keyboard rollback timed out\r\n");
+        writePort(0x60, oldConfiguration);
         micant::hal::amd64::setBootstrapPs2InterruptMode(false);
         return false;
     }
+    g_ps2Configuration = static_cast<uint8_t>(oldConfiguration | 0x01u);
+    g_ps2KeyboardInterruptActive = true;
     return true;
 }
 
@@ -3947,6 +4046,40 @@ bool pollMouseInput(MicaWin32kInputEvent& event) noexcept {
         return true;
     }
     return false;
+}
+
+void pollKeyboardInput() noexcept {
+    static bool extended = false;
+    static bool pauseSequence = false;
+    for (unsigned count = 0; count < 64; ++count) {
+        uint8_t scancode{};
+        bool lost{};
+        if (!micant::hal::amd64::popBootstrapPs2KeyboardByte(scancode, lost)) return;
+        if (lost) {
+            extended = false;
+            pauseSequence = false;
+        }
+        if (pauseSequence) {
+            pauseSequence = false;
+            continue;
+        }
+        if (scancode == 0xE1) {
+            pauseSequence = true;
+            extended = false;
+            continue;
+        }
+        if (scancode == 0xE0) {
+            extended = true;
+            continue;
+        }
+        micant::km::hid::KEYBOARD_INPUT_DATA packet{};
+        packet.MakeCode = static_cast<uint16_t>(scancode & 0x7Fu);
+        packet.Flags = (scancode & 0x80u) ? micant::km::hid::KEY_BREAK : micant::km::hid::KEY_MAKE;
+        if (extended) packet.Flags |= micant::km::hid::KEY_E0;
+        extended = false;
+        uint32_t consumed{};
+        micant::km::hid::KeyboardClassServiceCallback(nullptr, &packet, &packet + 1, &consumed);
+    }
 }
 
 [[noreturn]] void runMouseShell(bool clockActive) noexcept {
@@ -4417,6 +4550,8 @@ extern "C" micant::NtStatus KiSystemStartup(
     const auto usbEnumeration = micant::usb::baremetal::startEnumeration();
     if (usbEnumeration != micant::NtStatus::Success)
         serialWrite("[MicaNT Io] USB host enumeration did not start\r\n");
+    if (clockActive && startKeyboardInterrupt())
+        serialWrite("[MicaNT Input] PS/2 keyboard interrupt routing active\r\n");
     if (clockActive && startMouseInterrupt())
         serialWrite("[MicaNT Input] PS/2 mouse interrupt routing active\r\n");
     if (!clockActive) serialWrite("[MicaNT Ke] Runtime scheduler clock unavailable\r\n");

@@ -2362,6 +2362,24 @@ bool prepareBootstrapPs2Interrupt(uint32_t& gsi) noexcept {
     return true;
 }
 
+bool prepareBootstrapPs2KeyboardInterrupt(uint32_t& gsi) noexcept {
+    if (!g_schedulerClockActive || !g_timerApic.available()) return false;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0" : "=r"(flags));
+    if (flags & (uint64_t{1} << 9)) return false;
+    bool low{}, level{};
+    uint32_t resolved{};
+    if (!resolveBootstrapIsaInterrupt(1, resolved, low, level)) return false;
+    const uint32_t rawId = g_timerApic.read(0x20 / 4);
+    const uint32_t id = (cpu::cpuRdmsr(cpu::MSR_IA32_APIC_BASE) & (1u << 10)) ? rawId : rawId >> 24;
+    if (id > 255 || !prepareBootstrapIoApicRoute(resolved, 0x20, static_cast<uint8_t>(id), low, level)) return false;
+    const uint64_t handler = reinterpret_cast<uint64_t>(MicantBootstrapPs2Interrupt);
+    g_idt[0x20] = InterruptGate{static_cast<uint16_t>(handler), cpu::SELECTOR_KCODE64, 0, 0x8e,
+        static_cast<uint16_t>(handler >> 16), static_cast<uint32_t>(handler >> 32), 0};
+    gsi = resolved;
+    return true;
+}
+
 bool bootstrapSyscallGsActive() noexcept {
     return g_dispatch && cpu::cpuRdmsr(cpu::MSR_GS_BASE) == reinterpret_cast<uintptr_t>(&g_syscallCpu);
 }
