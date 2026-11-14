@@ -437,8 +437,13 @@ static int g_FailedTests = 0;
 #include "suites/modern_suites.hpp"
 #include "suites/hardware_suites.hpp"
 #include "suites/server_storage_suites.hpp"
+#include "suites/icon_suite.hpp"
 
 int main(int argc, char* argv[]) {
+    if (argc > 1 && std::string(argv[1]) == "--icon") {
+        RUN_TEST(Test_IcoDecoder_PngDibAndMalformedInputs);
+        return (g_FailedTests == 0) ? 0 : 1;
+    }
     if (argc > 1 && std::string(argv[1]) == "--apps") {
         std::cout << "========================================================================\n";
         std::cout << "   MicaNT Retail Application Subsystems Suite (Suites 215 - 228)\n";
