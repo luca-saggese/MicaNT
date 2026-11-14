@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/um/subsystems/graphics/font_catalog.hpp"
@@ -135,6 +136,9 @@ public:
         release(primaryBytes_);
         release(fallbackBytes_);
         release(workspace_);
+        cacheStorage_ = nullptr;
+        cacheNext_ = 0;
+        for (auto& entry : glyphCache_) entry = {};
         workspaceSize_ = 0;
         primary_ = {};
         fallback_ = {};
@@ -236,6 +240,16 @@ private:
                 if (!fallback_.parse(fallbackBytes_, fallbackLength)) release(fallbackBytes_);
             }
             workspaceSize_ = truetype::FaceView::rasterWorkspaceBytes();
+            const size_t cacheBytes = GlyphCacheCapacity * GlyphMaskSize * GlyphMaskSize;
+            if (workspaceSize_ > SIZE_MAX - cacheBytes) {
+                release(primaryBytes_);
+                release(fallbackBytes_);
+                primary_ = {};
+                fallback_ = {};
+                workspaceSize_ = 0;
+                return false;
+            }
+            workspaceSize_ += cacheBytes;
             if (native_nt::NtAllocateVirtualMemory(static_cast<Handle>(-1), &workspace_, 0,
                     &workspaceSize_, 0x3000, 0x04) != NtStatus::Success || !workspace_) {
                 release(primaryBytes_);
@@ -245,12 +259,22 @@ private:
                 fallback_ = {};
                 return false;
             }
+            cacheStorage_ = static_cast<uint8_t*>(workspace_) +
+                truetype::FaceView::rasterWorkspaceBytes();
+            cacheNext_ = 0;
+            for (auto& entry : glyphCache_) entry = {};
         }
         initialized_ = true;
         return true;
     }
     static constexpr uint32_t GlyphMaskSize = 64;
+    static constexpr size_t GlyphCacheCapacity = 32;
     static constexpr uint32_t MaxFontBytes = 16 * 1024 * 1024;
+    struct GlyphCacheEntry {
+        const truetype::FaceView* face{};
+        uint16_t glyph{};
+        bool valid{};
+    };
 
     [[nodiscard]] static int32_t scale(int32_t value, uint32_t pxEm, uint32_t units) noexcept {
         if (!units) return 0;
@@ -377,9 +401,24 @@ private:
         if (!outlineSize) return true;
         int16_t xMin{}, yMin{}, xMax{}, yMax{};
         if (!face.glyphBounds(glyph, xMin, yMin, xMax, yMax)) return false;
-        for (size_t i = 0; i < GlyphMaskSize * GlyphMaskSize; ++i) mask[i] = 0;
-        if (!face.rasterizeSimpleGlyph(glyph, pxEm, mask, GlyphMaskSize,
-                GlyphMaskSize, GlyphMaskSize, workspace_, workspaceSize_)) return false;
+        const uint8_t* coverage = nullptr;
+        for (size_t i = 0; i < GlyphCacheCapacity; ++i) {
+            const auto& cached = glyphCache_[i];
+            if (cached.valid && cached.face == &face && cached.glyph == glyph) {
+                coverage = cacheStorage_ + i * GlyphMaskSize * GlyphMaskSize;
+                break;
+            }
+        }
+        if (!coverage) {
+            std::memset(mask, 0, GlyphMaskSize * GlyphMaskSize);
+            if (!face.rasterizeSimpleGlyph(glyph, pxEm, mask, GlyphMaskSize,
+                    GlyphMaskSize, GlyphMaskSize, workspace_, workspaceSize_)) return false;
+            const size_t slot = cacheNext_++ % GlyphCacheCapacity;
+            auto* cachedMask = cacheStorage_ + slot * GlyphMaskSize * GlyphMaskSize;
+            std::memcpy(cachedMask, mask, GlyphMaskSize * GlyphMaskSize);
+            glyphCache_[slot] = {&face, glyph, true};
+            coverage = cachedMask;
+        }
         const int32_t left = pen + scale(xMin, pxEm, face.metrics().unitsPerEm);
         const int32_t top = baseline - scale(yMax, pxEm, face.metrics().unitsPerEm);
         for (uint32_t y = 0; y < GlyphMaskSize; ++y) {
@@ -388,7 +427,7 @@ private:
             for (uint32_t x = 0; x < GlyphMaskSize; ++x) {
                 const int32_t dx = left + static_cast<int32_t>(x);
                 if (dx < 0 || dx >= static_cast<int32_t>(width)) continue;
-                const uint32_t alpha = mask[y * GlyphMaskSize + x];
+                const uint32_t alpha = coverage[y * GlyphMaskSize + x];
                 if (!alpha) continue;
                 uint32_t& target = pixels[static_cast<size_t>(dy) * width + static_cast<uint32_t>(dx)];
                 const uint32_t inverse = 255 - alpha;
@@ -435,6 +474,9 @@ private:
     void* fallbackBytes_{};
     size_t workspaceSize_{};
     void* workspace_{};
+    uint8_t* cacheStorage_{};
+    size_t cacheNext_{};
+    GlyphCacheEntry glyphCache_[GlyphCacheCapacity]{};
     truetype::FaceView primary_{};
     truetype::FaceView fallback_{};
     bool initialized_{};
