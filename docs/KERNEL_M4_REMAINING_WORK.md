@@ -133,7 +133,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   rimuova la sospensione: il wait a timeout zero successivo resta in timeout.
   La nuova prova CPL3 termina inoltre un thread sospeso con un APC pendente e
   controlla stato di uscita, wait segnalato, mancata esecuzione dell'APC e
-  chiusura dell'handle.
+  chiusura dell'handle. La fixture Ring 3 crea anche un processo clone con
+  `NtCreateProcessEx`, poi crea, riprende, attende e chiude via syscall un thread
+  nel child usando il suo handle dalla handle table del creator.
   La fixture file-backed avvia anche un thread dal vero entry point PE, ne
   attende l'uscita via syscall e chiude l'handle nel processo proprietario.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
