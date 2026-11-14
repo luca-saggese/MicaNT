@@ -333,8 +333,10 @@ void probeSystemFontFile() noexcept {
             static_cast<micant::Handle>(-1), &workspace, 0, &workspaceSize, 0x3000, 0x04) ==
                 micant::NtStatus::Success && workspace;
         constexpr char16_t sample[] = u"MicaNT — Città, perché?";
-        constexpr uint32_t pixelsPerEm = 20, baseline = 34;
+        constexpr uint32_t pixelsPerEm = micant::um::graphics::truetype::pixelsFromPoints(9, 96);
+        constexpr uint32_t baseline = 30;
         uint32_t pen = 0;
+        uint16_t previousGlyph = 0;
         uint8_t glyphMask[48 * 48]{};
         const auto paintGlyph = [&](uint16_t glyph, int32_t glyphPen, int32_t glyphBaseline) noexcept {
             int16_t xMin{}, yMin{}, xMax{}, yMax{};
@@ -387,6 +389,11 @@ void probeSystemFontFile() noexcept {
             }
             uint16_t glyph = face.glyphIndex(baseScalar);
             micant::um::graphics::truetype::GlyphMetrics gm{};
+            if (previousGlyph) {
+                const int32_t kern = static_cast<int32_t>(face.kerning(previousGlyph, glyph)) * pixelsPerEm /
+                                     metrics.unitsPerEm;
+                pen = kern < 0 && static_cast<uint32_t>(-kern) > pen ? 0 : static_cast<uint32_t>(pen + kern);
+            }
             if (!glyph || !face.glyphMetrics(glyph, gm) || !paintGlyph(glyph, pen, baseline)) {
                 rasterized = false; break;
             }
@@ -405,6 +412,7 @@ void probeSystemFontFile() noexcept {
             }
             pen += (static_cast<uint32_t>(gm.advanceWidth) * pixelsPerEm + metrics.unitsPerEm / 2) /
                    metrics.unitsPerEm;
+            previousGlyph = glyph;
         }
         if (workspaceReady) {
             size_t releaseSize = 0;

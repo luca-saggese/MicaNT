@@ -24,6 +24,12 @@ struct GlyphMetrics {
     int16_t leftSideBearing{};
 };
 
+[[nodiscard]] constexpr uint32_t pixelsFromPoints(uint32_t points, uint32_t dpi) noexcept {
+    if (!points || !dpi) return 0;
+    const uint64_t pixels = (static_cast<uint64_t>(points) * dpi + 36) / 72;
+    return pixels > 512 ? 512 : static_cast<uint32_t>(pixels);
+}
+
 class FaceView {
 public:
     [[nodiscard]] bool parse(const void* bytes, size_t length) noexcept {
@@ -61,6 +67,7 @@ public:
         const Table* loca = find(TagLoca);
         const Table* glyf = find(TagGlyf);
         const Table* os2 = find(TagOs2);
+        const Table* kern = find(TagKern);
         if (!head || head->length < 54 || !maxp || maxp->length < 6 ||
             !hhea || hhea->length < 36 || !hmtx || !cmap || !loca || !glyf)
             return fail();
@@ -93,6 +100,8 @@ public:
         locaOffset_ = loca->offset;
         glyfOffset_ = glyf->offset;
         glyfLength_ = glyf->length;
+        kernOffset_ = kern ? kern->offset : 0;
+        kernLength_ = kern ? kern->length : 0;
         if (!parseCmap(*cmap)) return fail();
         valid_ = true;
         return true;
@@ -100,6 +109,34 @@ public:
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }
     [[nodiscard]] const FaceMetrics& metrics() const noexcept { return metrics_; }
+
+    [[nodiscard]] int16_t kerning(uint16_t leftGlyph, uint16_t rightGlyph) const noexcept {
+        if (!valid_ || !kernOffset_ || kernLength_ < 4 || be16(kernOffset_) != 0) return 0;
+        const uint16_t subtables = be16(kernOffset_ + 2);
+        size_t cursor = kernOffset_ + 4;
+        const size_t end = static_cast<size_t>(kernOffset_) + kernLength_;
+        for (uint16_t table = 0; table < subtables; ++table) {
+            if (cursor > end || end - cursor < 6) return 0;
+            const uint16_t version = be16(cursor), subLength = be16(cursor + 2), coverage = be16(cursor + 4);
+            if (subLength < 6 || subLength > end - cursor) return 0;
+            if (version == 0 && (coverage & 1) && (coverage >> 8) == 0 && subLength >= 14) {
+                const uint16_t pairs = be16(cursor + 6);
+                if (static_cast<uint64_t>(pairs) * 6 + 14 > subLength) return 0;
+                const uint32_t key = (static_cast<uint32_t>(leftGlyph) << 16) | rightGlyph;
+                uint32_t low = 0, high = pairs;
+                while (low < high) {
+                    const uint32_t mid = low + (high - low) / 2;
+                    const size_t pair = cursor + 14 + static_cast<size_t>(mid) * 6;
+                    const uint32_t current = (static_cast<uint32_t>(be16(pair)) << 16) | be16(pair + 2);
+                    if (key < current) high = mid;
+                    else if (key > current) low = mid + 1;
+                    else return bes16(pair + 4);
+                }
+            }
+            cursor += subLength;
+        }
+        return 0;
+    }
 
     [[nodiscard]] uint16_t glyphIndex(uint32_t scalar) const noexcept {
         if (!valid_ || scalar > 0x10FFFF || (scalar >= 0xD800 && scalar <= 0xDFFF)) return 0;
@@ -356,6 +393,7 @@ private:
     static constexpr uint32_t TagHhea = 0x68686561, TagHmtx = 0x686D7478;
     static constexpr uint32_t TagCmap = 0x636D6170, TagLoca = 0x6C6F6361;
     static constexpr uint32_t TagGlyf = 0x676C7966, TagOs2 = 0x4F532F32;
+    static constexpr uint32_t TagKern = 0x6B65726E;
     struct Table { uint32_t tag{}, offset{}, length{}; };
     struct Edge { float x0, y0, x1, y1; };
     struct RasterWorkspace {
@@ -433,6 +471,7 @@ private:
     uint16_t tableCount_{};
     FaceMetrics metrics_{};
     uint32_t hmtxOffset_{}, locaOffset_{}, glyfOffset_{}, glyfLength_{}, cmapOffset_{}, cmapLength_{};
+    uint32_t kernOffset_{}, kernLength_{};
     uint16_t cmapFormat_{}, cmapSegments_{}, cmapGroups_{};
     int16_t locaFormat_{};
     bool valid_{};
