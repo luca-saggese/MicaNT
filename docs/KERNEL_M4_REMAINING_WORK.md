@@ -75,8 +75,8 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   creazione di un evento `OBJ_INHERIT`, la clonazione con flag di inheritance,
   la chiusura dell'handle sorgente nel parent e il suo uso da un thread child;
   un secondo evento non inheritable viene rifiutato nel figlio e resta non
-  segnalato. Restano i casi CPL3 `DUPLICATE_CLOSE_SOURCE` e copyout fallito dopo
-  una probe valida. Il percorso kernel M4 verifica in
+  segnalato. Restano il copyout fallito dopo una probe valida e il rollback
+  QEMU di tutte le fasi d'inheritance. Il percorso kernel M4 verifica in
   QEMU `NtCreateEvent` con `OBJ_INHERIT`, `NtCreateProcessEx` con inheritance,
   chiusura dell'handle sorgente e wait sul valore-handle dopo attach al figlio.
   `NtCreateEvent` registra l'attributo nella handle table. Resta aperta la prova
