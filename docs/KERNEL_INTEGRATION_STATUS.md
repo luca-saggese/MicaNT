@@ -1769,6 +1769,11 @@ components remain unsupported. Hint instructions are bounds-checked but not
 executed. Runtime font registration, persistent settings and DirectWrite
 face/collection behavior remain open.
 
+The inline GDI compatibility declarations for runtime font registration now
+return failure (zero/null handle and zero font count) instead of claiming that
+unregistered fonts were installed. This preserves the current fixed system
+font catalog contract; registration and removal are still unsupported.
+
 QEMU's Explorer input verification now waits for the actual scanout pixels to
 change after the kernel window-creation event. That event can precede the
 user-mode paint, so the test polls for up to five seconds before treating an
@@ -1778,3 +1783,4 @@ unchanged frame as a failure.
 |---|---|
 | `python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-font-f2-build --cxx build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ --diagnostics-dir /private/tmp/micant-f5-glyph-cache` | Passed; modular kernel and Explorer dependency closure linked, TTF metrics, two-face switch, four-style enumeration and cached repeated glyph rendering probes succeeded; app DIBs rendered and composed, overlapping/move/resize/repeated cleanup checks passed, and serial remained stable for five seconds |
 | `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` (temporary verification tree `/private/tmp/micant-font-f2-verify`) | Passed; current composite outline parser/rasterizer compiled and linked into `ntoskrnl_core_baremetal` dependency closure; Explorer input, scanout and cleanup passed, serial remained stable for five seconds |
+| `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` (temporary verification tree `/private/tmp/micant-font-f2-verify`) | Passed after explicit font-registration failure semantics; user-mode boundary checks passed, Explorer input/scanout/cleanup passed and serial remained stable for five seconds |

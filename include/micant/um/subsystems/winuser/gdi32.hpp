@@ -1861,21 +1861,34 @@ inline uint32_t WINAPI GetOutlineTextMetricsW(HDC /*hdc*/, uint32_t /*cjCopy*/, 
     return 64;
 }
 
-inline int WINAPI AddFontResourceExW(const wchar_t* /*name*/, DWORD /*fl*/, void* /*res*/) noexcept {
-    return 1;
+inline int WINAPI AddFontResourceExW(const wchar_t* name, DWORD flags, void* reserved) noexcept {
+    // Runtime registration is not implemented by the fixed system-font
+    // catalog yet. Do not report success for a face that cannot be selected.
+    (void)name;
+    (void)flags;
+    (void)reserved;
+    return 0;
 }
 
-inline BOOL WINAPI RemoveFontResourceExW(const wchar_t* /*name*/, DWORD /*fl*/, void* /*res*/) noexcept {
-    return TRUE;
+inline BOOL WINAPI RemoveFontResourceExW(const wchar_t* name, DWORD flags, void* reserved) noexcept {
+    (void)name;
+    (void)flags;
+    (void)reserved;
+    return FALSE;
 }
 
-inline void* WINAPI AddFontMemResourceEx(void* /*pFileView*/, DWORD /*cjSize*/, void* /*pvResrved*/, DWORD* pNumFonts) noexcept {
-    if (pNumFonts) *pNumFonts = 1;
-    return reinterpret_cast<void*>(0xB001);
+inline void* WINAPI AddFontMemResourceEx(void* fileView, DWORD size, void* reserved,
+                                         DWORD* fontCount) noexcept {
+    (void)fileView;
+    (void)size;
+    (void)reserved;
+    if (fontCount) *fontCount = 0;
+    return nullptr;
 }
 
-inline BOOL WINAPI RemoveFontMemResourceEx(void* /*h*/) noexcept {
-    return TRUE;
+inline BOOL WINAPI RemoveFontMemResourceEx(void* handle) noexcept {
+    (void)handle;
+    return FALSE;
 }
 
 inline DWORD WINAPI GetFontData(HDC /*hdc*/, DWORD /*dwTable*/, DWORD /*dwOffset*/, void* /*pvBuffer*/, DWORD /*cjBuffer*/) noexcept {
