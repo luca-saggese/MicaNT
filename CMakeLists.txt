@@ -424,6 +424,20 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
+    # The compositor is an independent, import-free Ring 3 image. Its shared
+    # section views are installed by the kernel before either process starts.
+    add_executable(compositor_boot EXCLUDE_FROM_ALL tools/compositor_app.cpp)
+    target_compile_options(compositor_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(compositor_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+    )
+    set_target_properties(compositor_boot PROPERTIES
+        OUTPUT_NAME "compositor"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
     # Self-contained image for the file-backed SEC_IMAGE verification. It has
     # no imports and no DllMain, so the Ps loader can map it as a main image.
     add_executable(file_image_boot EXCLUDE_FROM_ALL tools/file_image_app.cpp)
@@ -716,7 +730,7 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot
+        DEPENDS explorer_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)

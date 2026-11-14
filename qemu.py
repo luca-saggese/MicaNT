@@ -353,6 +353,7 @@ def main() -> int:
                 "https_probe_boot",
                 "file_image_boot",
                 "explorer_runtime_boot",
+                "compositor_boot",
             ]
         )
         write_manifest(

@@ -1,4 +1,5 @@
 #include "micant/km/win32k/freestanding.hpp"
+#include "micant/shared/compositor_surface.h"
 #include <atomic>
 
 namespace micant::win32k::freestanding {
@@ -9,6 +10,8 @@ constexpr size_t kClassCapacity = 32;
 constexpr size_t kMessageCapacity = 256;
 constexpr uint64_t kHandleTag = 0x4D4E570000000000ULL;
 constexpr uint32_t kWmQuit = 0x0012;
+constexpr uint32_t kWmMove = 0x0003;
+constexpr uint32_t kWmSize = 0x0005;
 constexpr uint32_t kWmNcCreate = 0x0081;
 constexpr uint32_t kWmActivate = 0x0006;
 constexpr uint32_t kWmSetFocus = 0x0007;
@@ -90,6 +93,8 @@ uint64_t g_foregroundWindow{};
 uint64_t g_nextZOrder{};
 int32_t g_mouseX{-1}, g_mouseY{-1};
 uint32_t g_mouseButtons{};
+MicaCompositorMetadataStore* g_compositorStore{};
+void (*g_compositorPublishCallback)() noexcept{};
 
 bool equalText(const uint16_t* first, const uint16_t* second) noexcept {
     for (size_t index = 0; index < MICANT_WIN32K_TEXT_CAPACITY; ++index) {
@@ -176,6 +181,15 @@ Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
         const int64_t localY = static_cast<int64_t>(y) - window.y;
         if (!window.active || !window.visible || window.iconic || localX < 0 ||
             localY < 0 || localX >= window.width || localY >= window.height) continue;
+        if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
+    }
+    return topmost;
+}
+
+Window* topmostVisibleWindow() noexcept {
+    Window* topmost{};
+    for (auto& window : g_windows) {
+        if (!window.active || !window.visible || window.iconic) continue;
         if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
     }
     return topmost;
@@ -290,11 +304,35 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return registerClass(request, ownerProcessId);
         case MICANT_WIN32K_OP_CREATE_WINDOW:
             return createWindow(request, ownerProcessId);
+        case MICANT_WIN32K_OP_GET_WINDOW_SURFACE: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            const size_t slot = static_cast<size_t>(window - g_windows);
+            if (slot >= MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                return NtStatus::InsufficientResources;
+            request.result = static_cast<uint64_t>(slot) + 1;
+            request.rect = {0, 0, window->width, window->height};
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_PRESENT_WINDOW: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            request.result = 1;
+            return NtStatus::Success;
+        }
         case MICANT_WIN32K_OP_DESTROY_WINDOW: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
+            const bool wasForeground = g_foregroundWindow == window->handle;
             window->active = false;
-            if (g_foregroundWindow == window->handle) g_foregroundWindow = 0;
+            if (wasForeground) {
+                g_foregroundWindow = 0;
+                if (auto* next = topmostVisibleWindow()) {
+                    g_foregroundWindow = next->handle;
+                    (void)enqueueWindowMessage(*next, kWmActivate, 1, 0);
+                    (void)enqueueWindowMessage(*next, kWmSetFocus, 0, 0);
+                }
+            }
             request.result = 1;
             return NtStatus::Success;
         }
@@ -316,6 +354,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_SET_WINDOW_POS: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
+            const int32_t oldX = window->x, oldY = window->y;
+            const int32_t oldWidth = window->width, oldHeight = window->height;
             const uint32_t flags = static_cast<uint32_t>(request.args[5]);
             int64_t x = window->x;
             int64_t y = window->y;
@@ -340,6 +380,20 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (request.args[6] == 0) {
                 window->zOrder = nextZOrder();
                 g_foregroundWindow = window->handle;
+            }
+            if (window->x != oldX || window->y != oldY) {
+                const uint32_t packedPosition =
+                    (static_cast<uint32_t>(window->y) & 0xFFFFu) << 16 |
+                    (static_cast<uint32_t>(window->x) & 0xFFFFu);
+                (void)enqueueWindowMessage(*window, kWmMove, 0,
+                    static_cast<int64_t>(packedPosition));
+            }
+            if (window->width != oldWidth || window->height != oldHeight) {
+                const uint32_t packedSize =
+                    (static_cast<uint32_t>(window->height) & 0xFFFFu) << 16 |
+                    (static_cast<uint32_t>(window->width) & 0xFFFFu);
+                (void)enqueueWindowMessage(*window, kWmSize, 0,
+                    static_cast<int64_t>(packedSize));
             }
             request.result = 1;
             return NtStatus::Success;
@@ -469,16 +523,20 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
 
 void releaseProcess(uint64_t ownerProcessId) noexcept {
     if (!ownerProcessId) return;
-    StateLockGuard lock;
-    for (auto& message : g_messages)
-        if (message.active && message.ownerProcessId == ownerProcessId) message.active = false;
-    for (auto& window : g_windows) {
-        if (!window.active || window.ownerProcessId != ownerProcessId) continue;
-        if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
-        window = {};
+    auto publish = g_compositorPublishCallback;
+    {
+        StateLockGuard lock;
+        for (auto& message : g_messages)
+            if (message.active && message.ownerProcessId == ownerProcessId) message.active = false;
+        for (auto& window : g_windows) {
+            if (!window.active || window.ownerProcessId != ownerProcessId) continue;
+            if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
+            window = {};
+        }
+        for (auto& windowClass : g_classes)
+            if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
     }
-    for (auto& windowClass : g_classes)
-        if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
+    if (publish) publish();
 }
 
 bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
@@ -517,6 +575,7 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         const uint32_t mask = buttonMasks[index];
         if ((previousButtons & mask) == (currentButtons & mask)) continue;
         if (currentButtons & mask) {
+            target->zOrder = nextZOrder();
             if (g_foregroundWindow != target->handle) {
                 auto* previous = findWindowAny(g_foregroundWindow);
                 if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
@@ -552,6 +611,42 @@ bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
                                   static_cast<int64_t>(lParam))) return false;
     }
     return true;
+}
+
+void bindCompositorStore(MicaCompositorMetadataStore* store,
+                         void (*publishCallback)() noexcept) noexcept {
+    StateLockGuard lock;
+    g_compositorStore = store;
+    g_compositorPublishCallback = publishCallback;
+}
+
+void publishCompositorSurfaces() noexcept {
+    StateLockGuard lock;
+    auto* store = g_compositorStore;
+    if (!store) return;
+    __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
+    for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
+        auto& info = store->surfaces[index];
+        info = {};
+        if (index >= kWindowCapacity) continue;
+        const auto& window = g_windows[index];
+        if (!window.active) continue;
+        info.window = window.handle;
+        info.ownerProcessId = window.ownerProcessId;
+        info.x = window.x;
+        info.y = window.y;
+        info.width = static_cast<uint32_t>(window.width);
+        info.height = static_cast<uint32_t>(window.height);
+        info.pitch = MICANT_COMPOSITOR_SCREEN_WIDTH;
+        info.zOrder = static_cast<uint32_t>(window.zOrder);
+        info.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
+            (window.visible ? MICANT_COMPOSITOR_SURFACE_VISIBLE : 0u) |
+            (window.iconic ? MICANT_COMPOSITOR_SURFACE_ICONIC : 0u);
+        info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
+        info.dirtyRight = window.width;
+        info.dirtyBottom = window.height;
+    }
+    __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
 }
 
 } // namespace micant::win32k::freestanding

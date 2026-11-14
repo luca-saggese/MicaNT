@@ -5,6 +5,7 @@
 #include "micant/shared/user_graphics.hpp"
 #include "micant/shared/user_syscall.hpp"
 #include "micant/shared/win32k_client.h"
+#include "micant/shared/compositor_surface.h"
 
 #include <cstdint>
 
@@ -22,6 +23,7 @@ constexpr size_t kPixelCapacity = 4u * 1024u * 1024u;
 constexpr size_t kDcCapacity = 32;
 constexpr size_t kBitmapCapacity = 16;
 constexpr uint64_t kHandleTag = 0x4D574B0000000000ULL;
+constexpr size_t kSurfacePixels = MICANT_COMPOSITOR_SURFACE_PIXELS;
 
 struct DeviceContext {
     uint64_t handle{};
@@ -85,6 +87,8 @@ DeviceContext* allocateContext(void* window, bool memory) noexcept {
     return nullptr;
 }
 
+bool request(uint32_t operation, MicaWin32kRequest& value) noexcept;
+
 Bitmap* allocateBitmap(uint32_t width, uint32_t height) noexcept {
     if (!width || !height || width > kScreenWidth || height > kScreenHeight ||
         static_cast<size_t>(width) > kPixelCapacity / height) {
@@ -127,6 +131,20 @@ Bitmap* allocateBitmap(uint32_t width, uint32_t height) noexcept {
 
 uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
                     uint32_t& height) noexcept {
+    if (!context.memory && context.window) {
+        MicaWin32kRequest value{};
+        value.args[0] = reinterpret_cast<uint64_t>(context.window);
+        if (!request(MICANT_WIN32K_OP_GET_WINDOW_SURFACE, value) ||
+            !value.result || value.result > MICANT_COMPOSITOR_SURFACE_CAPACITY ||
+            value.rect.right <= value.rect.left || value.rect.bottom <= value.rect.top ||
+            value.rect.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
+            value.rect.bottom > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT))
+            return nullptr;
+        width = static_cast<uint32_t>(value.rect.right - value.rect.left);
+        height = static_cast<uint32_t>(value.rect.bottom - value.rect.top);
+        return reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_PIXELS_BASE) +
+            (value.result - 1) * kSurfacePixels;
+    }
     if (context.bitmap) {
         auto& bitmap = g_bitmaps[context.bitmap - 1];
         if (!bitmap.active) return nullptr;
@@ -494,13 +512,9 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
     uint32_t dstWidth{}, dstHeight{}, srcWidth{}, srcHeight{};
     auto* dstPixels = pixelsFor(*dst, dstWidth, dstHeight);
     auto* srcPixels = pixelsFor(*src, srcWidth, srcHeight);
-    uint32_t originX{}, originY{};
-    if (dst->window) {
-        MicaWin32kRect rect{};
-        if (!MicaWin32kGetWindowRect(dst->window, &rect)) return 0;
-        originX = static_cast<uint32_t>(rect.left);
-        originY = static_cast<uint32_t>(rect.top);
-    }
+    if (!dstPixels || !srcPixels) return 0;
+    const uint32_t dstPitch = dst->window
+        ? MICANT_COMPOSITOR_SCREEN_WIDTH : dstWidth;
     const int64_t left = x;
     const int64_t top = y;
     const int64_t right = left + width;
@@ -508,13 +522,13 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
     if (right < left || bottom < top) return 0;
     for (int64_t row = 0; row < height; ++row) {
         const int64_t sy = static_cast<int64_t>(sourceY) + row;
-        const int64_t dy = static_cast<int64_t>(originY) + top + row;
+        const int64_t dy = top + row;
         if (sy < 0 || sy >= srcHeight || dy < 0 || dy >= dstHeight) continue;
         for (int64_t column = 0; column < width; ++column) {
             const int64_t sx = static_cast<int64_t>(sourceX) + column;
-            const int64_t dx = static_cast<int64_t>(originX) + left + column;
+            const int64_t dx = left + column;
             if (sx < 0 || sx >= srcWidth || dx < 0 || dx >= dstWidth) continue;
-            dstPixels[static_cast<size_t>(dy) * dstWidth + dx] =
+            dstPixels[static_cast<size_t>(dy) * dstPitch + dx] =
                 srcPixels[static_cast<size_t>(sy) * srcWidth + sx];
         }
     }
@@ -527,18 +541,14 @@ int32_t MicaWin32kPresentDC(void* dc) {
     uint32_t width{}, height{};
     auto* pixels = pixelsFor(*context, width, height);
     if (!pixels) return 0;
-    uint32_t originX{}, originY{};
     if (context->window) {
-        MicaWin32kRect rect{};
-        if (!MicaWin32kGetWindowRect(context->window, &rect) ||
-            rect.left < 0 || rect.top < 0) return 0;
-        originX = static_cast<uint32_t>(rect.left);
-        originY = static_cast<uint32_t>(rect.top);
+        MicaWin32kRequest value{};
+        value.operation = MICANT_WIN32K_OP_PRESENT_WINDOW;
+        value.args[0] = reinterpret_cast<uint64_t>(context->window);
+        return request(value.operation, value) && value.result ? 1 : 0;
     }
-    if (!context->memory) {
-        return presentSurface(pixels, kScreenWidth, kScreenHeight, 0, 0);
-    }
-    return presentSurface(pixels, width, height, originX, originY);
+    if (!context->memory) return 0;
+    return presentSurface(pixels, width, height, 0, 0);
 }
 
 int32_t MicaWin32kDeleteObject(void* object) {

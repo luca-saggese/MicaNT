@@ -1703,10 +1703,25 @@ unsupported on bare metal for now.
 | `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal explorer_runtime_boot` | Passed; modular kernel and Explorer dependency closure linked |
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024` | Passed for E1; real Explorer Ring 3 entry, class registration and first user-mode window observed, then stable for 5 seconds |
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024` (E2) | Passed; QMP mouse click and keyboard Enter/Escape traversed Explorer's window queue, user-mode app paint changed scanout, owner destruction redrew it; serial remained stable for 5 seconds |
+| `python3 qemu.py --headless --timeout 180 --memory-mib 1024 --diagnostics-dir build/explorer-ring3-main-e3-movefront` | Passed E3; two Explorer windows overlap, keyboard path moves/resizes the upper window, click raises the exposed sibling, each closes independently and scanout reveals the remaining surface; serial remained stable for 5 seconds |
 
-E2 acceptance covers one interactive Explorer application window and its
-owner-driven close. Multiple independently overlapped/moved/resized windows
-remain E3 acceptance. E3 has no standalone Ring 3 compositor yet, and app
-surfaces are still held in the current Win32k client DLL arena. E4 has not
-presented Explorer through the canonical VirtIO driver. E5 has no evidence of
-GPU composition submission and completion. E6 has not been run.
+E3 now runs `compositor.exe` as a separate Ps process. Ob/Mm committed sections
+back the bounded surface pixels and compositor metadata; Explorer maps pixels
+read/write and metadata read-only, while the compositor maps pixels read-only
+and owns the metadata view. Win32k publishes process-owned window geometry,
+visibility and z-order, and the client presents through a validated per-window
+surface slot. The compositor clips, sorts and alpha blends in Ring 3, then
+submits its final frame through the existing display service. Only the
+compositor PID may use surface-present syscall `0x81` after it starts. Process
+rundown clears its Win32k windows and republishes the surface set. The current
+bounded profile supports up to 16 windows at 1024x768; it does not claim broad
+Win32k compatibility.
+
+E3's multi-window QMP evidence is in
+`build/explorer-ring3-main-e3-movefront/serial.log` and the captures
+`overlapping-windows.ppm`, `moved-resized-window.ppm`,
+`brought-forward-window.ppm`, `one-window-after-close.ppm`, and
+`interactive.ppm`. This run's display service used the GOP pass-through
+fallback, so E4's required canonical VirtIO-GPU presentation has not yet been
+accepted. E5 has no evidence of GPU composition submission and completion.
+E6 stabilization has not been run.

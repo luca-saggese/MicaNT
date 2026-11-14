@@ -5,6 +5,7 @@
 #include "micant/km/executive/ob.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/km/executive/ps.hpp"
+#include "micant/km/executive/ps_objects.hpp"
 #include "micant/km/executive/probe.hpp"
 #include "micant/km/core/ke.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
@@ -156,7 +157,8 @@ uint32_t bootstrapSectionObjectCount() noexcept {
 NtStatus NtAllocateVirtualMemory(Handle process, uintptr_t* base, uintptr_t zeroBits,
                                  size_t* regionSize, uint32_t type, uint32_t protection) {
     if (!base || !regionSize || !*regionSize) return NtStatus::InvalidParameter;
-    if (process != InvalidHandleValue) return NtStatus::NotImplemented;
+    mm::ProcessAddressSpace* targetSpace{};
+    ob::ObjectHeader* targetProcessReference{};
     if (zeroBits) return NtStatus::NotImplemented;
     const size_t offset = *base & mm::PageMask4KB;
     if (*regionSize > SIZE_MAX - offset || *regionSize + offset > SIZE_MAX - mm::PageMask4KB)
@@ -509,7 +511,6 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
         status = probeWrite(offset, sizeof(*offset), alignof(LargeInteger));
         if (status != NtStatus::Success) return status;
     }
-    if (process != InvalidHandleValue) return NtStatus::NotImplemented;
     if (inherit != 1 && inherit != 2) return NtStatus::InvalidParameter;
     if (zeroBits || commitSize || allocation)
         return NtStatus::NotImplemented;
@@ -595,9 +596,28 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
         return NtStatus::InvalidImageFormat;
     }
     const auto* imagePageProtections = imageView ? object->getImageViewProtections() : nullptr;
+    mm::ProcessAddressSpace* targetSpace{};
+    ob::ObjectHeader* targetProcessReference{};
+    ps::EProcess* targetProcessForMapping{};
     if (imageView && !imagePageProtections) {
         ob::ObDereferenceObject(header);
         return NtStatus::InvalidImageFormat;
+    }
+    if (process == InvalidHandleValue) {
+        targetSpace = &currentAddressSpace();
+    } else {
+        status = ps::detail::referenceProcessHandle(process, 0x0008u,
+            targetProcessForMapping, targetProcessReference);
+        if (status != NtStatus::Success) {
+            ob::ObDereferenceObject(header);
+            return status;
+        }
+        if (!targetProcessForMapping || targetProcessForMapping->isTerminating()) {
+            if (targetProcessReference) ob::ObDereferenceObject(targetProcessReference);
+            ob::ObDereferenceObject(header);
+            return NtStatus::ProcessIsTerminating;
+        }
+        targetSpace = &targetProcessForMapping->getAddressSpace();
     }
     // SEC_IMAGE ignores Win32Protect for actual page permissions. Keep the
     // PE subsection protections for every page, including when the caller
@@ -614,8 +634,34 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
         target - hal::amd64::BootstrapUserAddressBase < hal::amd64::BootstrapUserAddressSize &&
         length <= hal::amd64::BootstrapUserAddressSize - (target - hal::amd64::BootstrapUserAddressBase);
     bool imageNotAtBase = false;
-    status = withInterruptsDisabled([&]() noexcept {
-        auto& space = currentAddressSpace();
+    bool attachedToTarget = false;
+    if (targetProcessForMapping && ke::KeGetCurrentProcess() != targetProcessForMapping) {
+        ke::KAPC_STATE attachState{};
+        ke::KeStackAttachProcess(targetProcessForMapping, &attachState);
+        attachedToTarget = ke::KeGetCurrentProcess() == targetProcessForMapping;
+        if (!attachedToTarget) status = NtStatus::Unsuccessful;
+        if (attachedToTarget) {
+            status = withInterruptsDisabled([&]() noexcept {
+                auto& space = *targetSpace;
+                auto result = imageView && !capturedBase && !preferredInWindow ? NtStatus::Conflict :
+                    space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,
+                        backing.pageCount - firstPage, header, acquireSectionView, releaseSectionView,
+                        maximumProtection, imageView, inherit == 1, sectionOffset, pageProtections, false, nullptr,
+                        imageView ? object->getSharedImagePages() + firstPage : nullptr);
+                if (imageView && !capturedBase && result == NtStatus::Conflict) {
+                    target = 0;
+                    result = space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,
+                        backing.pageCount - firstPage, header, acquireSectionView, releaseSectionView,
+                        maximumProtection, true, inherit == 1, sectionOffset, pageProtections, false, nullptr,
+                        object->getSharedImagePages() + firstPage);
+                }
+                return result;
+            });
+            ke::KeUnstackDetachProcess(&attachState);
+            attachedToTarget = false;
+        }
+    } else status = withInterruptsDisabled([&]() noexcept {
+        auto& space = *targetSpace;
         auto result = imageView && !capturedBase && !preferredInWindow ? NtStatus::Conflict :
             space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,
                 backing.pageCount - firstPage, header, acquireSectionView, releaseSectionView,
@@ -630,22 +676,31 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
         }
         if (result != NtStatus::Success) return result;
         imageNotAtBase = imageView && target != object->getImageBase();
-
-        LargeInteger returnedOffset{};
-        returnedOffset.quadPart = static_cast<int64_t>(sectionOffset);
-        result = copyOut(base, &target, sizeof(target), alignof(uintptr_t));
-        if (result == NtStatus::Success)
-            result = copyOut(viewSize, &length, sizeof(length), alignof(size_t));
-        if (result == NtStatus::Success && offset)
-            result = copyOut(offset, &returnedOffset, sizeof(returnedOffset), alignof(LargeInteger));
-        if (result != NtStatus::Success) {
-            // An unmap failure retains the VAD and its owner for retry. The
-            // exclusion prevents another thread from replacing this view
-            // between publication and rollback.
-            (void)space.unmapSharedPages(target, true);
-        }
         return result;
     });
+    if (status == NtStatus::Success) {
+        imageNotAtBase = imageView && target != object->getImageBase();
+        LargeInteger returnedOffset{};
+        returnedOffset.quadPart = static_cast<int64_t>(sectionOffset);
+        status = copyOut(base, &target, sizeof(target), alignof(uintptr_t));
+        if (status == NtStatus::Success)
+            status = copyOut(viewSize, &length, sizeof(length), alignof(size_t));
+        if (status == NtStatus::Success && offset)
+            status = copyOut(offset, &returnedOffset, sizeof(returnedOffset), alignof(LargeInteger));
+        if (status != NtStatus::Success) {
+            ke::KAPC_STATE rollbackAttachState{};
+            bool rollbackAttached = false;
+            if (targetProcessForMapping && ke::KeGetCurrentProcess() != targetProcessForMapping) {
+                ke::KeStackAttachProcess(targetProcessForMapping, &rollbackAttachState);
+                rollbackAttached = ke::KeGetCurrentProcess() == targetProcessForMapping;
+            }
+            if (!targetProcessForMapping || rollbackAttached ||
+                ke::KeGetCurrentProcess() == targetProcessForMapping)
+                (void)targetSpace->unmapSharedPages(target, true);
+            if (rollbackAttached) ke::KeUnstackDetachProcess(&rollbackAttachState);
+        }
+    }
+    if (targetProcessReference) ob::ObDereferenceObject(targetProcessReference);
     ob::ObDereferenceObject(header);
     return status == NtStatus::Success && imageNotAtBase ? NtStatus::ImageNotAtBase : status;
 }
@@ -668,14 +723,30 @@ NtStatus NtMapViewOfSectionFromKernel(Handle handle, Handle process, uintptr_t* 
 }
 
 NtStatus NtUnmapViewOfSection(Handle process, uintptr_t base) {
-    if (process != InvalidHandleValue) return NtStatus::NotImplemented;
-    const auto result = currentAddressSpace().unmapSharedPages(base);
+    mm::ProcessAddressSpace* targetSpace{};
+    ob::ObjectHeader* processReference{};
+    if (process == InvalidHandleValue) {
+        targetSpace = &currentAddressSpace();
+    } else {
+        ps::EProcess* target{};
+        const auto referenceStatus = ps::detail::referenceProcessHandle(
+            process, 0x0008u, target, processReference);
+        if (referenceStatus != NtStatus::Success) return referenceStatus;
+        if (!target || target->isTerminating()) {
+            if (processReference) ob::ObDereferenceObject(processReference);
+            return NtStatus::ProcessIsTerminating;
+        }
+        targetSpace = &target->getAddressSpace();
+    }
+    const auto result = targetSpace->unmapSharedPages(base);
+    if (processReference) ob::ObDereferenceObject(processReference);
     return result == NtStatus::InvalidParameter ? NtStatus::NotMappedView : result;
 }
 
 NtStatus rollbackMappedViewFromKernel(Handle process, uintptr_t base) noexcept {
-    if (process != InvalidHandleValue) return NtStatus::NotImplemented;
-    return currentAddressSpace().unmapSharedPages(base, true);
+    if (process == InvalidHandleValue)
+        return currentAddressSpace().unmapSharedPages(base, true);
+    return NtUnmapViewOfSection(process, base);
 }
 
 bool verifyBootstrapSectionOwnership() noexcept {

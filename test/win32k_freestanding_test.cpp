@@ -66,6 +66,20 @@ int main() {
     position.args[4] = 600;
     assert(dispatchRequest(position, 42) == NtStatus::Success);
 
+    auto moved = makeRequest(MICANT_WIN32K_OP_PEEK_MESSAGE);
+    moved.args[0] = window;
+    moved.args[3] = 1;
+    assert(dispatchRequest(moved, 42) == NtStatus::Success);
+    assert(moved.result == 1 && moved.messageId == 0x0003);
+    assert(static_cast<uint32_t>(moved.messageLParam) == ((40u << 16) | 30u));
+
+    auto sized = makeRequest(MICANT_WIN32K_OP_PEEK_MESSAGE);
+    sized.args[0] = window;
+    sized.args[3] = 1;
+    assert(dispatchRequest(sized, 42) == NtStatus::Success);
+    assert(sized.result == 1 && sized.messageId == 0x0005);
+    assert(static_cast<uint32_t>(sized.messageLParam) == ((600u << 16) | 800u));
+
     auto windowRect = makeRequest(MICANT_WIN32K_OP_GET_WINDOW_RECT);
     windowRect.args[0] = window;
     assert(dispatchRequest(windowRect, 42) == NtStatus::Success);

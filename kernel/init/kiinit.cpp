@@ -32,6 +32,7 @@
 #include "micant/km/drivers/net/tcpip_kernel_api.hpp"
 #include "micant/shared/ntstatus.hpp"
 #include "micant/shared/user_graphics.hpp"
+#include "micant/shared/compositor_surface.h"
 #include "micant/shared/win32k_client.h"
 #include "tools/explorer_shell/desktop.hpp"
 #include "tools/explorer_shell/taskbar.hpp"
@@ -2459,9 +2460,56 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
 // for the lifetime of the initial interactive session.
 micant::Handle g_explorerProcessHandle{};
 micant::Handle g_explorerProcessId{};
-bool g_explorerApplicationWindowLive{};
+micant::Handle g_compositorProcessHandle{};
+micant::Handle g_compositorProcessId{};
+micant::ps::EProcess* g_compositorProcessObject{};
+micant::ob::ObjectHeader* g_compositorProcessReference{};
+micant::Handle g_compositorMetadataSection{};
+micant::Handle g_compositorPixelsSection{};
+MicaCompositorMetadataStore* g_compositorMetadata{};
 
-bool launchExplorerProcess() noexcept {
+bool initializeCompositorSections() noexcept {
+    using namespace micant;
+    LargeInteger metadataSize{};
+    metadataSize.quadPart = MICANT_COMPOSITOR_METADATA_STORE_SIZE;
+    auto result = sys::NtCreateSectionFromKernel(&g_compositorMetadataSection,
+        section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr,
+        &metadataSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
+    if (result != NtStatus::Success) return false;
+    LargeInteger pixelsSize{};
+    pixelsSize.quadPart = MICANT_COMPOSITOR_PIXEL_STORE_SIZE;
+    result = sys::NtCreateSectionFromKernel(&g_compositorPixelsSection,
+        section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr,
+        &pixelsSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
+    if (result != NtStatus::Success) {
+        (void)sys::NtClose(g_compositorMetadataSection);
+        g_compositorMetadataSection = 0;
+        return false;
+    }
+    return true;
+}
+
+void publishCompositorSurfacesInCompositorSpace() noexcept {
+    using namespace micant;
+    auto* compositor = g_compositorProcessObject;
+    if (!compositor || !g_compositorProcessReference) return;
+    auto* currentProcess = ke::KeGetCurrentProcess();
+    if (currentProcess == compositor) {
+        win32k::freestanding::publishCompositorSurfaces();
+    } else {
+        ke::KAPC_STATE attachState{};
+        ke::KeStackAttachProcess(compositor, &attachState);
+        if (ke::KeGetCurrentProcess() == compositor)
+            win32k::freestanding::publishCompositorSurfaces();
+        else serialWrite("[MicaNT Compositor] Metadata target attach failed\r\n");
+        ke::KeUnstackDetachProcess(&attachState);
+    }
+}
+uint32_t g_explorerApplicationWindowCount{};
+
+bool launchUserImageProcess(const char16_t* imageName,
+                            micant::Handle& processHandle,
+                            micant::Handle& processId) noexcept {
     using namespace micant;
     char16_t path[256]{};
     size_t directoryLength{};
@@ -2477,10 +2525,11 @@ bool launchExplorerProcess() noexcept {
         if (length + 1 >= std::size(path)) return false;
         path[length++] = u'\\';
     }
-    constexpr char16_t imageName[] = u"explorer.exe";
-    if (length + (std::size(imageName) - 1) >= std::size(path)) return false;
-    std::memcpy(path + length, imageName, (std::size(imageName) - 1) * sizeof(char16_t));
-    length += std::size(imageName) - 1;
+    size_t imageNameLength{};
+    while (imageName[imageNameLength]) ++imageNameLength;
+    if (!imageNameLength || imageNameLength >= std::size(path) - length) return false;
+    std::memcpy(path + length, imageName, imageNameLength * sizeof(char16_t));
+    length += imageNameLength;
 
     Handle file{};
     result = io::IoOpenBackendFile(&file, 0x0021, {path, length});
@@ -2530,14 +2579,14 @@ bool launchExplorerProcess() noexcept {
         return false;
     }
 
-    result = sys::NtCreateProcessExFromKernel(&g_explorerProcessHandle,
+    result = sys::NtCreateProcessExFromKernel(&processHandle,
         0x001FFFFF, nullptr, systemProcessHandle, 0, imageSection, 0, 0, false);
     const auto parentClose = sys::NtClose(systemProcessHandle);
     const auto sectionClose = sys::NtClose(imageSection);
     if (result == NtStatus::Success && parentClose != NtStatus::Success) result = parentClose;
     if (result == NtStatus::Success && sectionClose != NtStatus::Success) result = sectionClose;
     if (result != NtStatus::Success) {
-        g_explorerProcessHandle = 0;
+        processHandle = 0;
         serialWrite("[MicaNT Explorer] Ps process creation failed status=");
         serialWriteNumber(static_cast<uint32_t>(result));
         serialWrite(" free PFNs=");
@@ -2550,10 +2599,10 @@ bool launchExplorerProcess() noexcept {
 
     ps::EProcess* process{};
     ob::ObjectHeader* processReference{};
-    result = ps::detail::referenceProcessHandle(g_explorerProcessHandle, 0,
+    result = ps::detail::referenceProcessHandle(processHandle, 0,
                                                  process, processReference);
     if (result == NtStatus::Success && process)
-        g_explorerProcessId = process->processId();
+        processId = process->processId();
     uintptr_t entryPoint{};
     if (result == NtStatus::Success && process && process->nativeImages()) {
         const auto* mainImage = process->nativeImages()->module(0);
@@ -2565,12 +2614,17 @@ bool launchExplorerProcess() noexcept {
     } else if (result == NtStatus::Success) {
         result = NtStatus::InvalidImageFormat;
     }
+    if (processHandle == g_compositorProcessHandle && result == NtStatus::Success && processReference) {
+        g_compositorProcessObject = process;
+        g_compositorProcessReference = processReference;
+        processReference = nullptr;
+    }
     if (processReference) ob::ObDereferenceObject(processReference);
     if (result != NtStatus::Success) {
-        (void)sys::NtTerminateProcess(g_explorerProcessHandle, result);
-        (void)sys::NtClose(g_explorerProcessHandle);
-        g_explorerProcessHandle = 0;
-        g_explorerProcessId = 0;
+        (void)sys::NtTerminateProcess(processHandle, result);
+        (void)sys::NtClose(processHandle);
+        processHandle = 0;
+        processId = 0;
         serialWrite("[MicaNT Explorer] Loaded image metadata invalid status=");
         serialWriteNumber(static_cast<uint32_t>(result));
         serialWrite("\r\n");
@@ -2578,18 +2632,81 @@ bool launchExplorerProcess() noexcept {
     }
 
     Handle thread{};
+    if (processHandle == g_compositorProcessHandle || processHandle == g_explorerProcessHandle) {
+        uintptr_t metadataBase = MICANT_COMPOSITOR_METADATA_BASE;
+        size_t metadataView = MICANT_COMPOSITOR_METADATA_STORE_SIZE;
+        const uint32_t metadataProtection = processHandle == g_compositorProcessHandle
+            ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
+        result = sys::NtMapViewOfSectionFromKernel(g_compositorMetadataSection,
+            processHandle, &metadataBase, 0, 0, nullptr, &metadataView,
+            2, 0, metadataProtection);
+        uintptr_t pixelsBase = MICANT_COMPOSITOR_PIXELS_BASE;
+        size_t pixelsView = MICANT_COMPOSITOR_PIXEL_STORE_SIZE;
+        const uint32_t pixelProtection = processHandle == g_explorerProcessHandle
+            ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
+        if (result == NtStatus::Success)
+            result = sys::NtMapViewOfSectionFromKernel(g_compositorPixelsSection,
+                processHandle, &pixelsBase, 0, 0, nullptr, &pixelsView,
+                2, 0, pixelProtection);
+        if (result != NtStatus::Success || metadataBase != MICANT_COMPOSITOR_METADATA_BASE ||
+            pixelsBase != MICANT_COMPOSITOR_PIXELS_BASE) {
+            serialWrite("[MicaNT Compositor] Section view mapping failed status=");
+            serialWriteNumber(static_cast<uint32_t>(result));
+            serialWrite(" metadata=");
+            serialWriteNumber(metadataBase);
+            serialWrite(" pixels=");
+            serialWriteNumber(pixelsBase);
+            serialWrite("\r\n");
+            (void)sys::NtTerminateProcess(processHandle, result);
+            (void)sys::NtClose(processHandle);
+            processHandle = 0;
+            processId = 0;
+            return false;
+        }
+        if (processHandle == g_compositorProcessHandle) {
+            ps::EProcess* compositor{};
+            ob::ObjectHeader* compositorReference{};
+            result = ps::detail::referenceProcessHandle(processHandle, 0x0008u,
+                compositor, compositorReference);
+            if (result == NtStatus::Success && compositor) {
+                ke::KAPC_STATE attachState{};
+                ke::KeStackAttachProcess(compositor, &attachState);
+                if (ke::KeGetCurrentProcess() != compositor) result = NtStatus::Unsuccessful;
+                else {
+                    g_compositorMetadata = reinterpret_cast<MicaCompositorMetadataStore*>(metadataBase);
+                    *g_compositorMetadata = {};
+                    g_compositorMetadata->magic = MICANT_COMPOSITOR_STORE_MAGIC;
+                    g_compositorMetadata->version = MICANT_COMPOSITOR_STORE_VERSION;
+                    g_compositorMetadata->screenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
+                    g_compositorMetadata->screenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
+                    g_compositorMetadata->surfaceCapacity = MICANT_COMPOSITOR_SURFACE_CAPACITY;
+                    win32k::freestanding::bindCompositorStore(
+                        g_compositorMetadata, publishCompositorSurfacesInCompositorSpace);
+                }
+                ke::KeUnstackDetachProcess(&attachState);
+            } else if (result == NtStatus::Success) result = NtStatus::InvalidHandle;
+            if (compositorReference) ob::ObDereferenceObject(compositorReference);
+            if (result != NtStatus::Success) {
+                (void)sys::NtTerminateProcess(processHandle, result);
+                (void)sys::NtClose(processHandle);
+                processHandle = 0;
+                processId = 0;
+                return false;
+            }
+        }
+    }
     result = sys::NtCreateThreadExFromKernel(&thread, 0x001FFFFF, nullptr,
-        g_explorerProcessHandle, entryPoint, 0, 1, 0, 0, 0, nullptr);
+        processHandle, entryPoint, 0, 1, 0, 0, 0, nullptr);
     if (result == NtStatus::Success) result = sys::NtResumeThread(thread, nullptr);
     if (thread) {
         const auto threadClose = sys::NtClose(thread);
         if (result == NtStatus::Success && threadClose != NtStatus::Success) result = threadClose;
     }
     if (result != NtStatus::Success) {
-        (void)sys::NtTerminateProcess(g_explorerProcessHandle, result);
-        (void)sys::NtClose(g_explorerProcessHandle);
-        g_explorerProcessHandle = 0;
-        g_explorerProcessId = 0;
+        (void)sys::NtTerminateProcess(processHandle, result);
+        (void)sys::NtClose(processHandle);
+        processHandle = 0;
+        processId = 0;
         serialWrite("[MicaNT Explorer] Initial user thread failed status=");
         serialWriteNumber(static_cast<uint32_t>(result));
         serialWrite("\r\n");
@@ -2600,6 +2717,16 @@ bool launchExplorerProcess() noexcept {
     serialWriteNumber(static_cast<uint32_t>(process ? process->processId() : 0));
     serialWrite("\r\n");
     return true;
+}
+
+bool launchExplorerProcess() noexcept {
+    return launchUserImageProcess(u"explorer.exe", g_explorerProcessHandle,
+                                  g_explorerProcessId);
+}
+
+bool launchCompositorProcess() noexcept {
+    return launchUserImageProcess(u"compositor.exe", g_compositorProcessHandle,
+                                  g_compositorProcessId);
 }
 
 void restoreCursorBackground(uint32_t x, uint32_t y) noexcept {
@@ -3689,6 +3816,10 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                                            &info, sizeof(info)));
     }
     if (number == 0x81) {
+        const auto* presenter = ke::KeGetCurrentProcess();
+        if (g_compositorProcessId && (!presenter ||
+            presenter->processId() != g_compositorProcessId))
+            return status(NtStatus::AccessDenied);
         um::UserPresentSurfaceParams64 params{};
         const NtStatus copyStatus = ex::ExSafeCopyFromUser(
             &params, reinterpret_cast<const void*>(first), sizeof(params));
@@ -3777,6 +3908,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             MicaWin32kInputEvent event{};
             if (pollMouseInput(event)) {
                 const bool clickQueued = win32k::freestanding::dispatchMouseInput(event);
+                if (clickQueued) publishCompositorSurfacesInCompositorSpace();
                 auto* inputProcess = ke::KeGetCurrentProcess();
                 if (clickQueued && !explorerMouseClickObserved && inputProcess &&
                     inputProcess->processId() == g_explorerProcessId) {
@@ -3795,6 +3927,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                     case 0x0E: virtualKey = 0x08; break;
                     case 0x0F: virtualKey = 0x09; break;
                     case 0x1C: virtualKey = 0x0D; break;
+                    case 0x3D: virtualKey = 0x72; break;
                     case 0x1D: virtualKey = 0x11; break;
                     case 0x2A: case 0x36: virtualKey = 0x10; break;
                     case 0x38: virtualKey = 0x12; break;
@@ -3840,6 +3973,14 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const NtStatus requestStatus = win32k::freestanding::dispatchRequest(
             request, process ? process->processId() : 0);
         if (requestStatus != NtStatus::Success) return status(requestStatus);
+        static bool surfaceRequestObserved = false;
+        if (!surfaceRequestObserved &&
+            (request.operation == MICANT_WIN32K_OP_GET_WINDOW_SURFACE ||
+             request.operation == MICANT_WIN32K_OP_PRESENT_WINDOW)) {
+            surfaceRequestObserved = true;
+            serialWrite("[MicaNT Compositor] Explorer requested shared window surface\r\n");
+        }
+        publishCompositorSurfacesInCompositorSpace();
         const NtStatus resultStatus = ex::ExSafeCopyToUser(
             reinterpret_cast<void*>(first), &request, sizeof(request));
         static bool explorerEntryObserved = false;
@@ -3858,14 +3999,17 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             if (explorerWindowCreateCount == 1)
                 serialWrite("[MicaNT Explorer] First user-mode window created\r\n");
             else if (explorerWindowCreateCount == 4) {
-                g_explorerApplicationWindowLive = true;
+                ++g_explorerApplicationWindowCount;
                 serialWrite("[MicaNT Explorer] First application window created\r\n");
+            } else if (explorerWindowCreateCount == 5) {
+                ++g_explorerApplicationWindowCount;
+                serialWrite("[MicaNT Explorer] Second overlapping application window created\r\n");
             }
         }
         if (fromExplorer && resultStatus == NtStatus::Success &&
             request.operation == MICANT_WIN32K_OP_DESTROY_WINDOW &&
-            g_explorerApplicationWindowLive) {
-            g_explorerApplicationWindowLive = false;
+            g_explorerApplicationWindowCount) {
+            --g_explorerApplicationWindowCount;
             serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
         }
         return status(resultStatus);
@@ -4095,6 +4239,11 @@ void pollKeyboardInput() noexcept {
         serialWrite("[MicaNT Ke] Runtime scheduler clock ticking\r\n");
     }
     serialWrite("[MicaNT Explorer] Kernel idle loop entered\r\n");
+    if (!initializeCompositorSections())
+        stopWithError("[MicaNT Compositor] Shared sections failed\r\n");
+    if (!launchCompositorProcess())
+        stopWithError("[MicaNT Compositor] Ring 3 launch failed\r\n");
+    serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
     for (;;) {
