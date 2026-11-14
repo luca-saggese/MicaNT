@@ -272,6 +272,20 @@ Do not let ancillary work on M4, memory, registry or filesystem expand into open
 5. Asset provenance/third-party license manifest for any bundled Fluent icon files and build-time conversion scripts.
 6. Regression and fuzz-test records, documented unsupported flags/API surface, update to `docs/KERNEL_INTEGRATION_STATUS.md` only after verified gains.
 
+### Current implementation evidence (2026-11-14)
+
+This matrix records the current source status; a linked export is not evidence of CPL3 use or icon pixels on scanout.
+
+| Family / entrypoints | Owner and current bounded behavior | Evidence / gaps |
+|---|---|---|
+| ICO decode | `include/micant/um/subsystems/imaging/ico_decoder.hpp`: PNG and classic 1/4/8/24/32bpp BI_RGB DIB, size selection, scaling and bounded file access | Standalone host harness checks PNG/DIB, malformed offsets, alpha/channel bytes; no fuzz corpus yet |
+| PE resources | `include/micant/um/native/pe.hpp`: file-backed resource tree, numeric group names, language fallback, `RT_GROUP_ICON`→`RT_ICON` numeric IDs | Host fixture decodes a PE resource without executing it; named group resources unsupported |
+| User32 HICON | `kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp`: owned handles, `CopyIcon`, `CopyImage(IMAGE_ICON, flags=0)`, `DestroyIcon`, `CreateIconFromResource[Ex]`, `LoadImageW` ICO `LR_LOADFROMFILE`, ASCII-only `LoadImageA`; icon/class window fields and `WM_SETICON/GETICON` | User32 PE links and boundary checks pass. `LoadIconA/W` exports deliberately fail until module-resource/stock-artwork support exists; `LR_SHARED`, nonzero `CopyImage` flags, `CreateIconIndirect`, `GetIconInfo[Ex]` unsupported |
+| Drawing / class icons | Same User32 owner plus Win32k alpha source-over operation; `DrawIcon/DrawIconEx` supports `DI_IMAGE`/`DI_NORMAL`, class large/small icons and `Get/SetClassLongPtrA/W` | Pixel blend host checks passed. Latest full QEMU boot failed before the icon path at the second Explorer surface composition check; a separate runtime self-test passed. No CPL3 icon client or icon scanout pixel probe yet. Mask-only/compat flags, brush background and taskbar repaint remain open |
+| Shell32 extraction | `tools/dlls/shell32_icon.cpp`, `shell32_boot`: A/W `ExtractIcon`, `ExtractIconEx`, `PrivateExtractIcons`, `SHGetFileInfo` for ASCII `.ico` paths and numeric PE group icons; owned HICON output | Built into QEMU artifact set and imports only User32/NTDLL. ANSI paths are limited to ASCII pending an ACP converter. No CPL3 caller yet; full QEMU currently fails in Explorer before shell icon use. Generic associations, folders and cache invalidation remain open |
+| Comctl32 image lists | `tools/dlls/comctl32_icon.cpp`, `comctl32_boot`: bounded process-local handles and image storage, `ImageList_Create/Destroy/Add/AddIcon/ReplaceIcon/Draw/Remove/GetImageCount/GetIconSize/SetIconSize` through GDI/User32; unsupported mask/drag/serialization APIs fail | Target builds and passes its boundary check; QEMU runtime self-test passes, but no CPL3 call or image-list scanout proof yet. The hosted adapter accepts real HBITMAP inputs and rejects fake HICONs |
+| Explorer / assets | Desktop still uses built-in hardcoded glyph rectangles; no licensed asset pack or file association resolver connected | IC4 remains unimplemented; no asset provenance manifest exists |
+
 **Definition of done:** an unmodified Win32-style client can call the implemented subset of Windows icon APIs on actual icon-bearing files and see correct output through Explorer on the canonical MicaNT QEMU path, with independently tested ownership, failure behavior and no hardcoded icon substitute. Full parity means every declared supported API/flag/object lifetime is tested; do not use the term “complete Windows icon compatibility” before that matrix passes.
 
 ## 14. Public normative references

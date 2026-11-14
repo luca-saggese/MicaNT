@@ -226,7 +226,11 @@ inline const HTREEITEM TVI_SORT  = reinterpret_cast<HTREEITEM>(static_cast<uintp
 // ============================================================================
 
 class ImageListObject {
+public:
+    static constexpr size_t MaxImages = 128;
 private:
+    static constexpr size_t MaxBytes = 8 * 1024 * 1024;
+    mutable std::mutex m_mutex;
     int m_cx{16};
     int m_cy{16};
     UINT m_flags{ILC_COLOR32};
@@ -234,49 +238,55 @@ private:
 
 public:
     ImageListObject(int cx, int cy, UINT flags)
-        : m_cx(cx > 0 ? cx : 16), m_cy(cy > 0 ? cy : 16), m_flags(flags) {}
+        : m_cx(cx), m_cy(cy), m_flags(flags) {}
 
-    [[nodiscard]] int getWidth() const noexcept { return m_cx; }
-    [[nodiscard]] int getHeight() const noexcept { return m_cy; }
+    [[nodiscard]] int getWidth() const noexcept { std::lock_guard lock(m_mutex); return m_cx; }
+    [[nodiscard]] int getHeight() const noexcept { std::lock_guard lock(m_mutex); return m_cy; }
     [[nodiscard]] UINT getFlags() const noexcept { return m_flags; }
-    [[nodiscard]] int getImageCount() const noexcept { return static_cast<int>(m_images.size()); }
+    [[nodiscard]] int getImageCount() const noexcept { std::lock_guard lock(m_mutex); return static_cast<int>(m_images.size()); }
 
-    int add(HBITMAP hbmImage, HBITMAP /*hbmMask*/) {
+    int add(HBITMAP hbmImage, HBITMAP hbmMask) {
+        std::lock_guard lock(m_mutex);
+        if (hbmMask) return -1;
         auto obj = gdi32::GdiEngine::get().getObject(hbmImage);
         auto bmp = std::dynamic_pointer_cast<gdi32::GdiBitmap>(obj);
-        if (!bmp) {
-            // Allocate a blank bitmap with cx, cy
-            bmp = std::make_shared<gdi32::GdiBitmap>(static_cast<uint32_t>(m_cx), static_cast<uint32_t>(m_cy), gdi32::RGB(0, 120, 215));
+        const size_t bytes = static_cast<size_t>(m_cx) * static_cast<size_t>(m_cy) * 4;
+        if (!bmp || m_images.size() >= MaxImages || bmp->GetWidth() != static_cast<uint32_t>(m_cx) ||
+            bmp->GetHeight() != static_cast<uint32_t>(m_cy) || bytes > MaxBytes - m_bytes) return -1;
+        std::shared_ptr<gdi32::GdiBitmap> snapshot;
+        try {
+            snapshot = std::make_shared<gdi32::GdiBitmap>(bmp->GetWidth(), bmp->GetHeight(), 0);
+            for (uint32_t y = 0; y < bmp->GetHeight(); ++y)
+                for (uint32_t x = 0; x < bmp->GetWidth(); ++x)
+                    snapshot->SetPixel(x, y, bmp->GetPixel(x, y));
+            m_images.push_back(std::move(snapshot));
+        } catch (...) { return -1; }
+        int index = static_cast<int>(m_images.size()) - 1;
+        m_bytes += bytes;
+        return index;
+    }
+
+    int addIcon(HICON /*hicon*/) { return -1; }
+
+    bool replaceIcon(int /*i*/, HICON /*hicon*/) { return false; }
+
+    bool draw(int i, HDC hdcDst, int x, int y, UINT fStyle) {
+        if (fStyle != ILD_NORMAL && fStyle != ILD_TRANSPARENT) return false;
+        std::shared_ptr<gdi32::GdiBitmap> bmp;
+        int width{}, height{};
+        {
+            std::lock_guard lock(m_mutex);
+            if (i < 0 || static_cast<size_t>(i) >= m_images.size()) return false;
+            bmp = m_images[static_cast<size_t>(i)];
+            width = m_cx; height = m_cy;
         }
-        int index = static_cast<int>(m_images.size());
-        m_images.push_back(bmp);
-        return index;
-    }
-
-    int addIcon(HICON /*hicon*/) {
-        auto bmp = std::make_shared<gdi32::GdiBitmap>(static_cast<uint32_t>(m_cx), static_cast<uint32_t>(m_cy), gdi32::RGB(255, 180, 0));
-        int index = static_cast<int>(m_images.size());
-        m_images.push_back(bmp);
-        return index;
-    }
-
-    bool replaceIcon(int i, HICON /*hicon*/) {
-        if (i < 0 || static_cast<size_t>(i) >= m_images.size()) return false;
-        m_images[i] = std::make_shared<gdi32::GdiBitmap>(static_cast<uint32_t>(m_cx), static_cast<uint32_t>(m_cy), gdi32::RGB(0, 200, 100));
-        return true;
-    }
-
-    bool draw(int i, HDC hdcDst, int x, int y, UINT /*fStyle*/) {
-        if (i < 0 || static_cast<size_t>(i) >= m_images.size()) return false;
         auto dc = gdi32::GdiEngine::get().getDc(reinterpret_cast<gdi32::HDC>(hdcDst));
         if (!dc) return false;
-
-        const auto& bmp = m_images[i];
         if (!bmp) return false;
 
         // Blit icon frame into destination DC
-        for (uint32_t row = 0; row < static_cast<uint32_t>(m_cy); ++row) {
-            for (uint32_t col = 0; col < static_cast<uint32_t>(m_cx); ++col) {
+        for (uint32_t row = 0; row < static_cast<uint32_t>(height); ++row) {
+            for (uint32_t col = 0; col < static_cast<uint32_t>(width); ++col) {
                 uint32_t color = bmp->GetPixel(col, row);
                 dc->SetPixel(x + static_cast<int>(col), y + static_cast<int>(row), color);
             }
@@ -284,6 +294,24 @@ public:
         dc->FlushIfWindow();
         return true;
     }
+
+    bool remove(int i) {
+        std::lock_guard lock(m_mutex);
+        if (i == -1) { m_images.clear(); m_bytes = 0; return true; }
+        if (i < 0 || static_cast<size_t>(i) >= m_images.size()) return false;
+        m_images.erase(m_images.begin() + i);
+        m_bytes -= static_cast<size_t>(m_cx) * static_cast<size_t>(m_cy) * 4;
+        return true;
+    }
+
+    bool setIconSize(int cx, int cy) {
+        std::lock_guard lock(m_mutex);
+        if (!m_images.empty() || cx <= 0 || cy <= 0 || cx > 256 || cy > 256) return false;
+        m_cx = cx; m_cy = cy; return true;
+    }
+
+private:
+    size_t m_bytes{};
 };
 
 class ImageListRegistry {
@@ -300,10 +328,18 @@ public:
         return instance;
     }
 
-    HIMAGELIST create(int cx, int cy, UINT flags, int, int) {
+    HIMAGELIST create(int cx, int cy, UINT flags, int initial, int grow) {
+        constexpr UINT supportedFlags = ILC_MASK | ILC_COLOR4 | ILC_COLOR8 | ILC_COLOR16 |
+            ILC_COLOR24 | ILC_COLOR32;
+        if (cx <= 0 || cy <= 0 || cx > 256 || cy > 256 || initial < 0 || grow < 0 ||
+            initial > 128 || grow > 128 || (flags & ~supportedFlags) || (flags & ILC_MASK) ||
+            (static_cast<size_t>(cx) * cy * 4 * ImageListObject::MaxImages) > 8 * 1024 * 1024)
+            return nullptr;
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_lists.size() >= 64 || m_nextHandle == UINTPTR_MAX) return nullptr;
         uintptr_t handle = m_nextHandle++;
-        m_lists[handle] = std::make_shared<ImageListObject>(cx, cy, flags);
+        try { m_lists[handle] = std::make_shared<ImageListObject>(cx, cy, flags); }
+        catch (...) { return nullptr; }
         return reinterpret_cast<HIMAGELIST>(handle);
     }
 
@@ -993,14 +1029,20 @@ inline void InitCommonControls() noexcept {
 }
 
 inline void ImageList_EndDrag() noexcept {}
-inline BOOL ImageList_DragShowNolock(BOOL /*fShow*/) noexcept { return win32::TRUE; }
-inline BOOL ImageList_DragEnter(HWND /*hwndLockWindow*/, int /*x*/, int /*y*/) noexcept { return win32::TRUE; }
-inline BOOL ImageList_DragMove(int /*x*/, int /*y*/) noexcept { return win32::TRUE; }
-inline BOOL ImageList_BeginDrag(HIMAGELIST /*himlTrack*/, int /*iTrack*/, int /*dxHotspot*/, int /*dyHotspot*/) noexcept { return win32::TRUE; }
-inline BOOL ImageList_Remove(HIMAGELIST /*himl*/, int /*i*/) noexcept { return win32::TRUE; }
-inline BOOL ImageList_SetIconSize(HIMAGELIST /*himl*/, int /*cx*/, int /*cy*/) noexcept { return win32::TRUE; }
-inline int ImageList_AddMasked(HIMAGELIST /*himl*/, HBITMAP /*hbmImage*/, DWORD /*crMask*/) noexcept { return 0; }
-inline HICON ImageList_GetIcon(HIMAGELIST /*himl*/, int /*i*/, UINT /*flags*/) noexcept { return reinterpret_cast<HICON>(0x2001); }
+inline BOOL ImageList_DragShowNolock(BOOL /*fShow*/) noexcept { return win32::FALSE; }
+inline BOOL ImageList_DragEnter(HWND /*hwndLockWindow*/, int /*x*/, int /*y*/) noexcept { return win32::FALSE; }
+inline BOOL ImageList_DragMove(int /*x*/, int /*y*/) noexcept { return win32::FALSE; }
+inline BOOL ImageList_BeginDrag(HIMAGELIST /*himlTrack*/, int /*iTrack*/, int /*dxHotspot*/, int /*dyHotspot*/) noexcept { return win32::FALSE; }
+inline BOOL ImageList_Remove(HIMAGELIST himl, int i) noexcept {
+    auto list = ImageListRegistry::get().getList(himl);
+    return (list && list->remove(i)) ? win32::TRUE : win32::FALSE;
+}
+inline BOOL ImageList_SetIconSize(HIMAGELIST himl, int cx, int cy) noexcept {
+    auto list = ImageListRegistry::get().getList(himl);
+    return (list && list->setIconSize(cx, cy)) ? win32::TRUE : win32::FALSE;
+}
+inline int ImageList_AddMasked(HIMAGELIST /*himl*/, HBITMAP /*hbmImage*/, DWORD /*crMask*/) noexcept { return -1; }
+inline HICON ImageList_GetIcon(HIMAGELIST /*himl*/, int /*i*/, UINT /*flags*/) noexcept { return nullptr; }
 
 struct IMAGEINFO {
     HBITMAP hbmImage{nullptr};
@@ -1010,13 +1052,8 @@ struct IMAGEINFO {
     user32::RECT rcImage{0, 0, 16, 16};
 };
 
-inline BOOL ImageList_GetImageInfo(HIMAGELIST /*himl*/, int /*i*/, IMAGEINFO* pImageInfo) noexcept {
-    if (pImageInfo) {
-        pImageInfo->hbmImage = nullptr;
-        pImageInfo->hbmMask = nullptr;
-        pImageInfo->rcImage = user32::RECT{0, 0, 16, 16};
-    }
-    return win32::TRUE;
+inline BOOL ImageList_GetImageInfo(HIMAGELIST /*himl*/, int /*i*/, IMAGEINFO* /*pImageInfo*/) noexcept {
+    return win32::FALSE;
 }
 
 struct TRACKMOUSEEVENT {
@@ -1075,24 +1112,24 @@ inline win32::HRESULT WINAPI ImageList_ReadEx_Ordinal15(uint32_t /*dwFlags*/, vo
 
 inline win32::BOOL FlatSB_SetScrollInfo(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
 inline win32::BOOL FlatSB_SetScrollProp(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_GetDragImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_DrawEx(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_SetImageCount(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
+inline win32::BOOL ImageList_GetDragImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_DrawEx(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_SetImageCount(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
 inline win32::BOOL FlatSB_GetScrollPos(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
 inline win32::BOOL FlatSB_SetScrollPos(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
 inline win32::BOOL InitializeFlatSB(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_Copy(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
+inline win32::BOOL ImageList_Copy(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
 inline win32::BOOL FlatSB_GetScrollInfo(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_Write(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_DrawIndirect(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_SetBkColor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_GetBkColor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_Replace(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_SetDragCursorImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_Read(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
+inline win32::BOOL ImageList_Write(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_DrawIndirect(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_SetBkColor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_GetBkColor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_Replace(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_SetDragCursorImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_Read(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
 inline win32::BOOL ImageList_DragLeave(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_LoadImageW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
-inline win32::BOOL ImageList_SetOverlayImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::TRUE; }
+inline win32::BOOL ImageList_LoadImageW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
+inline win32::BOOL ImageList_SetOverlayImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return win32::FALSE; }
 
 inline void InitializeComCtl32SubsystemExports() {
     InitCommonControls();

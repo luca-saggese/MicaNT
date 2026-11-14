@@ -426,6 +426,28 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
 
+    # Comctl32 image lists are process-local Ring 3 objects. Bitmap/icon bytes
+    # cross the existing GDI32/User32 DLL interfaces; allocation uses NTDLL.
+    add_library(comctl32_boot SHARED EXCLUDE_FROM_ALL
+        tools/dlls/comctl32.cpp tools/dlls/comctl32_icon.cpp
+        tools/dlls/native_stack_probe.cpp kernel/ex/freestanding_memory.cpp)
+    target_include_directories(comctl32_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(comctl32_boot PRIVATE MICANT_NATIVE_USERMODE)
+    target_compile_options(comctl32_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -O2
+    )
+    target_link_options(comctl32_boot PRIVATE
+        -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
+    )
+    target_link_libraries(comctl32_boot PRIVATE gdi32_boot user32_boot ntdll_boot)
+    set_target_properties(comctl32_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "comctl32"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
+    )
+
     add_executable(explorer_boot EXCLUDE_FROM_ALL
         tools/explorer_shell_app.cpp
         tools/explorer_shell/desktop.cpp
@@ -803,7 +825,7 @@ if(WIN32 OR MICANT_ENABLE_BAREMETAL)
     add_custom_target(micant_user_mode_boundary_check)
     foreach(_user_mode_variant IN ITEMS
         micant_win32k micant_user32 micant_gdi32 micant_imm32
-        kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot
+        kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot
         imm32_boot explorer_boot explorer_runtime_boot
     )
         add_custom_target(micant_boundary_${_user_mode_variant}

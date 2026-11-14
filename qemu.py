@@ -353,6 +353,7 @@ def main() -> int:
                 "https_probe_boot",
                 "file_image_boot",
                 "shell32_boot",
+                "comctl32_boot",
                 "explorer_runtime_boot",
                 "compositor_boot",
             ]

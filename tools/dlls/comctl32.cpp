@@ -11,7 +11,7 @@ extern "C" {
 
 bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 
-__declspec(dllexport) bool InitCommonControlsEx(const void*) noexcept { return true; }
+__declspec(dllexport) bool InitCommonControlsEx(const void*) noexcept { return false; }
 __declspec(dllexport) void* CreatePropertySheetPageW(const void*) noexcept { return nullptr; }
 __declspec(dllexport) int64_t PropertySheetW(const void*) noexcept { return 0; }
 

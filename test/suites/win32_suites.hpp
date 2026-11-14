@@ -5956,10 +5956,19 @@ void Test_Shell32_And_ComCtl32_Win32Controls() {
     // ------------------------------------------------------------------------
     comctl32::HIMAGELIST himl = comctl32::ImageList_Create(24, 24, comctl32::ILC_COLOR32, 2, 2);
     TEST_ASSERT(himl != nullptr, "ImageList_Create must return valid HIMAGELIST");
-    int i0 = comctl32::ImageList_AddIcon(himl, reinterpret_cast<win32::HICON>(0x101));
-    int i1 = comctl32::ImageList_AddIcon(himl, reinterpret_cast<win32::HICON>(0x102));
-    TEST_ASSERT(i0 == 0 && i1 == 1, "ImageList_AddIcon must return sequential indices");
+    TEST_ASSERT(comctl32::ImageList_AddIcon(himl, reinterpret_cast<win32::HICON>(0x101)) == -1,
+                 "ImageList_AddIcon rejects an invalid HICON without publishing a fake image");
+    gdi32::HBITMAP hbmpSource = gdi32::CreateCompatibleBitmap(nullptr, 24, 24);
+    user32::HDC hdcSource = gdi32::CreateCompatibleDC(nullptr);
+    gdi32::SelectObject(hdcSource, hbmpSource);
+    gdi32::SetPixel(hdcSource, 2, 3, gdi32::RGB(11, 22, 33));
+    int i0 = comctl32::ImageList_Add(himl, hbmpSource, nullptr);
+    int i1 = comctl32::ImageList_Add(himl, hbmpSource, nullptr);
+    TEST_ASSERT(i0 == 0 && i1 == 1, "ImageList_Add copies validated images at stable indices");
     TEST_ASSERT(comctl32::ImageList_GetImageCount(himl) == 2, "ImageList_GetImageCount must return 2");
+    TEST_ASSERT(comctl32::ImageList_Remove(himl, 0) == win32::TRUE &&
+                comctl32::ImageList_GetImageCount(himl) == 1,
+                "ImageList_Remove deletes one image and compacts following indices");
 
     int icx = 0, icy = 0;
     TEST_ASSERT(comctl32::ImageList_GetIconSize(himl, &icx, &icy) == win32::TRUE, "ImageList_GetIconSize must succeed");
@@ -5968,9 +5977,13 @@ void Test_Shell32_And_ComCtl32_Win32Controls() {
     user32::HDC hdcTest = gdi32::CreateCompatibleDC(nullptr);
     gdi32::HBITMAP hbmpTest = gdi32::CreateCompatibleBitmap(nullptr, 48, 48);
     gdi32::SelectObject(hdcTest, hbmpTest);
-    TEST_ASSERT(comctl32::ImageList_Draw(himl, 0, hdcTest, 0, 0, comctl32::ILD_NORMAL) == win32::TRUE, "ImageList_Draw must succeed");
+    TEST_ASSERT(comctl32::ImageList_Draw(himl, 0, hdcTest, 0, 0, comctl32::ILD_NORMAL) == win32::TRUE, "ImageList_Draw must copy a stored image to the destination DC");
+    TEST_ASSERT(gdi32::GetPixel(hdcTest, 2, 3) == gdi32::RGB(11, 22, 33),
+                "ImageList_Draw changes destination pixels to the copied source image");
     gdi32::DeleteObject(hbmpTest);
     gdi32::DeleteDC(hdcTest);
+    gdi32::DeleteObject(hbmpSource);
+    gdi32::DeleteDC(hdcSource);
 
     TEST_ASSERT(comctl32::ImageList_Destroy(himl) == win32::TRUE, "ImageList_Destroy must destroy HIMAGELIST");
 
