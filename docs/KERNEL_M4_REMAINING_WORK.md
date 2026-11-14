@@ -102,7 +102,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 - [ ] **Completare attese e lifetime degli oggetti di processo/thread.**
   Verificare timeout, alertability/APC, cancellazione, chiusura dell'ultimo
   handle durante l'attesa, riferimenti trattenuti, CID lookup e reaping in ogni
-  ordine valido.
+  ordine valido. Il test QEMU kernel chiude entrambi gli handle di un thread
+  mentre un waiter è bloccato sul relativo oggetto; l'esecuzione successiva
+  segnala l'oggetto, risveglia il waiter e consente il reaping con il riferimento
+  esplicito di verifica ancora valido. Gli altri ordini e le varianti timeout/
+  alertability restano aperti.
 - [ ] **Portare i percorsi M4 oltre il solo bootstrap BSP.** Collegare accesso,
   lifecycle e cleanup alle entry native Ps/Ob e ai caller reali; mantenere
   capture, pubblicazione, rollback e sincronizzazione coerenti con il contesto
@@ -183,4 +187,8 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   test CPL3, input PS/2 e stabilità seriale per 5 secondi sono verdi. I tentativi
   sperimentali di inheritance CPL3 non hanno superato il fixture e sono stati
   rimossi; la prova end-to-end resta aperta.
+- Verifica integrata completa della chiusura degli handle di thread durante un
+  wait pendente: `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-wait-close-last-pass` è passata, inclusi build/link,
+  seriale stabile per 5 secondi e controllo PS/2.
 

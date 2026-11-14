@@ -168,14 +168,28 @@ bool testThreadObjectLifetime() noexcept {
     using namespace micant;
     using namespace micant::ke;
     const auto objects = ps::detail::bootstrapThreadObjectCount();
+    g_attachFailureStage = 601;
     ps::EProcess process;
     if (process.initializeAddressSpace() != NtStatus::Success) return false;
+    struct AddressSpaceCleanup {
+        ps::EProcess& process;
+        bool active{true};
+        ~AddressSpaceCleanup() {
+            if (active && process.getDirectoryTableBase()) (void)process.closeAddressSpace();
+        }
+    } addressSpaceCleanup{process};
     State state{&process, KeGetCurrentThread()};
     Handle handle{};
     ps::EThread* thread{};
     if (ps::detail::createThreadHandle(process, 16384, threadEntry, &state, ob::SYNCHRONIZE,
                                        handle, thread) != NtStatus::Success || !thread ||
         ps::detail::bootstrapThreadObjectCount() != objects + 1) return false;
+    ps::EThread* referencedThread{};
+    ob::ObjectHeader* threadLifetimeReference{};
+    if (ps::detail::referenceThreadHandle(handle, ob::SYNCHRONIZE, referencedThread,
+                                           threadLifetimeReference) != NtStatus::Success ||
+        referencedThread != thread || !threadLifetimeReference) return false;
+    g_attachFailureStage = 602;
     if (sys::NtTerminateThread(handle, NtStatus::AccessDenied) != NtStatus::AccessDenied ||
         sys::NtResumeThread(handle, nullptr) != NtStatus::AccessDenied ||
         thread->kernelThread()->terminationRequested) return false;
@@ -197,31 +211,35 @@ bool testThreadObjectLifetime() noexcept {
     const auto waitIrql = KfRaiseIrql(DISPATCH_LEVEL);
     const bool waited = KiSwapContext(state.boot, &waiter);
     KeLowerIrql(waitIrql);
+    g_attachFailureStage = 603;
     if (!waited || waiter.state != ThreadState::Waiting || waiterState.finished ||
-        sys::NtClose(waiterState.handle) != NtStatus::Success || thread->ready() != NtStatus::Success)
+        sys::NtClose(waiterState.handle) != NtStatus::Success ||
+        sys::NtClose(handle) != NtStatus::Success || thread->ready() != NtStatus::Success)
         return false;
     auto& scheduler = PriorityScheduler::get();
     auto* next = scheduler.selectNextThread();
+    g_attachFailureStage = 604;
     if (next != thread->kernelThread()) return false;
     const auto old = KfRaiseIrql(DISPATCH_LEVEL);
     const bool switched = KiSwapContext(state.boot, next);
     KeLowerIrql(old);
+    g_attachFailureStage = 605;
     if (!switched || !state.ran || state.rundownInvalid || state.ownedApc ||
         state.kernelCount != 213 || state.rundownCount != 4123 || state.crossThreadApc.inserted ||
         KeInsertQueueApc(&state.crossThreadApc) ||
-        sys::NtWaitForSingleObject(handle, false, &poll) != NtStatus::Success) return false;
+        thread->kernelThread()->state != ThreadState::Terminated) return false;
     auto* wake = scheduler.selectNextThread();
     if (wake != &waiter) return false;
     const auto wakeIrql = KfRaiseIrql(DISPATCH_LEVEL);
     const bool woken = KiSwapContext(state.boot, wake);
     KeLowerIrql(wakeIrql);
+    g_attachFailureStage = 606;
     if (!woken || !waiterState.finished || waiter.state != ThreadState::Terminated ||
         scheduler.getReadyThreadCount() || thread->reap() != NtStatus::Success ||
         thread->initialize(process, 16384, threadEntry, &state) != NtStatus::InvalidParameter ||
-        sys::NtWaitForSingleObject(handle, false, &poll) != NtStatus::Success ||
-        sys::NtWaitForSingleObject(handle, false, &poll) != NtStatus::Success ||
-        sys::NtClose(handle) != NtStatus::Success ||
-        ps::detail::bootstrapThreadObjectCount() != objects) return false;
+        ps::detail::bootstrapThreadObjectCount() != objects + 1) return false;
+    ob::ObDereferenceObject(threadLifetimeReference);
+    if (ps::detail::bootstrapThreadObjectCount() != objects) return false;
 
     State closedState{&process, KeGetCurrentThread()};
     if (ps::detail::createThreadHandle(process, 16384, threadEntry, &closedState, ob::SYNCHRONIZE,
@@ -234,7 +252,9 @@ bool testThreadObjectLifetime() noexcept {
     // The final lifecycle reference was released by reap; thread is no longer
     // a valid borrowed pointer after this point.
     if (ps::detail::bootstrapThreadObjectCount() != objects) return false;
-    return process.closeAddressSpace() == NtStatus::Success;
+    const auto closeStatus = process.closeAddressSpace();
+    addressSpaceCleanup.active = false;
+    return closeStatus == NtStatus::Success;
 }
 
 bool testLastThreadExitAndDeferredReap() noexcept {
