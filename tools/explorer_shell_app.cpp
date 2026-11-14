@@ -7,6 +7,11 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
+#include "micant/um/subsystems/imaging/bmp_png_decoder.hpp"
+#include "micant/um/subsystems/imaging/native_image_allocator.hpp"
+#include "micant/um/subsystems/imaging/native_image_file.hpp"
+#include "micant/um/subsystems/imaging/wallpaper.hpp"
+
 #include <windows.h>
 #include "micant/shared/win32k_client.h"
 #include "gui_common.hpp"
@@ -44,6 +49,7 @@ struct ShellState {
     HWND desktop{};
     HDC desktopDc{};
     uint32_t* desktopPixels{};
+    uint32_t* wallpaperPixels{};
     HWND taskbar{};
     HDC taskbarDc{};
     uint32_t* taskbarPixels{};
@@ -191,9 +197,41 @@ void redrawTaskbar() noexcept {
 
 void redrawDesktop() noexcept {
     if (!g.desktopPixels) return;
-    micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H);
+    micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
+                                  g.wallpaperPixels);
     present(g.desktop);
     redrawTaskbar();
+}
+
+void loadPackagedWallpaper() noexcept {
+    constexpr wchar_t path[] = L"C:\\MicaNT\\System32\\wallpaper.png";
+    const auto allocator = micant::um::imaging::NativeImageAllocator();
+    micant::um::imaging::ImageLimits limits{};
+    micant::um::imaging::ImageFrame decoded{};
+    const auto decodeStatus = micant::um::imaging::DecodeImageFile(
+        path, decoded, allocator, limits);
+    if (decodeStatus != micant::um::imaging::ImageStatus::Success) return;
+
+    micant::um::imaging::ImageFrame composed{};
+    const uint32_t background = PackBGRA(28, 58, 92);
+    if (decoded.pixels.size() >= limits.maxIntermediateBytes) return;
+    const uint64_t compositionBudget = limits.maxIntermediateBytes - decoded.pixels.size();
+    const uint64_t outputBudget = compositionBudget / 2;
+    const auto composeStatus = micant::um::imaging::ComposeWallpaper(
+        &decoded, g.screenW, g.screenH - TASKBAR_H,
+        micant::um::imaging::WallpaperStyle::Fill, background,
+        allocator, composed,
+        outputBudget < limits.maxDecodedBytes ? outputBudget : limits.maxDecodedBytes);
+    if (composeStatus != micant::um::imaging::ImageStatus::Success) return;
+    const size_t pixelCount = static_cast<size_t>(g.screenW) * (g.screenH - TASKBAR_H);
+    if (pixelCount > SIZE_MAX / sizeof(uint32_t)) return;
+    const size_t bytes = pixelCount * sizeof(uint32_t);
+    auto* surface = static_cast<uint32_t*>(micant::um::imaging::AllocateImagePages(
+        nullptr, bytes));
+    if (!surface) return;
+    const auto* source = reinterpret_cast<const uint32_t*>(composed.pixels.data());
+    for (size_t index = 0; index < pixelCount; ++index) surface[index] = source[index];
+    g.wallpaperPixels = surface;
 }
 
 void chooseFallbackActiveApp() noexcept {
@@ -559,6 +597,7 @@ extern "C" void _start(const char* = nullptr) {
         }
     }
 
+    loadPackagedWallpaper();
     redrawDesktop();
     updateClock();
     uint32_t clockPollDivider = 0;

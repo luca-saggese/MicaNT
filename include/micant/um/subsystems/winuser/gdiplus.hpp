@@ -5,7 +5,10 @@
 #include "micant/um/native/ldr.hpp"
 #include "micant/um/subsystems/winbase/version.hpp"
 #include "micant/um/subsystems/winuser/gdi32.hpp"
-#include "micant/km/hal/bootvid.hpp"
+#include "micant/um/subsystems/imaging/codec_registry.hpp"
+#include "micant/um/subsystems/imaging/native_image_allocator.hpp"
+#include "micant/um/subsystems/imaging/native_image_save.hpp"
+#include "micant/um/subsystems/wic/wic_runtime.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -954,6 +957,12 @@ inline constexpr GUID ImageFormatGIF       = { 0xb96b3cb0, 0x0728, 0x11d3, { 0x9
 inline constexpr GUID ImageFormatTIFF      = { 0xb96b3cb1, 0x0728, 0x11d3, { 0x9d, 0x7b, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } };
 inline constexpr GUID ImageFormatICO       = { 0xb96b3cb5, 0x0728, 0x11d3, { 0x9d, 0x7b, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } };
 
+// Standard GDI+ encoder CLSIDs (BMP, JPEG, and PNG are implemented here).
+inline constexpr GUID EncoderClsidBmp  = { 0x557cf400, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } };
+inline constexpr GUID EncoderClsidJpeg = { 0x557cf401, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } };
+inline constexpr GUID EncoderClsidPng  = { 0x557cf406, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } };
+inline constexpr GUID EncoderQuality   = { 0x1d5be4b5, 0xfa4a, 0x452d, { 0x9c, 0xdd, 0x5d, 0xb3, 0x51, 0x05, 0xe7, 0xeb } };
+
 class Image {
 protected:
     ImageType   m_type{ ImageTypeBitmap };
@@ -1074,6 +1083,7 @@ public:
 
     uint32_t* GetPixelBuffer() { return m_pixels.data(); }
     const uint32_t* GetPixelBuffer() const { return m_pixels.data(); }
+    void SetRawFormat(const GUID& value) noexcept { m_rawFormat = value; }
 };
 
 using GpBitmap = Bitmap;
@@ -1771,14 +1781,18 @@ inline Status __stdcall GdipDisposeImage(GpImage* image) {
     return Ok;
 }
 
-inline int32_t __stdcall WICCreateImagingFactory_Proxy(uint32_t, IWICImagingFactory** ppImagingFactory) {
+inline int32_t __stdcall WICCreateImagingFactory_Proxy(uint32_t version, IWICImagingFactory** ppImagingFactory) {
     if (!ppImagingFactory) return ole32::E_POINTER;
-    *ppImagingFactory = new CWICImagingFactory();
-    return ole32::S_OK;
+    *ppImagingFactory = nullptr;
+    micant::um::wic::IWICImagingFactory* factory{};
+    const auto status = ::WICCreateImagingFactory_Proxy(version, &factory);
+    if (status >= 0)
+        *ppImagingFactory = reinterpret_cast<IWICImagingFactory*>(factory);
+    return status;
 }
 
 inline int32_t __stdcall DllCanUnloadNow() {
-    return ole32::S_OK;
+    return ::DllCanUnloadNow();
 }
 
 // ----------------------------------------------------------------------------
@@ -2159,9 +2173,105 @@ inline Status __stdcall GdipImageRotateFlip(GpImage* image, int) noexcept {
     return Ok;
 }
 
-inline Status __stdcall GdipSaveImageToFile(GpImage* image, const wchar_t*, const void*, const void*) noexcept {
-    if (!image) return InvalidParameter;
+struct EncoderParameter {
+    GUID Guid{};
+    uint32_t NumberOfValues{};
+    uint32_t Type{};
+    void* Value{};
+};
+struct EncoderParameters { uint32_t Count{}; EncoderParameter Parameter[1]{}; };
+
+inline Status GdipImageCodecStatus(um::imaging::ImageStatus status) noexcept {
+    using um::imaging::ImageStatus;
+    switch (status) {
+        case ImageStatus::Success: return Ok;
+        case ImageStatus::UnknownFormat: return UnknownImageFormat;
+        case ImageStatus::UnsupportedFeature: return NotImplemented;
+        case ImageStatus::ImageTooLarge: return ValueOverflow;
+        case ImageStatus::OutOfMemory: return OutOfMemory;
+        case ImageStatus::AccessDenied: return AccessDenied;
+        case ImageStatus::Cancelled: return Aborted;
+        case ImageStatus::MalformedData:
+        case ImageStatus::TruncatedInput: return InvalidParameter;
+        case ImageStatus::IoFailure: return Win32Error;
+    }
+    return GenericError;
+}
+
+inline bool GdipEncoderFormat(const GUID* clsid, um::imaging::ImageFormat& format) noexcept {
+    if (!clsid) return false;
+    if (*clsid == EncoderClsidBmp) format = um::imaging::ImageFormat::Bmp;
+    else if (*clsid == EncoderClsidJpeg) format = um::imaging::ImageFormat::Jpeg;
+    else if (*clsid == EncoderClsidPng) format = um::imaging::ImageFormat::Png;
+    else return false;
+    return true;
+}
+
+inline Status GdipBuildEncodeFrame(GpImage* image, um::imaging::ImageFrame& frame,
+                                   const um::imaging::ImageAllocator& allocator) noexcept {
+    if (!image || image->GetType() != ImageTypeBitmap) return NotImplemented;
+    auto* bitmap = static_cast<Bitmap*>(image);
+    const uint32_t width = bitmap->GetWidth(), height = bitmap->GetHeight();
+    const uint64_t stride64 = static_cast<uint64_t>(width) * 4;
+    if (!width || !height || stride64 > UINT32_MAX ||
+        height > std::numeric_limits<uint64_t>::max() / stride64) return ValueOverflow;
+    const uint64_t bytes64 = stride64 * height;
+    if (bytes64 > SIZE_MAX ||
+        bytes64 > 256ull * 1024 * 1024) return ValueOverflow;
+    const auto* source = bitmap->GetPixelBuffer();
+    if (!source) return GenericError;
+    frame.width = width;
+    frame.height = height;
+    frame.stride = static_cast<uint32_t>(stride64);
+    frame.sourceHadAlpha = bitmap->GetPixelFormat() != PixelFormat32bppRGB;
+    if (!frame.pixels.allocate(static_cast<size_t>(bytes64), allocator)) return OutOfMemory;
+    const size_t count = static_cast<size_t>(bytes64 / 4);
+    if (bitmap->GetPixelFormat() != PixelFormat32bppARGB &&
+        bitmap->GetPixelFormat() != PixelFormat32bppPARGB &&
+        bitmap->GetPixelFormat() != PixelFormat32bppRGB) return NotImplemented;
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t pixel = source[i];
+        const uint8_t a = bitmap->GetPixelFormat() == PixelFormat32bppRGB ? 255 : static_cast<uint8_t>(pixel >> 24);
+        uint8_t b = static_cast<uint8_t>(pixel), g = static_cast<uint8_t>(pixel >> 8), r = static_cast<uint8_t>(pixel >> 16);
+        if (bitmap->GetPixelFormat() == PixelFormat32bppARGB) {
+            b = static_cast<uint8_t>((static_cast<uint32_t>(b) * a + 127) / 255);
+            g = static_cast<uint8_t>((static_cast<uint32_t>(g) * a + 127) / 255);
+            r = static_cast<uint8_t>((static_cast<uint32_t>(r) * a + 127) / 255);
+        }
+        frame.pixels[i * 4] = b; frame.pixels[i * 4 + 1] = g;
+        frame.pixels[i * 4 + 2] = r; frame.pixels[i * 4 + 3] = a;
+    }
     return Ok;
+}
+
+inline Status GdipGetEncodeOptions(const GUID* encoder, const EncoderParameters* params,
+                                  um::imaging::ImageEncodeOptions& options) noexcept {
+    if (!params) return Ok;
+    if (!encoder || params->Count != 1 || encoder->operator==(EncoderClsidJpeg) == false)
+        return NotImplemented;
+    const auto& parameter = params->Parameter[0];
+    if (!(parameter.Guid == EncoderQuality) || parameter.NumberOfValues != 1 ||
+        parameter.Type != 4 || !parameter.Value) return InvalidParameter;
+    const uint32_t quality = *static_cast<const uint32_t*>(parameter.Value);
+    if (quality > 100) return InvalidParameter;
+    options.quality = static_cast<uint8_t>(quality ? quality : 1);
+    return Ok;
+}
+
+inline Status __stdcall GdipSaveImageToFile(GpImage* image, const wchar_t* filename,
+                                            const GUID* clsidEncoder,
+                                            const EncoderParameters* encoderParams) noexcept {
+    if (!image || !filename || !*filename || !clsidEncoder) return InvalidParameter;
+    um::imaging::ImageFormat format{};
+    if (!GdipEncoderFormat(clsidEncoder, format)) return NotImplemented;
+    um::imaging::ImageEncodeOptions options{};
+    const Status paramStatus = GdipGetEncodeOptions(clsidEncoder, encoderParams, options);
+    if (paramStatus != Ok) return paramStatus;
+    um::imaging::ImageFrame frame{};
+    const Status frameStatus = GdipBuildEncodeFrame(image, frame, um::imaging::NativeImageAllocator());
+    if (frameStatus != Ok) return frameStatus;
+    return GdipImageCodecStatus(um::imaging::EncodeImageFile(filename, frame, format,
+        um::imaging::NativeImageAllocator(), options));
 }
 
 inline Status __stdcall GdipImageGetFrameCount(GpImage* image, const void*, uint32_t* count) noexcept {
@@ -2194,15 +2304,42 @@ inline Status __stdcall GdipSetPropertyItem(GpImage* image, const void*) noexcep
 
 inline Status __stdcall GdipGetImageEncodersSize(uint32_t* numEncoders, uint32_t* size) noexcept {
     if (!numEncoders || !size) return InvalidParameter;
-    *numEncoders = 1;
-    *size = sizeof(ImageCodecInfo);
+    constexpr uint32_t count = 3;
+    *numEncoders = count;
+    *size = count * sizeof(ImageCodecInfo);
     return Ok;
 }
 
 inline Status __stdcall GdipGetImageEncoders(uint32_t numEncoders, uint32_t size, void* encoders) noexcept {
-    if (!encoders || numEncoders == 0 || size < sizeof(ImageCodecInfo)) return InvalidParameter;
-    auto* codec = reinterpret_cast<ImageCodecInfo*>(encoders);
-    *codec = ImageCodecInfo{};
+    constexpr uint32_t count = 3;
+    if (!encoders || numEncoders < count || size < count * sizeof(ImageCodecInfo))
+        return InvalidParameter;
+    static constexpr wchar_t bmpName[] = L"BMP Encoder";
+    static constexpr wchar_t jpegName[] = L"JPEG Encoder";
+    static constexpr wchar_t pngName[] = L"PNG Encoder";
+    static constexpr wchar_t bmpExt[] = L"*.BMP";
+    static constexpr wchar_t jpegExt[] = L"*.JPG;*.JPEG";
+    static constexpr wchar_t pngExt[] = L"*.PNG";
+    static constexpr wchar_t bmpMime[] = L"image/bmp";
+    static constexpr wchar_t jpegMime[] = L"image/jpeg";
+    static constexpr wchar_t pngMime[] = L"image/png";
+    const GUID* encodersByIndex[count]{&EncoderClsidBmp, &EncoderClsidJpeg, &EncoderClsidPng};
+    const GUID* formats[count]{&ImageFormatBMP, &ImageFormatJPEG, &ImageFormatPNG};
+    const wchar_t* names[count]{bmpName, jpegName, pngName};
+    const wchar_t* extensions[count]{bmpExt, jpegExt, pngExt};
+    const wchar_t* mimeTypes[count]{bmpMime, jpegMime, pngMime};
+    auto* codecs = static_cast<ImageCodecInfo*>(encoders);
+    for (uint32_t i = 0; i < count; ++i) {
+        codecs[i] = ImageCodecInfo{};
+        std::memcpy(codecs[i].Clsid, encodersByIndex[i], sizeof(GUID));
+        std::memcpy(codecs[i].FormatID, formats[i], sizeof(GUID));
+        codecs[i].CodecName = names[i];
+        codecs[i].DllName = L"gdiplus.dll";
+        codecs[i].FormatDescription = names[i];
+        codecs[i].FilenameExtension = extensions[i];
+        codecs[i].MimeType = mimeTypes[i];
+        codecs[i].Flags = 1;
+    }
     return Ok;
 }
 
@@ -2499,16 +2636,107 @@ inline int32_t GdipGetImagePaletteSize(void* /*image*/, int32_t* size) noexcept 
     return 0; // Ok
 }
 
-inline int32_t GdipCreateBitmapFromFile(const wchar_t* /*filename*/, void** bitmap) noexcept {
-    if (bitmap) {
-        static uintptr_t s_bmp = 0xAA00;
-        *bitmap = reinterpret_cast<void*>(++s_bmp);
+inline void* GdipImageAllocate(void*, size_t bytes) noexcept { return std::malloc(bytes); }
+inline void GdipImageFree(void*, void* address, size_t) noexcept { std::free(address); }
+
+inline Status GdipCreateBitmapFromFile(const wchar_t* filename, void** bitmap) noexcept {
+    if (!bitmap) return InvalidParameter;
+    *bitmap = nullptr;
+    if (!filename || !*filename) return InvalidParameter;
+
+    using micant::win32::HANDLE;
+    HANDLE file = micant::win32::CreateFileW(filename, micant::win32::GENERIC_READ,
+        micant::win32::FILE_SHARE_READ, nullptr, micant::win32::OPEN_EXISTING, 0, nullptr);
+    if (file == micant::win32::INVALID_HANDLE_VALUE) {
+        const auto error = micant::win32::GetLastError();
+        return error == 5 ? AccessDenied : (error == 2 || error == 3 ? FileNotFound : Win32Error);
     }
-    return 0; // Ok
+    struct FileCloser {
+        HANDLE value;
+        ~FileCloser() { (void)micant::win32::CloseHandle(value); }
+    } closer{file};
+
+    micant::LargeInteger fileSize{};
+    if (!micant::win32::GetFileSizeEx(file, &fileSize) || fileSize.quadPart <= 0)
+        return GenericError;
+    um::imaging::ImageLimits limits{};
+    if (static_cast<uint64_t>(fileSize.quadPart) > limits.maxEncodedBytes) return ValueOverflow;
+    try {
+        std::vector<uint8_t> encoded(static_cast<size_t>(fileSize.quadPart));
+        uint32_t received{};
+        if (!micant::win32::ReadFile(file, encoded.data(), static_cast<uint32_t>(encoded.size()),
+                                     &received, nullptr) || received != encoded.size())
+            return GenericError;
+        um::imaging::ImageFrame decoded{};
+        const um::imaging::ImageAllocator allocator{nullptr, &GdipImageAllocate, &GdipImageFree};
+        if (encoded.size() > limits.maxIntermediateBytes) return ValueOverflow;
+        limits.maxIntermediateBytes -= encoded.size();
+        limits.maxDecodedBytes = std::min(limits.maxDecodedBytes, limits.maxIntermediateBytes / 3);
+        const auto status = um::imaging::DecodeImage(encoded, decoded, allocator, limits);
+        if (status != um::imaging::ImageStatus::Success) {
+            switch (status) {
+                case um::imaging::ImageStatus::UnknownFormat: return UnknownImageFormat;
+                case um::imaging::ImageStatus::UnsupportedFeature: return NotImplemented;
+                case um::imaging::ImageStatus::ImageTooLarge: return ValueOverflow;
+                case um::imaging::ImageStatus::OutOfMemory: return OutOfMemory;
+                default: return GenericError;
+            }
+        }
+        auto* result = new Bitmap(decoded.width, decoded.height, PixelFormat32bppPARGB);
+        if (result->pixelBuffer.size() != decoded.pixels.size()) {
+            delete result;
+            return ValueOverflow;
+        }
+        std::memcpy(result->pixelBuffer.data(), decoded.pixels.data(), decoded.pixels.size());
+        std::memcpy(result->GetPixelBuffer(), decoded.pixels.data(), decoded.pixels.size());
+        result->SetRawFormat(decoded.sourceFormat == um::imaging::ImageFormat::Jpeg ? ImageFormatJPEG :
+                             decoded.sourceFormat == um::imaging::ImageFormat::Png ? ImageFormatPNG : ImageFormatBMP);
+        *bitmap = result;
+        return Ok;
+    } catch (const std::bad_alloc&) {
+        return OutOfMemory;
+    } catch (...) {
+        return GenericError;
+    }
 }
 
-inline int32_t GdipSaveImageToStream(void* /*image*/, void* /*stream*/, const void* /*clsidEncoder*/, const void* /*encoderParams*/) noexcept {
-    return 0; // Ok
+inline Status GdipLoadImageFromFile(const wchar_t* filename, GpImage** image) noexcept {
+    if (!image) return InvalidParameter;
+    *image = nullptr;
+    void* bitmap{};
+    const Status status = GdipCreateBitmapFromFile(filename, &bitmap);
+    if (status == Ok) *image = static_cast<GpImage*>(bitmap);
+    return status;
+}
+
+inline int32_t GdipSaveImageToStream(void* image, void* stream, const void* clsidEncoder,
+                                    const void* encoderParams) noexcept {
+    if (!image || !stream || !clsidEncoder) return InvalidParameter;
+    um::imaging::ImageFormat format{};
+    if (!GdipEncoderFormat(static_cast<const GUID*>(clsidEncoder), format)) return NotImplemented;
+    um::imaging::ImageEncodeOptions options{};
+    const Status params = GdipGetEncodeOptions(static_cast<const GUID*>(clsidEncoder),
+        static_cast<const EncoderParameters*>(encoderParams), options);
+    if (params != Ok) return params;
+    um::imaging::ImageFrame frame{};
+    const Status frameStatus = GdipBuildEncodeFrame(static_cast<GpImage*>(image), frame,
+        um::imaging::NativeImageAllocator());
+    if (frameStatus != Ok) return frameStatus;
+    um::imaging::EncodedImage encoded{};
+    const auto encodeStatus = um::imaging::EncodeImage(frame, format, encoded,
+        um::imaging::NativeImageAllocator(), options);
+    if (encodeStatus != um::imaging::ImageStatus::Success) return GdipImageCodecStatus(encodeStatus);
+    auto* output = static_cast<ole32::IStream*>(stream);
+    size_t writtenTotal = 0;
+    while (writtenTotal < encoded.byteLength) {
+        const uint32_t chunk = static_cast<uint32_t>(std::min<size_t>(
+            encoded.byteLength - writtenTotal, UINT32_MAX));
+        uint32_t written{};
+        const auto hr = output->Write(encoded.bytes.data() + writtenTotal, chunk, &written);
+        if (hr < 0 || !written || written > chunk) return Win32Error;
+        writtenTotal += written;
+    }
+    return Ok;
 }
 
 inline int32_t GdipDrawLinesI(void* /*graphics*/, void* /*pen*/, const void* /*points*/, int32_t /*count*/) noexcept {
@@ -2590,6 +2818,7 @@ inline void InitializeGdiPlusExports() {
     loader.registerExport("gdiplus.dll", "GdipDisposeImage", reinterpret_cast<void*>(&GdipDisposeImage));
     loader.registerExport("gdiplus.dll", "GdipGetImageWidth", reinterpret_cast<void*>(&GdipGetImageWidth));
     loader.registerExport("gdiplus.dll", "GdipGetImageHeight", reinterpret_cast<void*>(&GdipGetImageHeight));
+    loader.registerExport("gdiplus.dll", "GdipLoadImageFromFile", reinterpret_cast<void*>(&GdipLoadImageFromFile));
     loader.registerExport("gdiplus.dll", "GdipGetImagePixelFormat", reinterpret_cast<void*>(&GdipGetImagePixelFormat));
     loader.registerExport("gdiplus.dll", "GdipGetImageHorizontalResolution", reinterpret_cast<void*>(&GdipGetImageHorizontalResolution));
     loader.registerExport("gdiplus.dll", "GdipBitmapSetResolution", reinterpret_cast<void*>(&GdipBitmapSetResolution));

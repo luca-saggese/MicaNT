@@ -408,6 +408,8 @@ if (MICANT_ENABLE_BAREMETAL)
         tools/explorer_shell/start_menu.cpp
         tools/explorer_shell/notification_area.cpp
         tools/explorer_shell/task_switcher.cpp
+        include/micant/um/subsystems/imaging/wallpaper.cpp
+        kernel/ex/freestanding_memory.cpp
     )
     target_include_directories(explorer_boot PRIVATE "${CMAKE_SOURCE_DIR}/tools")
     target_compile_options(explorer_boot PRIVATE
@@ -689,6 +691,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -nostdlib -Wl,--entry,DllMainCRTStartup
     )
     target_link_libraries(kernel32_boot PRIVATE ntdll_boot)
+    target_link_libraries(explorer_boot PRIVATE ntdll_boot)
     set_target_properties(kernel32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "kernel32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"

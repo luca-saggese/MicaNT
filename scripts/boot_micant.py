@@ -456,6 +456,10 @@ def run_qemu(
         # loader opens the real DLLs from there for file-backed SEC_IMAGE.
         system32_dir = esp / "MicaNT" / "System32"
         system32_dir.mkdir(parents=True)
+        wallpaper_asset = ROOT / "assets" / "wallpaper.png"
+        if not wallpaper_asset.is_file():
+            raise RuntimeError(f"Packaged desktop wallpaper is missing: {wallpaper_asset}")
+        shutil.copyfile(wallpaper_asset, system32_dir / "wallpaper.png")
         hosts_dir = system32_dir / "drivers" / "etc"
         hosts_dir.mkdir(parents=True, exist_ok=True)
         (hosts_dir / "hosts").write_text("10.0.2.2 host\n", encoding="ascii")

@@ -24,7 +24,7 @@
 #include "micant/shared/ntdef.hpp"
 #include "micant/um/subsystems/winbase/kernel32.hpp"
 #include "micant/um/subsystems/winuser/user32.hpp"
-#include "micant/km/hal/bootvid.hpp"
+#include "micant/shared/font8x8.hpp"
 #include "micant/um/native/ldr.hpp"
 
 namespace micant::gdi32 {
@@ -761,7 +761,7 @@ public:
         for (int i = 0; i < c; ++i) {
             wchar_t wc = lpString[i];
             char asciiCh = (wc >= 32 && wc <= 126) ? static_cast<char>(wc) : '?';
-            const uint8_t* glyph = bootvid::font::GLYPH_DATA[asciiCh - 32];
+            const uint8_t* glyph = micant::shared::FONT_8X8[asciiCh - 32];
 
             for (int row = 0; row < 8; ++row) {
                 int py = y + row;
