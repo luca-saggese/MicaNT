@@ -62,7 +62,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
   riferimenti. `NtDuplicateObject` ora è collegato al syscall CPL3; QEMU verifica
   `DUPLICATE_SAME_ACCESS`, rifiuto dei diritti insufficienti, handle sorgente
-  invalido e output non mappato. Il target non pubblicato viene ritirato anche
+  invalido e output non mappato. `DUPLICATE_CLOSE_SOURCE` è verificato sia dopo
+  una duplicazione riuscita sia quando i diritti target vengono negati; in
+  entrambi i casi il source handle è ritirato e l'handle risultante è controllato.
+  Il target non pubblicato viene ritirato anche
   per handle `OBJ_PROTECT_CLOSE`, usando il close callback canonico. I test
   kernel coprono il rollback della callback Ob. QEMU CPL3 verifica inoltre la
   creazione di un evento `OBJ_INHERIT`, la clonazione con flag di inheritance,
