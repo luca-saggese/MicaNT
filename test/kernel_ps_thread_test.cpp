@@ -1140,6 +1140,8 @@ bool testUserModeProcessOpenAccess() noexcept {
         0x0001 | ob::SYNCHRONIZE, &processAccess) == NtStatus::Success && target && targetReference;
     if (!valid) g_attachFailureStage = 41;
     Handle processHandle{}, deniedHandle{}, allowedHandle{}, debugHandle{};
+    Handle securedThreadHandle{}, openedThreadHandle{};
+    ps::EThread* securedThread{};
     se::FreestandingAccessToken* callerToken{};
     ob::ObjectHeader* callerTokenReference{};
     uint64_t originalPrivileges{};
@@ -1182,6 +1184,28 @@ bool testUserModeProcessOpenAccess() noexcept {
             debugHandle = 0;
         }
     }
+    if (valid) {
+        se::FreestandingSecurityDescriptor threadSecurity{};
+        threadSecurity.DaclPresent = true;
+        threadSecurity.AceCount = 2;
+        threadSecurity.Dacl[0] = {identity->UserSid, 0x0001, se::FreestandingAceType::Deny};
+        threadSecurity.Dacl[1] = {identity->UserSid, 0x00100040, se::FreestandingAceType::Allow};
+        constexpr uint32_t threadQueryAndSynchronize = 0x00100040;
+        valid = ps::detail::createThreadHandle(*target, 16384, threadEntry, nullptr,
+            threadQueryAndSynchronize, securedThreadHandle, securedThread, &threadSecurity) ==
+                NtStatus::Success && securedThreadHandle && securedThread;
+        if (valid) {
+            const ClientId securedThreadId{target->processId(), securedThread->threadId()};
+            valid = ps::detail::openThreadByClientId(securedThreadId, 0x0040, 0,
+                openedThreadHandle) == NtStatus::Success && openedThreadHandle;
+            Handle deniedThread{};
+            valid = valid && ps::detail::openThreadByClientId(securedThreadId, 0x0001, 0,
+                deniedThread) == NtStatus::AccessDenied && !deniedThread;
+            const auto* openedEntry = openedThreadHandle
+                ? target->getHandleTable().getEntry(openedThreadHandle) : nullptr;
+            valid = valid && openedEntry && openedEntry->grantedAccess == 0x0040;
+        }
+    }
     currentThread->previousUserMode = previousMode;
     if (attached) ke::KeUnstackDetachProcess(&attach);
     if (!valid) g_attachFailureStage = 43;
@@ -1193,6 +1217,20 @@ bool testUserModeProcessOpenAccess() noexcept {
         openedReference->as<ps::EProcess>() == target && openedGranted == 0x0010;
     if (!valid) g_attachFailureStage = 44;
     if (openedReference) ob::ObDereferenceObject(openedReference);
+    if (openedThreadHandle && target) {
+        valid = target->getHandleTable().closeHandle(openedThreadHandle) == NtStatus::Success && valid;
+        openedThreadHandle = 0;
+    }
+    if (securedThreadHandle && target) {
+        valid = target->getHandleTable().closeHandle(securedThreadHandle) == NtStatus::Success && valid;
+        securedThreadHandle = 0;
+    }
+    if (securedThread) {
+        const auto cancelStatus = securedThread->cancelBeforeStart();
+        const auto reapStatus = cancelStatus == NtStatus::Success ? securedThread->reap() : cancelStatus;
+        valid = valid && reapStatus == NtStatus::Success;
+        securedThread = nullptr;
+    }
     if (allowedHandle && target) (void)target->getHandleTable().closeHandle(allowedHandle);
     if (debugHandle && target) (void)target->getHandleTable().closeHandle(debugHandle);
     if (target && processHandle && !target->isTerminating())

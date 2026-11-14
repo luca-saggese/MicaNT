@@ -361,7 +361,8 @@ NtStatus createSystemThreadHandle(EProcess& process, EThread::SystemStartRoutine
 
 NtStatus createThreadHandle(EProcess& process, size_t stackSize,
                             void (*start)(void*) noexcept, void* argument, uint32_t access,
-                            Handle& handle, EThread*& thread) noexcept {
+                            Handle& handle, EThread*& thread,
+                            const se::FreestandingSecurityDescriptor* security) noexcept {
     ob::detail::HandleTableGuard guard;
     initializeThreadType();
     thread = nullptr;
@@ -372,7 +373,7 @@ NtStatus createThreadHandle(EProcess& process, size_t stackSize,
     auto status = ob::ObCreateObject(ob::KernelMode, &threadType, nullptr, sizeof(EThread), &body, &header);
     if (status != NtStatus::Success) return status;
     auto* created = new (body) EThread{};
-    status = assignObjectSecurity(*header, nullptr, access, true);
+    status = assignObjectSecurity(*header, security, access, true);
     if (status == NtStatus::Success)
         status = created->initialize(process, stackSize, start, argument);
     if (status == NtStatus::Success) {

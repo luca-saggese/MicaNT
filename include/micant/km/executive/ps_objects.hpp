@@ -52,7 +52,8 @@ NtStatus createBootstrapUserProcess(std::span<const BootstrapProcessImage> image
 // Internal BSP factory; a successfully created object remains pinned until reap.
 NtStatus createThreadHandle(EProcess& process, size_t stackSize,
                             void (*start)(void*) noexcept, void* argument, uint32_t access,
-                            Handle& handle, EThread*& thread) noexcept;
+                            Handle& handle, EThread*& thread,
+                            const se::FreestandingSecurityDescriptor* security = nullptr) noexcept;
 // Caller holds the target process root and keeps the supplied process alive.
 NtStatus createUserThreadHandle(EProcess& process, uintptr_t entry, size_t kernelStackSize,
                                 size_t userStackSize, bool interruptible, uint32_t access,
