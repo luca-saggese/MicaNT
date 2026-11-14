@@ -64,6 +64,11 @@ inline void Test_IcoDecoder_PngDibAndMalformedInputs() {
 
 inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     using namespace micant;
+    const um::imaging::ImageAllocator allocator{
+        nullptr,
+        [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
+        [](void*, void* address, size_t) noexcept { std::free(address); },
+    };
     std::vector<uint8_t> pe(0x400, 0);
     const auto put16 = [&](size_t offset, uint16_t value) {
         pe[offset] = static_cast<uint8_t>(value);
@@ -100,12 +105,15 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     pe[0x2c0] = 0xde; pe[0x2c1] = 0xad; pe[0x2c2] = 0xbe; pe[0x2c3] = 0xef;
     put16(root + 0x80 + 14, 1); put32(root + 0x80 + 16, 1); put32(root + 0x80 + 20, 0x800000a0u);
     put16(root + 0xa0 + 14, 1); put32(root + 0xa0 + 16, 1033); put32(root + 0xa0 + 20, 0xc0);
-    put32(root + 0xc0, 0x10e4); put32(root + 0xc4, 4);
+    put32(root + 0xc0, 0x10e4); put32(root + 0xc4, 48);
     put32(root + 0x60, 0x10d0); put32(root + 0x64, 20);
     pe[0x2d0] = 0; pe[0x2d2] = 1; pe[0x2d4] = 1;
     pe[0x2d6] = 1; pe[0x2d7] = 1; pe[0x2da] = 1; pe[0x2dc] = 32;
-    pe[0x2de] = 4; pe[0x2e2] = 1;
-    pe[0x2e4] = 0x11; pe[0x2e5] = 0x22; pe[0x2e6] = 0x33; pe[0x2e7] = 0x44;
+    pe[0x2de] = 48; pe[0x2e2] = 1;
+    // One-pixel 32bpp icon DIB: header + XOR BGRA + zeroed AND mask.
+    put32(0x2e4, 40); put32(0x2e8, 1); put32(0x2ec, 2);
+    put16(0x2f0, 1); put16(0x2f2, 32); put32(0x2f4, 0);
+    pe[0x30c] = 0x11; pe[0x30d] = 0x22; pe[0x30e] = 0x33; pe[0x30f] = 0xff;
 
     pe::PeImageView64 image;
     TEST_ASSERT(image.inspect(pe) == NtStatus::Success, "synthetic PE fixture validates");
@@ -120,9 +128,15 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     pe::PeIconResource icon{};
     TEST_ASSERT(icons.findIcon(101, 1033, 16, 16, 32, icon) == NtStatus::Success,
                 "RT_GROUP_ICON resolves its RT_ICON resource ID");
-    TEST_ASSERT(icon.entry.resourceId == 1 && icon.entry.width == 1 && icon.resource.bytes.size() == 4 &&
-                icon.resource.bytes[0] == 0x11 && icon.resource.language == 1033,
+    TEST_ASSERT(icon.entry.resourceId == 1 && icon.entry.width == 1 && icon.resource.bytes.size() == 48 &&
+                icon.resource.bytes[0] == 40 && icon.resource.language == 1033,
                 "icon variant metadata and payload are returned");
+    um::imaging::ImageFrame peIcon{};
+    TEST_ASSERT(um::imaging::DecodePeGroupIcon(pe, 101, 1033, 1, 1, peIcon, allocator) ==
+                    um::imaging::ImageStatus::Success &&
+                peIcon.width == 1 && peIcon.pixels[0] == 0x11 && peIcon.pixels[1] == 0x22 &&
+                peIcon.pixels[2] == 0x33 && peIcon.pixels[3] == 0xff,
+                "PE group traversal decodes a file-backed RT_ICON without executing the PE");
     TEST_ASSERT(resources.find({14, {}, false}, {102, {}, false}, 1033, result) == NtStatus::NotFound,
                  "missing resource is reported without synthetic data");
     put32(root + 0x60, 0x1200);

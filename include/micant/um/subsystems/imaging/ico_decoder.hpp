@@ -5,6 +5,7 @@
 // used by the other imaging clients.
 #include "bmp_png_decoder.hpp"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/um/native/pe.hpp"
 
 #include <algorithm>
 #include <array>
@@ -230,6 +231,52 @@ inline ImageStatus DecodeIconResourcePayload(std::span<const uint8_t> input,
 inline ImageStatus ScaleIconFrame(const ImageFrame& source, uint32_t width,
                                   uint32_t height, ImageFrame& output,
                                   const ImageAllocator& allocator,
+                                  ImageLimits limits) noexcept;
+
+// Extract one RT_GROUP_ICON entry through the bounded file-backed PE resource
+// reader, then decode the resolved RT_ICON bytes without mapping or executing
+// the image. Named group resources are intentionally left unsupported here.
+inline ImageStatus DecodePeGroupIcon(std::span<const uint8_t> file,
+                                     uint16_t groupId, uint16_t language,
+                                     uint32_t width, uint32_t height,
+                                     ImageFrame& output,
+                                     const ImageAllocator& allocator,
+                                     ImageLimits limits = {}) noexcept {
+    if (file.empty() || file.size() > limits.maxEncodedBytes ||
+        file.size() > limits.maxIntermediateBytes || !groupId ||
+        !width || !height || width > 4096 || height > 4096)
+        return ImageStatus::MalformedData;
+    pe::PeImageView64 image{};
+    if (image.inspect(file) != NtStatus::Success) return ImageStatus::MalformedData;
+    pe::PeResourceView resources(image);
+    pe::PeGroupIconView groups(resources);
+    pe::PeIconResource selected{};
+    const NtStatus resourceStatus =
+        groups.findIcon(groupId, language, width, height, 32, selected);
+    if (resourceStatus == NtStatus::NotFound) return ImageStatus::UnknownFormat;
+    if (resourceStatus == NtStatus::NotSupported) return ImageStatus::UnsupportedFeature;
+    if (resourceStatus != NtStatus::Success) return ImageStatus::MalformedData;
+    limits.maxIntermediateBytes -= file.size();
+    limits.maxDecodedBytes = std::min(limits.maxDecodedBytes, limits.maxIntermediateBytes);
+    ImageFrame decoded{};
+    ImageStatus status = DecodeIconResourcePayload(selected.resource.bytes, decoded,
+                                                    allocator, limits);
+    if (status != ImageStatus::Success) return status;
+    if (decoded.width != selected.entry.width || decoded.height != selected.entry.height)
+        return ImageStatus::MalformedData;
+    if (decoded.width != width || decoded.height != height) {
+        ImageFrame scaled{};
+        status = ScaleIconFrame(decoded, width, height, scaled, allocator, limits);
+        if (status != ImageStatus::Success) return status;
+        decoded = std::move(scaled);
+    }
+    output = std::move(decoded);
+    return ImageStatus::Success;
+}
+
+inline ImageStatus ScaleIconFrame(const ImageFrame& source, uint32_t width,
+                                  uint32_t height, ImageFrame& output,
+                                  const ImageAllocator& allocator,
                                   ImageLimits limits = {}) noexcept {
     if (!source.width || !source.height || source.stride < source.width * 4ull ||
         !width || !height || width > 4096 || height > 4096 ||
@@ -280,6 +327,59 @@ inline ImageStatus DecodeIcon(std::span<const uint8_t> input, uint32_t width,
                               uint32_t height, ImageFrame& output,
                               const ImageAllocator& allocator,
                               ImageLimits limits) noexcept;
+
+inline ImageStatus ReadIconSourceFile(const wchar_t* path, ImageBuffer& encoded,
+                                      const ImageAllocator& allocator,
+                                      ImageLimits limits = {}) noexcept {
+    if (!path || !*path || !allocator.allocate || !allocator.deallocate)
+        return ImageStatus::MalformedData;
+    size_t pathChars{};
+    while (path[pathChars]) if (++pathChars > 32767) return ImageStatus::ImageTooLarge;
+    const size_t pathBytes = pathChars * sizeof(wchar_t);
+    if (pathBytes > UINT16_MAX - sizeof(wchar_t)) return ImageStatus::ImageTooLarge;
+    UnicodeString name{};
+    name.length = static_cast<uint16_t>(pathBytes);
+    name.maximumLength = static_cast<uint16_t>(pathBytes + sizeof(wchar_t));
+    name.buffer = path;
+    ObjectAttributes attributes{};
+    attributes.length = sizeof(attributes);
+    attributes.objectName = &name;
+    attributes.attributes = OBJ_CASE_INSENSITIVE;
+    Handle file{};
+    IoStatusBlock io{};
+    NtStatus status = native_nt::NtCreateFile(&file, 0x00100081u, &attributes, &io,
+        nullptr, 0, 1, 1, 0x20, nullptr, 0);
+    if (status != NtStatus::Success)
+        return status == NtStatus::AccessDenied ? ImageStatus::AccessDenied : ImageStatus::IoFailure;
+    struct FileGuard {
+        Handle value{};
+        ~FileGuard() { if (value) (void)native_nt::NtClose(value); }
+    } guard{file};
+    FileStandardInformation standard{};
+    status = native_nt::NtQueryInformationFile(file, &io, &standard, sizeof(standard),
+        FileInformationClass::FileStandardInformation);
+    if (status != NtStatus::Success) return ImageStatus::IoFailure;
+    if (standard.directory || standard.endOfFile.quadPart <= 0) return ImageStatus::MalformedData;
+    const uint64_t fileSize = static_cast<uint64_t>(standard.endOfFile.quadPart);
+    if (fileSize > limits.maxEncodedBytes || fileSize > limits.maxIntermediateBytes ||
+        fileSize > SIZE_MAX) return ImageStatus::ImageTooLarge;
+    if (!encoded.allocate(static_cast<size_t>(fileSize), allocator)) return ImageStatus::OutOfMemory;
+    size_t completed{};
+    while (completed < encoded.size()) {
+        const uint32_t request = static_cast<uint32_t>(std::min<size_t>(
+            encoded.size() - completed, 64u * 1024u));
+        LargeInteger offset{};
+        offset.quadPart = static_cast<int64_t>(completed);
+        io = {};
+        status = native_nt::NtReadFile(file, 0, nullptr, nullptr, &io,
+            encoded.data() + completed, request, &offset, nullptr);
+        if (status != NtStatus::Success) return ImageStatus::IoFailure;
+        if (!io.information) return ImageStatus::TruncatedInput;
+        if (io.information > request) return ImageStatus::IoFailure;
+        completed += static_cast<size_t>(io.information);
+    }
+    return ImageStatus::Success;
+}
 
 inline ImageStatus DecodeIconFile(const wchar_t* path, ImageFrame& output,
                                   const ImageAllocator& allocator,
@@ -357,6 +457,18 @@ inline ImageStatus DecodeIconFile(const wchar_t* path, ImageFrame& output,
     }
     output = std::move(frame);
     return ImageStatus::Success;
+}
+
+inline ImageStatus DecodePeGroupIconFile(const wchar_t* path, uint16_t groupId,
+                                         uint16_t language, ImageFrame& output,
+                                         const ImageAllocator& allocator,
+                                         uint32_t width, uint32_t height,
+                                         ImageLimits limits = {}) noexcept {
+    ImageBuffer file{};
+    const ImageStatus readStatus = ReadIconSourceFile(path, file, allocator, limits);
+    if (readStatus != ImageStatus::Success) return readStatus;
+    return DecodePeGroupIcon(file.span(), groupId, language, width, height,
+                             output, allocator, limits);
 }
 
 inline ImageStatus DecodeIcon(std::span<const uint8_t> input, uint32_t width,
