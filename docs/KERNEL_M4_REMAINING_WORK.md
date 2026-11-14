@@ -102,7 +102,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   self-relative security descriptor con DACL vuota: `STATUS_ACCESS_DENIED` e
   handle nullo. L'inheritance `OBJ_INHERIT` positiva e negativa ora passa in
   CPL3/QEMU; restano aperti gli altri access mode e il rollback QEMU di tutte le
-  fasi di creazione e inheritance.
+  fasi di creazione e inheritance. La fixture CPL3 verifica anche
+  `STATUS_ACCESS_VIOLATION` con output handle non scrivibile prima di allocare o
+  pubblicare il processo.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
@@ -114,7 +116,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   verifica anche il rifiuto `STATUS_NOT_IMPLEMENTED` di flag non supportati con
   handle nullo, e `STATUS_INVALID_PARAMETER` senza handle per dimensioni stack
   che causano overflow nell'arrotondamento. Il contratto generale e il rollback
-  di tutte le fasi restano aperti.
+  di tutte le fasi restano aperti. La fixture CPL3 verifica inoltre
+  `STATUS_ACCESS_VIOLATION` con output handle non scrivibile prima di allocare
+  stack, TEB o membership del thread.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
@@ -138,7 +142,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   esplicito di verifica ancora valido. Gli altri ordini e le varianti timeout/
   alertability restano aperti. QEMU CPL3 verifica inoltre che il wait a timeout
   zero su un thread appena creato sospeso restituisca `STATUS_TIMEOUT` e lasci
-  il thread disponibile per setup APC e resume.
+  il thread disponibile per setup APC e resume. Il test processo ora blocca un
+  waiter, chiude entrambi gli handle pubblici, verifica che gli handle ritirati
+  non siano più usabili, poi termina il processo da un suo thread e controlla il
+  wake/status. Un riferimento esplicito mantiene l'oggetto vivo fino al controllo
+  finale, dopo il quale il PFN/object count torna al baseline.
 - [ ] **Portare i percorsi M4 oltre il solo bootstrap BSP.** Collegare accesso,
   lifecycle e cleanup alle entry native Ps/Ob e ai caller reali; mantenere
   capture, pubblicazione, rollback e sincronizzazione coerenti con il contesto
@@ -253,4 +261,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   /private/tmp/micant-m4-suspended-zero-wait2` è passata. Il syscall ha
   restituito `STATUS_TIMEOUT`, il successivo setup APC/resume è proseguito,
   build/link, PS/2 e seriale stabile per 5 secondi sono verdi.
+- Verifica integrata completa dopo i test del lotto wait/lifetime processo e
+  preflight degli output `NtCreateProcessEx`/`NtCreateThreadEx`:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-batch-lifecycle-debug4` è passata. Build/link
+  `ntoskrnl_core_baremetal`, due thread CPL3, terminazione, APC, file-backed
+  `SEC_IMAGE`, input PS/2 e seriale stabile per 5 secondi sono verdi.
 

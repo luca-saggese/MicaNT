@@ -349,6 +349,12 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x38(%rsp)\nmovq $0, 0x40(%rsp)\ncallq *40(%r15)\n"
         "cmpl $0xc0000002, %eax\nje 27f\nmovl $0xc0000227, %r13d\njmp 90f\n"
         "27: cmpq $0, 0x60(%rsp)\nje 28f\nmovl $0xc0000228, %r13d\njmp 90f\n28:\n"
+        // Invalid output addresses must be rejected before process allocation.
+        "movq $0x1000, %rcx\nmovl $0x0010043b, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
+        "xorl %eax, %eax\nmovq %rax, 0x20(%rsp)\nmovq %rax, 0x28(%rsp)\n"
+        "movq %rax, 0x30(%rsp)\nmovq %rax, 0x38(%rsp)\nmovq %rax, 0x40(%rsp)\n"
+        "callq *40(%r15)\ncmpl $0xc0000005, %eax\nje .Lmicant_process_bad_output\n"
+        "movl $0xc0000258, %r13d\njmp 90f\n.Lmicant_process_bad_output:\n"
         // Unsupported process-creation options must fail before publishing an
         // object or treating opaque debug/exception ports as live handles.
         "leaq 0x60(%rsp), %rcx\nmovl $0x0010043b, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
@@ -356,6 +362,14 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq %rax, 0x30(%rsp)\nmovq %rax, 0x38(%rsp)\nmovq %rax, 0x40(%rsp)\n"
         "callq *40(%r15)\ncmpl $0xc0000002, %eax\nje 68f\nmovl $0xc0000246, %r13d\njmp 90f\n"
         "68: cmpq $0, 0x60(%rsp)\nje 69f\nmovl $0xc0000242, %r13d\njmp 90f\n69:\n"
+        // Thread creation preflights its output before stack, TEB, or
+        // process-membership resources are published.
+        "movq $0x1000, %rcx\nmovl $0x00100052, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
+        "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
+        "movq $0, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\n"
+        "movq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
+        "callq *48(%r15)\ncmpl $0xc0000005, %eax\nje .Lmicant_thread_bad_output\n"
+        "movl $0xc0000259, %r13d\njmp 90f\n.Lmicant_thread_bad_output:\n"
         "leaq 0x60(%rsp), %rcx\nmovl $0x0010043b, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
         "movq $0, 0x20(%rsp)\nmovq $0, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\n"
         "movq $0, 0x38(%rsp)\nmovq $0, 0x40(%rsp)\ncallq *40(%r15)\n"

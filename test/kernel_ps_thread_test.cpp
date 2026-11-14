@@ -959,33 +959,49 @@ bool testProcessObjectLifetime() noexcept {
     const auto waitIrql = ke::KfRaiseIrql(ke::DISPATCH_LEVEL);
     const bool waited = ke::KiSwapContext(state.boot, &waiter);
     ke::KeLowerIrql(waitIrql);
-    if (!waited || waiter.state != ke::ThreadState::Waiting || waiterState.finished ||
+    if (!waited || waiter.state != ke::ThreadState::Waiting || waiterState.finished) return false;
+    // The waiter's dispatcher reference must keep the process object alive
+    // after every public handle is closed. Keep one explicit test reference
+    // so assertions never inspect an unpinned raw EPROCESS pointer.
+    ob::ObjectHeader* processWaitReference{};
+    ps::EProcess* pinnedProcess{};
+    const Handle closedProcessHandle = handle;
+    const Handle closedWaitHandle = waiterState.handle;
+    if (ps::detail::referenceProcessHandle(handle, ob::SYNCHRONIZE,
+            pinnedProcess, processWaitReference) != NtStatus::Success ||
+        pinnedProcess != process || !processWaitReference ||
         sys::NtClose(waiterState.handle) != NtStatus::Success ||
-        thread.initialize(*process, 16384, objectTerminatingEntry, &state) != NtStatus::Success ||
+        sys::NtClose(handle) != NtStatus::Success ||
+        sys::NtWaitForSingleObject(closedProcessHandle, false, &poll) != NtStatus::InvalidHandle ||
+        sys::NtClose(closedWaitHandle) != NtStatus::InvalidHandle ||
+        sys::NtTerminateProcess(closedProcessHandle, NtStatus::Success) != NtStatus::InvalidHandle ||
+        pinnedProcess->isTerminating() ||
+        ps::detail::bootstrapProcessObjectCount() != objects + 1 ||
+        thread.initialize(*pinnedProcess, 16384, objectTerminatingEntry, &state) != NtStatus::Success ||
         thread.ready() != NtStatus::Success) return false;
+    waiterState.handle = 0;
+    handle = 0;
     auto* next = scheduler.selectNextThread();
     if (next != thread.kernelThread()) return false;
     const auto previous = ke::KfRaiseIrql(ke::DISPATCH_LEVEL);
     const bool switched = ke::KiSwapContext(state.boot, next);
     ke::KeLowerIrql(previous);
-    if (!switched || !state.ran || state.rundownCount != 1 || !process->isTerminating() ||
-        process->exitStatus() != NtStatus::AccessDenied || next->state != ke::ThreadState::Terminated ||
-        thread.reap() != NtStatus::Success || process->getDirectoryTableBase() ||
+    if (!switched || !state.ran || state.rundownCount != 1 || !pinnedProcess->isTerminating() ||
+        pinnedProcess->exitStatus() != NtStatus::AccessDenied || next->state != ke::ThreadState::Terminated ||
+        thread.reap() != NtStatus::Success || pinnedProcess->getDirectoryTableBase() ||
         ps::detail::bootstrapProcessObjectCount() != objects + 1 ||
-        ps::detail::referenceProcessHandle(handle, 0, resolved, reference) != NtStatus::Success ||
-        resolved != process || resolved->exitStatus() != NtStatus::AccessDenied) return false;
-    ob::ObDereferenceObject(reference);
+        processWaitReference->as<ps::EProcess>() != pinnedProcess ||
+        processWaitReference->as<ps::EProcess>()->exitStatus() != NtStatus::AccessDenied) return false;
     auto* resumed = scheduler.selectNextThread();
     if (resumed != &waiter) return false;
     const auto resumeIrql = ke::KfRaiseIrql(ke::DISPATCH_LEVEL);
     const bool resumedWait = ke::KiSwapContext(state.boot, resumed);
     ke::KeLowerIrql(resumeIrql);
-    return resumedWait && waiterState.finished && waiter.state == ke::ThreadState::Terminated &&
-        !scheduler.getReadyThreadCount() &&
-        sys::NtWaitForSingleObject(handle, false, &poll) == NtStatus::Success &&
-        sys::NtWaitForSingleObject(handle, false, &poll) == NtStatus::Success &&
-        sys::NtClose(handle) == NtStatus::Success &&
-        ps::detail::bootstrapProcessObjectCount() == objects &&
+    const bool waiterCompleted = resumedWait && waiterState.finished &&
+        waiter.state == ke::ThreadState::Terminated && !scheduler.getReadyThreadCount() &&
+        processWaitReference->as<ps::EProcess>()->exitStatus() == NtStatus::AccessDenied;
+    ob::ObDereferenceObject(processWaitReference);
+    return waiterCompleted && ps::detail::bootstrapProcessObjectCount() == objects &&
         mm::PfnDatabase::get().getActiveCount() == active;
 }
 
