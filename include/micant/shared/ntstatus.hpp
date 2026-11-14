@@ -104,6 +104,7 @@ enum class NtStatus : uint32_t {
     ProcessAborted                   = 0xC000010B,
     PrivilegeNotHeld                 = 0xC0000061,
     ProcedureNotFound                = 0xC000007A,
+    ResourceDataNotFound             = 0xC0000089,
     FileIsADirectory                 = 0xC00000BA,
     DirectoryNotEmpty                = 0xC0000101,
     NotADirectory                    = 0xC0000103,

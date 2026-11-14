@@ -15,6 +15,7 @@
 #include <windows.h>
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/um/subsystems/graphics/truetype.hpp"
 #include "gui_common.hpp"
 #include "explorer_shell/taskbar.hpp"
 #include "explorer_shell/start_menu.hpp"
@@ -263,12 +264,65 @@ void probeSystemFontFile() noexcept {
     attributes.attributes = micant::OBJ_CASE_INSENSITIVE;
     micant::Handle file{};
     micant::IoStatusBlock io{};
-    if (micant::native_nt::NtCreateFile(&file, 0x00100001u, &attributes, &io, nullptr, 0, 7, 1, 0x20, nullptr, 0) != micant::NtStatus::Success) return;
-    uint8_t bytes[4096]{};
-    micant::LargeInteger offset{};
-    const auto status = micant::native_nt::NtReadFile(file, 0, nullptr, nullptr, &io, bytes, sizeof(bytes), &offset, nullptr);
+    if (micant::native_nt::NtCreateFile(&file, 0x00100081u, &attributes, &io, nullptr, 0, 7, 1, 0x20, nullptr, 0) != micant::NtStatus::Success) {
+        PrintLine("[MicaNT FontProbe] TTF open failed"); return;
+    }
+    micant::FileStandardInformation fileInfo{};
+    const auto queryStatus = micant::native_nt::NtQueryInformationFile(file, &io, &fileInfo, sizeof(fileInfo),
+            micant::FileInformationClass::FileStandardInformation);
+    if (queryStatus != micant::NtStatus::Success) {
+        (void)micant::native_nt::NtClose(file);
+        PrintLine("[MicaNT FontProbe] TTF size query status failed");
+        return;
+    }
+    if (fileInfo.endOfFile.QuadPart <= 0 || fileInfo.endOfFile.QuadPart > 16 * 1024 * 1024) {
+        (void)micant::native_nt::NtClose(file);
+        PrintLine("[MicaNT FontProbe] TTF size value invalid");
+        return;
+    }
+    const size_t length = static_cast<size_t>(fileInfo.endOfFile.QuadPart);
+    void* allocation = nullptr;
+    size_t allocationSize = length;
+    if (micant::native_nt::NtAllocateVirtualMemory(static_cast<micant::Handle>(-1),
+            &allocation, 0, &allocationSize, 0x3000, 0x04) != micant::NtStatus::Success || !allocation) {
+        (void)micant::native_nt::NtClose(file);
+        PrintLine("[MicaNT FontProbe] TTF buffer allocation failed");
+        return;
+    }
+    auto* bytes = static_cast<uint8_t*>(allocation);
+    size_t done = 0;
+    bool readOk = true;
+    while (done < length) {
+        const uint32_t chunk = static_cast<uint32_t>((length - done) > 64 * 1024 ? 64 * 1024 : length - done);
+        micant::LargeInteger offset{};
+        offset.QuadPart = static_cast<int64_t>(done);
+        const auto status = micant::native_nt::NtReadFile(file, 0, nullptr, nullptr, &io,
+            bytes + done, chunk, &offset, nullptr);
+        if (status != micant::NtStatus::Success || io.Information == 0 || io.Information > chunk) {
+            readOk = false;
+            break;
+        }
+        done += static_cast<size_t>(io.Information);
+    }
     (void)micant::native_nt::NtClose(file);
-    PrintLine(status == micant::NtStatus::Success ? "[MicaNT FontProbe] TTF read succeeded" : "[MicaNT FontProbe] TTF read failed");
+    micant::um::graphics::truetype::FaceView face;
+    const bool parsed = readOk && done == length && face.parse(bytes, length);
+    if (parsed) {
+        const auto& metrics = face.metrics();
+        const uint16_t glyph = face.glyphIndex('M');
+        micant::um::graphics::truetype::GlyphMetrics glyphMetrics{};
+        int16_t xMin{}, yMin{}, xMax{}, yMax{};
+        const bool glyphOk = glyph && face.glyphMetrics(glyph, glyphMetrics) &&
+            face.glyphBounds(glyph, xMin, yMin, xMax, yMax) && xMin < xMax && yMin < yMax;
+        PrintLine(glyphOk && metrics.unitsPerEm == 2048
+            ? "[MicaNT FontProbe] Parsed TTF, cmap and real glyph metrics"
+            : "[MicaNT FontProbe] TTF parsed but glyph validation failed");
+    } else {
+        PrintLine("[MicaNT FontProbe] TTF parse failed");
+    }
+    size_t releaseSize = 0;
+    (void)micant::native_nt::NtFreeVirtualMemory(static_cast<micant::Handle>(-1),
+        &allocation, &releaseSize, 0x8000);
 }
 
 void chooseFallbackActiveApp() noexcept {

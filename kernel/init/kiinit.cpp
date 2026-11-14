@@ -3260,11 +3260,14 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(copy);
     }
     if (number == sys::SSN_NtQueryInformationFile) {
-        uint64_t informationClass{};
+        uint64_t informationClassSlot{};
         if (args.userStack > UINT64_MAX - 40 ||
-            ex::ExSafeCopyFromUser(&informationClass,
-                reinterpret_cast<const void*>(args.userStack + 40), sizeof(informationClass)) != NtStatus::Success)
+            ex::ExSafeCopyFromUser(&informationClassSlot,
+                reinterpret_cast<const void*>(args.userStack + 40), sizeof(informationClassSlot)) != NtStatus::Success)
             return status(NtStatus::AccessViolation);
+        // The Win64 stack slot for the enum is eight bytes, but its upper
+        // padding is unspecified because FILE_INFORMATION_CLASS is uint32_t.
+        const uint32_t informationClass = static_cast<uint32_t>(informationClassSlot);
         auto* ioStatusAddress = reinterpret_cast<IoStatusBlock*>(second);
         auto* information = reinterpret_cast<void*>(args.third);
         const uint32_t informationLength = static_cast<uint32_t>(args.fourth);
