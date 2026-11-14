@@ -44,6 +44,21 @@ bool equalAsciiInsensitive(const wchar_t* left, const wchar_t* right) noexcept {
     return *left == 0 && *right == 0;
 }
 
+bool ansiPathToWide(const char* input, wchar_t* output, size_t capacity) noexcept {
+    if (!input || !output || capacity < 2) return false;
+    size_t i = 0;
+    for (; input[i] && i + 1 < capacity; ++i) {
+        const uint8_t byte = static_cast<uint8_t>(input[i]);
+        // No active ACP converter exists in this freestanding DLL. Restrict A
+        // entrypoints to lossless ASCII paths rather than corrupting names.
+        if (byte >= 0x80) return false;
+        output[i] = static_cast<wchar_t>(byte);
+    }
+    if (!i || input[i]) return false;
+    output[i] = 0;
+    return true;
+}
+
 bool isIcoPath(const wchar_t* path) noexcept {
     if (!path) return false;
     const wchar_t* extension = nullptr;
@@ -92,6 +107,24 @@ bool resolveGroup(std::span<const uint8_t> file, int32_t iconIndex,
     if (static_cast<uint32_t>(iconIndex) >= count) return false;
     groupId = ids[static_cast<size_t>(iconIndex)];
     return true;
+}
+
+uint16_t resolvedIconResourceId(const wchar_t* path, int32_t iconIndex,
+                                uint32_t width, uint32_t height) noexcept {
+    if (!path || !*path || isIcoPath(path)) return 0;
+    ImageBuffer file{};
+    if (ReadIconSourceFile(path, file, NativeImageAllocator(), shellIconLimits()) !=
+        ImageStatus::Success) return 0;
+    uint16_t groupId{};
+    if (!resolveGroup(file.span(), iconIndex, groupId)) return 0;
+    pe::PeImageView64 image{};
+    if (image.inspect(file.span()) != NtStatus::Success) return 0;
+    pe::PeResourceView resources(image);
+    pe::PeGroupIconView groups(resources);
+    pe::PeIconResource selected{};
+    if (groups.findIcon(groupId, 0, width, height, 32, selected) != NtStatus::Success)
+        return 0;
+    return selected.entry.resourceId;
 }
 
 void* makeIconFromPe(const wchar_t* path, int32_t iconIndex,
@@ -195,6 +228,13 @@ __declspec(dllexport) void* ExtractIconW(void*, const wchar_t* path,
     return loadIconPath(path, signedIndex, 32, 32);
 }
 
+__declspec(dllexport) void* ExtractIconA(void* instance, const char* path,
+                                         uint32_t iconIndex) noexcept {
+    wchar_t widePath[260]{};
+    return ansiPathToWide(path, widePath, 260)
+        ? ExtractIconW(instance, widePath, iconIndex) : nullptr;
+}
+
 __declspec(dllexport) uint32_t ExtractIconExW(const wchar_t* path, int32_t iconIndex,
     void** largeIcons, void** smallIcons, uint32_t iconCount) noexcept {
     if (!path || !*path || iconCount > 64 ||
@@ -228,6 +268,51 @@ __declspec(dllexport) uint32_t ExtractIconExW(const wchar_t* path, int32_t iconI
     return extracted;
 }
 
+__declspec(dllexport) uint32_t ExtractIconExA(const char* path, int32_t iconIndex,
+    void** largeIcons, void** smallIcons, uint32_t iconCount) noexcept {
+    wchar_t widePath[260]{};
+    return ansiPathToWide(path, widePath, 260)
+        ? ExtractIconExW(widePath, iconIndex, largeIcons, smallIcons, iconCount) : 0;
+}
+
+__declspec(dllexport) uint32_t PrivateExtractIconsW(const wchar_t* path,
+    int32_t iconIndex, int32_t width, int32_t height, void** icons,
+    uint32_t* resourceIds, uint32_t iconCount, uint32_t flags) noexcept {
+    if (!path || !*path || width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+        iconCount > 64 || (iconCount && !icons && !resourceIds) || flags != 0) return 0;
+    if (!iconCount) return 0;
+    const uint32_t requested = iconIndex < 0 ? 1u : iconCount;
+    uint32_t extracted = 0;
+    for (; extracted < requested; ++extracted) {
+        if (icons) icons[extracted] = nullptr;
+        if (resourceIds) resourceIds[extracted] = 0;
+        const int64_t current = static_cast<int64_t>(iconIndex) + extracted;
+        if (current < INT32_MIN || current > INT32_MAX) break;
+        const int32_t currentIndex = static_cast<int32_t>(current);
+        void* icon = icons ? loadIconPath(path, currentIndex,
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height)) : nullptr;
+        if (icons && !icon) break;
+        const uint16_t resourceId = resolvedIconResourceId(path, currentIndex,
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+        if (!isIcoPath(path) && !resourceId) {
+            if (icon) (void)DestroyIcon(icon);
+            break;
+        }
+        if (icons) icons[extracted] = icon;
+        if (resourceIds) resourceIds[extracted] = resourceId;
+    }
+    return extracted;
+}
+
+__declspec(dllexport) uint32_t PrivateExtractIconsA(const char* path,
+    int32_t iconIndex, int32_t width, int32_t height, void** icons,
+    uint32_t* resourceIds, uint32_t iconCount, uint32_t flags) noexcept {
+    wchar_t widePath[260]{};
+    return ansiPathToWide(path, widePath, 260)
+        ? PrivateExtractIconsW(widePath, iconIndex, width, height, icons,
+                               resourceIds, iconCount, flags) : 0;
+}
+
 __declspec(dllexport) uintptr_t SHGetFileInfoW(const wchar_t* path,
     uint32_t, void* output, uint32_t outputBytes, uint32_t flags) noexcept {
     constexpr uint32_t kShgfiIcon = 0x00000100u;
@@ -252,6 +337,34 @@ __declspec(dllexport) uintptr_t SHGetFileInfoW(const wchar_t* path,
         info->displayName[index] = 0;
     }
     return reinterpret_cast<uintptr_t>(info->icon);
+}
+
+struct ShellFileInfoA {
+    void* icon;
+    int32_t iconIndex;
+    uint32_t attributes;
+    char displayName[260];
+    char typeName[80];
+};
+
+__declspec(dllexport) uintptr_t SHGetFileInfoA(const char* path,
+    uint32_t attributes, void* output, uint32_t outputBytes, uint32_t flags) noexcept {
+    wchar_t widePath[260]{};
+    if (!ansiPathToWide(path, widePath, 260) || !output || outputBytes < sizeof(ShellFileInfoA))
+        return 0;
+    ShellFileInfoW wide{};
+    const uintptr_t result = SHGetFileInfoW(widePath, attributes, &wide, sizeof(wide), flags);
+    if (!result) return 0;
+    auto* narrow = static_cast<ShellFileInfoA*>(output);
+    *narrow = {};
+    narrow->icon = wide.icon;
+    narrow->iconIndex = wide.iconIndex;
+    narrow->attributes = wide.attributes;
+    for (size_t i = 0; i < 260 && wide.displayName[i]; ++i) {
+        if (wide.displayName[i] > 0x7f) { (void)DestroyIcon(narrow->icon); *narrow = {}; return 0; }
+        narrow->displayName[i] = static_cast<char>(wide.displayName[i]);
+    }
+    return result;
 }
 
 } // extern "C"
