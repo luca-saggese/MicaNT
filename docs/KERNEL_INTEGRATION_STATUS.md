@@ -1498,3 +1498,12 @@ The M10 N0–N5 functional closure, including loss recovery and malformed RX
 handling, is verified on the bare-metal network path. Repeat the full boot and
 all M4 smoke tests together after resolving the current pre-network M4 test
 failure. N6, SMP and general network compatibility are outside this closure.
+
+### Ring 0 reliability roadmap planning record
+
+Planning-only references were added for proposed milestones M19–M27 in
+[`KERNEL_MILESTONES.md`](KERNEL_MILESTONES.md). Their specifications define
+future acceptance gates for crash/debug, SMP, ACPI/power, IOMMU/DMA, PnP,
+memory pressure, hardening, timekeeping and virtualization. No implementation,
+freestanding linkage, QEMU result or physical-hardware result is asserted by
+this planning record. Existing historical evidence above remains unchanged.

@@ -8,7 +8,23 @@
 
 ---
 
+## Reliability and Hardware Enablement Pillars
+
+The following are roadmap goals, not claims that the capabilities are implemented. Each stays with the canonical subsystem owners in [KERNEL_ARCHITECTURE.md](KERNEL_ARCHITECTURE.md):
+
+- **Multicore correctness:** per-CPU AMD64 state, APIC/IPI coordination, Ke scheduling and Mm TLB shootdown with explicit lifecycle and memory-ordering rules.
+- **Device and DMA safety:** canonical Io PnP/device stacks, explicit IRP/resource teardown and staged IOMMU isolation; DMA lifetime safety and hardware remapping are separately verified.
+- **Durable operation:** validated ACPI discovery, driver-coordinated power transitions, real storage flush/recovery guarantees and distinct shutdown/reboot versus suspend/resume gates.
+- **Crash evidence and recovery:** preallocated fatal-path records, bounded symbolizable dumps, protected diagnostics and safe recovery boot; no promise to resume after arbitrary kernel corruption.
+- **Memory and time resilience:** one Mm for reclamation/paging and one Ke timer service over validated AMD64 clock sources; explicit exhaustion, timeout and drift behavior.
+- **Defense in depth:** capability-gated NX/W^X, SMEP/SMAP and access validation backed by Se/Ob policy, safe boot rollback and measurable negative tests.
+- **Virtualization as a later extension:** VMX/SVM only after Mm, SMP, interrupts, crash handling and IOMMU prerequisites; not a first-system requirement.
+
+See [KERNEL_MILESTONES.md](KERNEL_MILESTONES.md) and the linked M19–M27 specifications for phase-specific acceptance. Hosted tests, CPU recognition and build success alone do not establish hardware support.
+
 ## Complete Subsystem Catalog
+
+> **Status boundary:** This catalog is a topic inventory, not an evidence ledger. Descriptions of kernel mechanisms, drivers, hardware integrations, performance figures, APIs or completed implementations below must be checked against [`KERNEL_MILESTONES.md`](KERNEL_MILESTONES.md) and [`KERNEL_INTEGRATION_STATUS.md`](KERNEL_INTEGRATION_STATUS.md); unverified/proposed items are not supported product claims. The current authoritative baseline is [`KERNEL_ARCHITECTURE.md`](KERNEL_ARCHITECTURE.md).
 
 1. **Modern C++23 Core**: Built with RAII, concepts, compile-time type safety, and atomic synchronization. No 1990s naked pointers or raw un-checked buffers.
 2. **Metadata-Driven Syscall Surface**: The entire `Zw*` / `Nt*` system call table, types, and NTSTATUS codes are auto-generated from Microsoft's MIT-licensed [`win32metadata`](https://github.com/microsoft/win32metadata) repository.

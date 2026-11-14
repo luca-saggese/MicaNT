@@ -136,6 +136,12 @@ complete user-process isolation from these bounded diagnostics.
 | File-system runtime interfaces | `FsRtl` |
 | Cache and cached file data | `Cc` |
 | CPU registers, interrupt-controller hardware, timers, MMIO, and context-switch mechanism | `Hal` / architecture platform code |
+| ACPI table mapping, CPU discovery, APIC and processor-local hardware state | `Hal` / AMD64 platform; executive policy stays in Ke/Io/Po |
+| IOMMU unit programming, IOTLB and interrupt-remap mechanisms | `Hal`; DMA request ownership and buffers stay in Io/Mm |
+| Device discovery, resource arbitration, IRP device-stack lifecycle and removal | `Io` (PnP manager) with bus drivers and `Ob` references |
+| System/device power policy and transition orchestration | `Po`/`Io`; hardware-specific quiesce/restore remains in drivers/HAL |
+| CPU scheduling, per-CPU queues, DPC/APC policy and timer objects | `Ke`; per-CPU hardware timer mechanism stays in HAL |
+| Fatal exception capture, bugcheck coordination and crash records | `Ke` with HAL CPU/serial capture; dump output is a restricted crash backend |
 | Loader handover and early initialization sequencing | `kernel/init/` |
 
 Platform code implements hardware mechanisms; it must not become a second
@@ -401,3 +407,17 @@ claims of completed compatibility. The optional
 [`scripts/nt_reference_inventory.py`](../scripts/nt_reference_inventory.py)
 scans a local ReactOS checkout for candidate definitions, files, and tests;
 its lexical results are discovery aids and require semantic review.
+
+## J. Reliability and hardware enablement roadmap
+
+These are planned extensions, not current architecture capabilities. Current bootstrap evidence is BSP-only and must not be read as SMP, system power management, IOMMU protection, general PnP, paging, high-resolution timekeeping, debugger/dump support or virtualization.
+
+- **SMP:** ACPI MADT discovery and APIC programming are AMD64 HAL responsibilities. HAL establishes per-CPU execution context; Ke owns scheduling and interprocessor rescheduling; Mm owns address-space generations and TLB shootdown; Ps/Ob own lifecycle and references. AP online state is not an Executive process/thread abstraction.
+- **DMA protection:** HAL implements vendor IOMMU units; Io owns mapping/request lifetime and Mm pins PFNs. DMA cancellation does not release pages until device access is quiesced and translation invalidated. Identity DMA and correct buffer lifetime are not hardware isolation.
+- **PnP and power:** Io's PnP manager owns the single device tree, PDO/FDO/filter stacks, resources and IRP lifecycle. Po coordinates transitions; each participating driver quiesces and restores its own hardware. ACPI AML and tables are firmware inputs, not authority to bypass Io/Se access checks.
+- **Crash and recovery:** Ke's fatal path uses preallocated per-CPU records and must not require normal allocation, held locks, scheduler operation, filesystem availability or compromised callbacks. Dump storage is a separate restricted backend; a crash stop is not general recovery.
+- **Memory pressure and persistence:** Mm remains the sole owner of PFNs, working sets and paging. Cc/FsRtl/Io provide coherent file backing and durable flush semantics; FAT32's lack of journaling must not be presented as journaled crash consistency.
+- **Time:** HAL provides clocksource/clockevent mechanisms; Ke owns monotonic deadlines and timers. Wall-clock corrections and RTC time cannot move monotonic waits backward.
+- **Virtualization:** a future manager may compose existing Mm/Ke/HAL/IOMMU services only after those foundations pass their gates. It is not a prerequisite for the first usable kernel.
+
+Detailed phase gates and acceptance evidence are linked from [KERNEL_MILESTONES.md](KERNEL_MILESTONES.md) and its M19–M27 specifications. No planned capability is promoted to present support without an owner-connected implementation and the corresponding QEMU/physical evidence.
