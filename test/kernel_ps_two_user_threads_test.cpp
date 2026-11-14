@@ -1554,8 +1554,8 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto* head = reinterpret_cast<const uint64_t*>(listHead);
         uintptr_t link = head[0];
         uintptr_t previousLink = listHead;
-        const uintptr_t expectedBases[]{code, tlsDllBase, dll.headers().optionalHeader.imageBase};
-        const std::u16string_view expectedPaths[]{executablePath, tlsPath, dllPath};
+        const uintptr_t expectedBases[]{code, dll.headers().optionalHeader.imageBase, tlsDllBase};
+        const std::u16string_view expectedPaths[]{executablePath, dllPath, tlsPath};
         const auto matches = [](const ps::detail::UserUnicodeString& value, std::u16string_view expected) {
             return value.length == expected.size() * sizeof(char16_t) &&
                 value.maximumLength == value.length + sizeof(char16_t) &&
@@ -1566,19 +1566,37 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto parametersAddress = *reinterpret_cast<const uint64_t*>(process.userPebAddress() + 0x20);
         if (!hal::amd64::bootstrapUserRange(parametersAddress, sizeof(ps::detail::UserProcessParameters), false)) return false;
         const auto& parameters = *reinterpret_cast<const ps::detail::UserProcessParameters*>(parametersAddress);
-        tls = tls && matches(parameters.imagePathName, executablePath) && matches(parameters.commandLine, commandLine);
+        const bool imagePathMatches = matches(parameters.imagePathName, executablePath);
+        const bool commandLineMatches = matches(parameters.commandLine, commandLine);
+        if (!imagePathMatches || !commandLineMatches) {
+            serialWrite("[MicaNT Ps] Process parameter image/command match=");
+            serialWriteHex((imagePathMatches ? 1u : 0u) | (commandLineMatches ? 2u : 0u));
+            serialWrite("\r\n");
+        }
+        tls = tls && imagePathMatches && commandLineMatches;
         size_t pathIndex = 0;
         for (const auto expectedBase : expectedBases) {
             if (link == listHead || !hal::amd64::bootstrapUserRange(link, 0x48, false)) {
+                serialWrite("[MicaNT Ps] Loader list ended/invalid at index=");
+                serialWriteHex(static_cast<uint32_t>(pathIndex)); serialWrite("\r\n");
                 tls = false;
                 break;
             }
             const auto* entry = reinterpret_cast<const uint64_t*>(link);
-            if (entry[1] != previousLink || entry[4] != expectedBase ||
-                !matches(*reinterpret_cast<const ps::detail::UserUnicodeString*>(link + 0x38), expectedPaths[pathIndex++])) {
+            const bool backlinksMatch = entry[1] == previousLink;
+            const bool basesMatch = entry[4] == expectedBase;
+            const bool pathMatches = matches(*reinterpret_cast<const ps::detail::UserUnicodeString*>(link + 0x38),
+                                             expectedPaths[pathIndex]);
+            if (!backlinksMatch || !basesMatch || !pathMatches) {
+                serialWrite("[MicaNT Ps] Loader entry mismatch index/backlink/base/path=");
+                serialWriteHex(static_cast<uint32_t>(pathIndex)); serialWrite("/");
+                serialWriteHex(backlinksMatch ? 1u : 0u); serialWrite("/");
+                serialWriteHex(basesMatch ? 1u : 0u); serialWrite("/");
+                serialWriteHex(pathMatches ? 1u : 0u); serialWrite("\r\n");
                 tls = false;
                 break;
             }
+            ++pathIndex;
             previousLink = link;
             link = entry[0];
         }
@@ -1593,10 +1611,14 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         }
         tls = tls && (!preemptive || (reinterpret_cast<volatile uint64_t*>(counters)[0] &&
                                       reinterpret_cast<volatile uint64_t*>(counters)[1]));
-        if (!hal::amd64::switchProcessPagingRootByPhysical(previous) || !tls) return false;
+        if (!hal::amd64::switchProcessPagingRootByPhysical(previous)) return false;
         progress.stage = "user workers reap";
         for (size_t i = 0; i < threadCount; ++i)
             if (threads[i]->reap() != NtStatus::Success) return false;
+        if (!tls) {
+            serialWrite("[MicaNT Ps] User workers PEB/TLS metadata validation failed\r\n");
+            return false;
+        }
         progress.stage = "user process address space close";
         const auto processCloseStatus = process.closeAddressSpace();
         if (processCloseStatus != NtStatus::Success) return false;

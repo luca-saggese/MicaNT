@@ -150,8 +150,13 @@ NtStatus EThread::prepareUserApc(const ke::UserApcDelivery* deliveries,
         return NtStatus::StackOverflow;
 
     const bool stackPointerInOwnedStack = userStackTop >= userStackLimit_ && userStackTop <= userStackTop_;
-    uintptr_t frameAddress = stackPointerInOwnedStack && userStackTop >= payloadSize
-        ? (userStackTop - payloadSize) & ~uintptr_t{15} : 0;
+    // Put the CONTEXT immediately below the interrupted RSP. The dispatcher
+    // uses the stack below that frame, so the mapped span is the context
+    // payload plus its call stack, once each. Reserving the dispatcher stack
+    // on both sides needlessly consumed more than 32 KiB for a single APC and
+    // could turn a valid 32 KiB thread stack into a kernel-fatal delivery.
+    uintptr_t frameAddress = stackPointerInOwnedStack && userStackTop >= payloadContextSize
+        ? (userStackTop - payloadContextSize) & ~uintptr_t{15} : 0;
     const bool needsGuarantee = !frameAddress || frameAddress < userStackLimit_ + dispatcherStackBytes ||
         frameAddress < dispatcherStackBytes ||
         !hal::amd64::bootstrapUserRange(frameAddress - dispatcherStackBytes, payloadSize, true);
