@@ -123,6 +123,7 @@ private:
     std::unique_ptr<char16_t[]> ownedImagePath_{};
     std::unique_ptr<char16_t[]> ownedCommandLine_{};
     bool imagesFinalized_{false};
+    bool imageStartupCallbacksStarted_{false};
     uintptr_t userPeb_{0};
     uintptr_t userLoaderData_{0};
     uintptr_t userProcessParameters_{0};
@@ -299,6 +300,9 @@ private:
     NtStatus exitStatus_{NtStatus::Pending};
     NtStatus requestedExitStatus_{NtStatus::Success};
     uintptr_t userEntry_{0};
+    uintptr_t userStartupEntry_{0};
+    uintptr_t userStartupThunk_{0};
+    bool userStartupCallbacks_{false};
     uintptr_t userStartRoutine_{0};
     uintptr_t userStartArgument_{0};
     uintptr_t userStack_{0};

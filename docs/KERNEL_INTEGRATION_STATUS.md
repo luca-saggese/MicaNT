@@ -1666,27 +1666,32 @@ file-backed loader has a bounded fallback mapping the generated
 `api-ms-win-crt-*` imports to the project's `ucrtbase.dll` when no API-set
 schema is present. Unsupported non-CRT API-set contracts still fail.
 
-The QEMU launch attempt has not reached Explorer. `qemu.py --headless` links
-the real `ntoskrnl_core_baremetal` and passes the earlier CPL3/scanout probes,
-then faults with vector 6 at `MicantBootstrapTimerInterrupt+0x52` (the stack
-range guard), after `[MicaNT Ps] Process-owned CPL3 context and termination
-verified` and before the two-user-thread milestone. One earlier boot reached
-the launch call and exposed that the BSP thread has no current `EProcess`; the
-launcher now supplies a handle to the canonical Ps System process as parent.
-That parent-path change has compiled but has not been exercised in QEMU due to
-the recurring timer guard trap. Explorer entrypoint, first window and input
-therefore remain unverified. The last diagnostics are retained under
-`build/explorer-ring3-qemu-8/serial.log` in the isolated worktree.
+The 2026-11-14 `qemu.py --headless --timeout 180 --memory-mib 1024` run now
+passes the timer-driven two/three-thread checks, file-backed `SEC_IMAGE`,
+Explorer's seven-image dependency closure, TLS callback startup, and image
+protection finalization. The real Explorer process reaches its Ring 3 entry,
+registers its Win32k class, creates its first user-mode window, and remains
+active through the five-second stable-serial window. QMP also confirms display
+scanout, PS/2 movement, and left-click delivery. This accepts E1. The serial
+evidence is `build/explorer-ring3-main-e1-final/serial.log`.
+
+The protection-finalization hang was caused by a recursively destroyed
+`unique_ptr` journal node per committed image page. `finalizeImageProtections`
+now allocates a contiguous journal sized from the VAD commit charge, validates
+that the page list has the same bounded length before changing PTEs, and rolls
+back already-applied changes on backend failure. LPC's current syscall handler
+still depends on hosted C++ futures and condition variables, so its dispatcher
+registration is gated out of the freestanding target until it is implemented
+with canonical Ke/Ob primitives; the native syscall numbers therefore fail as
+unsupported on bare metal for now.
 
 | Command | Result |
 |---|---|
-| `cmake --build build/qemu-cmake-mingw --config Release --target ntoskrnl_core_baremetal explorer_runtime_boot` | Passed; canonical kernel linked and Explorer runtime built |
-| `python3 scripts/verify_kernel_architecture.py` | Passed; one modular startup, no monolith build input |
-| `python3 qemu.py --check-explorer` | Passed; Explorer transitive PE import closure only |
-| `python3 qemu.py --headless --timeout 180` | Failed before Explorer startup at the Ke timer stack guard described above |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal explorer_runtime_boot` | Passed; modular kernel and Explorer dependency closure linked |
+| `python3 qemu.py --headless --timeout 180 --memory-mib 1024` | Passed; real Explorer Ring 3 entry, class registration and first user-mode window observed, then stable for 5 seconds; QMP display/input checks passed |
 
-E2 is not accepted: the actual Explorer user-mode first window has not been
-observed. E3 has no standalone Ring 3 compositor. E4 has not presented Explorer
-through the canonical VirtIO driver. E5 has not shown GPU composition submission
-and completion; the existence of VirGL code is not runtime evidence. E6 has not
-been run.
+E2 remains open: the initial user-mode window is real, but interactive control
+of independent windows, event-queue behavior, focus, movement, resizing and
+close/cleanup have not been accepted. E3 has no standalone Ring 3 compositor.
+E4 has not presented Explorer through the canonical VirtIO driver. E5 has no
+evidence of GPU composition submission and completion. E6 has not been run.

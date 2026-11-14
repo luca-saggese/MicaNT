@@ -1,5 +1,6 @@
 #include "micant/km/executive/ps.hpp"
 #include "micant/km/core/ke.hpp"
+
 #include "micant/km/core/syscalls.hpp"
 #include "micant/km/core/sync.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
@@ -14,8 +15,10 @@
 #include <cstring>
 #include <iterator>
 
+
 #if defined(MICANT_FREESTANDING) && (defined(_M_X64) || defined(__x86_64__))
 extern "C" uint32_t MicantAmd64XsaveMask;
+extern "C" uint32_t MicantAmd64ExtendedSize;
 #endif
 
 namespace micant::sys {
@@ -845,9 +848,13 @@ NtStatus EThread::initializeUserWithTls(EProcess& process, uintptr_t entry, size
         !hal::amd64::bootstrapUserRange(entry, 1, false, true)) return NtStatus::InvalidParameter;
     if (tls.size() > 16) return NtStatus::NotImplemented;
     for (const auto& layout : tls) {
-        if (!layout.present || layout.callbackCount || !layout.alignment || layout.alignment > 256 ||
+        if (!layout.present || !layout.alignment || layout.alignment > 256 ||
             layout.initialData.size() > mm::PageSize4KB - 0x100 ||
             layout.zeroFill > mm::PageSize4KB - 0x100 - layout.initialData.size()) return NtStatus::NotImplemented;
+        if (layout.callbackCount > layout.callbacks.size()) return NtStatus::NotImplemented;
+        for (size_t i = 0; i < layout.callbackCount; ++i)
+            if (!hal::amd64::bootstrapUserRange(layout.callbacks[i], 1, false, true))
+                return NtStatus::NotImplemented;
     }
     size_t stackSize = (userStackSize + mm::PageMask4KB) & ~mm::PageMask4KB;
     if (!commitSize) commitSize = MinimumUserExceptionStackCommit;
@@ -930,6 +937,81 @@ NtStatus EThread::initializeUserWithTls(EProcess& process, uintptr_t entry, size
     // after the caller's return address. The bootstrap iret does not push that
     // return address, so reserve 136 bytes from the aligned stack top.
     userStackPointer_ = userStack_ + stackSize - 136;
+    if (process.images_ && !process.imageStartupCallbacksStarted_ && process.images_->size()) {
+        const auto* mainImage = process.images_->module(0);
+        if (mainImage && mainImage->view.headers().optionalHeader.addressOfEntryPoint &&
+            mainImage->base <= UINTPTR_MAX - mainImage->view.headers().optionalHeader.addressOfEntryPoint &&
+            entry == mainImage->base + mainImage->view.headers().optionalHeader.addressOfEntryPoint) {
+            constexpr size_t MaximumCallbacks = 16 * 64;
+            std::array<pe::PeImageView64::TlsLayout, 16> layouts{};
+            std::array<const um::NativeUserImageSet64::Module*, 16> modules{};
+            size_t callbackCount{};
+            for (size_t i = 0; i < process.images_->size(); ++i) {
+                const auto* module = process.images_->module(i);
+                if (!module) { status = NtStatus::InvalidImageFormat; break; }
+                modules[i] = module;
+                status = module->view.tlsLayout(module->immutableImage(), module->base, layouts[i]);
+                if (status != NtStatus::Success) break;
+                if (layouts[i].callbackCount > MaximumCallbacks - callbackCount) {
+                    status = NtStatus::NotSupported;
+                    break;
+                }
+                callbackCount += layouts[i].callbackCount;
+            }
+            if (status == NtStatus::Success && callbackCount) {
+                constexpr size_t CallbackCodeBytes = 30;
+                if (callbackCount > (SIZE_MAX - 16) / CallbackCodeBytes) {
+                    status = NtStatus::InvalidParameter;
+                } else {
+                    const size_t codeSize = callbackCount * CallbackCodeBytes + 16;
+                    std::unique_ptr<uint8_t[]> code(new (std::nothrow_t{}) uint8_t[codeSize]{});
+                    if (!code) {
+                        status = NtStatus::NoMemory;
+                    } else {
+                        size_t cursor{};
+                        const auto byte = [&](uint8_t value) noexcept { code[cursor++] = value; };
+                        const auto dword = [&](uint32_t value) noexcept {
+                            for (unsigned i = 0; i < 4; ++i) byte(static_cast<uint8_t>(value >> (i * 8)));
+                        };
+                        const auto qword = [&](uint64_t value) noexcept {
+                            for (unsigned i = 0; i < 8; ++i) byte(static_cast<uint8_t>(value >> (i * 8)));
+                        };
+                        byte(0x48); byte(0x83); byte(0xec); byte(0x28); // shadow space and call alignment
+                        for (size_t i = 0; i < process.images_->size(); ++i) {
+                            for (size_t j = 0; j < layouts[i].callbackCount; ++j) {
+                                byte(0x48); byte(0xb9); qword(modules[i]->base); // RCX = DllHandle
+                                byte(0xba); dword(1);                            // EDX = DLL_PROCESS_ATTACH
+                                byte(0x45); byte(0x31); byte(0xc0);             // R8 = Reserved = nullptr
+                                byte(0x48); byte(0xb8); qword(layouts[i].callbacks[j]);
+                                byte(0xff); byte(0xd0);                         // call RAX
+                            }
+                        }
+                        byte(0x48); byte(0x83); byte(0xc4); byte(0x28);
+                        byte(0x48); byte(0xb8); qword(entry);
+                        byte(0xff); byte(0xe0);                                 // tail-jump to PE entry
+                        if (cursor != codeSize) {
+                            status = NtStatus::Unsuccessful;
+                        } else {
+                            status = space.allocate(userStartupThunk_, codeSize,
+                                mm::MEM_RESERVE | mm::MEM_COMMIT, mm::PAGE_READWRITE);
+                            if (status == NtStatus::Success) {
+                                std::memcpy(reinterpret_cast<void*>(userStartupThunk_), code.get(), codeSize);
+                                status = space.protect(userStartupThunk_, codeSize, mm::PAGE_EXECUTE_READ, nullptr);
+                                if (status == NtStatus::Success) {
+                                    userStartupEntry_ = entry;
+                                    userStartupCallbacks_ = true;
+                                    userEntry_ = userStartupThunk_;
+                                } else {
+                                    (void)space.free(userStartupThunk_, 0, mm::MEM_RELEASE);
+                                    userStartupThunk_ = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     thread_->tebAddress = userTeb_;
     thread_->previousUserMode = true;
     return NtStatus::Success;
@@ -1264,12 +1346,21 @@ extern "C" bool MicantPsHandleUserStackFault(uintptr_t address, uint64_t errorCo
 void EThread::startUser(void* argument) noexcept {
     auto* self = static_cast<EThread*>(argument);
     if (!self || !self->userEntry_ || !self->userStackPointer_) __builtin_trap();
+    if (self->userStartupCallbacks_) {
+        if (!self->process_ || self->process_->imageStartupCallbacksStarted_) {
+            self->userEntry_ = self->userStartupEntry_;
+            self->userStartRoutine_ = self->userStartArgument_ = 0;
+            self->userStartupCallbacks_ = false;
+        } else {
+            self->process_->imageStartupCallbacksStarted_ = true;
+        }
+    }
     hal::amd64::enterBootstrapUserThread(self->userEntry_, self->userStackPointer_,
         self->userInterruptible_, self->userStartRoutine_, self->userStartArgument_);
 }
 
 NtStatus EThread::releaseUserMemory() noexcept {
-    if (!userStack_ && !userTeb_ && !userTls_) return NtStatus::Success;
+    if (!userStack_ && !userTeb_ && !userTls_ && !userStartupThunk_) return NtStatus::Success;
     uint64_t flags{};
     uintptr_t previous{};
     __asm__ __volatile__("pushfq; popq %0; cli; movq %%cr3, %1"
@@ -1281,13 +1372,15 @@ NtStatus EThread::releaseUserMemory() noexcept {
     }
     auto& space = process_->getAddressSpace();
     NtStatus status = NtStatus::Success;
-    for (auto* address : {&userTls_, &userTeb_, &userStack_}) {
+    for (auto* address : {&userStartupThunk_, &userTls_, &userTeb_, &userStack_}) {
         if (*address && (status = space.free(*address, 0, mm::MEM_RELEASE)) != NtStatus::Success) break;
         *address = 0;
     }
     if (previous != target && !hal::amd64::switchProcessPagingRootByPhysical(previous)) __builtin_trap();
     if (status == NtStatus::Success) {
         userEntry_ = userStackPointer_ = 0;
+        userStartupEntry_ = 0;
+        userStartupCallbacks_ = false;
         userStackGuard_ = 0;
         userStackLimit_ = userStackTop_ = 0;
         userStartRoutine_ = userStartArgument_ = 0;
@@ -2315,8 +2408,9 @@ static NtStatus createProcessEx(Handle* processHandle, uint32_t desiredAccess,
                     if (thread->attachedProcess != child ||
                         thread->directoryTableBase != child->getDirectoryTableBase())
                         result = NtStatus::Unsuccessful;
-                    else
+                    else {
                         result = child->initializeMainImageFromSection(*imageSection, imageSectionReference);
+                    }
                     ke::KeUnstackDetachProcess(&attachState);
                     if (thread->processAttachDepth != previousDepth ||
                         thread->directoryTableBase != originalRoot) __builtin_trap();

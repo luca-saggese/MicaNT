@@ -147,8 +147,16 @@ bool waitForPfnBaselineAndDeferredDeletes(uintptr_t kernelRoot, uintptr_t proces
                 }
             }
         } else {
+            reported = observedCount;
         }
+        serialWrite("[MicaNT Ps] Deferred PFN cleanup baseline count/observed/extra=");
+        serialWriteHex(baseline.size()); serialWrite("/"); serialWriteHex(observedCount);
+        serialWrite("/"); serialWriteHex(reported); serialWrite(" ticks=");
+        serialWriteHex(elapsedTicks); serialWrite(" file/ps-pending=");
+        serialWriteHex(pendingFileDeletes); serialWrite("/");
+        serialWriteHex(micant::ps::detail::deferredCleanupPending()); serialWrite("\r\n");
     }
+    if (!restored) serialWrite("[MicaNT Ps] PFN baseline process root restore failed\r\n");
     return drained && restored;
 }
 
@@ -847,11 +855,23 @@ __attribute__((noinline)) bool testClonedImageLifetime(micant::Handle process) n
     ob::detail::HandleTableGuard interruptGuard;
     ps::EProcess* child{};
     ob::ObjectHeader* reference{};
-    if (ps::detail::referenceProcessHandle(process, ob::SYNCHRONIZE, child, reference) != NtStatus::Success ||
-        !child || !child->nativeImagesFinalized() || !child->nativeImages()) return false;
+    const auto referenceStatus = ps::detail::referenceProcessHandle(process,
+        ob::SYNCHRONIZE, child, reference);
+    if (referenceStatus != NtStatus::Success || !child || !child->nativeImagesFinalized() ||
+        !child->nativeImages()) {
+        serialWrite("[MicaNT Ps] Clone process reference/status/images=");
+        serialWriteHex(static_cast<uint32_t>(referenceStatus)); serialWrite("/");
+        serialWriteHex(reinterpret_cast<uintptr_t>(child)); serialWrite("/");
+        serialWriteHex(child && child->nativeImagesFinalized()); serialWrite("/");
+        serialWriteHex(child && child->nativeImages()); serialWrite("\r\n");
+        return false;
+    }
     uintptr_t original{};
     __asm__ __volatile__("movq %%cr3, %0" : "=r"(original));
-    if (!hal::amd64::switchProcessPagingRootByPhysical(child->getDirectoryTableBase())) return false;
+    if (!hal::amd64::switchProcessPagingRootByPhysical(child->getDirectoryTableBase())) {
+        serialWrite("[MicaNT Ps] Clone process root switch failed\r\n");
+        return false;
+    }
     uint64_t thunk{};
     const bool valid = child->userPebAddress() &&
         hal::amd64::bootstrapUserRange(child->userPebAddress(), 1, false) &&
@@ -859,21 +879,48 @@ __attribute__((noinline)) bool testClonedImageLifetime(micant::Handle process) n
         hal::amd64::bootstrapUserRange(thunk, 1, false, true);
     const auto* image = child->nativeImages()->module(0);
     const uintptr_t entry = image ? image->base + image->view.headers().optionalHeader.addressOfEntryPoint : 0;
-    if (!hal::amd64::switchProcessPagingRootByPhysical(original)) return false;
+    if (!hal::amd64::switchProcessPagingRootByPhysical(original)) {
+        serialWrite("[MicaNT Ps] Clone parent root restore failed\r\n");
+        return false;
+    }
     Handle threadHandle{};
-    if (!valid || !entry || sys::NtCreateThreadEx(&threadHandle, ob::SYNCHRONIZE, nullptr, process,
-            entry, 0, 1, 0, mm::PageSize4KB, 32768, nullptr) != NtStatus::Success) return false;
+    const auto createStatus = valid && entry ? sys::NtCreateThreadEx(&threadHandle,
+        ob::SYNCHRONIZE, nullptr, process, entry, 0, 1, 0,
+        mm::PageSize4KB, 32768, nullptr) : NtStatus::InvalidImageFormat;
+    if (!valid || !entry || createStatus != NtStatus::Success) {
+        serialWrite("[MicaNT Ps] Clone TLS setup/entry/thread status=");
+        serialWriteHex(valid); serialWrite("/"); serialWriteHex(entry);
+        serialWrite("/"); serialWriteHex(static_cast<uint32_t>(createStatus));
+        serialWrite("\r\n");
+        return false;
+    }
     ps::EThread* thread{};
     ob::ObjectHeader* threadReference{};
-    if (ps::detail::referenceThreadHandle(threadHandle, ob::SYNCHRONIZE, thread, threadReference) != NtStatus::Success ||
-        !thread || !hal::amd64::switchProcessPagingRootByPhysical(child->getDirectoryTableBase())) return false;
+    const auto threadReferenceStatus = ps::detail::referenceThreadHandle(threadHandle,
+        ob::SYNCHRONIZE, thread, threadReference);
+    if (threadReferenceStatus != NtStatus::Success || !thread ||
+        !hal::amd64::switchProcessPagingRootByPhysical(child->getDirectoryTableBase())) {
+        serialWrite("[MicaNT Ps] Clone thread reference/root status=");
+        serialWriteHex(static_cast<uint32_t>(threadReferenceStatus)); serialWrite("/");
+        serialWriteHex(reinterpret_cast<uintptr_t>(thread)); serialWrite("\r\n");
+        return false;
+    }
     const auto tls = thread->userTlsStorage();
     const auto* teb = reinterpret_cast<const um::Teb64*>(thread->userTebAddress());
     const auto* tlsVector = teb ? reinterpret_cast<const uint64_t*>(teb->threadLocalStoragePointer) : nullptr;
     const bool threadValid = teb && teb->processEnvironmentBlock == child->userPebAddress() && tls &&
         *reinterpret_cast<const uint64_t*>(tls) == 0x8877665544332211ULL && tlsVector && tlsVector[1] &&
         *reinterpret_cast<const uint64_t*>(tlsVector[1]) == 0x1020304050607080ULL;
-    if (!hal::amd64::switchProcessPagingRootByPhysical(original)) return false;
+    if (!threadValid) {
+        serialWrite("[MicaNT Ps] Clone thread PEB/TLS validation failed teb/tls/vector=");
+        serialWriteHex(reinterpret_cast<uintptr_t>(teb)); serialWrite("/");
+        serialWriteHex(reinterpret_cast<uintptr_t>(tls)); serialWrite("/");
+        serialWriteHex(tlsVector ? tlsVector[1] : 0); serialWrite("\r\n");
+    }
+    if (!hal::amd64::switchProcessPagingRootByPhysical(original)) {
+        serialWrite("[MicaNT Ps] Clone thread root restore failed\r\n");
+        return false;
+    }
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     const auto rolledBack = thread->rollbackBeforeStart();
@@ -896,16 +943,33 @@ __attribute__((noinline)) bool testClonedImageLifetime(micant::Handle process) n
     ob::ObDereferenceObject(threadReference);
     ob::ObDereferenceObject(reference);
     const auto threadCloseStatus = sys::NtClose(threadHandle);
+    const auto terminateStatus = sys::NtTerminateProcess(process, NtStatus::Success);
     if (!threadValid || rolledBack != NtStatus::Success || threadCloseStatus != NtStatus::Success ||
-        sys::NtTerminateProcess(process, NtStatus::Success) != NtStatus::Success) return false;
+        terminateStatus != NtStatus::Success) {
+        serialWrite("[MicaNT Ps] Clone thread rollback/close/terminate status=");
+        serialWriteHex(threadValid); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(rolledBack)); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(threadCloseStatus)); serialWrite("/");
+        serialWriteHex(static_cast<uint32_t>(terminateStatus)); serialWrite("\r\n");
+        return false;
+    }
     // Once the runtime clock is active process teardown is deferred to the
     // reaper. Wait on the process object before checking the PFN baseline.
     if (hal::amd64::bootstrapSchedulerClockActive()) {
         auto* current = ke::KeGetCurrentThread();
-        if (!current || !hal::amd64::switchProcessPagingRootByPhysical(current->directoryTableBase)) return false;
+        if (!current || !hal::amd64::switchProcessPagingRootByPhysical(current->directoryTableBase)) {
+            serialWrite("[MicaNT Ps] Clone cleanup kernel root switch failed\r\n");
+            return false;
+        }
         if (ke::g_CurrentCpu.serviceDeferredCleanup) ke::g_CurrentCpu.serviceDeferredCleanup();
         const auto waited = sys::NtWaitForSingleObject(process, false, nullptr);
-        if (!hal::amd64::switchProcessPagingRootByPhysical(original) || waited != NtStatus::Success) return false;
+        const bool restored = hal::amd64::switchProcessPagingRootByPhysical(original);
+        if (!restored || waited != NtStatus::Success) {
+            serialWrite("[MicaNT Ps] Clone process wait/root restore status=");
+            serialWriteHex(static_cast<uint32_t>(waited)); serialWrite("/");
+            serialWriteHex(restored); serialWrite("\r\n");
+            return false;
+        }
     }
     const auto closeStatus = sys::NtClose(process);
     const auto finalEntryCount = mm::PfnDatabase::get().snapshotActiveEntries(rollbackEntries);
@@ -922,6 +986,10 @@ __attribute__((noinline)) bool testClonedImageLifetime(micant::Handle process) n
             }
         }
     } else {
+    }
+    if (closeStatus != NtStatus::Success) {
+        serialWrite("[MicaNT Ps] Clone process close status=");
+        serialWriteHex(static_cast<uint32_t>(closeStatus)); serialWrite("\r\n");
     }
     return closeStatus == NtStatus::Success;
 }
@@ -1319,11 +1387,12 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         if (process.setNativeProcessParameters(executablePath, commandLine) != NtStatus::Success) return false;
         serialWrite("[MicaNT Ps] Process parameters set\r\n");
         // Finalization reads the immutable image snapshot, not the writable
-        // process mapping. Inject the unsupported metadata into that snapshot.
+        // process mapping. An invalid, non-executable callback must still be
+        // rejected before it can mutate TLS indices or publish the loader data.
         auto* loadedTls = reinterpret_cast<pe::ImageTlsDirectory64*>(image->metadata.get() + dataRva);
         auto* callbacks = reinterpret_cast<uint64_t*>(image->metadata.get() + dataRva + 0x68);
         loadedTls->addressOfCallBacks = code + dataRva + 0x68;
-        callbacks[0] = code + mm::PageSize4KB;
+        callbacks[0] = code + dataRva;
         callbacks[1] = 0;
         serialWrite("[MicaNT Ps] Finalizing image callbacks rejection\r\n");
         const auto callbackStatus = process.finalizeNativeImages();
@@ -1336,7 +1405,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         serialWrite("[MicaNT Ps] Finalizing native images\r\n");
         const auto finalizeStatus = process.finalizeNativeImages();
         serialWrite("[MicaNT Ps] Native images finalized\r\n");
-        if (callbackStatus != NtStatus::NotImplemented || !callbackRejectedWithoutTlsMutation ||
+        if (callbackStatus != NtStatus::InvalidImageFormat || !callbackRejectedWithoutTlsMutation ||
             finalizeStatus != NtStatus::Success || process.userTlsLayouts().size() != 2 ||
             *reinterpret_cast<uint32_t*>(code + tlsLayout.indexRva) != 0 ||
             *reinterpret_cast<uint32_t*>(tlsDllBase + mm::PageSize4KB + 0x90) != 1 ||
@@ -1460,7 +1529,13 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         if (!waitForPfnBaselineAndDeferredDeletes(previous, process.getDirectoryTableBase(),
                 std::span<const mm::Mmpfn>{beforeThreadEntries, beforeThreadEntryCount},
                 finalThreadEntries)) return false;
-        if (mm::PfnDatabase::get().getActiveCount() != beforeThread) return false;
+        const auto afterCloneActive = mm::PfnDatabase::get().getActiveCount();
+        if (afterCloneActive != beforeThread) {
+            serialWrite("[MicaNT Ps] Clone lifetime active PFNs expected/actual=");
+            serialWriteHex(beforeThread); serialWrite("/"); serialWriteHex(afterCloneActive);
+            serialWrite("\r\n");
+            return false;
+        }
         // Exercise Ob ownership for a user context before the real workers.
         progress.stage = "Ob-owned user thread lifecycle";
         Handle objectHandle{};
@@ -1554,8 +1629,9 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto* head = reinterpret_cast<const uint64_t*>(listHead);
         uintptr_t link = head[0];
         uintptr_t previousLink = listHead;
-        const uintptr_t expectedBases[]{code, dll.headers().optionalHeader.imageBase, tlsDllBase};
-        const std::u16string_view expectedPaths[]{executablePath, dllPath, tlsPath};
+        const auto* loadedImages = process.nativeImages();
+        if (!loadedImages || !loadedImages->module(0) || !loadedImages->module(1) ||
+            !loadedImages->module(2)) return false;
         const auto matches = [](const ps::detail::UserUnicodeString& value, std::u16string_view expected) {
             return value.length == expected.size() * sizeof(char16_t) &&
                 value.maximumLength == value.length + sizeof(char16_t) &&
@@ -1566,51 +1642,77 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         const auto parametersAddress = *reinterpret_cast<const uint64_t*>(process.userPebAddress() + 0x20);
         if (!hal::amd64::bootstrapUserRange(parametersAddress, sizeof(ps::detail::UserProcessParameters), false)) return false;
         const auto& parameters = *reinterpret_cast<const ps::detail::UserProcessParameters*>(parametersAddress);
-        const bool imagePathMatches = matches(parameters.imagePathName, executablePath);
-        const bool commandLineMatches = matches(parameters.commandLine, commandLine);
-        if (!imagePathMatches || !commandLineMatches) {
-            serialWrite("[MicaNT Ps] Process parameter image/command match=");
-            serialWriteHex((imagePathMatches ? 1u : 0u) | (commandLineMatches ? 2u : 0u));
-            serialWrite("\r\n");
-        }
-        tls = tls && imagePathMatches && commandLineMatches;
-        size_t pathIndex = 0;
-        for (const auto expectedBase : expectedBases) {
+        const bool parametersValid = matches(parameters.imagePathName, executablePath) &&
+                                     matches(parameters.commandLine, commandLine);
+        tls = tls && parametersValid;
+        bool imageListValid = true;
+        bool matchedModules[3]{};
+        for (size_t listIndex = 0; listIndex < loadedImages->size(); ++listIndex) {
             if (link == listHead || !hal::amd64::bootstrapUserRange(link, 0x48, false)) {
-                serialWrite("[MicaNT Ps] Loader list ended/invalid at index=");
-                serialWriteHex(static_cast<uint32_t>(pathIndex)); serialWrite("\r\n");
-                tls = false;
+                imageListValid = false;
                 break;
             }
             const auto* entry = reinterpret_cast<const uint64_t*>(link);
-            const bool backlinksMatch = entry[1] == previousLink;
-            const bool basesMatch = entry[4] == expectedBase;
-            const bool pathMatches = matches(*reinterpret_cast<const ps::detail::UserUnicodeString*>(link + 0x38),
-                                             expectedPaths[pathIndex]);
-            if (!backlinksMatch || !basesMatch || !pathMatches) {
-                serialWrite("[MicaNT Ps] Loader entry mismatch index/backlink/base/path=");
-                serialWriteHex(static_cast<uint32_t>(pathIndex)); serialWrite("/");
-                serialWriteHex(backlinksMatch ? 1u : 0u); serialWrite("/");
-                serialWriteHex(basesMatch ? 1u : 0u); serialWrite("/");
-                serialWriteHex(pathMatches ? 1u : 0u); serialWrite("\r\n");
-                tls = false;
+            size_t moduleIndex = loadedImages->size();
+            for (size_t index = 0; index < loadedImages->size(); ++index) {
+                const auto* module = loadedImages->module(index);
+                if (module && module->base == entry[4]) {
+                    moduleIndex = index;
+                    break;
+                }
+            }
+            const auto* module = loadedImages->module(moduleIndex);
+            std::u16string_view expectedPath{};
+            if (module && module->name == "fixture.exe") expectedPath = executablePath;
+            else if (module && module->name == "ntdll.dll") expectedPath = dllPath;
+            else if (module && module->name == "tls.dll") expectedPath = tlsPath;
+            const bool pathValid = !expectedPath.empty() && matches(
+                *reinterpret_cast<const ps::detail::UserUnicodeString*>(link + 0x38), expectedPath);
+            const bool entryValid = entry[1] == previousLink && module && !matchedModules[moduleIndex] && pathValid;
+            if (!entryValid) {
+                imageListValid = false;
+                serialWrite("[MicaNT Ps] User loader image entry mismatch index/base/link/name=");
+                serialWriteHex(static_cast<uint32_t>(listIndex)); serialWrite("/");
+                serialWriteHex(static_cast<uint32_t>(entry[4])); serialWrite("/");
+                serialWriteHex(static_cast<uint32_t>(module ? module->base : 0)); serialWrite("/");
+                serialWriteHex(static_cast<uint32_t>(entry[1])); serialWrite("/");
+                serialWriteHex(static_cast<uint32_t>(previousLink)); serialWrite("/");
+                serialWrite(pathValid ? "1\r\n" : "0\r\n");
                 break;
             }
-            ++pathIndex;
+            matchedModules[moduleIndex] = true;
             previousLink = link;
             link = entry[0];
         }
-        tls = tls && link == listHead && head[1] == previousLink;
+        imageListValid = imageListValid && link == listHead && head[1] == previousLink &&
+            matchedModules[0] && matchedModules[1] && matchedModules[2];
+        const bool imageTlsValid = tls && imageListValid;
+        tls = tls && imageListValid;
+        bool threadTlsValid = true;
         for (size_t i = 0; i < threadCount; ++i) {
             const auto* teb = reinterpret_cast<um::Teb64*>(tebs[i]);
-            tls = tls && threads[i]->kernelThread()->state == ThreadState::Terminated &&
+            const bool valid = threads[i]->kernelThread()->state == ThreadState::Terminated &&
                   teb->processEnvironmentBlock == process.userPebAddress() &&
                   teb->tlsSlots[0] == (i == 0 ? 0x1111222233334444ULL : 0xaaaabbbbccccddddULL) &&
                   *reinterpret_cast<uint64_t*>(tlsBlocks[i]) == (i == 0 ? 0x1234u : 0x5678u) &&
                   *reinterpret_cast<uint64_t*>(tlsSecond[i]) == (i == 0 ? 0xabcdu : 0xdcbau);
+            threadTlsValid = threadTlsValid && valid;
         }
+        tls = tls && threadTlsValid;
         tls = tls && (!preemptive || (reinterpret_cast<volatile uint64_t*>(counters)[0] &&
                                       reinterpret_cast<volatile uint64_t*>(counters)[1]));
+        if (!tls) {
+            serialWrite("[MicaNT Ps] User worker PEB/TLS parameters/list/thread=");
+            serialWrite(parametersValid ? "1/" : "0/");
+            serialWrite(imageListValid ? "1/" : "0/");
+            serialWrite(threadTlsValid ? "1\r\n" : "0\r\n");
+            for (size_t i = 0; i < threadCount; ++i)
+                if (threads[i]->kernelThread() && threads[i]->kernelThread()->state == ThreadState::Terminated)
+                    (void)threads[i]->reap();
+            (void)hal::amd64::switchProcessPagingRootByPhysical(previous);
+            if (process.closeAddressSpace() == NtStatus::Success) processCleanup.active = false;
+            return false;
+        }
         if (!hal::amd64::switchProcessPagingRootByPhysical(previous)) return false;
         progress.stage = "user workers reap";
         for (size_t i = 0; i < threadCount; ++i)

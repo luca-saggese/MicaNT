@@ -45,6 +45,10 @@ MICANT_NT_API_IMPORT micant::NtStatus NtCreateFile(
     micant::LargeInteger* allocationSize, uint32_t fileAttributes,
     uint32_t shareAccess, uint32_t createDisposition, uint32_t createOptions,
     void* eaBuffer, uint32_t eaLength) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtQueryInformationFile(
+    micant::Handle fileHandle, micant::IoStatusBlock* ioStatusBlock,
+    void* fileInformation, uint32_t length,
+    micant::FileInformationClass fileInformationClass) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtDeviceIoControlFile(
     micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
     void* apcContext, micant::IoStatusBlock* ioStatusBlock,

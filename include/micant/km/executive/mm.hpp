@@ -1753,60 +1753,67 @@ public:
             bool oldCopyOnWriteArmed;
             uint64_t oldPfn;
             bool replaced;
-            std::unique_ptr<Change> next;
         };
-        std::unique_ptr<Change> changes;
-        for (auto* page = vad->commitRanges.get(); page; page = page->next.get()) {
-            auto change = std::unique_ptr<Change>(new (std::nothrow_t{}) Change{
-                page, page->protection, page->copyOnWriteArmed, page->pfn, false, {}});
-            if (!change) return NtStatus::NoMemory;
-            change->next = std::move(changes);
-            changes = std::move(change);
+        const size_t changeCount = vad->commitCharge;
+        if (changeCount > std::numeric_limits<size_t>::max() / sizeof(Change))
+            return NtStatus::NoMemory;
+        std::unique_ptr<Change[]> changes(new (std::nothrow_t{}) Change[changeCount]{});
+        if (changeCount && !changes) return NtStatus::NoMemory;
+        auto* page = vad->commitRanges.get();
+        for (size_t index = 0; index < changeCount; ++index) {
+            if (!page) return NtStatus::InvalidDeviceState;
+            changes[index] = {page, page->protection, page->copyOnWriteArmed,
+                              page->pfn, false};
+            page = page->next.get();
         }
-        auto* change = changes.get();
-        for (; change; change = change->next.get()) {
-            const uintptr_t va = change->page->firstVpn << PageShift4KB;
-            const uint32_t logical = change->page->maximumProtection;
+        if (page) return NtStatus::InvalidDeviceState;
+        size_t applied = 0;
+        for (; applied < changeCount; ++applied) {
+            auto& change = changes[applied];
+            const uintptr_t va = change.page->firstVpn << PageShift4KB;
+            const uint32_t logical = change.page->maximumProtection;
             const bool copy = logical == PAGE_WRITECOPY || logical == PAGE_EXECUTE_WRITECOPY;
-            const bool armed = copy && !change->page->ownsPfn;
+            const bool armed = copy && !change.page->ownsPfn;
             const uint32_t hardware = logical == PAGE_EXECUTE_WRITECOPY
                 ? (armed ? PAGE_EXECUTE_READ : PAGE_EXECUTE_READWRITE)
                 : logical == PAGE_WRITECOPY ? (armed ? PAGE_READONLY : PAGE_READWRITE) : logical;
-            if (change->page->sharedImagePage && change->page->ownsPfn) {
+            if (change.page->sharedImagePage && change.page->ownsPfn) {
                 if (!backend_.replace ||
-                    !change->page->sharedImagePfn ||
-                    !backend_.replace(backend_.context, va, change->oldPfn,
-                                      change->page->sharedImagePfn, hardware)) break;
-                change->replaced = true;
-                change->page->pfn = change->page->sharedImagePfn;
+                    !change.page->sharedImagePfn ||
+                    !backend_.replace(backend_.context, va, change.oldPfn,
+                                      change.page->sharedImagePfn, hardware)) break;
+                change.replaced = true;
+                change.page->pfn = change.page->sharedImagePfn;
             } else if (!backend_.protect(backend_.context, va, hardware)) break;
-            change->page->protection = logical;
-            change->page->copyOnWriteArmed = armed;
+            change.page->protection = logical;
+            change.page->copyOnWriteArmed = armed;
         }
-        if (change) {
-            for (auto* rollback = changes.get(); rollback != change; rollback = rollback->next.get()) {
-                const uintptr_t va = rollback->page->firstVpn << PageShift4KB;
-                const uint32_t oldHardware = (rollback->oldProtection == PAGE_EXECUTE_WRITECOPY ||
-                                              (rollback->oldProtection == PAGE_EXECUTE_READWRITE && rollback->oldCopyOnWriteArmed))
-                    ? (rollback->oldCopyOnWriteArmed ? PAGE_EXECUTE_READ : PAGE_EXECUTE_READWRITE)
-                    : (rollback->oldProtection == PAGE_WRITECOPY ||
-                       (rollback->oldProtection == PAGE_READWRITE && rollback->oldCopyOnWriteArmed))
-                        ? (rollback->oldCopyOnWriteArmed ? PAGE_READONLY : PAGE_READWRITE)
-                        : rollback->oldProtection;
-                if (rollback->replaced) {
-                    if (!backend_.replace(backend_.context, va, rollback->page->pfn,
-                                          rollback->oldPfn, oldHardware)) ownershipInvariantFailure();
-                    rollback->page->pfn = rollback->oldPfn;
+        if (applied != changeCount) {
+            for (size_t index = 0; index < applied; ++index) {
+                auto& rollback = changes[index];
+                const uintptr_t va = rollback.page->firstVpn << PageShift4KB;
+                const uint32_t oldHardware = (rollback.oldProtection == PAGE_EXECUTE_WRITECOPY ||
+                                              (rollback.oldProtection == PAGE_EXECUTE_READWRITE && rollback.oldCopyOnWriteArmed))
+                    ? (rollback.oldCopyOnWriteArmed ? PAGE_EXECUTE_READ : PAGE_EXECUTE_READWRITE)
+                    : (rollback.oldProtection == PAGE_WRITECOPY ||
+                       (rollback.oldProtection == PAGE_READWRITE && rollback.oldCopyOnWriteArmed))
+                        ? (rollback.oldCopyOnWriteArmed ? PAGE_READONLY : PAGE_READWRITE)
+                        : rollback.oldProtection;
+                if (rollback.replaced) {
+                    if (!backend_.replace(backend_.context, va, rollback.page->pfn,
+                                          rollback.oldPfn, oldHardware)) ownershipInvariantFailure();
+                    rollback.page->pfn = rollback.oldPfn;
                 } else if (!backend_.protect(backend_.context, va, oldHardware)) ownershipInvariantFailure();
-                rollback->page->protection = rollback->oldProtection;
-                rollback->page->copyOnWriteArmed = rollback->oldCopyOnWriteArmed;
+                rollback.page->protection = rollback.oldProtection;
+                rollback.page->copyOnWriteArmed = rollback.oldCopyOnWriteArmed;
             }
             return NtStatus::Unsuccessful;
         }
-        for (auto* committed = changes.get(); committed; committed = committed->next.get()) {
-            if (committed->replaced) {
-                PfnDatabase::get().freePage(committed->oldPfn);
-                committed->page->ownsPfn = false;
+        for (size_t index = 0; index < changeCount; ++index) {
+            auto& committed = changes[index];
+            if (committed.replaced) {
+                PfnDatabase::get().freePage(committed.oldPfn);
+                committed.page->ownsPfn = false;
             }
         }
         vad->privateImageView = false;

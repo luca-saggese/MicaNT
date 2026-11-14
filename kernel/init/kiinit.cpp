@@ -2635,6 +2635,9 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
     using namespace micant;
     const auto number = args.number, first = args.first, second = args.second;
     const auto status = [](NtStatus value) { return static_cast<uint64_t>(value); };
+    if (number == sys::SSN_NtCreatePort || number == sys::SSN_NtConnectPort ||
+        number == sys::SSN_NtRequestWaitReplyPort)
+        return status(NtStatus::NotImplemented);
     if (number == sys::SSN_NtQuerySystemTime) {
         const auto result = sys::NtQuerySystemTime(reinterpret_cast<LargeInteger*>(first));
         return status(result);

@@ -1933,6 +1933,13 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtFlushBuffersFile(
                          ", %eax\n\tsyscall\n\tret\n\t");
 }
 
+__attribute__((naked)) __declspec(dllexport) int32_t NtQueryInformationFile(
+    void* /*fileHandle*/, void* /*ioStatusBlock*/, void* /*fileInformation*/,
+    uint32_t /*length*/, uint32_t /*fileInformationClass*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $" MICANT_STRINGIFY(MICANT_SSN_NT_QUERY_INFORMATION_FILE)
+                         ", %eax\n\tsyscall\n\tretq\n\t");
+}
+
 __attribute__((naked)) __declspec(dllexport) uint64_t NtReadFile(
     void* /*fileHandle*/,
     void* /*event*/,

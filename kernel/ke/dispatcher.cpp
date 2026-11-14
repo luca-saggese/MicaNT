@@ -204,10 +204,14 @@ void SyscallDispatcher::initializeStandardTable() {
     registerSyscall(SSN_NtOpenProcessToken, "NtOpenProcessToken", 3, internal::NtOpenProcessTokenSys);
     registerSyscall(SSN_NtAccessCheck, "NtAccessCheck", 5, internal::NtAccessCheckSys);
 
-    // 20-22. ALPC/LPC Port System Services (kernel/lpc/ntlpc.cpp)
+    // The hosted LPC adapter is not linked into the freestanding Executive;
+    // until its Ke wait and Ob ownership path is native, leave these syscalls
+    // unregistered so the canonical dispatcher returns NotImplemented.
+#if !defined(MICANT_FREESTANDING)
     registerSyscall(SSN_NtCreatePort, "NtCreatePort", 4, internal::NtCreatePortSys);
     registerSyscall(SSN_NtConnectPort, "NtConnectPort", 4, internal::NtConnectPortSys);
     registerSyscall(SSN_NtRequestWaitReplyPort, "NtRequestWaitReplyPort", 3, internal::NtRequestWaitReplyPortSys);
+#endif
 
     // 23. NtCreateFile (SSN: 0x0055)
     registerSyscall(SSN_NtCreateFile, "NtCreateFile", 11, [](const SyscallFrame& f) -> NtStatus {

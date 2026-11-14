@@ -7,6 +7,7 @@
 #include "micant/shared/syscall_numbers.hpp"
 #include "micant/shared/win32k_client.h"
 #include "micant/km/executive/mm.hpp"
+#include "micant/km/executive/mm_baremetal.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/km/executive/usermode.hpp"
 #include "micant/km/core/ke.hpp"
@@ -921,6 +922,9 @@ uintptr_t MicantBootstrapExecutionStackTop{};
 uintptr_t MicantBootstrapUserInterruptStackFloor{};
 uintptr_t MicantBootstrapUserInterruptStackBase{};
 uintptr_t MicantBootstrapUserInterruptStackTop{};
+uintptr_t MicantBootstrapUserInterruptStackAliasBase{};
+uintptr_t MicantBootstrapUserInterruptStackAliasTop{};
+uintptr_t MicantBootstrapUserInterruptStackAliasFloor{};
 uintptr_t MicantBootstrapSyscallStackBase{};
 uintptr_t MicantBootstrapSyscallStackTop{};
 uintptr_t MicantBootstrapSyscallStackFloor{};
@@ -1032,8 +1036,12 @@ __attribute__((naked)) void MicantBootstrapTimerInterrupt() noexcept {
         "5: cmpq MicantBootstrapSyscallStackBase(%rip), %rax\njb 7f\n"
         "cmpq MicantBootstrapSyscallStackTop(%rip), %rax\njae 7f\n"
         "cmpq MicantBootstrapSyscallStackFloor(%rip), %rax\njae 6f\nud2\n"
-        "7: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
-        "cmpq MicantBootstrapInterruptStackFloor(%rip), %rax\njae 6f\n8: ud2\n6:\n"
+        "7: cmpq MicantBootstrapUserInterruptStackAliasBase(%rip), %rax\njb 9f\n"
+        "cmpq MicantBootstrapUserInterruptStackAliasTop(%rip), %rax\njae 9f\n"
+        "cmpq MicantBootstrapUserInterruptStackAliasFloor(%rip), %rax\njae 6f\nud2\n"
+        "9: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
+        "cmpq MicantBootstrapInterruptStackFloor(%rip), %rax\njae 6f\n"
+        "8: ud2\n6:\n"
         "cld\n"
         "pushq %rcx\npushq %rdx\npushq %rbx\npushq %rbp\n"
         "pushq %rsi\npushq %rdi\npushq %r8\npushq %r9\npushq %r10\npushq %r11\n"
@@ -1997,6 +2005,9 @@ void MicantProbeUnexpectedTrap() noexcept {
 }
 
 void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noexcept {
+    // Keep timer delivery from recursively entering this diagnostic path and
+    // interleaving or overwriting the exception report.
+    __asm__ __volatile__("cli" : : : "memory");
     logTrapValue("[MicaNT Hal] Unhandled exception vector=0x", vector);
     if (frame) {
         logTrapValue("[MicaNT Hal] Unhandled exception RIP=0x", frame[1]);
@@ -2045,7 +2056,7 @@ __attribute__((naked)) void MicantProbePageFaultEntry() {
         "1: fxsave64 64(%rsp)\n"
         "2: leaq 120(%r12), %rcx\nmovq %r12, %rdx\nleaq 64(%rsp), %r8\n"
         "callq MicantDispatchBootstrapPageFault\n"
-        "testb %al, %al\njnz 3f\n"
+        "testb %al, %al\njnz 3f\ncli\n"
         "leaq 120(%r12), %rcx\ncallq MicantProbePageFault\nud2\n"
         "3: cmpl $0, MicantAmd64XsaveMask(%rip)\nje 4f\n"
         "movl MicantAmd64XsaveMask(%rip), %eax\nxorl %edx, %edx\n"
@@ -2116,7 +2127,7 @@ __attribute__((naked)) void MicantProbeUserGeneralProtectionEntry() {
 
 __attribute__((naked)) void MicantProbeUserExceptionEntry() {
     __asm__ __volatile__(
-        "cld\npushq %rax\npushq %rcx\npushq %rdx\npushq %rbx\npushq %rbp\n"
+        "cli\ncld\npushq %rax\npushq %rcx\npushq %rdx\npushq %rbx\npushq %rbp\n"
         "pushq %rsi\npushq %rdi\npushq %r8\npushq %r9\npushq %r10\npushq %r11\n"
         "pushq %r12\npushq %r13\npushq %r14\npushq %r15\n"
         "movq %rsp, %r12\nmovl MicantAmd64ExtendedSize(%rip), %eax\n"
@@ -2384,6 +2395,12 @@ bool bootstrapStackHasHeadroom(uintptr_t stackPointer, uintptr_t threadBase,
         base = MicantBootstrapUserInterruptStackBase;
         top = MicantBootstrapUserInterruptStackTop;
     }
+    else if (MicantBootstrapUserInterruptStackAliasBase &&
+             stackPointer >= MicantBootstrapUserInterruptStackAliasBase &&
+             stackPointer < MicantBootstrapUserInterruptStackAliasTop) {
+        base = MicantBootstrapUserInterruptStackAliasBase;
+        top = MicantBootstrapUserInterruptStackAliasTop;
+    }
     else if (stackPointer >= MicantBootstrapSyscallStackBase &&
              stackPointer < MicantBootstrapSyscallStackTop) {
         base = MicantBootstrapSyscallStackBase;
@@ -2403,14 +2420,63 @@ bool bootstrapStackHasHeadroom(uintptr_t stackPointer, uintptr_t threadBase,
 
 void setBootstrapThreadEntryStack(uintptr_t stackTop, uintptr_t userTeb, bool syscallGsActive,
                                   uintptr_t stackBase, uintptr_t executionStackTop) noexcept {
+    // The fixed BSP interrupt stack is linked in the kernel image. Early
+    // context metadata may still contain its low physical alias, while the
+    // CPU executes through the relocated kernel virtual alias. Publish the
+    // executable alias so IRQ bounds and TSS.RSP0 describe the same stack.
+    const uintptr_t originalStackBase = stackBase;
+    const uintptr_t originalStackTop = stackTop;
+    if (stackTop > stackBase && stackTop - stackBase == sizeof(g_kernelStack)) {
+        uint64_t currentRoot{};
+        __asm__ __volatile__("movq %%cr3, %0" : "=r"(currentRoot));
+        const uintptr_t kernelStackAlias = reinterpret_cast<uintptr_t>(g_kernelStack);
+        const auto kernelStackPhysical = km::mm_baremetal::BareMetalPaging::getPhysicalAddress(
+            currentRoot, kernelStackAlias);
+        const auto suppliedStackPhysical = km::mm_baremetal::BareMetalPaging::getPhysicalAddress(
+            currentRoot, stackBase);
+        if (kernelStackPhysical && suppliedStackPhysical == kernelStackPhysical) {
+            stackBase = kernelStackAlias;
+            stackTop = stackBase + sizeof(g_kernelStack);
+            if (!executionStackTop || executionStackTop -
+                (stackTop - sizeof(g_kernelStack)) == sizeof(g_kernelStack))
+                executionStackTop = stackTop;
+        }
+    }
     // A clock IRQ may switch context while its own XSAVE frame is resident.
     MicantBootstrapInterruptStackFloor = stackBase ? stackBase + 4096 + 2 * MicantAmd64ExtendedSize : 0;
     MicantBootstrapExecutionStackTop = executionStackTop;
-    const uintptr_t userEntryBase = stackTop ? stackBase : reinterpret_cast<uintptr_t>(g_kernelStack);
+    const uintptr_t userEntryBase = stackBase ? stackBase :
+        (stackTop ? stackBase : reinterpret_cast<uintptr_t>(g_kernelStack));
+    const uintptr_t userEntryTop = executionStackTop > userEntryBase ? executionStackTop :
+        (stackTop ? stackTop :
+         reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack)));
     MicantBootstrapUserInterruptStackBase = userEntryBase;
-    MicantBootstrapUserInterruptStackTop = stackTop ? stackTop :
-        reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack));
+    MicantBootstrapUserInterruptStackTop = userEntryTop;
     MicantBootstrapUserInterruptStackFloor = userEntryBase + 4096 + 2 * MicantAmd64ExtendedSize;
+    MicantBootstrapUserInterruptStackAliasBase = 0;
+    MicantBootstrapUserInterruptStackAliasTop = 0;
+    MicantBootstrapUserInterruptStackAliasFloor = 0;
+    if (originalStackTop > originalStackBase &&
+        originalStackTop - originalStackBase == sizeof(g_kernelStack)) {
+        // A kernel stack can be entered through its linked high alias or its
+        // low physical alias depending on the current bootstrap root.
+        const uintptr_t linkedBase = reinterpret_cast<uintptr_t>(g_kernelStack);
+        const uintptr_t linkedTop = reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack));
+        const bool primaryIsLinked = stackBase == linkedBase;
+        MicantBootstrapUserInterruptStackAliasBase = primaryIsLinked ? originalStackBase : linkedBase;
+        MicantBootstrapUserInterruptStackAliasTop = primaryIsLinked ? originalStackTop : linkedTop;
+        MicantBootstrapUserInterruptStackAliasFloor =
+            MicantBootstrapUserInterruptStackAliasBase + 4096 +
+            2 * MicantAmd64ExtendedSize;
+    } else if (!originalStackTop) {
+        // CPL3 transitions without a thread-owned syscall stack use the
+        // dedicated bootstrap interrupt stack through TSS.RSP0.
+        MicantBootstrapUserInterruptStackAliasBase = reinterpret_cast<uintptr_t>(g_kernelStack);
+        MicantBootstrapUserInterruptStackAliasTop =
+            reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack));
+        MicantBootstrapUserInterruptStackAliasFloor =
+            MicantBootstrapUserInterruptStackAliasBase + 4096 + 2 * MicantAmd64ExtendedSize;
+    }
     MicantBootstrapSyscallStackBase = stackTop ? stackBase : reinterpret_cast<uintptr_t>(g_syscallStack);
     MicantBootstrapSyscallStackTop = stackTop ? stackTop :
         reinterpret_cast<uintptr_t>(g_syscallStack + sizeof(g_syscallStack));

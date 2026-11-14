@@ -1383,10 +1383,6 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
             return status;
         }
         if (!candidate.present) continue;
-        if (candidate.callbackCount) {
-            traceImageInitializationFailure("TLS callbacks unsupported", NtStatus::NotImplemented);
-            return NtStatus::NotImplemented;
-        }
         if (tlsCount == 16 || candidate.alignment > 256 ||
             candidate.initialData.size() > mm::PageSize4KB - 0x100 ||
             candidate.zeroFill > mm::PageSize4KB - 0x100 - candidate.initialData.size())

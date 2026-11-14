@@ -360,13 +360,14 @@ def serial_has_failure(serial_log: str) -> bool:
     for line in serial_log.splitlines():
         if not line.startswith("[MicaNT") or (" failed" not in line and "Invalid " not in line):
             continue
-        # The image-loader fixture deliberately attempts to bind a missing
-        # import before asserting rollback and then retries finalization.
-        # This diagnostic is expected evidence from that negative case, not a
-        # failed kernel bootstrap.
+        # The SEC_IMAGE import-preflight test deliberately asks the loader to
+        # reject a fixture with an unresolved native import, then verifies
+        # that all partially created image state was rolled back. This is an
+        # expected negative test result, not a kernel bootstrap failure.
         if line.startswith("[MicaNT Ps] SEC_IMAGE initialization import binding failed status="):
             continue
-        if line.startswith("[MicaNT Ps] SEC_IMAGE initialization TLS callbacks unsupported failed status="):
+        if (line.startswith("[MicaNT Ps] SEC_IMAGE initialization TLS inspection failed status=") and
+                "[MicaNT Ps] Image callbacks rejection returned" in serial_log):
             continue
         if gop_fallback and line.startswith("[MicaNT Io] Boot-start driver failed: virtio_gpu.sys"):
             continue
