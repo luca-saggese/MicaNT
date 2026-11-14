@@ -230,3 +230,7 @@ Useful public references:
 - Apple: [Dispatch QoS](https://developer.apple.com/documentation/dispatch/dispatchqos)
 
 **Definition of done:** NT-compatible process/thread priorities remain intact; dynamic interactive behavior uses the canonical Ke/Ps/Ob/Mm paths; user-mode compositor responsiveness is demonstrable under load; all claims distinguish implementation, QEMU evidence and physical hardware measurements.
+
+### Multicore dependency
+
+SMP is a distinct dependency tracked by [M20](KERNEL_MILESTONES.md), with processor bring-up, per-CPU scheduling, affinity migration, reschedule IPIs and Mm shootdown acceptance in [KERNEL_SMP_MULTICORE_IMPLEMENTATION_SPEC.md](KERNEL_SMP_MULTICORE_IMPLEMENTATION_SPEC.md). Existing BSP scheduling evidence does not satisfy those gates. M13's responsiveness measurements may proceed on BSP while multicore-specific claims remain deferred.

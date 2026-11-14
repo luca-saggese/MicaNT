@@ -211,3 +211,7 @@ Technical reference does not imply permission to import code. Evaluate licenses 
 ## 16. Final definition of done
 
 An implementation milestone is **complete** only when its entire stated end-to-end path works under the required evidence level. A header, a simulator, a compiled `.sys`, a host unit test, a QEMU bootstrap image, and a real physical GPU driver are distinct results. Preserve those distinctions in status reporting. Continue work on the next dependency within the authorized scope; do not stop after an isolated helper, a small test or a commit unless the actual task is complete or the execution environment imposes a limit.
+
+### PnP and DMA prerequisites
+
+Hardware driver lifecycle and resource teardown follow [M23 PnP](KERNEL_PNP_DRIVER_LIFECYCLE_SPEC.md). GPU DMA buffers must use the canonical Io/Mm ownership contract; hardware isolation claims require the separate IOMMU gates in [M22](KERNEL_IOMMU_DMA_PROTECTION_SPEC.md). The existing VirtIO-GPU bootstrap scanout evidence does not imply either capability.

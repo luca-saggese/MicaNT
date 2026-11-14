@@ -372,3 +372,26 @@ Recommended implementation ownership: Storage/HAL owns block devices; Io/Ob owns
 - ReactOS sources: I/O manager, file objects, Cache Manager, memory-mapped image sections, filesystem drivers and their tests. Use as architectural reference under project licensing policy.
 
 > **Final success criterion:** MicaNT's AMD64 kernel reads an actual PE32+ file from a persistent ext4-backed QEMU disk through canonical block Io and filesystem IRPs, creates a correctly referenced `SEC_IMAGE` section, executes the file as a Ps-managed Ring 3 process, and reclaims all file, section, VAD, handle and PFN resources at exit. Subsequent filesystem write support must additionally prove crash-consistent persistence.
+
+## 15. Durability, cache coherence and device failure (M14 extension)
+
+This section extends the existing single M14 filesystem pipeline; it does not create a second cache or filesystem architecture. `Cc` owns cached file data, each filesystem driver owns on-disk metadata rules, `Io` owns IRP ordering/completion and block-device error propagation, and the storage/HAL driver owns controller commands. `Mm` and `Cc` must share file-backed page identity so mapped writes, cached reads, paging I/O and ordinary file I/O cannot observe unrelated copies.
+
+### 15.1 Flush and persistence contract
+
+- Define dirty state at page, file, filesystem transaction and device queue levels. A successful flush must drain all earlier writes covered by its contract and propagate the first failure; clearing a dirty bit or completing an IRP before device completion is not durability.
+- Preserve ordering through filesystem → Cc → Io → block driver. Use device cache flush commands and FUA/barrier only when the device/controller advertises and implements them. If ordering/durability cannot be guaranteed, expose the limitation and fail a requested durable operation rather than synthesize success.
+- FAT32 has no journal. A completed write/flush can only claim the guarantees supported by the device's cache and ordered sector writes; it cannot promise atomic metadata updates or journal recovery. ext4 writable mode remains gated on JBD2 transaction/replay behavior described in F2.
+- On writeback failure, retain dirty/error state, report the failing file/device status, prevent unsafe eviction and allow retry or explicit unmount failure. Never convert a removed device or timeout into a successful short write.
+
+### 15.2 Coherence, locking and lifecycle
+
+Use per-file/section range synchronization for write, rename, truncate, paging and memory-mapped modification. Define lock order between Cc, filesystem inode/metadata locks, Mm VAD/page locks and Io request queues. Paging I/O cannot recursively enter a cache path that waits on the same page. Rename is atomic only on filesystems whose metadata operation and recovery protocol provide that guarantee; document per-volume behavior. Oplocks/leases are not implied; add them only with the corresponding public contract and break/timeout lifecycle.
+
+Unmount transitions mounted → quiescing → drained → unmounted; reject new opens, flush dirty state, cancel/complete in-flight IRPs and preserve referenced sections until their backing object lifetime ends. Surprise removal stops new requests immediately, fails outstanding operations accurately, blocks further MMIO/DMA, and retains pinned pages until device quiescence. Corrupt volumes are mounted read-only or rejected according to a filesystem-specific policy; do not silently repair metadata. Storage timeout recovery/reset is owned by the block driver and must complete each request exactly once.
+
+### 15.3 Acceptance and fault injection
+
+Add power-loss fault injection at block write, cache flush, FUA/barrier, journal commit and metadata update boundaries. Reboot a disposable image and verify file contents and metadata using an independent checker where appropriate. Exercise flush concurrent with mapped writes, page eviction, rename, cancellation, storage timeout and surprise removal. Verify cached and mapped views agree, errors reach callers, mount/unmount drains references, and no dirty data is discarded on shutdown. Test each filesystem separately; never infer journaling from a successful FAT32 remount. QEMU persistence tests require a real backing image, while physical claims require a documented controller/device cache profile and abrupt-power test setup.
+
+Related roadmap dependencies: [M19 crash/debug](KERNEL_CRASH_DEBUG_RECOVERY_SPEC.md), [M21 ACPI/power](KERNEL_ACPI_POWER_MANAGEMENT_SPEC.md), [M22 DMA](KERNEL_IOMMU_DMA_PROTECTION_SPEC.md), [M24 paging](KERNEL_MEMORY_PRESSURE_PAGING_SPEC.md).
