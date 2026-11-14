@@ -104,7 +104,8 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   CPL3/QEMU; restano aperti gli altri access mode e il rollback QEMU di tutte le
   fasi di creazione e inheritance. La fixture CPL3 verifica anche
   `STATUS_ACCESS_VIOLATION` con output handle non scrivibile prima di allocare o
-  pubblicare il processo.
+  pubblicare il processo. La fixture CPL3 verifica anche che `Flags=1` venga
+  rifiutato con `STATUS_NOT_IMPLEMENTED` e output handle nullo.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
@@ -190,6 +191,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 ## Stato QEMU annotato
 
+- Verifica integrata del rifiuto `NtCreateProcessEx(Flags=1)` CPL3:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-process-flags-final` è passata. La build/link
+  `ntoskrnl_core_baremetal`, il boot modulare, l'input PS/2 e la seriale stabile
+  per 5 secondi sono verdi.
 - Build/link `ntoskrnl_core_baremetal` e target boot: passati con
   `python3 qemu.py --build-only` nel batch precedente.
 - Ultimo boot completo riuscito: `python3 qemu.py --headless` nel batch

@@ -362,6 +362,13 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq %rax, 0x30(%rsp)\nmovq %rax, 0x38(%rsp)\nmovq %rax, 0x40(%rsp)\n"
         "callq *40(%r15)\ncmpl $0xc0000002, %eax\nje 68f\nmovl $0xc0000246, %r13d\njmp 90f\n"
         "68: cmpq $0, 0x60(%rsp)\nje 69f\nmovl $0xc0000242, %r13d\njmp 90f\n69:\n"
+        // CREATE_FLAGS is not implemented; reject it before publishing a child.
+        "leaq 0x60(%rsp), %rcx\nmovl $0x0010043b, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
+        "movq $1, 0x20(%rsp)\nxorl %eax, %eax\nmovq %rax, 0x28(%rsp)\n"
+        "movq %rax, 0x30(%rsp)\nmovq %rax, 0x38(%rsp)\nmovq %rax, 0x40(%rsp)\n"
+        "callq *40(%r15)\ncmpl $0xc0000002, %eax\nje .Lmicant_process_unsupported_flags\n"
+        "movl $0xc0000247, %r13d\njmp 90f\n.Lmicant_process_unsupported_flags:\n"
+        "cmpq $0, 0x60(%rsp)\nje 70f\nmovl $0xc0000248, %r13d\njmp 90f\n70:\n"
         // Thread creation preflights its output before stack, TEB, or
         // process-membership resources are published.
         "movq $0x1000, %rcx\nmovl $0x00100052, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
