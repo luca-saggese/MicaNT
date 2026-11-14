@@ -67,10 +67,11 @@ specification. The compatibility inventory is
 - UEFI descriptor boundary samples verify included/excluded regions and a
   large unavailable physical hole; the active 32-page EFI stack/handoff
   descriptor is excluded, and APIC MMIO remains supervisor-only at CPL3. The
-  QEMU map exposed no `EfiMemoryMappedIO` descriptor, so descriptor-type MMIO
-  exclusion is validated by the enrollment rules but not exercised by this
-  profile. Arbitrary multi-node physical fragmentation is not represented by
-  this single-QEMU profile.
+  PFN and UEFI contract host regressions cover discontiguous ranges, holes, and
+  non-reclaimable loader/runtime/ACPI/MMIO types. The QEMU map exposed no
+  `EfiMemoryMappedIO` descriptor, so actual firmware MMIO-range enrollment is
+  not exercised by this profile. Arbitrary multi-node physical fragmentation
+  is not represented by this single-QEMU profile.
 - The PFN and address-space migration is implemented and exercised in the
   canonical bare-metal kernel. Remaining end-to-end limits are the actual
   512 MiB OOM, unsupported Explorer TLS callbacks at 1/2 GiB, and the 4 GiB

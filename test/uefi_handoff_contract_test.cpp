@@ -6,6 +6,22 @@
 
 int main() {
     using namespace micant;
+    assert(uefi::isReclaimableAfterExitBootServices(
+        uefi::EfiMemoryType::EfiConventionalMemory));
+    assert(uefi::isReclaimableAfterExitBootServices(
+        uefi::EfiMemoryType::EfiBootServicesCode));
+    assert(uefi::isReclaimableAfterExitBootServices(
+        uefi::EfiMemoryType::EfiBootServicesData));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiLoaderCode));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiLoaderData));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiRuntimeServicesCode));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiRuntimeServicesData));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiACPIReclaimMemory));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiACPIMemoryNVS));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiMemoryMappedIO));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiMemoryMappedIOPortSpace));
+    assert(!uefi::isReclaimableAfterExitBootServices(uefi::EfiMemoryType::EfiUnusableMemory));
+
     std::array<uefi::EfiMemoryDescriptor, 2> memoryMap{};
     const auto empty = uefi::BuildKernelHandoffFromUefi(nullptr, nullptr, {});
     assert(empty.version == 3 && empty.size == 120);
