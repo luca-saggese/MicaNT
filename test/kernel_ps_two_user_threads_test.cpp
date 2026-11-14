@@ -539,12 +539,23 @@ __attribute__((noinline)) bool testNativePeerThread(micant::Handle process, uint
     const auto oversizedReserveStatus = sys::NtCreateThreadEx(&oversizedReserveThread,
         ob::SYNCHRONIZE, nullptr, process, entry, 0, 1, 0,
         mm::PageSize4KB, hal::amd64::BootstrapManagedSize + mm::PageSize4KB, nullptr);
+    auto malformedAttributes = attrs;
+    malformedAttributes.entries[1].attribute = PS_ATTRIBUTE_CLIENT_ID;
+    Handle malformedAttributeThread{};
+    const auto threadObjectsBeforeAttributeValidation = ps::detail::bootstrapThreadObjectCount();
+    const auto readyThreadsBeforeAttributeValidation = ke::PriorityScheduler::get().getReadyThreadCount();
+    const auto malformedAttributeStatus = sys::NtCreateThreadEx(&malformedAttributeThread,
+        ob::SYNCHRONIZE, nullptr, process, entry, 0, 1, 0,
+        mm::PageSize4KB, 32768, &malformedAttributes);
     if (duplicateStatus != NtStatus::Success || restrictedCreateStatus != NtStatus::AccessDenied ||
         restrictedCloseStatus != NtStatus::Success ||
         invalidCommitStatus != NtStatus::InvalidParameter || invalidCommitThread ||
         oversizedReserveStatus != NtStatus::InvalidParameter || oversizedReserveThread ||
         ps::detail::bootstrapThreadObjectCount() != threadObjectsBeforeStackValidation ||
-        ke::PriorityScheduler::get().getReadyThreadCount() != readyThreadsBeforeStackValidation) {
+        ke::PriorityScheduler::get().getReadyThreadCount() != readyThreadsBeforeStackValidation ||
+        malformedAttributeStatus != NtStatus::InvalidParameter || malformedAttributeThread ||
+        ps::detail::bootstrapThreadObjectCount() != threadObjectsBeforeAttributeValidation ||
+        ke::PriorityScheduler::get().getReadyThreadCount() != readyThreadsBeforeAttributeValidation) {
         serialWrite("[MicaNT Ps] NtCreateThreadEx stack validation status/handle/count/ready=");
         serialWriteHex(static_cast<uint32_t>(invalidCommitStatus)); serialWrite("/");
         serialWriteHex(static_cast<uint32_t>(oversizedReserveStatus)); serialWrite("/");
