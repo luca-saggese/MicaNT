@@ -632,6 +632,11 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "leaq MicantApcThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nleaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\n"
         "movq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
         "callq *48(%r15)\ntestl %eax, %eax\njz 9f\nmovl $0xc0000215, %r13d\njmp 90f\n9:\n"
+        // A failed PreviousSuspendCount copyout must leave the new thread
+        // suspended; the zero-time wait below verifies that no resume leaked.
+        "movq 0x70(%rsp), %rcx\nmovq $0x1000, %rdx\ncallq *56(%r15)\n"
+        "cmpl $0xc0000005, %eax\nje .Lmicant_resume_bad_count\nmovl $0xc000028f, %r13d\njmp 90f\n"
+        ".Lmicant_resume_bad_count:\n"
         // A zero-time wait on the newly created suspended thread must time
         // out and leave it available for APC setup and resume.
         "movq $0, 0x100(%rsp)\nmovq 0x70(%rsp), %rcx\nxorl %edx, %edx\n"

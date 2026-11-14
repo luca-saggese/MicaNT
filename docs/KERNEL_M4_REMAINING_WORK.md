@@ -106,6 +106,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   `STATUS_ACCESS_VIOLATION` con output handle non scrivibile prima di allocare o
   pubblicare il processo. La fixture CPL3 verifica anche che `Flags=1` venga
   rifiutato con `STATUS_NOT_IMPLEMENTED` e output handle nullo.
+  La fixture CPL3 prova anche che un puntatore `PreviousSuspendCount` non
+  valido fa fallire `NtResumeThread` senza togliere la sospensione; il wait
+  immediatamente successivo restituisce `STATUS_TIMEOUT`.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback
@@ -119,7 +122,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   che causano overflow nell'arrotondamento. Il contratto generale e il rollback
   di tutte le fasi restano aperti. La fixture CPL3 verifica inoltre
   `STATUS_ACCESS_VIOLATION` con output handle non scrivibile prima di allocare
-  stack, TEB o membership del thread.
+  stack, TEB o membership del thread. La fixture CPL3 controlla inoltre che
+  un copyout non valido di `PreviousSuspendCount` in `NtResumeThread` non
+  rimuova la sospensione: il wait a timeout zero successivo resta in timeout.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
@@ -191,6 +196,13 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 ## Stato QEMU annotato
 
+- Verifica integrata dei test CPL3 `NtCreateProcessEx(Flags=1)` e rollback
+  `NtResumeThread` su copyout invalido:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-resume-copyout-retry` è passata. Il primo tentativo
+  dello stesso batch ha raggiunto i marker CPL3 Ps ma è terminato con `#UD`
+  dopo `SEC_IMAGE`; la ripetizione ha completato boot, PS/2 e seriale stabile
+  per 5 secondi.
 - Verifica integrata del rifiuto `NtCreateProcessEx(Flags=1)` CPL3:
   `python3 qemu.py --headless --timeout 120 --diagnostics-dir
   /private/tmp/micant-m4-process-flags-final` è passata. La build/link
