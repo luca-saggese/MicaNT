@@ -365,6 +365,18 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movl $0xc0000250, %r13d\njmp 90f\n.Lmicant_process_sd_denied:\n"
         "cmpq $0, 0x60(%rsp)\nje .Lmicant_process_sd_unpublished\n"
         "movl $0xc0000251, %r13d\njmp 90f\n.Lmicant_process_sd_unpublished:\n"
+        // The same caller-supplied empty DACL must deny a real CPL3
+        // NtCreateThreadEx request before publishing its output handle.
+        "movq $0, 0x78(%rsp)\nleaq 0x78(%rsp), %rcx\nmovl $0x00100052, %edx\n"
+        "leaq 0x130(%rsp), %r8\nmovq $-1, %r9\n"
+        "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
+        "leaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\n"
+        "movq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\n"
+        "movq $0, 0x50(%rsp)\ncallq *48(%r15)\n"
+        "cmpl $0xc0000022, %eax\nje .Lmicant_thread_sd_denied\n"
+        "movl $0xc0000254, %r13d\njmp 90f\n.Lmicant_thread_sd_denied:\n"
+        "cmpq $0, 0x78(%rsp)\nje .Lmicant_thread_sd_unpublished\n"
+        "movl $0xc0000255, %r13d\njmp 90f\n.Lmicant_thread_sd_unpublished:\n"
         // Restore the deliberately named ObjectAttributes used by the later
         // NtCreateThreadEx namespace rejection case.
         "xorl %eax, %eax\nmovq %rax, 0x130(%rsp)\nmovq %rax, 0x138(%rsp)\n"

@@ -54,7 +54,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   oggetti parziali. Il test kernel UserMode verifica ora `NtOpenProcess` negato
   dalla DACL senza `SeDebugPrivilege` e consentito con il privilegio abilitato,
   controllando i diritti concessi e ripristinando il token. Restano i casi di
-  creazione/uso generali, KernelMode e handle pseudo.
+  creazione/uso generali, KernelMode e handle pseudo. QEMU CPL3 verifica anche
+  che un `NtCreateThreadEx` con self-relative security descriptor e DACL vuota
+  ritorni `STATUS_ACCESS_DENIED` senza pubblicare l'handle.
 - [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
   processi.** Verificare diritti concessi, callback Ob, handle ereditabili,
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
@@ -198,4 +200,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   /private/tmp/micant-m4-event-inherit-kernel` è passata. Il test ha chiuso
   l'handle parent, fatto attach al child e completato il wait; build/link, PS/2
   e seriale stabile per 5 secondi sono verdi. L'esercizio CPL3 rimane aperto.
+- Verifica integrata completa della DACL CPL3 su `NtCreateThreadEx`:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-thread-sd-deny2` è passata, con `STATUS_ACCESS_DENIED`
+  e handle nullo per la DACL vuota, più build/link, PS/2 e seriale stabile per
+  5 secondi.
 
