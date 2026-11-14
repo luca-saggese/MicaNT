@@ -16,6 +16,8 @@ bool MmCloseSectionHandle(Handle h);
 bool CmCloseKeyHandle(Handle h);
 bool SeCloseTokenHandle(Handle h);
 bool LpcClosePortHandle(Handle h);
+ClientId LpcGetCurrentClientId() noexcept;
+bool LpcCurrentCallerIsSystem() noexcept;
 
 // I/O Completion Port System Services (kernel/io/iomgr.cpp)
 NtStatus NtCreateIoCompletionSys(const SyscallFrame& f);
@@ -35,6 +37,9 @@ NtStatus NtAccessCheckSys(const SyscallFrame& f);
 NtStatus NtCreatePortSys(const SyscallFrame& f);
 NtStatus NtConnectPortSys(const SyscallFrame& f);
 NtStatus NtRequestWaitReplyPortSys(const SyscallFrame& f);
+NtStatus NtListenPortSys(const SyscallFrame& f);
+NtStatus NtAcceptConnectPortSys(const SyscallFrame& f);
+NtStatus NtReplyWaitReceivePortSys(const SyscallFrame& f);
 
 // Cache Manager Executive Initialization & Scan (kernel/cc/ccmgr.cpp)
 void CcInitializeExecutiveCache() noexcept;

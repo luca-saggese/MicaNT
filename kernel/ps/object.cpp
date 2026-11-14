@@ -862,3 +862,32 @@ extern "C" __declspec(dllexport) NtStatus PsCreateSystemThread(
     return status;
 }
 }
+
+namespace micant::sys::internal {
+ClientId LpcGetCurrentClientId() noexcept {
+#if defined(MICANT_FREESTANDING)
+    auto* process = ke::KeGetCurrentProcess();
+    auto* thread = ke::KeGetCurrentThread();
+    if (!process || !thread || !thread->tid) return {};
+    return ClientId{process->processId(), thread->tid};
+#else
+    return {};
+#endif
+}
+
+bool LpcCurrentCallerIsSystem() noexcept {
+#if defined(MICANT_FREESTANDING)
+    auto* process = ke::KeGetCurrentProcess();
+    if (!process) return false;
+    se::FreestandingAccessToken* token{};
+    ob::ObjectHeader* reference{};
+    if (process->referencePrimaryToken(token, reference) != NtStatus::Success || !token || !reference)
+        return false;
+    const bool isSystem = se::SeIsFreestandingTokenObject(token, reference) && token->IsSystem;
+    se::SeDereferenceFreestandingToken(reference);
+    return isSystem;
+#else
+    return false;
+#endif
+}
+}

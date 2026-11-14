@@ -12,6 +12,7 @@
 #include "micant/shared/context.hpp"
 #include "micant/shared/ntstatus.hpp"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/native_lpc.hpp"
 #include "micant/km/core/dispatcher.hpp"
 #include "micant/km/executive/heap.hpp"
 #include "micant/um/native/ldr.hpp"
@@ -572,14 +573,18 @@ inline NtStatus NtCreatePort(
     Handle* portHandle,
     ObjectAttributes* objectAttributes,
     uint32_t maxConnectionInfoLength = 0,
-    uint32_t maxMessageLength = 256
+    uint32_t maxMessageLength = 256,
+    uint32_t maxPoolUsage = 0
 ) {
+    uint64_t stackArgument = maxPoolUsage;
     sys::SyscallFrame frame{
         .ssn = sys::SSN_NtCreatePort,
         .arg1 = reinterpret_cast<uint64_t>(portHandle),
         .arg2 = reinterpret_cast<uint64_t>(objectAttributes),
         .arg3 = maxConnectionInfoLength,
-        .arg4 = maxMessageLength
+        .arg4 = maxMessageLength,
+        .stackArgs = &stackArgument,
+        .stackArgCount = 1
     };
     return sys::SyscallDispatcher::get().dispatch(frame);
 }
@@ -589,14 +594,24 @@ inline NtStatus NtConnectPort(
     Handle* portHandle,
     UnicodeString* portName,
     void* securityQos = nullptr,
-    void* clientView = nullptr
+    void* clientView = nullptr,
+    void* serverView = nullptr,
+    uint32_t* maxMessageLength = nullptr,
+    void* connectionInformation = nullptr,
+    uint32_t* connectionInformationLength = nullptr
 ) {
+    uint64_t stackArguments[4]{reinterpret_cast<uintptr_t>(serverView),
+                               reinterpret_cast<uintptr_t>(maxMessageLength),
+                               reinterpret_cast<uintptr_t>(connectionInformation),
+                               reinterpret_cast<uintptr_t>(connectionInformationLength)};
     sys::SyscallFrame frame{
         .ssn = sys::SSN_NtConnectPort,
         .arg1 = reinterpret_cast<uint64_t>(portHandle),
         .arg2 = reinterpret_cast<uint64_t>(portName),
         .arg3 = reinterpret_cast<uint64_t>(securityQos),
-        .arg4 = reinterpret_cast<uint64_t>(clientView)
+        .arg4 = reinterpret_cast<uint64_t>(clientView),
+        .stackArgs = stackArguments,
+        .stackArgCount = 4
     };
     return sys::SyscallDispatcher::get().dispatch(frame);
 }
@@ -6742,9 +6757,26 @@ inline constexpr DWORD ERROR_SUCCESS_VAL = 0;
 inline NtStatus WINAPI Generic_Nt_Success() noexcept { return NtStatus::Success; }
 inline void* WINAPI Generic_Nt_NullPtr() noexcept { return nullptr; }
 
-inline NtStatus WINAPI NtAcceptConnectPort(HANDLE* PortHandle, void* /*PortContext*/, void* /*ConnectionRequest*/, BOOLEAN /*AcceptConnection*/, void* /*ServerView*/, void* /*ClientView*/) noexcept {
-    if (PortHandle) *PortHandle = reinterpret_cast<HANDLE>(0x9001);
-    return NtStatus::Success;
+inline NtStatus WINAPI NtAcceptConnectPort(
+    HANDLE* PortHandle,
+    void* PortContext,
+    void* ConnectionRequest,
+    BOOLEAN AcceptConnection,
+    void* ServerView,
+    void* ClientView
+) noexcept {
+    uint64_t stackArguments[2]{reinterpret_cast<uintptr_t>(ServerView),
+                               reinterpret_cast<uintptr_t>(ClientView)};
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtAcceptConnectPort,
+        .arg1 = reinterpret_cast<uintptr_t>(PortHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(PortContext),
+        .arg3 = reinterpret_cast<uintptr_t>(ConnectionRequest),
+        .arg4 = AcceptConnection,
+        .stackArgs = stackArguments,
+        .stackArgCount = 2
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
 }
 
 inline NtStatus WINAPI NtAdjustGroupsToken(HANDLE /*TokenHandle*/, BOOLEAN /*ResetToDefault*/, void* /*NewState*/, ULONG /*BufferLength*/, void* /*PreviousState*/, ULONG* ReturnLength) noexcept {
@@ -6772,9 +6804,30 @@ inline NtStatus WINAPI NtCancelTimer_Export(HANDLE /*TimerHandle*/, BOOLEAN* Cur
 }
 inline NtStatus WINAPI NtClearEvent(HANDLE /*EventHandle*/) noexcept { return NtStatus::Success; }
 
-inline NtStatus WINAPI NtConnectPort_Export(HANDLE* PortHandle, void* /*PortName*/, void* /*SecurityQos*/, void* /*ClientView*/, void* /*ServerView*/, ULONG* /*MaxMessageLength*/, void* /*ConnectionInformation*/, ULONG* /*ConnectionInformationLength*/) noexcept {
-    if (PortHandle) *PortHandle = reinterpret_cast<HANDLE>(0x9002);
-    return NtStatus::Success;
+inline NtStatus WINAPI NtConnectPort_Export(
+    HANDLE* PortHandle,
+    void* PortName,
+    void* SecurityQos,
+    void* ClientView,
+    void* ServerView,
+    ULONG* MaxMessageLength,
+    void* ConnectionInformation,
+    ULONG* ConnectionInformationLength
+) noexcept {
+    uint64_t stackArguments[4]{reinterpret_cast<uintptr_t>(ServerView),
+                               reinterpret_cast<uintptr_t>(MaxMessageLength),
+                               reinterpret_cast<uintptr_t>(ConnectionInformation),
+                               reinterpret_cast<uintptr_t>(ConnectionInformationLength)};
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtConnectPort,
+        .arg1 = reinterpret_cast<uintptr_t>(PortHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(PortName),
+        .arg3 = reinterpret_cast<uintptr_t>(SecurityQos),
+        .arg4 = reinterpret_cast<uintptr_t>(ClientView),
+        .stackArgs = stackArguments,
+        .stackArgCount = 4
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
 }
 
 inline NtStatus WINAPI NtCreateDirectoryObject(HANDLE* DirectoryHandle, uint32_t /*DesiredAccess*/, void* /*ObjectAttributes*/) noexcept {
@@ -6868,9 +6921,24 @@ inline NtStatus WINAPI NtCreateMutant_Export(HANDLE* MutantHandle, uint32_t /*De
     return NtStatus::Success;
 }
 
-inline NtStatus WINAPI NtCreatePort_Export(HANDLE* PortHandle, void* /*ObjectAttributes*/, ULONG /*MaxConnectionInfoLength*/, ULONG /*MaxDataLength*/, ULONG /*Reserved*/) noexcept {
-    if (PortHandle) *PortHandle = reinterpret_cast<HANDLE>(0x900A);
-    return NtStatus::Success;
+inline NtStatus WINAPI NtCreatePort_Export(
+    HANDLE* PortHandle,
+    void* ObjectAttributes,
+    ULONG MaxConnectionInfoLength,
+    ULONG MaxDataLength,
+    ULONG MaxPoolUsage
+) noexcept {
+    uint64_t stackArgument = MaxPoolUsage;
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtCreatePort,
+        .arg1 = reinterpret_cast<uintptr_t>(PortHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(ObjectAttributes),
+        .arg3 = MaxConnectionInfoLength,
+        .arg4 = MaxDataLength,
+        .stackArgs = &stackArgument,
+        .stackArgCount = 1
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
 }
 
 inline NtStatus WINAPI NtCreateProcessEx(HANDLE* ProcessHandle, uint32_t /*DesiredAccess*/, void* /*ObjectAttributes*/, HANDLE /*ParentProcess*/, ULONG /*Flags*/, HANDLE /*SectionHandle*/, HANDLE /*DebugPort*/, HANDLE /*TokenHandle*/, ULONG /*Reserved*/) noexcept {
@@ -7238,8 +7306,39 @@ inline NtStatus WINAPI NtRemoveIoCompletionEx(HANDLE /*IoCompletionHandle*/, voi
 }
 
 inline NtStatus WINAPI NtRemoveProcessDebug(HANDLE /*ProcessHandle*/, HANDLE /*DebugObjectHandle*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtReplyWaitReceivePort(HANDLE /*PortHandle*/, void** /*PortContext*/, void* /*ReplyMessage*/, void* /*ReceiveMessage*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtRequestWaitReplyPort_Export(HANDLE /*PortHandle*/, void* /*RequestMessage*/, void* /*ReplyMessage*/) noexcept { return NtStatus::Success; }
+inline NtStatus WINAPI NtListenPort(HANDLE PortHandle, void* ConnectionRequest) noexcept {
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtListenPort,
+        .arg1 = reinterpret_cast<uintptr_t>(PortHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(ConnectionRequest)
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
+
+inline NtStatus WINAPI NtReplyWaitReceivePort(
+    HANDLE PortHandle,
+    void** PortContext,
+    void* ReplyMessage,
+    void* ReceiveMessage
+) noexcept {
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtReplyWaitReceivePort,
+        .arg1 = reinterpret_cast<uintptr_t>(PortHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(PortContext),
+        .arg3 = reinterpret_cast<uintptr_t>(ReplyMessage),
+        .arg4 = reinterpret_cast<uintptr_t>(ReceiveMessage)
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
+inline NtStatus WINAPI NtRequestWaitReplyPort_Export(HANDLE PortHandle, void* RequestMessage, void* ReplyMessage) noexcept {
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtRequestWaitReplyPort,
+        .arg1 = reinterpret_cast<uintptr_t>(PortHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(RequestMessage),
+        .arg3 = reinterpret_cast<uintptr_t>(ReplyMessage)
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
 inline NtStatus WINAPI NtResetEvent_Export(HANDLE /*EventHandle*/, int32_t* PreviousState) noexcept {
     if (PreviousState) *PreviousState = 0;
     return NtStatus::Success;
@@ -10389,6 +10488,7 @@ inline void InitializeNtdllSubsystemExports() {
     ldr.registerExport("ntdll.dll", "NtIsProcessInJob", reinterpret_cast<void*>(NtIsProcessInJob));
     ldr.registerExport("ntdll.dll", "NtLoadDriver", reinterpret_cast<void*>(NtLoadDriver));
     ldr.registerExport("ntdll.dll", "NtLoadKeyEx", reinterpret_cast<void*>(NtLoadKeyEx));
+    ldr.registerExport("ntdll.dll", "NtListenPort", reinterpret_cast<void*>(NtListenPort));
     ldr.registerExport("ntdll.dll", "NtLockFile", reinterpret_cast<void*>(NtLockFile));
     ldr.registerExport("ntdll.dll", "NtOpenDirectoryObject", reinterpret_cast<void*>(NtOpenDirectoryObject));
     ldr.registerExport("ntdll.dll", "NtOpenJobObject", reinterpret_cast<void*>(NtOpenJobObject));

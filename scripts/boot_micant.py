@@ -374,6 +374,41 @@ def verify_mouse(
                     )
                     if restored_pixels < 5000:
                         raise RuntimeError("Closing the top window did not reveal the remaining surface")
+            destroyed_count = 2
+            for cycle in range(3):
+                for down in (True, False):
+                    execute("input-send-event", {"events": [{
+                        "type": "key", "data": {
+                            "down": down,
+                            "key": {"type": "qcode", "data": "ret"},
+                        },
+                    }]})
+                time.sleep(0.35)
+                reopened = screen(f"reopen-cycle-{cycle + 1}.ppm")
+                visible_pixels = sum(
+                    1 for offset in range(0, len(after), 3)
+                    if after[offset:offset + 3] != reopened[offset:offset + 3]
+                )
+                if visible_pixels < 5000:
+                    raise RuntimeError("Repeated Explorer window creation did not change scanout")
+                for down in (True, False):
+                    execute("input-send-event", {"events": [{
+                        "type": "key", "data": {
+                            "down": down,
+                            "key": {"type": "qcode", "data": "esc"},
+                        },
+                    }]})
+                destroyed_count += 1
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if serial.count("[MicaNT Explorer] Application window destroyed by its owner") >= destroyed_count:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Repeated Explorer window destruction did not complete")
+                time.sleep(0.25)
+                screen(f"closed-cycle-{cycle + 1}.ppm")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")

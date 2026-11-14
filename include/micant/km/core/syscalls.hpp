@@ -86,6 +86,10 @@ inline constexpr uint32_t SSN_NtAccessCheck              = 0x0182;
 inline constexpr uint32_t SSN_NtCreatePort               = 0x0093;
 inline constexpr uint32_t SSN_NtConnectPort              = 0x0096;
 inline constexpr uint32_t SSN_NtRequestWaitReplyPort     = 0x0022;
+// MicaNT service-profile assignments for the remaining basic LPC handshake.
+inline constexpr uint32_t SSN_NtListenPort               = 0x0183;
+inline constexpr uint32_t SSN_NtAcceptConnectPort         = 0x0184;
+inline constexpr uint32_t SSN_NtReplyWaitReceivePort      = 0x0185;
 
 // Section & Memory Mapping SSNs
 inline constexpr uint32_t SSN_NtCreateSection            = 0x004A;

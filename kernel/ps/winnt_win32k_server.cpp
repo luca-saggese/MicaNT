@@ -447,6 +447,13 @@ void* MicaWin32kGetForegroundWindow() {
         ? reinterpret_cast<void*>(value.result) : nullptr;
 }
 
+void* MicaWin32kSetFocus(void* hwnd) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    return request(MICANT_WIN32K_OP_SET_FOCUS, value)
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
 void* MicaWin32kGetDC(void* window) {
     auto* context = allocateContext(window, false);
     return context ? reinterpret_cast<void*>(context->handle) : nullptr;

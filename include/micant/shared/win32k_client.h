@@ -100,7 +100,8 @@ enum {
     MICANT_WIN32K_OP_DEF_WINDOW_PROC,
     MICANT_WIN32K_OP_PUMP_INPUT,
     MICANT_WIN32K_OP_GET_WINDOW_SURFACE,
-    MICANT_WIN32K_OP_PRESENT_WINDOW
+    MICANT_WIN32K_OP_PRESENT_WINDOW,
+    MICANT_WIN32K_OP_SET_FOCUS
 };
 
 typedef struct MicaWin32kRequest {
@@ -162,6 +163,7 @@ MICANT_WIN32K_API int32_t MicaWin32kGetWindowTextW(void*, wchar_t*, int32_t);
 MICANT_WIN32K_API int32_t MicaWin32kIsWindowVisible(void*);
 MICANT_WIN32K_API int32_t MicaWin32kIsIconic(void*);
 MICANT_WIN32K_API void* MicaWin32kGetForegroundWindow(void);
+MICANT_WIN32K_API void* MicaWin32kSetFocus(void*);
 
 #ifdef __cplusplus
 }

@@ -482,6 +482,24 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_GET_FOREGROUND_WINDOW:
             request.result = g_foregroundWindow;
             return NtStatus::Success;
+        case MICANT_WIN32K_OP_SET_FOCUS: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            if (!window->visible || window->iconic) return NtStatus::InvalidParameter;
+            const uint64_t previousHandle = g_foregroundWindow;
+            if (previousHandle != window->handle) {
+                auto* previous = findWindowAny(previousHandle);
+                if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
+                    return NtStatus::InsufficientResources;
+                g_foregroundWindow = window->handle;
+                if (!enqueueWindowMessage(*window, kWmActivate, 1, 0) ||
+                    !enqueueWindowMessage(*window, kWmSetFocus, 0, 0))
+                    return NtStatus::InsufficientResources;
+            }
+            window->zOrder = nextZOrder();
+            request.result = previousHandle;
+            return NtStatus::Success;
+        }
         case MICANT_WIN32K_OP_SET_WINDOW_LONG: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;

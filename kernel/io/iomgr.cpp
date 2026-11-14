@@ -19,6 +19,17 @@ static std::unordered_map<Handle, std::shared_ptr<fs::FileObject>> g_KernelFiles
 static std::unordered_map<Handle, std::shared_ptr<io::IoCompletionPort>> g_KernelIocpPorts;
 static Handle g_NextFileHandle = 0x200;
 
+static void CloseAfdHandleAfterCaptureFailure(Handle handle) noexcept {
+#if defined(MICANT_FREESTANDING)
+    ob::HandleTable* table{};
+    Handle raw{};
+    if (ob::detail::resolveHandle(handle, table, raw) == NtStatus::Success && table)
+        (void)table->closeHandle(raw);
+#else
+    (void)internal::ObCloseGenericHandle(handle);
+#endif
+}
+
 static std::shared_ptr<fs::FileObject> ReferenceKernelFile(Handle handle) {
     const auto it = g_KernelFiles.find(handle);
     return it == g_KernelFiles.end() ? nullptr : it->second;
@@ -151,15 +162,13 @@ NtStatus NtCreateFile(
             desiredAccess, capturedEa.data(), eaLength);
         if (status != NtStatus::Success) return status;
         if (ex::ExSafeCopyToUser(fileHandle, &handle, sizeof(handle)) != NtStatus::Success) {
-            ob::HandleTable* table{}; Handle raw{};
-            if (ob::detail::resolveHandle(handle, table, raw) == NtStatus::Success) (void)table->closeHandle(raw);
+            CloseAfdHandleAfterCaptureFailure(handle);
             return NtStatus::AccessViolation;
         }
         if (ioStatusBlock) {
             IoStatusBlock iosb{NtStatus::Success, 2u};
             if (ex::ExSafeCopyToUser(ioStatusBlock, &iosb, sizeof(iosb)) != NtStatus::Success) {
-                ob::HandleTable* table{}; Handle raw{};
-                if (ob::detail::resolveHandle(handle, table, raw) == NtStatus::Success) (void)table->closeHandle(raw);
+                CloseAfdHandleAfterCaptureFailure(handle);
                 return NtStatus::AccessViolation;
             }
         }
@@ -470,24 +479,21 @@ NtStatus NtDeviceIoControlFile(
     if (!devObj || !devObj->driverObject) {
         return NtStatus::InvalidDeviceRequest;
     }
-
-
-    io::Irp irp{};
-    irp.fileObject = fileObj.get();
-    irp.majorFunction = io::IRP_MJ_DEVICE_CONTROL;
-    irp.deviceObject = devObj;
-    irp.systemBuffer = const_cast<void*>(inputBuffer);
-    irp.userBuffer = outputBuffer;
-    irp.length = outputBufferLength;
-    irp.byteOffset.lowPart = ioControlCode;
-    irp.byteOffset.highPart = static_cast<int32_t>(inputBufferLength);
-
-    NtStatus status = io::IoCallDriver(devObj, &irp);
-
+    // VFS handles are legacy fs::FileObject instances, not Ob-owned
+    // io::FileObject handles. Until the VFS open path is migrated to the
+    // canonical Io backend ownership contract, forwarding this request would
+    // pass an object with the wrong type and lifetime to the driver.
+    (void)ioControlCode;
+    (void)inputBuffer;
+    (void)inputBufferLength;
+    (void)outputBuffer;
+    (void)outputBufferLength;
     if (ioStatusBlock) {
-        *ioStatusBlock = irp.ioStatus;
+        IoStatusBlock status{NtStatus::InvalidDeviceRequest, 0};
+        if (ex::ExSafeCopyToUser(ioStatusBlock, &status, sizeof(status)) != NtStatus::Success)
+            return NtStatus::AccessViolation;
     }
-    return status;
+    return NtStatus::InvalidDeviceRequest;
 }
 
 NtStatus NtQueryInformationFile(

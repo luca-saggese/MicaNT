@@ -153,6 +153,23 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
             reportFailure("[MicaNT Ps] SEC_IMAGE file open", openStatus);
             return false;
         }
+        if (io::IoFlushBuffersFile(fileHandle.value) != NtStatus::AccessDenied) {
+            reportFailure("[MicaNT Io] read-only file flush access check", NtStatus::AccessDenied);
+            return false;
+        }
+        ScopedHandle flushHandle;
+        const auto flushOpenStatus = io::IoOpenBackendFile(&flushHandle.value, 0x0023,
+            {imagePath, imagePathLength});
+        if (flushOpenStatus != NtStatus::Success) {
+            reportFailure("[MicaNT Io] durable file open", flushOpenStatus);
+            return false;
+        }
+        const auto flushStatus = io::IoFlushBuffersFile(flushHandle.value);
+        if (flushStatus != NtStatus::Success) {
+            reportFailure("[MicaNT Io] FAT/AHCI file flush", flushStatus);
+            return false;
+        }
+        reportFailure("[MicaNT Io] FAT/AHCI file flush", NtStatus::Success);
 
         ScopedHandle sectionHandle;
         auto status = sys::NtCreateSectionFromKernel(&sectionHandle.value,

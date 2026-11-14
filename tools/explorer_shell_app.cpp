@@ -363,6 +363,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         openView(View::MyComputer);
         return 0;
     }
+    if (message == WM_KEYDOWN && wParam == VK_RETURN && appFromHwnd(hwnd)) {
+        openView(View::MyDocuments);
+        return 0;
+    }
+    if (message == WM_KEYDOWN && wParam == VK_F3) {
+        if (appFromHwnd(hwnd)) {
+            RECT rect{};
+            if (GetWindowRect(hwnd, &rect))
+                SetWindowPos(hwnd, nullptr, rect.left + 24, rect.top + 18,
+                    rect.right - rect.left - 40, rect.bottom - rect.top - 30, 0);
+        }
+        return 0;
+    }
     if (message == WM_KEYDOWN && wParam == VK_ESCAPE && appFromHwnd(hwnd)) {
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
         return 0;
@@ -460,7 +473,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             DestroyWindow(hwnd);
             if (dc) DeleteDC(dc);
             if (bitmap) DeleteObject(bitmap);
-            if (wasActive) chooseFallbackActiveApp();
+            if (wasActive) {
+                chooseFallbackActiveApp();
+                SetFocus(g.activeApp == 0xFF ? g.desktop : g.apps[g.activeApp].hwnd);
+            }
             redrawDesktop();
         }
         return 0;

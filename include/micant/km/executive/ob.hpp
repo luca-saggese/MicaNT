@@ -87,7 +87,8 @@ enum class ObjectTypeId : uint32_t {
     Job,
     Timer,
     BlockDevice,
-    Token
+    Token,
+    Port
 };
 
 struct ObjectHeader;

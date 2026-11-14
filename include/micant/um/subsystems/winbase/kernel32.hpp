@@ -1176,7 +1176,10 @@ inline HANDLE CreateFileW(
         0
     );
 
-    if (!NT_SUCCESS(status)) return INVALID_HANDLE_VALUE;
+    if (!NT_SUCCESS(status)) {
+        SetLastError(ntdll::RtlNtStatusToDosError(status));
+        return INVALID_HANDLE_VALUE;
+    }
     return reinterpret_cast<HANDLE>(hFile);
 }
 

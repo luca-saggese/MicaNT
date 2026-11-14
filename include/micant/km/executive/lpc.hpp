@@ -17,6 +17,7 @@
 #include <future>
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/ntstatus.hpp"
+#include "micant/shared/native_lpc.hpp"
 #include "micant/km/executive/ob.hpp"
 #include "micant/km/executive/se.hpp"
 
@@ -25,17 +26,6 @@ namespace micant::lpc {
 // ============================================================================
 // 1. Standard NT LPC / ALPC Message Types
 // ============================================================================
-enum class PortMessageType : uint16_t {
-    LpcRequest           = 1,
-    LpcReply             = 2,
-    LpcDatagram          = 3,
-    LpcConnectionRequest = 4,
-    LpcClientDied        = 5,
-    LpcPortClosed        = 6,
-    LpcErrorEvent        = 7,
-    LpcConnectionReply   = 8,
-    LpcCanceled          = 9
-};
 
 // ALPC Message Attribute Flags
 inline constexpr uint32_t ALPC_MESSAGE_SECURITY_ATTRIBUTE = 0x80000000;
@@ -44,23 +34,6 @@ inline constexpr uint32_t ALPC_MESSAGE_CONTEXT_ATTRIBUTE  = 0x20000000;
 inline constexpr uint32_t ALPC_MESSAGE_HANDLE_ATTRIBUTE   = 0x10000000;
 inline constexpr uint32_t ALPC_VIEWFLG_NOT_AT_BASE        = 0x00010000;
 inline constexpr size_t   PORT_MAXIMUM_MESSAGE_LENGTH     = 65536;
-
-/**
- * @brief Standard NT LPC/ALPC Message Header (PORT_MESSAGE).
- */
-struct PortMessage {
-    struct {
-        uint16_t dataLength{0};
-        uint16_t totalLength{sizeof(PortMessage)};
-    } u1;
-    struct {
-        uint16_t type{static_cast<uint16_t>(PortMessageType::LpcRequest)};
-        uint16_t dataInfoOffset{0};
-    } u2;
-    ClientId clientId{};
-    uint32_t messageId{0};
-    uint32_t callbackId{0};
-};
 
 /**
  * @brief ALPC Data View Attribute (Section Mapping for Large Payloads).
@@ -182,6 +155,7 @@ class PortObject;
 struct PendingConnectRequest {
     uint32_t connectionId{0};
     ClientId clientId{};
+    Handle listeningProcessId{0};
     std::shared_ptr<PortObject> clientPort;
     PortMessage connectMessage{};
     std::vector<uint8_t> connectData;
@@ -195,12 +169,20 @@ struct PendingConnectRequest {
 // ============================================================================
 class PortObject : public std::enable_shared_from_this<PortObject> {
 public:
-    PortObject(std::wstring name, PortType type)
-        : name_(std::move(name)), type_(type) {}
+    PortObject(std::wstring name, PortType type,
+               size_t maximumConnectionInfoLength = 0,
+               size_t maximumMessageLength = 256)
+        : name_(std::move(name)), type_(type),
+          maximumConnectionInfoLength_(maximumConnectionInfoLength),
+          maximumMessageLength_(maximumMessageLength) {}
 
     [[nodiscard]] const std::wstring& getName() const noexcept { return name_; }
     [[nodiscard]] PortType getType() const noexcept { return type_; }
     [[nodiscard]] bool isConnected() const noexcept { return !peerPort_.expired(); }
+    void setContext(uintptr_t context) noexcept { context_ = context; }
+    [[nodiscard]] uintptr_t getContext() const noexcept { return context_; }
+    [[nodiscard]] size_t getMaxConnectionInfoLength() const noexcept { return maximumConnectionInfoLength_; }
+    [[nodiscard]] size_t getMaxMessageLength() const noexcept { return maximumMessageLength_; }
 
     void setPeerPort(std::shared_ptr<PortObject> peer) {
         peerPort_ = peer;
@@ -483,7 +465,8 @@ public:
         cv_.notify_one();
     }
 
-    bool getNextPendingConnection(PendingConnectRequest& outReq, uint32_t timeoutMs = 0xFFFFFFFF) {
+    bool getNextPendingConnection(PendingConnectRequest& outReq, uint32_t timeoutMs = 0xFFFFFFFF,
+                                  Handle listeningProcessId = 0) {
         std::unique_lock<std::mutex> lock(mutex_);
         if (pendingConnectionIds_.empty()) {
             if (timeoutMs == 0) return false;
@@ -502,22 +485,29 @@ public:
 
         auto it = pendingConnections_.find(id);
         if (it != pendingConnections_.end()) {
+            it->second.listeningProcessId = listeningProcessId;
             outReq = it->second;
             return true;
         }
         return false;
     }
 
-    bool resolvePendingConnection(uint32_t connectionId, bool accept, std::shared_ptr<PortObject> serverPort) {
+    bool resolvePendingConnection(uint32_t connectionId, bool accept, std::shared_ptr<PortObject> serverPort,
+                                  Handle listeningProcessId = 0) {
         std::unique_lock<std::mutex> lock(mutex_);
         auto it = pendingConnections_.find(connectionId);
         if (it == pendingConnections_.end()) return false;
+        if (listeningProcessId && it->second.listeningProcessId != listeningProcessId) return false;
 
         auto req = std::move(it->second);
         pendingConnections_.erase(it);
 
         if (accept) {
             req.serverPort = serverPort;
+            if (serverPort) {
+                serverPort->maximumConnectionInfoLength_ = maximumConnectionInfoLength_;
+                serverPort->maximumMessageLength_ = maximumMessageLength_;
+            }
             req.clientPort->setPeerPort(serverPort);
             serverPort->setPeerPort(req.clientPort);
             if (req.connectAttributes && req.connectAttributes->security) {
@@ -562,6 +552,9 @@ public:
 private:
     std::wstring name_;
     PortType type_;
+    uintptr_t context_{0};
+    size_t maximumConnectionInfoLength_{0};
+    size_t maximumMessageLength_{256};
     std::weak_ptr<PortObject> peerPort_;
     std::optional<se::SecurityDescriptor> securityDescriptor_;
     std::shared_ptr<se::TokenObject> clientToken_;
@@ -592,15 +585,21 @@ public:
      */
     std::shared_ptr<PortObject> createPort(
         std::wstring_view name,
-        std::optional<se::SecurityDescriptor> sd = std::nullopt
+        std::optional<se::SecurityDescriptor> sd = std::nullopt,
+        size_t maximumConnectionInfoLength = 256 - sizeof(PortMessage),
+        size_t maximumMessageLength = 256
     ) {
+        if (maximumMessageLength < sizeof(PortMessage) ||
+            maximumMessageLength > PORT_MAXIMUM_MESSAGE_LENGTH ||
+            maximumConnectionInfoLength > maximumMessageLength - sizeof(PortMessage)) return nullptr;
         std::unique_lock<std::mutex> lock(mutex_);
         std::wstring fullName = normalizePortName(name);
 
         auto it = namedPorts_.find(fullName);
         if (it != namedPorts_.end()) return nullptr;
 
-        auto port = std::make_shared<PortObject>(fullName, PortType::ConnectionPort);
+        auto port = std::make_shared<PortObject>(fullName, PortType::ConnectionPort,
+            maximumConnectionInfoLength, maximumMessageLength);
         if (sd) {
             port->setSecurityDescriptor(std::move(*sd));
         }
@@ -675,7 +674,8 @@ public:
         std::shared_ptr<PortObject>& outClientCommPort,
         const se::TokenObject* callerToken = nullptr,
         const AlpcMessageAttributes* connectAttrs = nullptr,
-        uint32_t timeoutMs = 5000
+        uint32_t timeoutMs = 5000,
+        ClientId clientId = {}
     ) {
         std::shared_ptr<PortObject> targetPort;
         std::wstring fullName = normalizePortName(name);
@@ -688,6 +688,10 @@ public:
             }
             targetPort = it->second;
         }
+
+        if (connectData.size() > targetPort->getMaxConnectionInfoLength() ||
+            connectData.size() > targetPort->getMaxMessageLength() - sizeof(PortMessage))
+            return NtStatus::BufferTooSmall;
 
         // Access check
         if (callerToken && targetPort->getSecurityDescriptor()) {
@@ -707,13 +711,15 @@ public:
         static std::atomic<uint32_t> s_ConnIdGen{1};
         uint32_t connId = s_ConnIdGen++;
 
-        auto clientComm = std::make_shared<PortObject>(fullName + L":Client:" + std::to_wstring(connId), PortType::ClientCommunicationPort);
+        auto clientComm = std::make_shared<PortObject>(fullName + L":Client:" + std::to_wstring(connId),
+            PortType::ClientCommunicationPort, targetPort->getMaxConnectionInfoLength(),
+            targetPort->getMaxMessageLength());
         auto promise = std::make_shared<std::promise<NtStatus>>();
         auto future = promise->get_future();
 
         PendingConnectRequest req{
             .connectionId = connId,
-            .clientId = ClientId{ .uniqueProcess = 1000, .uniqueThread = 1001 },
+            .clientId = clientId,
             .clientPort = clientComm,
             .connectMessage = PortMessage{},
             .connectData = std::vector<uint8_t>(connectData.begin(), connectData.end()),
@@ -721,6 +727,9 @@ public:
         };
         req.connectMessage.u2.type = static_cast<uint16_t>(PortMessageType::LpcConnectionRequest);
         req.connectMessage.messageId = connId;
+        req.connectMessage.clientId = req.clientId;
+        req.connectMessage.u1.dataLength = static_cast<uint16_t>(req.connectData.size());
+        req.connectMessage.u1.totalLength = static_cast<uint16_t>(sizeof(PortMessage) + req.connectData.size());
 
         if (connectAttrs) {
             req.connectAttributes = *connectAttrs;
@@ -763,6 +772,22 @@ public:
         auto it = namedPorts_.find(fullName);
         if (it != namedPorts_.end()) return it->second;
         return nullptr;
+    }
+
+    bool resolvePendingConnection(uint32_t connectionId, bool accept,
+                                  std::shared_ptr<PortObject> serverPort,
+                                  Handle listeningProcessId = 0) {
+        std::vector<std::shared_ptr<PortObject>> listeners;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            listeners.reserve(namedPorts_.size());
+            for (const auto& [_, port] : namedPorts_)
+                if (port && port->getType() == PortType::ConnectionPort) listeners.push_back(port);
+        }
+        for (const auto& listener : listeners) {
+            if (listener->resolvePendingConnection(connectionId, accept, serverPort, listeningProcessId)) return true;
+        }
+        return false;
     }
 
     [[nodiscard]] size_t getPortCount() const {
