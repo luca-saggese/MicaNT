@@ -65,6 +65,7 @@ struct Window {
     uint64_t parent{};
     uint64_t menu{};
     uint64_t windowProcedure{};
+    uint64_t icons[3]{};
     intptr_t userData{};
     int32_t x{}, y{}, width{}, height{};
     uint32_t style{}, extendedStyle{};
@@ -498,6 +499,21 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             }
             window->zOrder = nextZOrder();
             request.result = previousHandle;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_SET_WINDOW_ICON: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            const uint32_t type = static_cast<uint32_t>(request.args[1]);
+            if (!window || type > 2) return NtStatus::InvalidParameter;
+            request.result = window->icons[type];
+            window->icons[type] = request.args[2];
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_GET_WINDOW_ICON: {
+            const auto* window = findWindow(request.args[0], ownerProcessId);
+            const uint32_t type = static_cast<uint32_t>(request.args[1]);
+            if (!window || type > 2) return NtStatus::InvalidParameter;
+            request.result = window->icons[type];
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_WINDOW_LONG: {

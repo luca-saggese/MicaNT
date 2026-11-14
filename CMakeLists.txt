@@ -388,6 +388,9 @@ if (MICANT_ENABLE_BAREMETAL)
             BUILD_SYSTEM32_STANDALONE_DLL
             "BUILD_SYSTEM32_${_client_upper}_DLL" MICANT_WIN32K_IMPORTS
         )
+        if(_client STREQUAL "user32" OR _client STREQUAL "gdi32")
+            target_compile_definitions(${_client}_boot PRIVATE MICANT_NATIVE_USERMODE)
+        endif()
         target_compile_options(${_client}_boot PRIVATE
             -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
             -ffunction-sections -fdata-sections -O2
@@ -484,6 +487,11 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
+
+    # User32 owns per-process icon pixels and file-backed icon loading through
+    # the native file/memory system calls. Those operations remain in Ring 3.
+    target_link_libraries(user32_boot PRIVATE ntdll_boot)
+    target_link_libraries(gdi32_boot PRIVATE ntdll_boot)
 
     add_library(ws2_32_boot SHARED EXCLUDE_FROM_ALL tools/dlls/ws2_32.cpp
         tools/dlls/native_stack_probe.cpp kernel/ex/freestanding_memory.cpp)

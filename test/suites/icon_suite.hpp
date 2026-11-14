@@ -2,6 +2,8 @@
 
 #include "micant/um/subsystems/imaging/ico_decoder.hpp"
 #include "micant/um/native/pe.hpp"
+#include "micant/um/subsystems/winuser/icon_handle_table.hpp"
+#include "micant/shared/pixel_composite.h"
 #include <cstdlib>
 #include <vector>
 
@@ -30,6 +32,10 @@ inline void Test_IcoDecoder_PngDibAndMalformedInputs() {
                  "embedded PNG icon decodes");
     TEST_ASSERT(pngFrame.width == 1 && pngFrame.height == 1 && pngFrame.sourceHadAlpha,
                  "PNG icon dimensions and alpha are retained");
+    ImageFrame scaledPng{};
+    TEST_ASSERT(ScaleIconFrame(pngFrame, 2, 2, scaledPng, allocator) == ImageStatus::Success &&
+                scaledPng.width == 2 && scaledPng.height == 2 && scaledPng.pixels.size() == 16,
+                "icon scaling publishes a bounded premultiplied frame");
 
     std::array<uint8_t, 70> dibIcon{};
     dibIcon[2] = 1; dibIcon[4] = 1;
@@ -125,4 +131,61 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     pe::PeResourceView tailResources(tailImage);
     TEST_ASSERT(tailResources.find({14, {}, false}, {101, {}, false}, 1033, result) == NtStatus::InvalidImageFormat,
                  "resource in zero-filled virtual tail is rejected");
+}
+
+inline void Test_IconHandles_OwnershipCopyAndLeaseLifetime() {
+    using namespace micant::um::imaging;
+    using namespace micant::um::winuser;
+    const ImageAllocator allocator{
+        nullptr,
+        [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
+        [](void*, void* address, size_t) noexcept { std::free(address); },
+    };
+    auto makeFrame = [&]() {
+        ImageFrame frame{};
+        frame.width = frame.height = 1; frame.stride = 4;
+        frame.format = PixelFormat::Bgra8Premultiplied;
+        if (frame.pixels.allocate(4, allocator)) {
+            frame.pixels[0] = 10; frame.pixels[1] = 20;
+            frame.pixels[2] = 30; frame.pixels[3] = 255;
+        }
+        return frame;
+    };
+    IconHandleTable& table = ProcessIconHandles();
+    HICON shared = table.create(makeFrame(), allocator, true);
+    TEST_ASSERT(shared, "shared icon gets an opaque validated handle");
+    TEST_ASSERT(!table.destroy(shared), "DestroyIcon semantics reject shared icon destruction");
+    HICON ownedCopy = table.copy(shared, allocator);
+    TEST_ASSERT(ownedCopy && ownedCopy != shared, "CopyIcon produces an independent owned handle");
+    IconHandleTable::Lease lease{};
+    TEST_ASSERT(table.acquire(ownedCopy, lease), "owned icon handle can be referenced");
+    TEST_ASSERT(table.destroy(ownedCopy), "owned icon is retired by DestroyIcon");
+    IconHandleTable::Lease invalid{};
+    TEST_ASSERT(!table.acquire(ownedCopy, invalid), "retired handle is no longer discoverable");
+    TEST_ASSERT(lease.bitmap().pixels.size() == 4 && lease.bitmap().pixels[2] == 30,
+                "active lease keeps immutable pixel storage alive after destroy");
+    lease = {};
+    HICON windowIcon = table.create(makeFrame(), allocator, false);
+    void* hwnd = reinterpret_cast<void*>(0x1234);
+    TEST_ASSERT(windowIcon && ProcessWindowIcons().set(hwnd, 1, windowIcon) == nullptr,
+                "window icon retains a valid owned HICON");
+    TEST_ASSERT(table.destroy(windowIcon), "DestroyIcon retires an icon assigned to a window");
+    IconHandleTable::Lease windowLease{};
+    TEST_ASSERT(ProcessWindowIcons().acquire(windowIcon, windowLease) &&
+                windowLease.bitmap().pixels[2] == 30,
+                "window reference keeps assigned pixels available after caller destroy");
+    windowLease = {};
+    ProcessWindowIcons().remove(hwnd);
+    TEST_ASSERT(table.releaseSharedAsset(shared), "owner can release shared icon at source teardown");
+    TEST_ASSERT(table.ownedCount() == 0, "all owned icon records are reclaimed");
+}
+
+inline void Test_IconDrawing_PremultipliedSourceOver() {
+    using micant::shared::graphics::PremultipliedSourceOver;
+    TEST_ASSERT(PremultipliedSourceOver(0x80800000u, 0xff0000ffu) == 0xff80007fu,
+                "half-alpha premultiplied source blends over opaque destination");
+    TEST_ASSERT(PremultipliedSourceOver(0x00000000u, 0x7f123456u) == 0x7f123456u,
+                "transparent source preserves destination color and alpha");
+    TEST_ASSERT(PremultipliedSourceOver(0xff102030u, 0x00405060u) == 0xff102030u,
+                "opaque icon source replaces destination");
 }

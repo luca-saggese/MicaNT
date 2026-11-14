@@ -101,7 +101,9 @@ enum {
     MICANT_WIN32K_OP_PUMP_INPUT,
     MICANT_WIN32K_OP_GET_WINDOW_SURFACE,
     MICANT_WIN32K_OP_PRESENT_WINDOW,
-    MICANT_WIN32K_OP_SET_FOCUS
+    MICANT_WIN32K_OP_SET_FOCUS,
+    MICANT_WIN32K_OP_SET_WINDOW_ICON,
+    MICANT_WIN32K_OP_GET_WINDOW_ICON
 };
 
 typedef struct MicaWin32kRequest {
@@ -123,6 +125,10 @@ typedef struct MicaWin32kRequest {
     uint16_t text[MICANT_WIN32K_TEXT_CAPACITY];
     uint64_t windowHandles[MICANT_WIN32K_WINDOW_CAPACITY];
 } MicaWin32kRequest;
+
+// Private client operation used by User32 DrawIconEx after validating the
+// HICON and staging its immutable BGRA pixels in a GDI DIB section.
+#define MICANT_WIN32K_ROP_ALPHA_SOURCE_OVER 0x4D494341u
 
 #if defined(__cplusplus)
 static_assert(sizeof(MicaWin32kRequest) == 1424);
@@ -154,6 +160,8 @@ MICANT_WIN32K_API int32_t MicaWin32kPresentDC(void*);
 MICANT_WIN32K_API int32_t MicaWin32kDeleteObject(void*);
 MICANT_WIN32K_API void* MicaWin32kGetStockObject(int32_t);
 MICANT_WIN32K_API void* MicaWin32kCreateDibSection(void*, int32_t, int32_t, void**);
+MICANT_WIN32K_API int32_t MicaWin32kSetWindowIcon(void*, uint32_t, uint64_t, uint64_t*);
+MICANT_WIN32K_API uint64_t MicaWin32kGetWindowIcon(void*, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kPeekMessageW(MicaWin32kMessage*, void*, uint32_t, uint32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kGetMessageW(MicaWin32kMessage*, void*, uint32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kGetClientRect(void*, MicaWin32kRect*);

@@ -30,6 +30,11 @@ inline constexpr uint32_t WM_PAINT_OFFICIAL            = 0x000FU;
 inline constexpr uint32_t WM_QUIT_OFFICIAL             = 0x0012U;
 inline constexpr uint32_t WM_INPUT_OFFICIAL            = 0x00FFU;
 inline constexpr uint32_t WM_KEYDOWN_OFFICIAL          = 0x0100U;
+inline constexpr uint32_t WM_GETICON_OFFICIAL          = 0x007FU;
+inline constexpr uint32_t WM_SETICON_OFFICIAL          = 0x0080U;
+inline constexpr uint32_t LR_LOADFROMFILE_OFFICIAL     = 0x0010U;
+inline constexpr uint32_t LR_SHARED_OFFICIAL           = 0x8000U;
+inline constexpr uint32_t IMAGE_ICON_OFFICIAL          = 1U;
 
 inline constexpr uint32_t RID_INPUT_OFFICIAL           = 0x10000003U;
 inline constexpr uint32_t RIM_TYPEMOUSE_OFFICIAL       = 0U;

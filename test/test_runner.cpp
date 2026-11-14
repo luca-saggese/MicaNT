@@ -443,6 +443,8 @@ int main(int argc, char* argv[]) {
     if (argc > 1 && std::string(argv[1]) == "--icon") {
         RUN_TEST(Test_IcoDecoder_PngDibAndMalformedInputs);
         RUN_TEST(Test_PeResources_BoundedTypeNameLanguageLookup);
+        RUN_TEST(Test_IconHandles_OwnershipCopyAndLeaseLifetime);
+        RUN_TEST(Test_IconDrawing_PremultipliedSourceOver);
         return (g_FailedTests == 0) ? 0 : 1;
     }
     if (argc > 1 && std::string(argv[1]) == "--apps") {

@@ -4,6 +4,7 @@
 // image payloads are decoded into the same premultiplied BGRA representation
 // used by the other imaging clients.
 #include "bmp_png_decoder.hpp"
+#include "micant/shared/native_nt_api.hpp"
 
 #include <algorithm>
 #include <array>
@@ -212,6 +213,150 @@ inline ImageStatus DecodeIcoImage(std::span<const uint8_t> input,
     if (std::equal(pngSignature.begin(), pngSignature.end(), input.begin()))
         return DecodePng(input, output, allocator, limits);
     return DecodeIcoDib(input, output, allocator, limits);
+}
+
+inline ImageStatus DecodeIconResourcePayload(std::span<const uint8_t> input,
+                                             ImageFrame& output,
+                                             const ImageAllocator& allocator,
+                                             ImageLimits limits = {}) noexcept {
+    static constexpr std::array<uint8_t, 8> pngSignature{137, 80, 78, 71, 13, 10, 26, 10};
+    if (input.size() < 8) return ImageStatus::TruncatedInput;
+    if (input.size() > limits.maxEncodedBytes) return ImageStatus::ImageTooLarge;
+    if (std::equal(pngSignature.begin(), pngSignature.end(), input.begin()))
+        return DecodePng(input, output, allocator, limits);
+    return DecodeIcoDib(input, output, allocator, limits);
+}
+
+inline ImageStatus ScaleIconFrame(const ImageFrame& source, uint32_t width,
+                                  uint32_t height, ImageFrame& output,
+                                  const ImageAllocator& allocator,
+                                  ImageLimits limits = {}) noexcept {
+    if (!source.width || !source.height || source.stride < source.width * 4ull ||
+        !width || !height || width > 4096 || height > 4096 ||
+        source.pixels.size() < static_cast<uint64_t>(source.stride) * source.height)
+        return ImageStatus::MalformedData;
+    uint32_t stride{}; size_t bytes{};
+    if (!detail::FrameSize(width, height, limits, stride, bytes)) return ImageStatus::ImageTooLarge;
+    ImageFrame scaled{};
+    scaled.width = width; scaled.height = height; scaled.stride = stride;
+    scaled.sourceFormat = source.sourceFormat; scaled.format = source.format;
+    scaled.sourceColor = source.sourceColor; scaled.bitsPerChannel = source.bitsPerChannel;
+    scaled.sourceHadAlpha = source.sourceHadAlpha;
+    if (!scaled.pixels.allocate(bytes, allocator)) return ImageStatus::OutOfMemory;
+
+    constexpr uint64_t One = 1ull << 16;
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint64_t fy = ((static_cast<uint64_t>(y) * 2 + 1) * source.height * One /
+                             (static_cast<uint64_t>(height) * 2));
+        const uint32_t y0 = static_cast<uint32_t>(std::min<uint64_t>(fy >> 16, source.height - 1));
+        const uint32_t y1 = std::min(y0 + 1, source.height - 1);
+        const uint32_t wy = y0 == y1 ? 0 : static_cast<uint32_t>(fy & 0xffff);
+        uint8_t* dst = scaled.pixels.data() + static_cast<size_t>(y) * stride;
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint64_t fx = ((static_cast<uint64_t>(x) * 2 + 1) * source.width * One /
+                                 (static_cast<uint64_t>(width) * 2));
+            const uint32_t x0 = static_cast<uint32_t>(std::min<uint64_t>(fx >> 16, source.width - 1));
+            const uint32_t x1 = std::min(x0 + 1, source.width - 1);
+            const uint32_t wx = x0 == x1 ? 0 : static_cast<uint32_t>(fx & 0xffff);
+            const uint8_t* p00 = source.pixels.data() + static_cast<size_t>(y0) * source.stride + x0 * 4;
+            const uint8_t* p10 = source.pixels.data() + static_cast<size_t>(y0) * source.stride + x1 * 4;
+            const uint8_t* p01 = source.pixels.data() + static_cast<size_t>(y1) * source.stride + x0 * 4;
+            const uint8_t* p11 = source.pixels.data() + static_cast<size_t>(y1) * source.stride + x1 * 4;
+            for (unsigned channel = 0; channel < 4; ++channel) {
+                const uint64_t top = static_cast<uint64_t>(p00[channel]) * (One - wx) +
+                                     static_cast<uint64_t>(p10[channel]) * wx;
+                const uint64_t bottom = static_cast<uint64_t>(p01[channel]) * (One - wx) +
+                                        static_cast<uint64_t>(p11[channel]) * wx;
+                const uint64_t value = top * (One - wy) + bottom * wy;
+                dst[x * 4 + channel] = static_cast<uint8_t>((value + (1ull << 31)) >> 32);
+            }
+        }
+    }
+    output = std::move(scaled);
+    return ImageStatus::Success;
+}
+
+inline ImageStatus DecodeIcon(std::span<const uint8_t> input, uint32_t width,
+                              uint32_t height, ImageFrame& output,
+                              const ImageAllocator& allocator,
+                              ImageLimits limits) noexcept;
+
+inline ImageStatus DecodeIconFile(const wchar_t* path, ImageFrame& output,
+                                  const ImageAllocator& allocator,
+                                  uint32_t desiredWidth, uint32_t desiredHeight,
+                                  ImageLimits limits = {}) noexcept {
+    if (!path || !*path || !allocator.allocate || !allocator.deallocate)
+        return ImageStatus::MalformedData;
+    size_t pathChars{};
+    while (path[pathChars]) {
+        if (++pathChars > 32767) return ImageStatus::ImageTooLarge;
+    }
+    const size_t pathBytes = pathChars * sizeof(wchar_t);
+    if (pathBytes > UINT16_MAX - sizeof(wchar_t)) return ImageStatus::ImageTooLarge;
+    UnicodeString name{};
+    name.length = static_cast<uint16_t>(pathBytes);
+    name.maximumLength = static_cast<uint16_t>(pathBytes + sizeof(wchar_t));
+    name.buffer = path;
+    ObjectAttributes attributes{};
+    attributes.length = sizeof(attributes);
+    attributes.objectName = &name;
+    attributes.attributes = OBJ_CASE_INSENSITIVE;
+
+    Handle file{};
+    IoStatusBlock io{};
+    NtStatus status = native_nt::NtCreateFile(&file, 0x00100081u, &attributes, &io,
+        nullptr, 0, 1, 1, 0x20, nullptr, 0);
+    if (status != NtStatus::Success)
+        return status == NtStatus::AccessDenied ? ImageStatus::AccessDenied : ImageStatus::IoFailure;
+    struct FileGuard {
+        Handle value{};
+        ~FileGuard() { if (value) (void)native_nt::NtClose(value); }
+    } guard{file};
+
+    FileStandardInformation standard{};
+    status = native_nt::NtQueryInformationFile(file, &io, &standard, sizeof(standard),
+        FileInformationClass::FileStandardInformation);
+    if (status != NtStatus::Success) return ImageStatus::IoFailure;
+    if (standard.directory || standard.endOfFile.quadPart <= 0)
+        return ImageStatus::MalformedData;
+    const uint64_t fileSize = static_cast<uint64_t>(standard.endOfFile.quadPart);
+    if (fileSize > limits.maxEncodedBytes || fileSize > limits.maxIntermediateBytes ||
+        fileSize > SIZE_MAX) return ImageStatus::ImageTooLarge;
+    ImageBuffer encoded{};
+    if (!encoded.allocate(static_cast<size_t>(fileSize), allocator)) return ImageStatus::OutOfMemory;
+    size_t completed{};
+    while (completed < encoded.size()) {
+        const uint32_t request = static_cast<uint32_t>(std::min<size_t>(
+            encoded.size() - completed, 64u * 1024u));
+        LargeInteger offset{};
+        offset.quadPart = static_cast<int64_t>(completed);
+        io = {};
+        status = native_nt::NtReadFile(file, 0, nullptr, nullptr, &io,
+            encoded.data() + completed, request, &offset, nullptr);
+        if (status != NtStatus::Success) return ImageStatus::IoFailure;
+        if (!io.information) return ImageStatus::TruncatedInput;
+        if (io.information > request) return ImageStatus::IoFailure;
+        completed += static_cast<size_t>(io.information);
+    }
+    limits.maxIntermediateBytes -= fileSize;
+    limits.maxDecodedBytes = std::min(limits.maxDecodedBytes, limits.maxIntermediateBytes);
+    ImageFrame frame{};
+    const ImageStatus decoded = DecodeIcon(encoded.span(),
+                                            desiredWidth ? desiredWidth : 32,
+                                            desiredHeight ? desiredHeight : 32,
+                                            frame, allocator, limits);
+    if (decoded != ImageStatus::Success) return decoded;
+    const uint32_t targetWidth = desiredWidth ? desiredWidth : frame.width;
+    const uint32_t targetHeight = desiredHeight ? desiredHeight : frame.height;
+    if (frame.width != targetWidth || frame.height != targetHeight) {
+        ImageFrame scaled{};
+        const ImageStatus scaleStatus = ScaleIconFrame(frame, targetWidth, targetHeight,
+                                                        scaled, allocator, limits);
+        if (scaleStatus != ImageStatus::Success) return scaleStatus;
+        frame = std::move(scaled);
+    }
+    output = std::move(frame);
+    return ImageStatus::Success;
 }
 
 inline ImageStatus DecodeIcon(std::span<const uint8_t> input, uint32_t width,

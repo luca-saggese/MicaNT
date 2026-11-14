@@ -7,7 +7,15 @@
  */
 
 #include "micant/um/subsystems/winuser/winnt_user32_gdi32_imm32_system32_abi.hpp"
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+#include "micant/um/subsystems/imaging/ico_decoder.hpp"
+#include "micant/um/subsystems/imaging/native_image_allocator.hpp"
+#include "micant/um/subsystems/winuser/icon_handle_table.hpp"
+#include "micant/shared/native_nt_api.hpp"
+#endif
 #include "micant/shared/win32k_client.h"
+
+#include <algorithm>
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
@@ -34,6 +42,9 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kIsWindowVisible);
     MICA_WIN32K_PROC(MicaWin32kIsIconic);
     MICA_WIN32K_PROC(MicaWin32kGetForegroundWindow);
+    MICA_WIN32K_PROC(MicaWin32kSetFocus);
+    MICA_WIN32K_PROC(MicaWin32kSetWindowIcon);
+    MICA_WIN32K_PROC(MicaWin32kGetWindowIcon);
     MICA_WIN32K_PROC(MicaWin32kRegisterClassW);
     MICA_WIN32K_PROC(MicaWin32kDispatchMessageW);
     MICA_WIN32K_PROC(MicaWin32kSetWindowLongPtrW);
@@ -62,6 +73,26 @@ struct WinNtWindowState {
     void*     imc{reinterpret_cast<void*>(static_cast<uintptr_t>(0x00000000000E0100ULL))};
     uint32_t  pendingMessages{1};
 } g_primaryWindow{};
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+struct RegisteredClassIcons {
+    wchar_t name[MICANT_WIN32K_TEXT_CAPACITY]{};
+    void* large{};
+    void* small{};
+    winuser::IconHandleTable::Lease largeLease{};
+    winuser::IconHandleTable::Lease smallLease{};
+};
+RegisteredClassIcons g_registeredClassIcons[64]{};
+RegisteredClassIcons* findRegisteredClassIcons(const wchar_t* name) noexcept {
+    if (!name) return nullptr;
+    for (auto& entry : g_registeredClassIcons) {
+        if (!entry.name[0]) continue;
+        size_t i = 0;
+        while (i < MICANT_WIN32K_TEXT_CAPACITY && entry.name[i] == name[i] && name[i]) ++i;
+        if (i < MICANT_WIN32K_TEXT_CAPACITY && !entry.name[i] && !name[i]) return &entry;
+    }
+    return nullptr;
+}
+#endif
 
 int32_t g_cursorShowCount = 0;
 WinNtPoint g_cursorPos{1920, 1080};
@@ -72,6 +103,161 @@ intptr_t AuditWindowProc(void*,uint32_t message,uintptr_t,intptr_t) noexcept {
 }
 } // namespace
 
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+void* User32_CreateIconFromResourceEx(const uint8_t* resourceBytes,
+                                      uint32_t resourceByteCount, int32_t isIcon,
+                                      uint32_t resourceVersion, int32_t desiredWidth,
+                                      int32_t desiredHeight, uint32_t flags) noexcept {
+    using namespace micant::um;
+    if (!resourceBytes || !resourceByteCount || isIcon != 1 ||
+        resourceVersion < 0x00020000u || resourceVersion > 0x00030000u ||
+        desiredWidth < 0 || desiredHeight < 0 || (flags & ~0x00000040u)) return nullptr;
+    imaging::ImageFrame frame{};
+    imaging::ImageLimits limits{};
+    limits.maxEncodedBytes = 16ull * 1024 * 1024;
+    limits.maxPixels = 16ull * 1024 * 1024;
+    limits.maxDecodedBytes = 64ull * 1024 * 1024;
+    limits.maxIntermediateBytes = 80ull * 1024 * 1024;
+    const auto status = imaging::DecodeIconResourcePayload(
+        std::span<const uint8_t>(resourceBytes, resourceByteCount), frame,
+        imaging::NativeImageAllocator(), limits);
+    if (status != imaging::ImageStatus::Success) return nullptr;
+    const uint32_t targetWidth = desiredWidth ? static_cast<uint32_t>(desiredWidth)
+        : ((flags & 0x40u) ? 32u : frame.width);
+    const uint32_t targetHeight = desiredHeight ? static_cast<uint32_t>(desiredHeight)
+        : ((flags & 0x40u) ? 32u : frame.height);
+    if (!targetWidth || !targetHeight || targetWidth > 4096 || targetHeight > 4096)
+        return nullptr;
+    if (frame.width != targetWidth || frame.height != targetHeight) {
+        imaging::ImageFrame scaled{};
+        if (imaging::ScaleIconFrame(frame, targetWidth, targetHeight, scaled,
+                                    imaging::NativeImageAllocator(), limits) !=
+            imaging::ImageStatus::Success) return nullptr;
+        frame = std::move(scaled);
+    }
+    return winuser::ProcessIconHandles().create(std::move(frame),
+        imaging::NativeImageAllocator(), false);
+}
+
+void* User32_CopyIcon(void* icon) noexcept {
+    return micant::um::winuser::ProcessIconHandles().copy(
+        icon, micant::um::imaging::NativeImageAllocator());
+}
+
+int32_t User32_DestroyIcon(void* icon) noexcept {
+    return micant::um::winuser::ProcessIconHandles().destroy(icon) ? 1 : 0;
+}
+
+void* User32_LoadImageW(void* /*instance*/, const wchar_t* name, uint32_t type,
+                        int32_t desiredWidth, int32_t desiredHeight,
+                        uint32_t flags) noexcept {
+    using namespace micant::um;
+    constexpr uint32_t LoadFromFile = 0x0010u;
+    constexpr uint32_t DefaultSize = 0x0040u;
+    if (!name || !*name || type != 1u || desiredWidth < 0 || desiredHeight < 0 ||
+        !(flags & LoadFromFile) || (flags & ~(LoadFromFile | DefaultSize))) return nullptr;
+    uint32_t width = static_cast<uint32_t>(desiredWidth);
+    uint32_t height = static_cast<uint32_t>(desiredHeight);
+    if (flags & DefaultSize) {
+        if (!width) width = 32;
+        if (!height) height = 32;
+    }
+    imaging::ImageLimits limits{};
+    limits.maxEncodedBytes = 16ull * 1024 * 1024;
+    limits.maxPixels = 16ull * 1024 * 1024;
+    limits.maxDecodedBytes = 64ull * 1024 * 1024;
+    limits.maxIntermediateBytes = 80ull * 1024 * 1024;
+    imaging::ImageFrame frame{};
+    const auto status = imaging::DecodeIconFile(name, frame,
+        imaging::NativeImageAllocator(), width, height, limits);
+    if (status != imaging::ImageStatus::Success) return nullptr;
+    return winuser::ProcessIconHandles().create(std::move(frame),
+        imaging::NativeImageAllocator(), false);
+}
+
+int32_t User32_DrawIconEx(void* destination, int32_t x, int32_t y, void* icon,
+                          int32_t width, int32_t height, uint32_t animationStep,
+                          void* brush, uint32_t flags) noexcept {
+    using namespace micant::um;
+    constexpr uint32_t DI_IMAGE = 0x0002u;
+    constexpr uint32_t DI_NORMAL = 0x0003u;
+    if (!destination || !icon || width < 0 || height < 0 || animationStep || brush ||
+        (flags != DI_IMAGE && flags != DI_NORMAL)) return 0;
+    winuser::IconHandleTable::Lease source{};
+    if (!winuser::ProcessIconHandles().acquire(icon, source) &&
+        !winuser::ProcessWindowIcons().acquire(icon, source)) return 0;
+    const auto& sourceView = source.bitmap();
+    const uint32_t targetWidth = width ? static_cast<uint32_t>(width) : sourceView.width;
+    const uint32_t targetHeight = height ? static_cast<uint32_t>(height) : sourceView.height;
+    if (!targetWidth || !targetHeight || targetWidth > 4096 || targetHeight > 4096) return 0;
+
+    imaging::ImageFrame scaled{};
+    std::span<const uint8_t> pixels = sourceView.pixels;
+    uint32_t stride = sourceView.stride;
+    if (targetWidth != sourceView.width || targetHeight != sourceView.height) {
+        imaging::ImageFrame input{};
+        input.width = sourceView.width; input.height = sourceView.height;
+        input.stride = sourceView.stride;
+        input.format = imaging::PixelFormat::Bgra8Premultiplied;
+        // The immutable lease is the owner for this temporary non-owning view.
+        // ScaleIconFrame accepts an owned ImageBuffer; copy only after the
+        // bounded allocation succeeds so it never retains caller memory.
+        if (!input.pixels.allocate(sourceView.pixels.size(), imaging::NativeImageAllocator())) return 0;
+        std::memcpy(input.pixels.data(), sourceView.pixels.data(), sourceView.pixels.size());
+        imaging::ImageLimits limits{};
+        limits.maxPixels = 16ull * 1024 * 1024;
+        limits.maxDecodedBytes = 64ull * 1024 * 1024;
+        limits.maxIntermediateBytes = 64ull * 1024 * 1024;
+        if (imaging::ScaleIconFrame(input, targetWidth, targetHeight, scaled,
+                                    imaging::NativeImageAllocator(), limits) !=
+            imaging::ImageStatus::Success) return 0;
+        pixels = scaled.pixels.span();
+        stride = scaled.stride;
+    }
+
+    using CreateDc = void* (*)(void*);
+    using DeleteDc = int32_t (*)(void*);
+    using CreateDib = void* (*)(void*, int32_t, int32_t, void**);
+    using Select = void* (*)(void*, void*);
+    using DeleteObject = int32_t (*)(void*);
+    using BitBlt = int32_t (*)(void*, int32_t, int32_t, int32_t, int32_t,
+                               void*, int32_t, int32_t, uint32_t);
+    const auto createDc = Win32kProc<CreateDc>("MicaWin32kCreateCompatibleDC");
+    const auto deleteDc = Win32kProc<DeleteDc>("MicaWin32kDeleteDC");
+    const auto createDib = Win32kProc<CreateDib>("MicaWin32kCreateDibSection");
+    const auto select = Win32kProc<Select>("MicaWin32kSelectObject");
+    const auto deleteObject = Win32kProc<DeleteObject>("MicaWin32kDeleteObject");
+    const auto bitBlt = Win32kProc<BitBlt>("MicaWin32kBitBlt");
+    if (!createDc || !deleteDc || !createDib || !select || !deleteObject || !bitBlt) return 0;
+
+    void* memoryDc = createDc(nullptr);
+    if (!memoryDc) return 0;
+    void* dibBits{};
+    void* bitmap = createDib(nullptr, static_cast<int32_t>(targetWidth),
+                             static_cast<int32_t>(targetHeight), &dibBits);
+    if (!bitmap || !dibBits) { deleteDc(memoryDc); return 0; }
+    const size_t rowBytes = static_cast<size_t>(targetWidth) * 4;
+    for (uint32_t row = 0; row < targetHeight; ++row)
+        std::memcpy(static_cast<uint8_t*>(dibBits) + static_cast<size_t>(row) * rowBytes,
+                    pixels.data() + static_cast<size_t>(row) * stride, rowBytes);
+    void* oldBitmap = select(memoryDc, bitmap);
+    if (!oldBitmap) {
+        deleteObject(bitmap); deleteDc(memoryDc); return 0;
+    }
+    const int32_t drawn = bitBlt(destination, x, y, static_cast<int32_t>(targetWidth),
+        static_cast<int32_t>(targetHeight), memoryDc, 0, 0,
+        MICANT_WIN32K_ROP_ALPHA_SOURCE_OVER);
+    select(memoryDc, oldBitmap);
+    const int32_t bitmapReleased = deleteObject(bitmap);
+    const int32_t dcReleased = deleteDc(memoryDc);
+    return drawn && bitmapReleased && dcReleased;
+}
+
+int32_t User32_DrawIcon(void* destination, int32_t x, int32_t y, void* icon) noexcept {
+    return User32_DrawIconEx(destination, x, y, icon, 0, 0, 0, nullptr, 0x0003u);
+}
+#endif
+
 // user32.dll implementations
 uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
     if (!lpWndClassEx) return 0;
@@ -79,7 +265,25 @@ uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
     if (wc->cbSize < sizeof(MicaWin32kWindowClassEx) || !wc->className || !wc->wndProc) return 0;
     using Fn=uint16_t (*)(const wchar_t*,void*);
     auto fn=Win32kProc<Fn>("MicaWin32kRegisterClassW");
-    return fn ? fn(wc->className,wc->wndProc) : 0;
+    const uint16_t atom = fn ? fn(wc->className,wc->wndProc) : 0;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (atom && wc->className) {
+        for (auto& entry : g_registeredClassIcons) {
+            if (entry.name[0]) continue;
+            size_t i = 0;
+            while (i + 1 < MICANT_WIN32K_TEXT_CAPACITY && wc->className[i]) {
+                entry.name[i] = wc->className[i]; ++i;
+            }
+            if (wc->className[i]) { entry.name[0] = 0; break; }
+            entry.name[i] = 0;
+            entry.large = wc->icon; entry.small = wc->smallIcon;
+            if (entry.large) (void)winuser::ProcessIconHandles().acquire(entry.large, entry.largeLease);
+            if (entry.small) (void)winuser::ProcessIconHandles().acquire(entry.small, entry.smallLease);
+            break;
+        }
+    }
+#endif
+    return atom;
 }
 
 void* User32_CreateWindowExW(
@@ -97,11 +301,25 @@ void* User32_CreateWindowExW(
     void* lpParam) noexcept {
     using Fn = void* (*)(uint32_t,const wchar_t*,const wchar_t*,uint32_t,int32_t,int32_t,int32_t,int32_t,void*,void*,void*,void*);
     auto fn=Win32kProc<Fn>("MicaWin32kCreateWindowExW");
-    return fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
+    void* hwnd = fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (hwnd) {
+        if (auto* icons = findRegisteredClassIcons(lpClassName)) {
+            if (icons->large) (void)winuser::ProcessWindowIcons().set(hwnd, 1, icons->large);
+            if (icons->small) (void)winuser::ProcessWindowIcons().set(hwnd, 0, icons->small);
+        }
+    }
+#endif
+    return hwnd;
 }
 
 int32_t User32_DestroyWindow(void* hWnd) noexcept {
-    using Fn=int32_t (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kDestroyWindow"); return fn ? fn(hWnd) : 0;
+    using Fn=int32_t (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kDestroyWindow");
+    const int32_t destroyed = fn ? fn(hWnd) : 0;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (destroyed) winuser::ProcessWindowIcons().remove(hWnd);
+#endif
+    return destroyed;
 }
 
 int32_t User32_ShowWindow(void* hWnd, int32_t nCmdShow) noexcept {
@@ -213,6 +431,32 @@ int32_t User32_PostMessageW(void* hWnd, uint32_t message, uintptr_t wParam, intp
 }
 
 intptr_t User32_SendMessageW(void* hWnd, uint32_t message, uintptr_t wParam, intptr_t lParam) noexcept {
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    using SetIconFn=int32_t (*)(void*,uint32_t,uint64_t,uint64_t*);
+    using GetIconFn=uint64_t (*)(void*,uint32_t);
+    if (message == WM_SETICON_OFFICIAL) {
+        if (wParam > 2) return 0;
+        void* icon = reinterpret_cast<void*>(lParam);
+        winuser::IconHandleTable::Lease validation{};
+        if (icon && !winuser::ProcessIconHandles().acquire(icon, validation)) return 0;
+        uint64_t previous{};
+        auto set=Win32kProc<SetIconFn>("MicaWin32kSetWindowIcon");
+        if (!set || !set(hWnd, static_cast<uint32_t>(wParam),
+                          reinterpret_cast<uint64_t>(icon), &previous)) return 0;
+        (void)winuser::ProcessWindowIcons().set(hWnd, static_cast<uint32_t>(wParam), icon);
+        if (icon && winuser::ProcessWindowIcons().get(hWnd, static_cast<uint32_t>(wParam)) != icon) {
+            uint64_t ignored{};
+            (void)set(hWnd, static_cast<uint32_t>(wParam), previous, &ignored);
+            return 0;
+        }
+        return static_cast<intptr_t>(previous);
+    }
+    if (message == WM_GETICON_OFFICIAL) {
+        if (wParam > 2) return 0;
+        auto get=Win32kProc<GetIconFn>("MicaWin32kGetWindowIcon");
+        return get ? static_cast<intptr_t>(get(hWnd, static_cast<uint32_t>(wParam))) : 0;
+    }
+#endif
     using Fn=intptr_t (*)(void*,uint32_t,uintptr_t,intptr_t);
     auto fn=Win32kProc<Fn>("MicaWin32kSendMessageW");
     return fn ? fn(hWnd,message,wParam,lParam) : 0;
@@ -571,6 +815,32 @@ void WinNtUser32Gdi32Imm32InitializeExecutiveSubsystem() noexcept {
 
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 extern "C" {
+__declspec(dllexport) void* CreateIconFromResourceEx(
+    const uint8_t* bits, uint32_t size, int32_t isIcon, uint32_t version,
+    int32_t cx, int32_t cy, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CreateIconFromResourceEx(
+        bits, size, isIcon, version, cx, cy, flags);
+}
+__declspec(dllexport) void* CopyIcon(void* icon) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CopyIcon(icon);
+}
+__declspec(dllexport) int32_t DestroyIcon(void* icon) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_DestroyIcon(icon);
+}
+__declspec(dllexport) void* LoadImageW(void* instance, const wchar_t* name,
+    uint32_t type, int32_t cx, int32_t cy, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadImageW(
+        instance, name, type, cx, cy, flags);
+}
+__declspec(dllexport) int32_t DrawIconEx(void* hdc, int32_t x, int32_t y,
+    void* icon, int32_t cx, int32_t cy, uint32_t step, void* brush, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_DrawIconEx(
+        hdc, x, y, icon, cx, cy, step, brush, flags);
+}
+__declspec(dllexport) int32_t DrawIcon(void* hdc, int32_t x, int32_t y, void* icon) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_DrawIcon(
+        hdc, x, y, icon);
+}
 __declspec(dllexport) uint16_t RegisterClassExW(const void* lpWndClassEx) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_RegisterClassExW(lpWndClassEx);
 }

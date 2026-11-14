@@ -6,8 +6,10 @@
 #include "micant/shared/user_syscall.hpp"
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/compositor_surface.h"
+#include "micant/shared/pixel_composite.h"
 
 #include <cstdint>
+#include <algorithm>
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
@@ -454,6 +456,27 @@ void* MicaWin32kSetFocus(void* hwnd) {
         ? reinterpret_cast<void*>(value.result) : nullptr;
 }
 
+int32_t MicaWin32kSetWindowIcon(void* hwnd, uint32_t type, uint64_t icon,
+                                uint64_t* previous) {
+    if (previous) *previous = 0;
+    if (!previous || type > 2) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.args[1] = type;
+    value.args[2] = icon;
+    if (!request(MICANT_WIN32K_OP_SET_WINDOW_ICON, value)) return 0;
+    *previous = value.result;
+    return 1;
+}
+
+uint64_t MicaWin32kGetWindowIcon(void* hwnd, uint32_t type) {
+    if (type > 2) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.args[1] = type;
+    return request(MICANT_WIN32K_OP_GET_WINDOW_ICON, value) ? value.result : 0;
+}
+
 void* MicaWin32kGetDC(void* window) {
     auto* context = allocateContext(window, false);
     return context ? reinterpret_cast<void*>(context->handle) : nullptr;
@@ -511,9 +534,10 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
     int32_t width, int32_t height, void* source, int32_t sourceX,
     int32_t sourceY, uint32_t rasterOperation) {
     constexpr uint32_t kSrcCopy = 0x00CC0020;
+    constexpr uint32_t kAlphaSourceOver = MICANT_WIN32K_ROP_ALPHA_SOURCE_OVER;
     auto* dst = findContext(destination);
     auto* src = findContext(source);
-    if (!dst || !src || rasterOperation != kSrcCopy ||
+    if (!dst || !src || (rasterOperation != kSrcCopy && rasterOperation != kAlphaSourceOver) ||
         width <= 0 || height <= 0) return 0;
 
     uint32_t dstWidth{}, dstHeight{}, srcWidth{}, srcHeight{};
@@ -535,8 +559,14 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
             const int64_t sx = static_cast<int64_t>(sourceX) + column;
             const int64_t dx = left + column;
             if (sx < 0 || sx >= srcWidth || dx < 0 || dx >= dstWidth) continue;
-            dstPixels[static_cast<size_t>(dy) * dstPitch + dx] =
-                srcPixels[static_cast<size_t>(sy) * srcWidth + sx];
+            uint32_t& target = dstPixels[static_cast<size_t>(dy) * dstPitch + dx];
+            const uint32_t sourcePixel = srcPixels[static_cast<size_t>(sy) * srcWidth + sx];
+            if (rasterOperation == kSrcCopy) {
+                target = sourcePixel;
+            } else {
+                target = micant::shared::graphics::PremultipliedSourceOver(
+                    sourcePixel, target);
+            }
         }
     }
     return 1;
