@@ -638,6 +638,24 @@ def run_qemu(
         # loader opens the real DLLs from there for file-backed SEC_IMAGE.
         system32_dir = esp / "MicaNT" / "System32"
         system32_dir.mkdir(parents=True)
+        # Keep redistributable system fonts on the mounted system volume so
+        # user-mode font consumers can load them through the normal file path.
+        # The TTFs and their upstream notices are kept together in the source
+        # tree under System/Fonts; do not embed font data in the kernel image.
+        font_source_dir = ROOT / "System" / "Fonts"
+        required_fonts = (
+            "Selawik-Regular.ttf",
+            "Selawik-Semibold.ttf",
+            "LiberationSans-Regular.ttf",
+            "LiberationSerif-Regular.ttf",
+            "LiberationMono-Regular.ttf",
+            "Carlito-Regular.ttf",
+            "DejaVuSans-Regular.ttf",
+        )
+        missing_fonts = [name for name in required_fonts if not (font_source_dir / name).is_file()]
+        if missing_fonts:
+            raise RuntimeError(f"Required system font files are missing: {', '.join(missing_fonts)}")
+        shutil.copytree(font_source_dir, esp / "MicaNT" / "System" / "Fonts")
         wallpaper_asset = ROOT / "assets" / "wallpaper.png"
         if not wallpaper_asset.is_file():
             raise RuntimeError(f"Packaged desktop wallpaper is missing: {wallpaper_asset}")
