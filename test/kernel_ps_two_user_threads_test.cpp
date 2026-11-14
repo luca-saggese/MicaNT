@@ -443,6 +443,17 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ncmpl $0xc000000d, %eax\nje 52f\n"
         "movl %eax, %r13d\njmp 90f\n52: cmpq $0, 0x70(%rsp)\nje 53f\n"
         "movl $0xc000023d, %r13d\njmp 90f\n53:\n"
+        // Stack rounding must reject size_t overflow without publishing an
+        // object handle.
+        "movq $0, 0x70(%rsp)\nleaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\n"
+        "xorl %r8d, %r8d\nmovq 0x60(%rsp), %r9\n"
+        "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
+        "leaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\n"
+        "movq $0, 0x38(%rsp)\nmovabsq $0xfffffffffffffff0, %rax\n"
+        "movq %rax, 0x40(%rsp)\nmovq %rax, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"
+        "callq *48(%r15)\ncmpl $0xc000000d, %eax\nje 54f\n"
+        "movl $0xc0000262, %r13d\njmp 90f\n54: cmpq $0, 0x70(%rsp)\nje 55f\n"
+        "movl $0xc0000263, %r13d\njmp 90f\n55:\n"
         "leaq 0x70(%rsp), %rcx\nmovl $0x00100042, %edx\nxorl %r8d, %r8d\nmovq 0x68(%rsp), %r9\n"
         "leaq MicantNativeThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\nleaq 16(%r12), %rax\nmovq %rax, 0x28(%rsp)\n"
         "movq $1, 0x30(%rsp)\nmovq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\nmovq $0, 0x50(%rsp)\n"

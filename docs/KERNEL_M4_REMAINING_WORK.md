@@ -93,8 +93,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   che non siano creati oggetti o ready entry. Un attributo `CLIENT_ID`
   duplicato viene rifiutato senza handle, oggetti o ready entry. QEMU CPL3
   verifica anche il rifiuto `STATUS_NOT_IMPLEMENTED` di flag non supportati con
-  handle nullo. Il contratto generale e il rollback di tutte le fasi restano
-  aperti.
+  handle nullo, e `STATUS_INVALID_PARAMETER` senza handle per dimensioni stack
+  che causano overflow nell'arrotondamento. Il contratto generale e il rollback
+  di tutte le fasi restano aperti.
 - [x] **Collegare il wrapper `NtResumeThread` al servizio Ps verificato.** Il
   wrapper inoltra handle e puntatore al resume count al syscall; QEMU esercita
   il resume count 1→0 sul thread creato sospeso. `NtSuspendThread` resta
@@ -218,4 +219,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   --diagnostics-dir /private/tmp/micant-m4-thread-unsupported-flags` è passata,
   incluso handle nullo, build/link, controllo PS/2 e seriale stabile per 5
   secondi.
+- Verifica integrata completa del controllo overflow stack CPL3 di
+  `NtCreateThreadEx`: `python3 qemu.py --headless --timeout 120
+  --diagnostics-dir /private/tmp/micant-m4-thread-stack-overflow` è passata,
+  con `STATUS_INVALID_PARAMETER` e handle nullo, build/link, controllo PS/2 e
+  seriale stabile per 5 secondi.
 
