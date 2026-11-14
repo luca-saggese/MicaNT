@@ -15,6 +15,7 @@
 #include <windows.h>
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/um/subsystems/graphics/font_catalog.hpp"
 #include "micant/um/subsystems/graphics/truetype.hpp"
 #include "gui_common.hpp"
 #include "explorer_shell/taskbar.hpp"
@@ -267,15 +268,22 @@ void loadPackagedWallpaper() noexcept {
     g.wallpaperPixels = reinterpret_cast<uint32_t*>(pixels);
 }
 
-void probeSystemFontFile() noexcept {
+bool loadSystemFontBytes(const char16_t* fileName, uint8_t*& bytes, size_t& length) noexcept {
+    bytes = nullptr; length = 0;
+    if (!fileName) return false;
     wchar_t path[320]{};
-    constexpr char16_t suffix[] = u"\\System\\Fonts\\DejaVuSans-Regular.ttf";
+    constexpr char16_t directory[] = u"\\System\\Fonts\\";
     const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(micant::UserSharedDataAddress);
     size_t rootLength = 0;
     while (rootLength < std::size(shared->ntSystemRoot) && shared->ntSystemRoot[rootLength]) ++rootLength;
-    if (rootLength < 3 || rootLength + std::size(suffix) > std::size(path)) return;
+    size_t fileLength = 0;
+    while (fileName[fileLength]) { if (++fileLength >= std::size(path)) return false; }
+    if (rootLength < 3 || rootLength + std::size(directory) + fileLength > std::size(path)) return false;
     for (size_t i = 0; i < rootLength; ++i) path[i] = static_cast<wchar_t>(shared->ntSystemRoot[i]);
-    for (size_t i = 0; i < std::size(suffix); ++i) path[rootLength + i] = static_cast<wchar_t>(suffix[i]);
+    for (size_t i = 0; i < std::size(directory) - 1; ++i)
+        path[rootLength + i] = static_cast<wchar_t>(directory[i]);
+    for (size_t i = 0; i <= fileLength; ++i)
+        path[rootLength + std::size(directory) - 1 + i] = static_cast<wchar_t>(fileName[i]);
     micant::UnicodeString name{path};
     micant::ObjectAttributes attributes{};
     attributes.objectName = &name;
@@ -283,31 +291,28 @@ void probeSystemFontFile() noexcept {
     micant::Handle file{};
     micant::IoStatusBlock io{};
     if (micant::native_nt::NtCreateFile(&file, 0x00100081u, &attributes, &io, nullptr, 0, 7, 1, 0x20, nullptr, 0) != micant::NtStatus::Success) {
-        PrintLine("[MicaNT FontProbe] TTF open failed"); return;
+        return false;
     }
     micant::FileStandardInformation fileInfo{};
     const auto queryStatus = micant::native_nt::NtQueryInformationFile(file, &io, &fileInfo, sizeof(fileInfo),
             micant::FileInformationClass::FileStandardInformation);
     if (queryStatus != micant::NtStatus::Success) {
         (void)micant::native_nt::NtClose(file);
-        PrintLine("[MicaNT FontProbe] TTF size query status failed");
-        return;
+        return false;
     }
     if (fileInfo.endOfFile.QuadPart <= 0 || fileInfo.endOfFile.QuadPart > 16 * 1024 * 1024) {
         (void)micant::native_nt::NtClose(file);
-        PrintLine("[MicaNT FontProbe] TTF size value invalid");
-        return;
+        return false;
     }
-    const size_t length = static_cast<size_t>(fileInfo.endOfFile.QuadPart);
+    length = static_cast<size_t>(fileInfo.endOfFile.QuadPart);
     void* allocation = nullptr;
     size_t allocationSize = length;
     if (micant::native_nt::NtAllocateVirtualMemory(static_cast<micant::Handle>(-1),
             &allocation, 0, &allocationSize, 0x3000, 0x04) != micant::NtStatus::Success || !allocation) {
         (void)micant::native_nt::NtClose(file);
-        PrintLine("[MicaNT FontProbe] TTF buffer allocation failed");
-        return;
+        return false;
     }
-    auto* bytes = static_cast<uint8_t*>(allocation);
+    bytes = static_cast<uint8_t*>(allocation);
     size_t done = 0;
     bool readOk = true;
     while (done < length) {
@@ -323,8 +328,32 @@ void probeSystemFontFile() noexcept {
         done += static_cast<size_t>(io.Information);
     }
     (void)micant::native_nt::NtClose(file);
+    if (!readOk || done != length) {
+        size_t releaseSize = 0;
+        (void)micant::native_nt::NtFreeVirtualMemory(static_cast<micant::Handle>(-1), &allocation, &releaseSize, 0x8000);
+        bytes = nullptr; length = 0;
+        return false;
+    }
+    return true;
+}
+
+void probeSystemFontFile() noexcept {
+    constexpr micant::um::graphics::LogicalFontRequest request{
+        u"Segoe UI", 400, false, micant::um::graphics::UiFontDefaults::TextPoints,
+        micant::um::graphics::UiFontDefaults::ReferenceDpi};
+    constexpr auto asset = micant::um::graphics::resolveFontAsset(request);
+    uint8_t* bytes{}; size_t length{};
+    if (!loadSystemFontBytes(asset.fileName, bytes, length)) {
+        PrintLine("[MicaNT FontProbe] system font open/read failed");
+        return;
+    }
     micant::um::graphics::truetype::FaceView face;
-    const bool parsed = readOk && done == length && face.parse(bytes, length);
+    const bool parsed = face.parse(bytes, length);
+    uint8_t* fallbackBytes{}; size_t fallbackLength{};
+    micant::um::graphics::truetype::FaceView fallbackFace;
+    const bool fallbackLoaded = loadSystemFontBytes(asset.unicodeFallbackFile,
+        fallbackBytes, fallbackLength) && fallbackFace.parse(fallbackBytes, fallbackLength);
+    PrintLine(fallbackLoaded ? "[MicaNT FontProbe] Unicode fallback face loaded" : "[MicaNT FontProbe] Unicode fallback face unavailable");
     if (parsed) {
         const auto& metrics = face.metrics();
         void* workspace = nullptr;
@@ -332,23 +361,28 @@ void probeSystemFontFile() noexcept {
         const bool workspaceReady = micant::native_nt::NtAllocateVirtualMemory(
             static_cast<micant::Handle>(-1), &workspace, 0, &workspaceSize, 0x3000, 0x04) ==
                 micant::NtStatus::Success && workspace;
-        constexpr char16_t sample[] = u"MicaNT — Città, perché?";
-        constexpr uint32_t pixelsPerEm = micant::um::graphics::truetype::pixelsFromPoints(9, 96);
+        constexpr char16_t sample[] = u"MicaNT — Città, perché? Ĉ ƀ";
+        constexpr uint32_t pixelsPerEm = micant::um::graphics::truetype::pixelsFromPoints(
+            asset.pointSize, asset.dpi);
         constexpr uint32_t baseline = 30;
         uint32_t pen = 0;
         uint16_t previousGlyph = 0;
+        const micant::um::graphics::truetype::FaceView* previousFace = nullptr;
+        bool fallbackUsed = false;
         uint8_t glyphMask[48 * 48]{};
-        const auto paintGlyph = [&](uint16_t glyph, int32_t glyphPen, int32_t glyphBaseline) noexcept {
+        const auto paintGlyph = [&](const micant::um::graphics::truetype::FaceView& glyphFace,
+                                    uint16_t glyph, int32_t glyphPen, int32_t glyphBaseline) noexcept {
+            const auto& glyphFaceMetrics = glyphFace.metrics();
             int16_t xMin{}, yMin{}, xMax{}, yMax{};
             const uint8_t* outline{}; size_t outlineSize{};
-            if (!face.glyphData(glyph, outline, outlineSize)) return false;
+            if (!glyphFace.glyphData(glyph, outline, outlineSize)) return false;
             if (!outlineSize) return true;
-            if (!face.glyphBounds(glyph, xMin, yMin, xMax, yMax)) return false;
+            if (!glyphFace.glyphBounds(glyph, xMin, yMin, xMax, yMax)) return false;
             for (uint8_t& value : glyphMask) value = 0;
-            if (!face.rasterizeSimpleGlyph(glyph, pixelsPerEm, glyphMask, 48, 48, 48,
+            if (!glyphFace.rasterizeSimpleGlyph(glyph, pixelsPerEm, glyphMask, 48, 48, 48,
                                            workspace, workspaceSize)) return false;
-            const int32_t left = glyphPen + static_cast<int32_t>(xMin) * pixelsPerEm / metrics.unitsPerEm;
-            const int32_t top = glyphBaseline - static_cast<int32_t>(yMax) * pixelsPerEm / metrics.unitsPerEm;
+            const int32_t left = glyphPen + static_cast<int32_t>(xMin) * pixelsPerEm / glyphFaceMetrics.unitsPerEm;
+            const int32_t top = glyphBaseline - static_cast<int32_t>(yMax) * pixelsPerEm / glyphFaceMetrics.unitsPerEm;
             for (uint32_t y = 0; y < 48; ++y) for (uint32_t x = 0; x < 48; ++x) {
                 const int32_t dx = left + static_cast<int32_t>(x), dy = top + static_cast<int32_t>(y);
                 if (dx < 0 || dx >= 1024 || dy < 0 || dy >= 48) continue;
@@ -385,34 +419,83 @@ void probeSystemFontFile() noexcept {
             case 0x00CC: baseScalar = 'I'; markScalar = 0x0300; break;
             case 0x00D2: baseScalar = 'O'; markScalar = 0x0300; break;
             case 0x00D9: baseScalar = 'U'; markScalar = 0x0300; break;
+            case 0x0108: baseScalar = 'C'; markScalar = 0x0302; break;
+            case 0x0109: baseScalar = 'c'; markScalar = 0x0302; break;
             default: break;
             }
+            const micant::um::graphics::truetype::FaceView* glyphFace = &face;
             uint16_t glyph = face.glyphIndex(baseScalar);
+            if (!glyph && fallbackLoaded) {
+                glyphFace = &fallbackFace;
+                glyph = fallbackFace.glyphIndex(baseScalar);
+                fallbackUsed |= glyph != 0;
+            }
             micant::um::graphics::truetype::GlyphMetrics gm{};
-            if (previousGlyph) {
-                const int32_t kern = static_cast<int32_t>(face.kerning(previousGlyph, glyph)) * pixelsPerEm /
-                                     metrics.unitsPerEm;
+            const auto& selectedMetrics = glyphFace->metrics();
+            if (previousGlyph && previousFace == glyphFace) {
+                const int32_t kern = static_cast<int32_t>(glyphFace->kerning(previousGlyph, glyph)) * pixelsPerEm /
+                                     selectedMetrics.unitsPerEm;
                 pen = kern < 0 && static_cast<uint32_t>(-kern) > pen ? 0 : static_cast<uint32_t>(pen + kern);
             }
-            if (!glyph || !face.glyphMetrics(glyph, gm) || !paintGlyph(glyph, pen, baseline)) {
-                rasterized = false; break;
+            bool glyphReady = glyph && glyphFace->glyphMetrics(glyph, gm) &&
+                paintGlyph(*glyphFace, glyph, pen, baseline);
+            if (!glyphReady && glyphFace == &face && fallbackLoaded) {
+                const uint16_t replacement = fallbackFace.glyphIndex(baseScalar);
+                micant::um::graphics::truetype::GlyphMetrics fallbackMetrics{};
+                if (replacement && fallbackFace.glyphMetrics(replacement, fallbackMetrics) &&
+                    paintGlyph(fallbackFace, replacement, pen, baseline)) {
+                    glyph = replacement;
+                    glyphFace = &fallbackFace;
+                    gm = fallbackMetrics;
+                    fallbackUsed = true;
+                    glyphReady = true;
+                }
             }
+            if (!glyphReady) { PrintLine("[MicaNT FontProbe] glyph raster failed"); rasterized = false; break; }
             if (markScalar) {
-                const uint16_t markGlyph = face.glyphIndex(markScalar);
+                const micant::um::graphics::truetype::FaceView* markFace = glyphFace;
+                uint16_t markGlyph = markFace->glyphIndex(markScalar);
+                if (!markGlyph && fallbackLoaded) {
+                    markFace = &fallbackFace;
+                    markGlyph = markFace->glyphIndex(markScalar);
+                    fallbackUsed |= markGlyph != 0;
+                }
                 int16_t bx0{}, by0{}, bx1{}, by1{}, mx0{}, my0{}, mx1{}, my1{};
                 const uint16_t baseGlyph = glyph;
-                if (!markGlyph || !face.glyphBounds(baseGlyph, bx0, by0, bx1, by1) ||
-                    !face.glyphBounds(markGlyph, mx0, my0, mx1, my1)) { rasterized = false; break; }
-                const int32_t baseWidth = static_cast<int32_t>(bx1 - bx0) * pixelsPerEm / metrics.unitsPerEm;
-                const int32_t markWidth = static_cast<int32_t>(mx1 - mx0) * pixelsPerEm / metrics.unitsPerEm;
+                if (!markGlyph || !glyphFace->glyphBounds(baseGlyph, bx0, by0, bx1, by1) ||
+                    !markFace->glyphBounds(markGlyph, mx0, my0, mx1, my1)) {
+                    PrintLine("[MicaNT FontProbe] combining mark metric lookup failed");
+                    rasterized = false; break;
+                }
+                const int32_t baseWidth = static_cast<int32_t>(bx1 - bx0) * pixelsPerEm / selectedMetrics.unitsPerEm;
+                const int32_t markWidth = static_cast<int32_t>(mx1 - mx0) * pixelsPerEm / markFace->metrics().unitsPerEm;
                 const int32_t markPen = static_cast<int32_t>(pen) +
-                    static_cast<int32_t>(bx0) * pixelsPerEm / metrics.unitsPerEm + (baseWidth - markWidth) / 2 -
-                    static_cast<int32_t>(mx0) * pixelsPerEm / metrics.unitsPerEm;
-                if (!paintGlyph(markGlyph, markPen, baseline)) { rasterized = false; break; }
+                    static_cast<int32_t>(bx0) * pixelsPerEm / selectedMetrics.unitsPerEm + (baseWidth - markWidth) / 2 -
+                    static_cast<int32_t>(mx0) * pixelsPerEm / markFace->metrics().unitsPerEm;
+                bool markPainted = paintGlyph(*markFace, markGlyph, markPen, baseline);
+                if (!markPainted && markFace == &face && fallbackLoaded) {
+                    markFace = &fallbackFace;
+                    markGlyph = markFace->glyphIndex(markScalar);
+                    if (markGlyph && markFace->glyphBounds(markGlyph, mx0, my0, mx1, my1)) {
+                        const int32_t fallbackMarkWidth = static_cast<int32_t>(mx1 - mx0) * pixelsPerEm /
+                            markFace->metrics().unitsPerEm;
+                        const int32_t fallbackMarkPen = static_cast<int32_t>(pen) +
+                            static_cast<int32_t>(bx0) * pixelsPerEm / selectedMetrics.unitsPerEm +
+                            (baseWidth - fallbackMarkWidth) / 2 -
+                            static_cast<int32_t>(mx0) * pixelsPerEm / markFace->metrics().unitsPerEm;
+                        markPainted = paintGlyph(*markFace, markGlyph, fallbackMarkPen, baseline);
+                        fallbackUsed |= markPainted;
+                    }
+                }
+                if (!markPainted) {
+                    PrintLine("[MicaNT FontProbe] combining mark raster failed");
+                    rasterized = false; break;
+                }
             }
-            pen += (static_cast<uint32_t>(gm.advanceWidth) * pixelsPerEm + metrics.unitsPerEm / 2) /
-                   metrics.unitsPerEm;
+            pen += (static_cast<uint32_t>(gm.advanceWidth) * pixelsPerEm + selectedMetrics.unitsPerEm / 2) /
+                   selectedMetrics.unitsPerEm;
             previousGlyph = glyph;
+            previousFace = glyphFace;
         }
         if (workspaceReady) {
             size_t releaseSize = 0;
@@ -424,16 +507,27 @@ void probeSystemFontFile() noexcept {
             visible |= coverage != 0;
             antialiased |= coverage != 0 && coverage != 255;
         }
+        if (!rasterized) PrintLine("[MicaNT FontProbe] layout failed");
+        else if (!visible) PrintLine("[MicaNT FontProbe] empty glyph mask");
+        else if (!antialiased) PrintLine("[MicaNT FontProbe] grayscale coverage absent");
         g.fontProbeReady = rasterized && visible && antialiased;
         PrintLine(g.fontProbeReady
-            ? "[MicaNT FontProbe] TrueType string MicaNT — Città, perché? drawn"
+            ? (fallbackUsed ? "[MicaNT FontProbe] TrueType string drawn with Unicode fallback"
+                            : "[MicaNT FontProbe] TrueType string MicaNT — Città, perché? drawn")
             : "[MicaNT FontProbe] TrueType string raster validation failed");
     } else {
         PrintLine("[MicaNT FontProbe] TTF parse failed");
     }
     size_t releaseSize = 0;
+    void* allocation = bytes;
     (void)micant::native_nt::NtFreeVirtualMemory(static_cast<micant::Handle>(-1),
         &allocation, &releaseSize, 0x8000);
+    if (fallbackBytes) {
+        void* fallbackAllocation = fallbackBytes;
+        releaseSize = 0;
+        (void)micant::native_nt::NtFreeVirtualMemory(static_cast<micant::Handle>(-1),
+            &fallbackAllocation, &releaseSize, 0x8000);
+    }
 }
 
 void chooseFallbackActiveApp() noexcept {
