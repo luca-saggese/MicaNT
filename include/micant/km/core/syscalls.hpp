@@ -105,6 +105,7 @@ inline constexpr uint32_t SSN_NtQueryInformationProcess  = 0x0019;
 inline constexpr uint32_t SSN_NtQueryInformationThread   = MICANT_SSN_NT_QUERY_INFORMATION_THREAD;
 inline constexpr uint32_t SSN_NtAlertThread = MICANT_SSN_NT_ALERT_THREAD;
 inline constexpr uint32_t SSN_NtTestAlert = MICANT_SSN_NT_TEST_ALERT;
+inline constexpr uint32_t SSN_NtDuplicateObject = MICANT_SSN_NT_DUPLICATE_OBJECT;
 
 /**
  * @brief Native NT Syscall Signatures in Modern C++23

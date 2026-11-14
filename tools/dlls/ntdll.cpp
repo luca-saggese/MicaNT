@@ -71,6 +71,11 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtOpenProcess(void**, uint3
 __attribute__((naked)) __declspec(dllexport) int32_t NtOpenThread(void**, uint32_t, void*, void*) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovq $" MICANT_STRINGIFY(MICANT_SSN_NT_OPEN_THREAD) ", %rax\n\tsyscall\n\tretq\n\t");
 }
+__attribute__((naked)) __declspec(dllexport) int32_t NtDuplicateObject(
+    void*, void*, void*, void**, uint32_t, uint32_t, uint32_t) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovq $" MICANT_STRINGIFY(MICANT_SSN_NT_DUPLICATE_OBJECT)
+                         ", %rax\n\tsyscall\n\tretq\n\t");
+}
 
 __attribute__((naked)) __declspec(dllexport) int32_t NtTerminateProcess(void* /*processHandle*/, int32_t /*exitStatus*/) noexcept {
 #if defined(__x86_64__)

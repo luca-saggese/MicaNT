@@ -1305,16 +1305,25 @@ inline NtStatus WINAPI NtDeviceIoControlFile_Export(
 }
 
 inline NtStatus WINAPI NtDuplicateObject(
-    void* /*SourceProcessHandle*/,
+    void* SourceProcessHandle,
     void* SourceHandle,
-    void* /*TargetProcessHandle*/,
+    void* TargetProcessHandle,
     void** TargetHandle,
-    uint32_t /*DesiredAccess*/,
-    uint32_t /*HandleAttributes*/,
-    uint32_t /*Options*/
+    uint32_t DesiredAccess,
+    uint32_t HandleAttributes,
+    uint32_t Options
 ) noexcept {
-    if (TargetHandle) *TargetHandle = SourceHandle;
-    return NtStatus::Success;
+    const uint64_t stack[3]{DesiredAccess, HandleAttributes, Options};
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtDuplicateObject,
+        .arg1 = reinterpret_cast<uintptr_t>(SourceProcessHandle),
+        .arg2 = reinterpret_cast<uintptr_t>(SourceHandle),
+        .arg3 = reinterpret_cast<uintptr_t>(TargetProcessHandle),
+        .arg4 = reinterpret_cast<uintptr_t>(TargetHandle),
+        .stackArgs = stack,
+        .stackArgCount = 3
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
 }
 
 inline NtStatus WINAPI NtFlushBuffersFile(void* /*FileHandle*/, void* /*IoStatusBlock*/) noexcept {
@@ -6733,7 +6742,13 @@ inline NtStatus WINAPI NtAdjustGroupsToken(HANDLE /*TokenHandle*/, BOOLEAN /*Res
     return NtStatus::Success;
 }
 
-inline NtStatus WINAPI NtAlertThread(HANDLE /*ThreadHandle*/) noexcept { return NtStatus::Success; }
+inline NtStatus WINAPI NtAlertThread(HANDLE ThreadHandle) noexcept {
+    sys::SyscallFrame frame{
+        .ssn = sys::SSN_NtAlertThread,
+        .arg1 = reinterpret_cast<uintptr_t>(ThreadHandle)
+    };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
 
 inline NtStatus WINAPI NtAlpcQueryInformation(HANDLE /*PortHandle*/, ULONG /*PortInformationClass*/, void* /*PortInformation*/, ULONG /*Length*/, ULONG* ReturnLength) noexcept {
     if (ReturnLength) *ReturnLength = 32;
@@ -7295,9 +7310,20 @@ inline NtStatus WINAPI NtSystemDebugControl(uint32_t /*Command*/, void* /*InputB
     return NtStatus::Success;
 }
 inline NtStatus WINAPI NtTerminateJobObject(HANDLE /*JobHandle*/, NtStatus /*ExitStatus*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtTerminateProcess_Export(HANDLE /*ProcessHandle*/, NtStatus /*ExitStatus*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtTerminateThread(HANDLE /*ThreadHandle*/, NtStatus /*ExitStatus*/) noexcept { return NtStatus::Success; }
-inline NtStatus WINAPI NtTestAlert() noexcept { return NtStatus::Success; }
+inline NtStatus WINAPI NtTerminateProcess_Export(HANDLE ProcessHandle, NtStatus ExitStatus) noexcept {
+    sys::SyscallFrame frame{ .ssn = sys::SSN_NtTerminateProcess,
+        .arg1 = reinterpret_cast<uintptr_t>(ProcessHandle), .arg2 = static_cast<uint32_t>(ExitStatus) };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
+inline NtStatus WINAPI NtTerminateThread(HANDLE ThreadHandle, NtStatus ExitStatus) noexcept {
+    sys::SyscallFrame frame{ .ssn = sys::SSN_NtTerminateThread,
+        .arg1 = reinterpret_cast<uintptr_t>(ThreadHandle), .arg2 = static_cast<uint32_t>(ExitStatus) };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
+inline NtStatus WINAPI NtTestAlert() noexcept {
+    sys::SyscallFrame frame{ .ssn = sys::SSN_NtTestAlert };
+    return sys::SyscallDispatcher::get().dispatch(frame);
+}
 inline NtStatus WINAPI NtTraceControl(ULONG /*FunctionCode*/, void* /*InBuffer*/, ULONG /*InBufferLen*/, void* /*OutBuffer*/, ULONG /*OutBufferLen*/, ULONG* ReturnLength) noexcept {
     if (ReturnLength) *ReturnLength = 0;
     return NtStatus::Success;

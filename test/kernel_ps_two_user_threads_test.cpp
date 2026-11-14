@@ -398,6 +398,33 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x108(%rsp)\nmovq $0, 0x110(%rsp)\nmovq $0, 0x118(%rsp)\nmovl $48, 0xf0(%rsp)\n"
         "leaq 0x68(%rsp), %rcx\nmovl $0x400, %edx\nleaq 0xf0(%rsp), %r8\nleaq 0xe0(%rsp), %r9\n"
         "callq *64(%r15)\ntestl %eax, %eax\njz 6f\nmovl $0xc0000213, %r13d\njmp 90f\n6:\n"
+        // NtDuplicateObject must cross the CPL3 syscall boundary, preserve
+        // the source grant for DUPLICATE_SAME_ACCESS, and publish only a live
+        // target handle. The next calls cover access denial, an invalid
+        // source and an unwritable output pointer.
+        "movq $0, 0x78(%rsp)\nmovq $-1, %rcx\nmovq 0x68(%rsp), %rdx\n"
+        "movq $-1, %r8\nleaq 0x78(%rsp), %r9\nxorl %eax, %eax\n"
+        "movq %rax, 0x20(%rsp)\nmovq $2, 0x28(%rsp)\nmovq $2, 0x30(%rsp)\n"
+        "callq *144(%r15)\ntestl %eax, %eax\njz .Lmicant_dup_ok\n"
+        "movl $0xc0000271, %r13d\njmp 90f\n.Lmicant_dup_ok:\n"
+        "cmpq $0, 0x78(%rsp)\njne .Lmicant_dup_handle\nmovl $0xc0000272, %r13d\njmp 90f\n"
+        ".Lmicant_dup_handle:\nmovq 0x78(%rsp), %rcx\ncallq *88(%r15)\n"
+        "testl %eax, %eax\njz .Lmicant_dup_access_denied\nmovl %eax, %r13d\njmp 90f\n"
+        ".Lmicant_dup_access_denied:\nmovq $0, 0x78(%rsp)\nmovq $-1, %rcx\n"
+        "movq 0x68(%rsp), %rdx\nmovq $-1, %r8\nleaq 0x78(%rsp), %r9\n"
+        "movq $1, 0x20(%rsp)\nxorl %eax, %eax\nmovq %rax, 0x28(%rsp)\n"
+        "movq %rax, 0x30(%rsp)\ncallq *144(%r15)\ncmpl $0xc0000022, %eax\nje .Lmicant_dup_bad_source\n"
+        "movl $0xc0000274, %r13d\njmp 90f\n.Lmicant_dup_bad_source:\n"
+        "cmpq $0, 0x78(%rsp)\nje .Lmicant_dup_invalid_source\nmovl $0xc0000275, %r13d\njmp 90f\n"
+        ".Lmicant_dup_invalid_source:\nmovq $0, 0x78(%rsp)\nmovq $-1, %rcx\n"
+        "movq $0x7fffffff, %rdx\nmovq $-1, %r8\nleaq 0x78(%rsp), %r9\n"
+        "xorl %eax, %eax\nmovq %rax, 0x20(%rsp)\nmovq %rax, 0x28(%rsp)\nmovq $2, 0x30(%rsp)\n"
+        "callq *144(%r15)\ncmpl $0xc0000008, %eax\nje .Lmicant_dup_copyout\n"
+        "movl $0xc0000276, %r13d\njmp 90f\n.Lmicant_dup_copyout:\n"
+        "movq $-1, %rcx\nmovq 0x68(%rsp), %rdx\nmovq $-1, %r8\nmovq $0x1000, %r9\n"
+        "movq $0, 0x20(%rsp)\nmovq $0, 0x28(%rsp)\nmovq $2, 0x30(%rsp)\n"
+        "callq *144(%r15)\ncmpl $0xc0000005, %eax\nje .Lmicant_duplicate_complete\n"
+        "movl $0xc0000277, %r13d\njmp 90f\n.Lmicant_duplicate_complete:\n"
         // The opened parent handle grants query access only; process creation
         // must require PROCESS_CREATE_PROCESS and publish no child on denial.
         "leaq 0x78(%rsp), %rcx\nmovq $0, 0x78(%rsp)\nmovl $0x0010043b, %edx\n"
@@ -527,7 +554,11 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq 0x70(%rsp), %rcx\ncallq *88(%r15)\ntestl %eax, %eax\njz 66f\n"
         "movl %eax, %r13d\njmp 90f\n66: movq 0x60(%rsp), %rcx\ncallq *88(%r15)\n"
         "testl %eax, %eax\njz 67f\nmovl %eax, %r13d\njmp 90f\n67:\n"
-        "movq $0x12345678, 8(%r12)\nxorl %r13d, %r13d\njmp 91f\n"
+        // Exercise the exported NTDLL NtTerminateThread wrapper from CPL3.
+        // The status and marker are observed by the kernel waiter after the
+        // syscall switches away; returning from the wrapper is a fixture bug.
+        "movq $0x12345678, 8(%r12)\nmovq $-2, %rcx\nmovl $0xc0000022, %edx\n"
+        "callq *136(%r15)\nmovl $0xc0000270, 8(%r12)\nxorl %r13d, %r13d\njmp 91f\n"
         "90: movl %r13d, 8(%r12)\n"
         "movq 0x60(%rsp), %rcx\ntestq %rcx, %rcx\njz 20f\nxorl %edx, %edx\ncallq *24(%r15)\n"
         "movq 0x78(%rsp), %rcx\ntestq %rcx, %rcx\njz 21f\ncallq *88(%r15)\n21:\n"
@@ -989,7 +1020,8 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         constexpr const char* names[]{"NtAllocateVirtualMemory", "NtWaitForSingleObject", "NtSetEvent",
             "NtTerminateProcess", "NtQueryInformationThread", "NtCreateProcessEx", "NtCreateThreadEx",
             "NtResumeThread", "NtOpenProcess", "NtOpenThread", "NtQueryInformationProcess", "NtClose",
-            "NtQuerySystemTime", "NtDelayExecution", "NtAlertThread", "NtQueueApcThread", "NtTestAlert"};
+            "NtQuerySystemTime", "NtDelayExecution", "NtAlertThread", "NtQueueApcThread", "NtTestAlert",
+            "NtTerminateThread", "NtDuplicateObject"};
         for (size_t i = 0; i < std::size(names); ++i) {
             const uint64_t rva = dataRva + 0x200 + i * 0x40;
             std::memcpy(rawData + 0xe0 + i * 8, &rva, sizeof(rva));

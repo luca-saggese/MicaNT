@@ -60,9 +60,14 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 - [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
   processi.** Verificare diritti concessi, callback Ob, handle ereditabili,
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
-  riferimenti. I test kernel coprono le primitive Ob; manca ancora la prova
-  syscall CPL3 che crea un oggetto `OBJ_INHERIT`, clona il processo, chiude
-  l'handle sorgente e usa la copia nel figlio. Il percorso kernel M4 verifica in
+  riferimenti. `NtDuplicateObject` ora è collegato al syscall CPL3; QEMU verifica
+  `DUPLICATE_SAME_ACCESS`, rifiuto dei diritti insufficienti, handle sorgente
+  invalido e output non mappato. Il target non pubblicato viene ritirato anche
+  per handle `OBJ_PROTECT_CLOSE`, usando il close callback canonico. I test
+  kernel coprono il rollback della callback Ob. Manca ancora la prova syscall
+  CPL3 che crea un oggetto `OBJ_INHERIT`, clona il processo, chiude l'handle
+  sorgente e usa la copia nel figlio, oltre ai casi CPL3 `DUPLICATE_CLOSE_SOURCE`
+  e fallimento di copyout dopo una probe valida. Il percorso kernel M4 verifica in
   QEMU `NtCreateEvent` con `OBJ_INHERIT`, `NtCreateProcessEx` con inheritance,
   chiusura dell'handle sorgente e wait sul valore-handle dopo attach al figlio.
   `NtCreateEvent` registra l'attributo nella handle table. Resta aperta la prova
@@ -106,7 +111,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   uno o più thread; APC rundown; segnalazione degli oggetti; cancellazione delle
   attese; reaping differito; chiusura address space; status di uscita e retry
   dopo errori. Un preflight fallito non deve alterare code, attese o stato di
-  terminazione.
+  terminazione. Il thunk NTDLL `NtTerminateThread` ora usa il servizio syscall
+  canonico; QEMU CPL3 termina il thread corrente con `STATUS_ACCESS_DENIED` e il
+  waiter osserva lo status previsto. Resta da generalizzare e stressare gli
+  altri stati e le combinazioni di thread/processo.
 - [ ] **Completare attese e lifetime degli oggetti di processo/thread.**
   Verificare timeout, alertability/APC, cancellazione, chiusura dell'ultimo
   handle durante l'attesa, riferimenti trattenuti, CID lookup e reaping in ogni

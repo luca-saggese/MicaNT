@@ -2255,6 +2255,50 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const auto closeStatus = sys::NtClose(static_cast<Handle>(first));
         return status(closeStatus);
     }
+    if (number == sys::SSN_NtDuplicateObject) {
+        uint64_t extra[3]{};
+        auto* targetHandle = reinterpret_cast<Handle*>(args.fourth);
+        if (args.userStack > UINT64_MAX - 64 ||
+            ex::ExSafeCopyFromUser(extra, reinterpret_cast<const void*>(args.userStack + 40),
+                                   sizeof(extra)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        const auto outputProbe = ex::ProbeForWrite(targetHandle, sizeof(*targetHandle), alignof(Handle));
+        if (outputProbe != NtStatus::Success) return status(outputProbe);
+
+        ps::EProcess* sourceProcess{};
+        ps::EProcess* targetProcess{};
+        ob::ObjectHeader* sourceProcessReference{};
+        ob::ObjectHeader* targetProcessReference{};
+        auto result = first == static_cast<uint64_t>(InvalidHandleValue)
+            ? ps::detail::referenceCurrentProcess(sourceProcess, sourceProcessReference)
+            : ps::detail::referenceProcessHandle(static_cast<Handle>(first), 0x0040,
+                                                  sourceProcess, sourceProcessReference);
+        if (result == NtStatus::Success)
+            result = args.third == static_cast<uint64_t>(InvalidHandleValue)
+                ? ps::detail::referenceCurrentProcess(targetProcess, targetProcessReference)
+                : ps::detail::referenceProcessHandle(static_cast<Handle>(args.third), 0x0040,
+                                                      targetProcess, targetProcessReference);
+
+        Handle duplicate{};
+        if (result == NtStatus::Success)
+            result = ob::ObDuplicateHandleEx(static_cast<Handle>(second),
+                sourceProcess->getHandleTable(), targetProcess->getHandleTable(), duplicate,
+                static_cast<uint32_t>(extra[0]), static_cast<uint32_t>(extra[1]),
+                static_cast<uint32_t>(extra[2]));
+        if (result == NtStatus::Success)
+            result = ex::ExSafeCopyToUser(targetHandle, &duplicate, sizeof(duplicate));
+        if (result != NtStatus::Success && duplicate) {
+            // A duplicate may request OBJ_PROTECT_CLOSE. A failed copyout must
+            // still retire the unpublished handle, so remove it transactionally
+            // and run the ordinary close callback after leaving the table.
+            auto* failed = targetProcess->getHandleTable().takeHandle(duplicate);
+            if (!failed || ob::ObFinishClose(failed, duplicate) != NtStatus::Success)
+                __builtin_trap();
+        }
+        if (targetProcessReference) ob::ObDereferenceObject(targetProcessReference);
+        if (sourceProcessReference) ob::ObDereferenceObject(sourceProcessReference);
+        return status(result);
+    }
     if (number == sys::SSN_NtCreateIoCompletion) {
         auto* destination = reinterpret_cast<Handle*>(first);
         if (!destination || ex::ProbeForWrite(destination, sizeof(Handle), alignof(Handle)) != NtStatus::Success)
@@ -3056,8 +3100,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(second), &previous, sizeof(previous)));
     }
     if (number == sys::SSN_NtWaitForSingleObject) {
-        LargeInteger timeout{};
-        if (args.third && ex::ExSafeCopyFromUser(&timeout, reinterpret_cast<const void*>(args.third), sizeof(timeout)) != NtStatus::Success)
+        if (args.third && ex::ProbeForRead(reinterpret_cast<const void*>(args.third),
+                sizeof(LargeInteger), alignof(LargeInteger), mm::UserMode) != NtStatus::Success)
             return status(NtStatus::AccessViolation);
         const auto* thread = ke::KeGetCurrentThread();
         if (!thread || !thread->owningProcess || !thread->kernelStackTop)
@@ -3067,7 +3111,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         __asm__ __volatile__("swapgs" : : : "memory");
         __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
         const auto result = sys::NtWaitForSingleObject(first, (second & 0xff) != 0,
-                                                        args.third ? &timeout : nullptr);
+            reinterpret_cast<LargeInteger*>(args.third));
         __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
         __asm__ __volatile__("swapgs" : : : "memory");
         return status(result);

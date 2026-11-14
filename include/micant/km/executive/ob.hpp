@@ -564,9 +564,13 @@ public:
 
     NtStatus duplicateHandle(
         Handle sourceHandle, HandleTable& targetTable, Handle& targetHandle,
-        uint32_t desiredAccess, bool inherit = false, uint32_t options = 0
+        uint32_t desiredAccess, bool inherit = false, uint32_t options = 0,
+        uint32_t targetAttributes = UINT32_MAX
     ) {
         targetHandle = 0;
+        if (!(options & 4) && targetAttributes != UINT32_MAX &&
+            (targetAttributes & ~OB_VALID_HANDLE_ATTRIBUTES))
+            return NtStatus::InvalidParameter;
         ObjectHeader* removed{};
         ObjectHeader* duplicated{};
         uint32_t duplicatedAccess{};
@@ -600,7 +604,7 @@ public:
                 const uint32_t required = requested & ~MAXIMUM_ALLOWED;
                 const uint32_t access = sameAccess ? granted : maximumAllowed ? granted : requested;
                 const uint32_t attributes = (options & 4) ? sourceEntry->handleAttributes :
-                                            (inherit ? OBJ_INHERIT : 0);
+                    (targetAttributes != UINT32_MAX ? targetAttributes : (inherit ? OBJ_INHERIT : 0));
                 if (!sameAccess && ((required & ~granted) != 0 || (access & ~granted) != 0))
                     status = NtStatus::AccessDenied;
                 else {
@@ -1539,6 +1543,28 @@ inline NtStatus ObDuplicateHandle(
 #endif
     }
     return st;
+}
+
+// Native NtDuplicateObject's table operation, split from process-handle
+// resolution and user capture so it can be exercised by kernel callers too.
+// The output is cleared before work and remains zero on every failure.
+inline NtStatus ObDuplicateHandleEx(
+    Handle sourceHandle,
+    HandleTable& sourceTable,
+    HandleTable& targetTable,
+    Handle& targetHandle,
+    uint32_t desiredAccess,
+    uint32_t handleAttributes,
+    uint32_t options
+) noexcept {
+    targetHandle = 0;
+    if ((options & ~uint32_t{7}) != 0 ||
+        (!(options & 4) && (handleAttributes & ~OB_VALID_HANDLE_ATTRIBUTES) != 0))
+        return NtStatus::InvalidParameter;
+    const bool sameAttributes = (options & 4) != 0;
+    const bool inherit = sameAttributes ? false : (handleAttributes & OBJ_INHERIT) != 0;
+    return sourceTable.duplicateHandle(sourceHandle, targetTable, targetHandle,
+                                       desiredAccess, inherit, options, handleAttributes);
 }
 
 /**

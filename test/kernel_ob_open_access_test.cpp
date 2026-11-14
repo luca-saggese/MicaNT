@@ -90,6 +90,18 @@ extern "C" bool MicantTestObOpenAccess() noexcept {
     if (ok) ok = table.lookup(sameAccessDuplicate, &duplicateGranted) == &object &&
         duplicateGranted == kRead;
     if (sameAccessDuplicate) (void)table.closeHandle(sameAccessDuplicate);
+    Handle attributedDuplicate{};
+    if (ok) ok = ob::ObDuplicateHandleEx(handle, table, table, attributedDuplicate, kRead,
+        OBJ_INHERIT | ob::OBJ_PROTECT_CLOSE, 0) == NtStatus::Success && attributedDuplicate;
+    const auto* attributedEntry = table.getEntry(attributedDuplicate);
+    if (ok) ok = attributedEntry && attributedEntry->handleAttributes == (OBJ_INHERIT | ob::OBJ_PROTECT_CLOSE);
+    if (attributedDuplicate) {
+        (void)table.setHandleAttributes(attributedDuplicate, 0);
+        (void)table.closeHandle(attributedDuplicate);
+    }
+    attributedDuplicate = 0xdead;
+    if (ok) ok = ob::ObDuplicateHandleEx(handle, table, table, attributedDuplicate, kRead,
+        0x8, 0) == NtStatus::InvalidParameter && attributedDuplicate == 0;
     if (handle) (void)table.closeHandle(handle);
     ok = ok && object.handleCount == 0;
     if (!ok) return false;
