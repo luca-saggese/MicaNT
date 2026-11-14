@@ -78,6 +78,11 @@ bool switchProcessPagingRootByPhysical(uintptr_t physicalRoot) noexcept;
 bool destroyProcessPagingRoot(ProcessPagingRoot& root) noexcept;
 // IRQ-disabled, single-CPU bootstrap test of PFN-backed paging and reclamation.
 bool verifyBootstrapPageTables() noexcept;
+bool reserveBootstrapPageTableStorage(size_t& reservedPages) noexcept;
+uintptr_t reserveBootstrapKernelHeapRange(size_t pageCount) noexcept;
+bool releaseBootstrapKernelHeapRange(uintptr_t address, size_t pageCount) noexcept;
+bool mapBootstrapKernelHeapPage(uintptr_t address, uint64_t pfn) noexcept;
+bool unmapBootstrapKernelHeapPage(uintptr_t address) noexcept;
 // Bootstrap CR3 only; callbacks require the BSP with interrupts disabled.
 // The process backend uses canonical lower-half PML4 slots not reserved by
 // the bootstrap kernel (slots 133 through 255). This is address-space reach,
@@ -105,6 +110,8 @@ uint64_t translateBootstrapAddress(const void* address) noexcept;
 // Release must follow every successful map before yielding or returning.
 volatile uint8_t* mapBootstrapPhysicalPage(uint64_t physicalAddress) noexcept;
 void releaseBootstrapPhysicalPage() noexcept;
+bool copyBootstrapPhysicalPage(uint64_t destinationPfn, uint64_t sourcePfn) noexcept;
+bool readBootstrapPhysicalPage(uint64_t sourcePfn, void* destination) noexcept;
 // Returns the first physical byte only when the complete non-empty range is
 // mapped by the bootstrap page tables to contiguous physical pages within the
 // bootstrap physical-address mask. The caller must keep the kernel-owned

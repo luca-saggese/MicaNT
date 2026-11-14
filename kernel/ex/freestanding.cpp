@@ -16,12 +16,14 @@ extern "C" size_t strlen(const char* text) {
 namespace {
 
 using micant::ex::BootstrapLogRoutine;
-using micant::ex::BootstrapMapPagesRoutine;
+using micant::ex::BootstrapReserveHeapRangeRoutine;
+using micant::ex::BootstrapReleaseHeapRangeRoutine;
+using micant::ex::BootstrapMapHeapPageRoutine;
+using micant::ex::BootstrapUnmapHeapPageRoutine;
 using micant::mm::PfnDatabase;
 
 struct AllocationHeader {
     uint64_t cookie;
-    uint64_t firstPfn;
     size_t pageCount;
     size_t requestedSize;
     size_t alignment;
@@ -34,7 +36,10 @@ constexpr size_t kDefaultAlignment =
 static_assert((kDefaultAlignment & (kDefaultAlignment - 1)) == 0);
 
 BootstrapLogRoutine g_bootstrapLog{};
-BootstrapMapPagesRoutine g_mapPages{};
+BootstrapReserveHeapRangeRoutine g_reserveHeapRange{};
+BootstrapReleaseHeapRangeRoutine g_releaseHeapRange{};
+BootstrapMapHeapPageRoutine g_mapHeapPage{};
+BootstrapUnmapHeapPageRoutine g_unmapHeapPage{};
 bool g_runtimeInitialized{};
 uint64_t g_rejectionLogCount{};
 using CInitializer = int (*)();
@@ -126,7 +131,7 @@ template<typename Initializer>
     const AllocationHeader& header
 ) noexcept {
     return kAllocationCookie ^ static_cast<uint64_t>(userAddress) ^
-        header.firstPfn ^ static_cast<uint64_t>(header.pageCount) ^
+        static_cast<uint64_t>(header.pageCount) ^
         static_cast<uint64_t>(header.requestedSize) ^
         static_cast<uint64_t>(header.alignment) ^
         static_cast<uint64_t>(header.baseAddress);
@@ -139,7 +144,7 @@ template<typename Initializer>
     auto* header = reinterpret_cast<AllocationHeader*>(
         userAddress - sizeof(AllocationHeader));
     if (header->cookie != allocationCookie(userAddress, *header) ||
-        header->firstPfn == 0 || header->pageCount == 0 ||
+        header->pageCount == 0 ||
         header->alignment < kDefaultAlignment ||
         !isPowerOfTwo(header->alignment) ||
         (userAddress & (header->alignment - 1)) != 0 ||
@@ -153,7 +158,8 @@ template<typename Initializer>
     }
     const uintptr_t allocationEnd = header->baseAddress + mappedBytes;
     const uintptr_t headerAddress = reinterpret_cast<uintptr_t>(header);
-    if (headerAddress < header->baseAddress ||
+    if (headerAddress < header->baseAddress +
+            header->pageCount * sizeof(uint64_t) ||
         headerAddress > allocationEnd - sizeof(AllocationHeader) ||
         userAddress > allocationEnd ||
         header->requestedSize > allocationEnd - userAddress) {
@@ -179,48 +185,72 @@ template<typename Initializer>
         return nullptr;
     }
 
-    const size_t requiredBytes = sizeof(AllocationHeader) + alignment - 1 + usableSize;
-    const size_t pageCount = requiredBytes / pageSize +
-        static_cast<size_t>(requiredBytes % pageSize != 0);
-    if (pageCount == 0 || pageCount > static_cast<size_t>(-1) / pageSize) {
+    const size_t baseBytes = sizeof(AllocationHeader) + alignment - 1 + usableSize;
+    size_t pageCount = baseBytes / (pageSize - sizeof(uint64_t)) +
+        static_cast<size_t>(baseBytes % (pageSize - sizeof(uint64_t)) != 0);
+    if (pageCount == 0 || pageCount > static_cast<size_t>(-1) / pageSize ||
+        pageCount > static_cast<size_t>(-1) / sizeof(uint64_t)) {
         rejectAllocation("ExHeap: allocation rejected (page count overflow)\r\n");
         return nullptr;
     }
 
     auto& database = PfnDatabase::get();
-    const uint64_t firstPfn = database.allocateContiguousPages(pageCount);
-    if (firstPfn == 0) {
-        rejectAllocation("ExHeap: allocation rejected (no contiguous physical pages)\r\n");
+    const uintptr_t baseAddress = g_reserveHeapRange(pageCount);
+    if (!baseAddress) {
+        rejectAllocation("ExHeap: allocation rejected (kernel VA range unavailable)\r\n");
         return nullptr;
     }
-
-    void* mapping = g_mapPages(firstPfn, pageCount);
-    const uintptr_t baseAddress = reinterpret_cast<uintptr_t>(mapping);
     const size_t mappedBytes = pageCount * pageSize;
-    if (!mapping || baseAddress > static_cast<uintptr_t>(-1) - mappedBytes) {
-        database.freeContiguousPages(firstPfn, pageCount);
-        rejectAllocation("ExHeap: allocation rejected (physical mapping unavailable)\r\n");
+    if (baseAddress > static_cast<uintptr_t>(-1) - mappedBytes) {
+        (void)g_releaseHeapRange(baseAddress, pageCount);
+        rejectAllocation("ExHeap: allocation rejected (address overflow)\r\n");
         return nullptr;
     }
-
-    const uintptr_t allocationEnd = baseAddress + mappedBytes;
-    const uintptr_t minimumUserAddress = baseAddress + sizeof(AllocationHeader);
+    const size_t pageListBytes = pageCount * sizeof(uint64_t);
+    const uintptr_t minimumUserAddress = baseAddress + pageListBytes + sizeof(AllocationHeader);
     if (minimumUserAddress > static_cast<uintptr_t>(-1) - (alignment - 1)) {
-        database.freeContiguousPages(firstPfn, pageCount);
+        (void)g_releaseHeapRange(baseAddress, pageCount);
         rejectAllocation("ExHeap: allocation rejected (address overflow)\r\n");
         return nullptr;
     }
     const uintptr_t userAddress =
         (minimumUserAddress + alignment - 1) & ~static_cast<uintptr_t>(alignment - 1);
+    const uintptr_t allocationEnd = baseAddress + mappedBytes;
     if (userAddress > allocationEnd || usableSize > allocationEnd - userAddress) {
-        database.freeContiguousPages(firstPfn, pageCount);
+        (void)g_releaseHeapRange(baseAddress, pageCount);
         rejectAllocation("ExHeap: allocation rejected (mapping too small)\r\n");
+        return nullptr;
+    }
+
+    auto* pfns = reinterpret_cast<uint64_t*>(baseAddress);
+    size_t mappedPages{};
+    for (; mappedPages < pageCount; ++mappedPages) {
+        const uint64_t pfn = database.allocatePage(false);
+        if (!pfn) break;
+        const uintptr_t pageAddress = baseAddress + mappedPages * pageSize;
+        if (!g_mapHeapPage(pageAddress, pfn)) {
+            database.freePage(pfn);
+            break;
+        }
+        pfns[mappedPages] = pfn;
+    }
+    if (mappedPages != pageCount) {
+        while (mappedPages) {
+            --mappedPages;
+            const uintptr_t pageAddress = baseAddress + mappedPages * pageSize;
+            const uint64_t pfn = pfns[mappedPages];
+            if (!g_unmapHeapPage(pageAddress))
+                stop("ExHeap: failed to unmap a partial allocation; stopping\r\n");
+            database.freePage(pfn);
+        }
+        if (!g_releaseHeapRange(baseAddress, pageCount))
+            stop("ExHeap: failed to return a partial kernel VA range; stopping\r\n");
+        rejectAllocation("ExHeap: allocation rejected (physical pages unavailable)\r\n");
         return nullptr;
     }
 
     auto* header = reinterpret_cast<AllocationHeader*>(
         userAddress - sizeof(AllocationHeader));
-    header->firstPfn = firstPfn;
     header->pageCount = pageCount;
     header->requestedSize = requestedSize;
     header->alignment = alignment;
@@ -238,10 +268,20 @@ void releaseMemory(void* pointer) noexcept {
         stop("ExHeap: invalid free rejected; stopping\r\n");
     }
 
-    const uint64_t firstPfn = header->firstPfn;
     const size_t pageCount = header->pageCount;
+    const uintptr_t baseAddress = header->baseAddress;
+    auto* pfns = reinterpret_cast<uint64_t*>(baseAddress);
     header->cookie = 0;
-    PfnDatabase::get().freeContiguousPages(firstPfn, pageCount);
+    auto& database = PfnDatabase::get();
+    for (size_t remaining = pageCount; remaining != 0; --remaining) {
+        const size_t index = remaining - 1;
+        const uint64_t pfn = pfns[index];
+        const uintptr_t pageAddress = baseAddress + index * micant::mm::PageSize4KB;
+        if (!g_unmapHeapPage(pageAddress))
+            stop("ExHeap: failed to unmap a released allocation; stopping\r\n");
+        database.freePage(pfn);
+    }
+    (void)g_releaseHeapRange(baseAddress, pageCount);
 }
 
 [[nodiscard]] bool fillAndVerify(void* memory, size_t size, uint8_t seed) noexcept {
@@ -256,6 +296,46 @@ void releaseMemory(void* pointer) noexcept {
         }
     }
     return matches;
+}
+
+[[nodiscard]] size_t availablePageCount(PfnDatabase& database) noexcept {
+    return database.getFreeCount() + database.getZeroedCount() + database.getStandbyCount();
+}
+
+[[nodiscard]] bool verifyExhaustionRollback(PfnDatabase& database,
+                                            size_t expectedAvailable) noexcept {
+    const size_t capacity = availablePageCount(database);
+    if (capacity < 4 || capacity > static_cast<size_t>(-1) / sizeof(uint64_t)) return false;
+    auto* heldPfns = static_cast<uint64_t*>(::operator new[](
+        capacity * sizeof(uint64_t), std::nothrow_t{}));
+    if (!heldPfns) return false;
+    void* primingAllocation = allocateMemory(1, kDefaultAlignment);
+    if (!primingAllocation) {
+        ::operator delete[](heldPfns, std::nothrow_t{});
+        return false;
+    }
+
+    const size_t availableAfterSetup = availablePageCount(database);
+    const size_t heldTarget = availableAfterSetup ? availableAfterSetup - 1 : 0;
+    size_t heldCount{};
+    for (; heldCount < heldTarget; ++heldCount) {
+        const uint64_t pfn = database.allocatePage(false);
+        if (!pfn) break;
+        heldPfns[heldCount] = pfn;
+    }
+    const size_t activeBeforeRollback = database.getActiveCount();
+    const uint64_t rejectionsBefore = g_rejectionLogCount;
+    void* partiallyMapped = allocateMemory(5000, kDefaultAlignment);
+    if (partiallyMapped) releaseMemory(partiallyMapped);
+    const bool rollbackOkay = heldCount == heldTarget &&
+        availablePageCount(database) == 1 &&
+        database.getActiveCount() == activeBeforeRollback &&
+        !partiallyMapped && g_rejectionLogCount == rejectionsBefore + 1;
+
+    while (heldCount) database.freePage(heldPfns[--heldCount]);
+    ::operator delete[](heldPfns, std::nothrow_t{});
+    releaseMemory(primingAllocation);
+    return rollbackOkay && availablePageCount(database) == expectedAvailable;
 }
 
 } // namespace
@@ -332,14 +412,17 @@ bool shutdownBootstrapCxxRuntime() noexcept {
 
 bool initializeBootstrapRuntime(
     BootstrapLogRoutine log,
-    BootstrapMapPagesRoutine mapPages
+    BootstrapReserveHeapRangeRoutine reserveRange,
+    BootstrapReleaseHeapRangeRoutine releaseRange,
+    BootstrapMapHeapPageRoutine mapPage,
+    BootstrapUnmapHeapPageRoutine unmapPage
 ) noexcept {
     if (g_runtimeInitialized) {
         logMessage(g_bootstrapLog,
                    "ExHeap: bootstrap initialization rejected (already initialized)\r\n");
         return false;
     }
-    if (!log || !mapPages) {
+    if (!log || !reserveRange || !releaseRange || !mapPage || !unmapPage) {
         logMessage(log, "ExHeap: bootstrap initialization rejected (missing callback)\r\n");
         return false;
     }
@@ -352,7 +435,10 @@ bool initializeBootstrapRuntime(
     }
 
     g_bootstrapLog = log;
-    g_mapPages = mapPages;
+    g_reserveHeapRange = reserveRange;
+    g_releaseHeapRange = releaseRange;
+    g_mapHeapPage = mapPage;
+    g_unmapHeapPage = unmapPage;
     g_runtimeInitialized = true;
     g_bootstrapLog("ExHeap: PFN-backed bootstrap allocator initialized\r\n");
     return true;
@@ -531,6 +617,12 @@ bool verifyBootstrapRuntime() noexcept {
     if (nothrowOverflow) {
         okay = false;
         ::operator delete(nothrowOverflow, std::nothrow_t{});
+    }
+
+    if (verifyExhaustionRollback(database, initialAvailable)) {
+        ++expectedRejections;
+    } else {
+        okay = false;
     }
 
     const size_t finalActive = database.getActiveCount();

@@ -86,6 +86,9 @@ constexpr uint64_t kPhysicalAccessBase = uint64_t{132} << 39;
 // device aperture instead of imposing the former 16 MiB framebuffer cap.
 constexpr uint64_t kDeviceMappingWindowSize = (uint64_t{1} << 39) - 4096;
 constexpr uint64_t kTestBase = uint64_t{130} << 39;
+constexpr uint64_t kBootstrapHeapBase = kTestBase + (uint64_t{1} << 30);
+constexpr uint64_t kBootstrapHeapEnd = kTestBase + (uint64_t{1} << 39);
+uint64_t g_bootstrapHeapNext{};
 constexpr uint64_t kKuserKernelAlias = uint64_t{131} << 39;
 constexpr uint64_t kKuserRootAlias = kKuserKernelAlias + 4096;
 constexpr uint64_t kUserStackBase = kUserBase + 4096;
@@ -883,6 +886,7 @@ uintptr_t MicantBootstrapSyscallStackFloor{};
 volatile uint64_t MicantTimerTicks{};
 volatile bool MicantTimerPreemptionEnabled{};
 volatile bool MicantTimerDispatchFailed{};
+volatile uint32_t MicantTimerDispatchFailureReason{};
 micant::ke::KThread* MicantTimerBootThread{};
 bool MicantTimerBootQueued{};
 uint64_t MicantTimerBootDeadline{24};
@@ -924,8 +928,10 @@ void MicantBootstrapTimerDispatch() noexcept {
     g_timerApic.write(0xb0 / 4, 0);
     if (g_kuserSharedMappingReady &&
         micant::hal::amd64::updateBootstrapKuserSharedData() !=
-            micant::hal::amd64::BootstrapClockStatus::Success)
+            micant::hal::amd64::BootstrapClockStatus::Success) {
         MicantTimerDispatchFailed = true;
+        MicantTimerDispatchFailureReason |= 1u;
+    }
 #if defined(MICANT_FREESTANDING) && defined(MICANT_BAREMETAL)
     micant::ke::clock_timer::onClockInterrupt();
 #endif
@@ -941,16 +947,22 @@ void MicantBootstrapTimerDispatch() noexcept {
     const uintptr_t expectedInterruptStack = current && current->kernelStackTop ? current->kernelStackTop :
         reinterpret_cast<uintptr_t>(g_kernelStack + sizeof(g_kernelStack));
     if (!current || g_syscallCpu.kernelRsp != expectedSyscallStack ||
-        micant::cpu::CpuHardwareEngine::get().getTss().rsp0 != expectedInterruptStack)
+        micant::cpu::CpuHardwareEngine::get().getTss().rsp0 != expectedInterruptStack) {
         MicantTimerDispatchFailed = true;
+        MicantTimerDispatchFailureReason |= 2u;
+    }
     if (MicantTimerBootThread && MicantTimerTicks >= MicantTimerBootDeadline && !MicantTimerBootQueued) {
-        if (!scheduler.readyKThread(MicantTimerBootThread)) MicantTimerDispatchFailed = true;
+        if (!scheduler.readyKThread(MicantTimerBootThread)) {
+            MicantTimerDispatchFailed = true;
+            MicantTimerDispatchFailureReason |= 4u;
+        }
         else MicantTimerBootQueued = true;
     }
     auto* next = scheduler.selectOnClockTick(current);
     if (next && !KiSwapContext(current, next, current != g_CurrentCpu.idleThread)) {
         if (!scheduler.cancelQuantumPreemption(current, next)) __builtin_trap();
         MicantTimerDispatchFailed = true;
+        MicantTimerDispatchFailureReason |= 8u;
     }
     KeLowerIrql(previous);
 }
@@ -1753,6 +1765,24 @@ void MicantProbePageFault(const uint64_t* frame) noexcept {
         logTrapValue("[MicaNT Hal] PF error=0x", frame[0]);
         logTrapValue("[MicaNT Hal] PF RIP=0x", frame[1]);
         logTrapValue("[MicaNT Hal] PF CS=0x", frame[2]);
+        // On a ring-0 fault the entry stub saved all GPRs immediately before
+        // the hardware frame. Keep source/destination/count visible for a
+        // fault inside REP MOVS without relying on an unavailable stack trace.
+        const uint64_t* saved = frame - 15;
+        logTrapValue("[MicaNT Hal] PF RAX=0x", saved[0]);
+        logTrapValue("[MicaNT Hal] PF RDX=0x", saved[2]);
+        logTrapValue("[MicaNT Hal] PF R8=0x", saved[7]);
+        logTrapValue("[MicaNT Hal] PF RDI=0x", saved[6]);
+        logTrapValue("[MicaNT Hal] PF RSI=0x", saved[5]);
+        logTrapValue("[MicaNT Hal] PF RCX=0x", saved[1]);
+        const uint64_t page = faultAddress & ~uint64_t{4095};
+        const uint64_t* table = g_pml4;
+        for (int shift = 39; shift >= 12; shift -= 9) {
+            const uint64_t entry = table[(page >> shift) & 511];
+            logTrapValue("[MicaNT Hal] PF PTE=0x", entry);
+            if (!(entry & kPresent) || (shift > 12 && (entry & 128))) break;
+            if (shift > 12) table = reinterpret_cast<const uint64_t*>(entry & kPhysicalMask);
+        }
         stopOnTrap();
     }
     MicantProbeReturn();
@@ -2623,6 +2653,51 @@ void releaseBootstrapPhysicalPage() noexcept {
     if (savedFlags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
 }
 
+bool copyBootstrapPhysicalPage(uint64_t destinationPfn, uint64_t sourcePfn) noexcept {
+    auto& database = mm::PfnDatabase::get();
+    if (destinationPfn == sourcePfn || !database.isActivePage(destinationPfn) ||
+        !database.isActivePage(sourcePfn) || destinationPfn > kPhysicalMask / mm::PageSize4KB ||
+        sourcePfn > kPhysicalMask / mm::PageSize4KB) return false;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    while (g_physicalAccessLock.test_and_set(std::memory_order_acquire))
+        __asm__ __volatile__("pause");
+    auto& sourcePte = g_physicalAccessTables[2][0];
+    auto& destinationPte = g_physicalAccessTables[2][1];
+    if ((sourcePte & kPresent) || (destinationPte & kPresent)) {
+        g_physicalAccessLock.clear(std::memory_order_release);
+        if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+        return false;
+    }
+    sourcePte = mm::PageTableEntry::create(sourcePfn, true, false, true).value;
+    destinationPte = mm::PageTableEntry::create(destinationPfn, true, false, true).value;
+    invalidatePage(kPhysicalAccessBase);
+    invalidatePage(kPhysicalAccessBase + mm::PageSize4KB);
+    auto* source = reinterpret_cast<const volatile uint8_t*>(kPhysicalAccessBase);
+    auto* destination = reinterpret_cast<volatile uint8_t*>(kPhysicalAccessBase + mm::PageSize4KB);
+    for (size_t index = 0; index < mm::PageSize4KB; ++index)
+        destination[index] = source[index];
+    sourcePte = 0;
+    destinationPte = 0;
+    invalidatePage(kPhysicalAccessBase);
+    invalidatePage(kPhysicalAccessBase + mm::PageSize4KB);
+    g_physicalAccessLock.clear(std::memory_order_release);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return true;
+}
+
+bool readBootstrapPhysicalPage(uint64_t sourcePfn, void* destination) noexcept {
+    auto& database = mm::PfnDatabase::get();
+    if (!destination || !database.isActivePage(sourcePfn) ||
+        sourcePfn > kPhysicalMask / mm::PageSize4KB) return false;
+    auto* source = mapBootstrapPhysicalPage(sourcePfn * mm::PageSize4KB);
+    if (!source) return false;
+    auto* output = static_cast<uint8_t*>(destination);
+    for (size_t index = 0; index < mm::PageSize4KB; ++index) output[index] = source[index];
+    releaseBootstrapPhysicalPage();
+    return true;
+}
+
 uint64_t translateBootstrapDmaRange(const void* address, size_t size) noexcept {
     if (!g_addressSpaceReady || !address || !size) return 0;
     const uint64_t virtualStart = reinterpret_cast<uintptr_t>(address);
@@ -3070,6 +3145,92 @@ bool verifyBootstrapPageTables() noexcept {
            database.getActiveCount() == active &&
            database.getFreeCount() + database.getZeroedCount() +
                database.getStandbyCount() == available;
+}
+
+bool reserveBootstrapPageTableStorage(size_t& reservedPages) noexcept {
+    reservedPages = 0;
+    if (!g_addressSpaceReady || !bootstrapPagingContext() || activePagingRoot() != g_pml4)
+        return false;
+    auto& database = mm::PfnDatabase::get();
+    const size_t availableBefore = database.getFreeCount() + database.getZeroedCount();
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const auto reserveTree = [&](auto&& reserveTree, const uint64_t* table,
+                                 uint8_t level) noexcept -> bool {
+        if (!table || !level) return false;
+        for (size_t index = 0; index < 512; ++index) {
+            const uint64_t entry = table[index];
+            if (!(entry & kPresent) || level == 1) continue;
+            if (level <= 3 && (entry & 128)) continue;
+            const uint64_t physical = entry & kPhysicalMask;
+            if (!physical) return false;
+            const uint64_t pfn = physical >> mm::PageShift4KB;
+            if (pfn < database.getTotalPages() && !database.reservePage(pfn)) return false;
+            if (!reserveTree(reserveTree,
+                    reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(physical)),
+                    static_cast<uint8_t>(level - 1))) return false;
+        }
+        return true;
+    };
+    const bool success = reserveTree(reserveTree, g_pml4, 4);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    if (!success) return false;
+    const size_t availableAfter = database.getFreeCount() + database.getZeroedCount();
+    if (availableAfter > availableBefore) return false;
+    reservedPages = availableBefore - availableAfter;
+    return true;
+}
+
+uintptr_t reserveBootstrapKernelHeapRange(size_t pageCount) noexcept {
+    if (!pageCount || pageCount > SIZE_MAX / mm::PageSize4KB) return 0;
+    const uint64_t bytes = static_cast<uint64_t>(pageCount) * mm::PageSize4KB;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    if (!g_bootstrapHeapNext) g_bootstrapHeapNext = kBootstrapHeapBase;
+    const uint64_t address = g_bootstrapHeapNext;
+    const bool valid = address >= kBootstrapHeapBase && address < kBootstrapHeapEnd &&
+        bytes <= kBootstrapHeapEnd - address;
+    if (valid) g_bootstrapHeapNext = address + bytes;
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return valid ? static_cast<uintptr_t>(address) : 0;
+}
+
+bool releaseBootstrapKernelHeapRange(uintptr_t address, size_t pageCount) noexcept {
+    if (!pageCount || pageCount > SIZE_MAX / mm::PageSize4KB) return false;
+    const uint64_t bytes = static_cast<uint64_t>(pageCount) * mm::PageSize4KB;
+    const uint64_t base = address;
+    if (base < kBootstrapHeapBase || base >= kBootstrapHeapEnd ||
+        bytes > kBootstrapHeapEnd - base) return false;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const bool tail = base + bytes == g_bootstrapHeapNext;
+    if (tail) g_bootstrapHeapNext = base;
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    // Non-tail frees leave a virtual hole. The slot is architectural system
+    // VA capacity; later Mm system-VA ownership can replace this bootstrap
+    // bump cursor without changing ExHeap's PFN ownership contract.
+    return tail;
+}
+
+bool mapBootstrapKernelHeapPage(uintptr_t address, uint64_t pfn) noexcept {
+    if (address < kBootstrapHeapBase || address >= kBootstrapHeapEnd ||
+        (address & mm::PageMask4KB) || !pfn || pfn > (kPhysicalMask >> mm::PageShift4KB))
+        return false;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const bool mapped = mapPage(address, pfn << mm::PageShift4KB, kWritable | kNoExecute);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return mapped;
+}
+
+bool unmapBootstrapKernelHeapPage(uintptr_t address) noexcept {
+    if (address < kBootstrapHeapBase || address >= kBootstrapHeapEnd ||
+        (address & mm::PageMask4KB)) return false;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const bool unmapped = unmapPage(address, false);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return unmapped;
 }
 
 bool mapBootstrapUserMemory(uint64_t address, const void* backing, size_t size,
@@ -3624,6 +3785,7 @@ static bool verifyClockInterruptDelivery(BootstrapLocalApic& apic) noexcept {
         logTrapValue("[MicaNT Hal] Timer lock masked=0x", lockMaskedInterrupts);
         logTrapValue("[MicaNT Hal] Timer IRQL masked=0x", irqlMaskedClock);
         logTrapValue("[MicaNT Hal] Timer delivered=0x", delivered);
+        logTrapValue("[MicaNT Hal] Timer failure reason=0x", MicantTimerDispatchFailureReason);
     }
     return success;
 }
@@ -3645,7 +3807,15 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
             g_timerApic[0x320 / 4] != (0xd1 | (1u << 17)) ||
             g_timerApic[0x380 / 4] != g_schedulerTimerPeriod ||
             MicantTimerDispatchFailed) {
-            if (g_log) g_log("[MicaNT Hal] Live timer state precondition failed\r\n");
+            if (g_log) {
+                g_log("[MicaNT Hal] Live timer state precondition failed\r\n");
+                logTrapValue("[MicaNT Hal] Live timer APIC=0x", g_timerApic.available());
+                logTrapValue("[MicaNT Hal] Live timer IRQL=0x", ke::KeGetCurrentIrql());
+                logTrapValue("[MicaNT Hal] Live timer LVT=0x", g_timerApic[0x320 / 4]);
+                logTrapValue("[MicaNT Hal] Live timer period=0x", g_schedulerTimerPeriod);
+                logTrapValue("[MicaNT Hal] Live timer current=0x", g_timerApic[0x380 / 4]);
+                logTrapValue("[MicaNT Hal] Live timer dispatch failed=0x", MicantTimerDispatchFailed);
+            }
             return false;
         }
         // The live clock owns its APIC and monotonic ticks; do not reset either.
@@ -3725,6 +3895,7 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
     g_idt[0xd1] = gate(reinterpret_cast<uint64_t>(MicantBootstrapTimerInterrupt));
     g_idt[0xff] = gate(reinterpret_cast<uint64_t>(MicantBootstrapSpuriousInterrupt));
     MicantTimerTicks = 0;
+    MicantTimerDispatchFailureReason = 0;
     g_clockIrqlMaskReady = true;
     setBootstrapClockIrqlMask(ke::KeGetCurrentIrql());
     apic[0xf0 / 4] = (savedSvr & ~0xffu) | 0x1ff;
@@ -3739,6 +3910,7 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
         MicantTimerTicks = 0;
         MicantTimerBootThread = nullptr;
         MicantTimerDispatchFailed = false;
+        MicantTimerDispatchFailureReason = 0;
         MicantTimerPreemptionEnabled = preemptionVerified;
         userPreemption = preemptionVerified && MicantTestPsUserPreemption() &&
             MicantTimerTicks > 0 && !MicantTimerDispatchFailed;
@@ -4047,6 +4219,7 @@ bool startBootstrapSchedulerClock() noexcept {
     g_idt[0xd1] = gate(reinterpret_cast<uint64_t>(MicantBootstrapTimerInterrupt));
     g_idt[0xff] = gate(reinterpret_cast<uint64_t>(MicantBootstrapSpuriousInterrupt));
     MicantTimerTicks = 0;
+    MicantTimerDispatchFailureReason = 0;
     MicantTimerBootThread = nullptr;
     MicantTimerDispatchFailed = false;
     MicantTimerPreemptionEnabled = true;

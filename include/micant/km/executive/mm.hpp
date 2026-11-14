@@ -129,6 +129,10 @@ struct PhysicalPageRange {
 };
 
 using ZeroPhysicalPageRoutine = void (*)(uint64_t pfn) noexcept;
+using CopyPhysicalPageRoutine = bool (*)(uint64_t destinationPfn,
+                                         uint64_t sourcePfn) noexcept;
+using ReadPhysicalPageRoutine = bool (*)(uint64_t sourcePfn,
+                                         void* destination) noexcept;
 
 /**
  * @brief Physical Page Frame Number (PFN) Database.
@@ -155,6 +159,8 @@ private:
     PageList modifiedList_{};
     size_t activeCount_{0};
     ZeroPhysicalPageRoutine zeroPhysicalPage_{nullptr};
+    CopyPhysicalPageRoutine copyPhysicalPage_{nullptr};
+    ReadPhysicalPageRoutine readPhysicalPage_{nullptr};
 
 #if defined(MICANT_FREESTANDING)
     constexpr PfnDatabase() noexcept = default;
@@ -349,6 +355,8 @@ public:
         entries_ = ownedEntries_;
         resetEntriesLocked();
         zeroPhysicalPage_ = nullptr;
+        copyPhysicalPage_ = nullptr;
+        readPhysicalPage_ = nullptr;
         for (uint64_t i = 0; i < totalPages; ++i) {
             if (i < 256) continue;
             if ((i & 1) == 0) {
@@ -363,7 +371,9 @@ public:
     [[nodiscard]] NtStatus initializeFromBootMemory(
         std::span<Mmpfn> storage,
         std::span<const PhysicalPageRange> availableRanges,
-        ZeroPhysicalPageRoutine zeroPhysicalPage
+        ZeroPhysicalPageRoutine zeroPhysicalPage,
+        CopyPhysicalPageRoutine copyPhysicalPage = nullptr,
+        ReadPhysicalPageRoutine readPhysicalPage = nullptr
     ) noexcept {
         Guard guard(*this);
         if (!validBootMemoryRanges(storage, availableRanges, zeroPhysicalPage)) {
@@ -374,6 +384,8 @@ public:
 #endif
         entries_ = storage;
         zeroPhysicalPage_ = zeroPhysicalPage;
+        copyPhysicalPage_ = copyPhysicalPage;
+        readPhysicalPage_ = readPhysicalPage;
         resetEntriesLocked();
         for (const auto& range : availableRanges) {
             const uint64_t end = range.firstPfn + range.pageCount;
@@ -479,6 +491,25 @@ public:
         return pfn;
     }
 
+    // Keep firmware page-table pages that remain referenced by the kernel's
+    // inherited identity mappings out of every allocator list. They are
+    // reserved rather than active: Mm did not acquire an owning reference and
+    // must never release them as ordinary allocated pages.
+    [[nodiscard]] bool reservePage(uint64_t pfn) noexcept {
+        Guard guard(*this);
+        if (!pfn || pfn >= entries_.size()) return false;
+        auto& entry = entries_[static_cast<size_t>(pfn)];
+        if (entry.location == PageLocation::BadPageList) return true;
+        if (entry.location == PageLocation::ActiveAndValid) return false;
+        if (listFor(entry.location) && !removeFromListLocked(pfn)) return false;
+        entry.location = PageLocation::BadPageList;
+        entry.referenceCount = 0;
+        entry.modified = false;
+        entry.flink = 0;
+        entry.blink = 0;
+        return true;
+    }
+
     [[nodiscard]] uint64_t allocatePageInRange(uint64_t firstPfn, uint64_t lastPfn) {
         Guard guard(*this);
         if (!firstPfn || firstPfn > lastPfn || firstPfn >= entries_.size()) return 0;
@@ -540,6 +571,46 @@ public:
         zeroPhysicalPage_(pfn);
         entries_[static_cast<size_t>(pfn)].modified = false;
         return true;
+    }
+
+    [[nodiscard]] bool isActivePage(uint64_t pfn) const noexcept {
+        Guard guard(*this);
+        return pfn != 0 && pfn < entries_.size() &&
+            entries_[static_cast<size_t>(pfn)].location == PageLocation::ActiveAndValid &&
+            entries_[static_cast<size_t>(pfn)].referenceCount != 0;
+    }
+
+    [[nodiscard]] bool isAvailablePage(uint64_t pfn) const noexcept {
+        Guard guard(*this);
+        if (!pfn || pfn >= entries_.size()) return false;
+        const auto location = entries_[static_cast<size_t>(pfn)].location;
+        return location == PageLocation::FreePageList ||
+            location == PageLocation::ZeroedPageList ||
+            location == PageLocation::StandbyPageList;
+    }
+
+    [[nodiscard]] bool copyPage(uint64_t destinationPfn, uint64_t sourcePfn) noexcept {
+        if (!isActivePage(destinationPfn) || !isActivePage(sourcePfn)) return false;
+        if (copyPhysicalPage_) return copyPhysicalPage_(destinationPfn, sourcePfn);
+#if !defined(MICANT_FREESTANDING)
+        std::memcpy(reinterpret_cast<void*>(destinationPfn << PageShift4KB),
+                    reinterpret_cast<const void*>(sourcePfn << PageShift4KB), PageSize4KB);
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    [[nodiscard]] bool readPage(uint64_t sourcePfn, void* destination) noexcept {
+        if (!destination || !isActivePage(sourcePfn)) return false;
+        if (readPhysicalPage_) return readPhysicalPage_(sourcePfn, destination);
+#if !defined(MICANT_FREESTANDING)
+        std::memcpy(destination, reinterpret_cast<const void*>(sourcePfn << PageShift4KB),
+                    PageSize4KB);
+        return true;
+#else
+        return false;
+#endif
     }
 
     void setModified(uint64_t pfn, bool modified) {
@@ -1569,8 +1640,11 @@ public:
                     failure = NtStatus::NoMemory;
                     break;
                 }
-                std::memcpy(reinterpret_cast<void*>(privatePfn << PageShift4KB),
-                            reinterpret_cast<const void*>(page->pfn << PageShift4KB), PageSize4KB);
+                if (!db.copyPage(privatePfn, page->pfn)) {
+                    db.freePage(privatePfn);
+                    failure = NtStatus::Unsuccessful;
+                    break;
+                }
                 page->pfn = privatePfn;
                 page->ownsPfn = true;
             }
@@ -2026,9 +2100,11 @@ public:
                 if (guarded && !backend_.guard(backend_.context, va, false)) return NtStatus::Unsuccessful;
                 if (committed->protection == PAGE_NOACCESS) {
                     // The managed backend retains the PFN for an inaccessible
-                    // image PTE. Copy through its supervisor physical mapping.
-                    std::memcpy(page.get(), reinterpret_cast<const void*>(
-                        committed->pfn << PageShift4KB), PageSize4KB);
+                    // image PTE. Read it through the validated physical mapper.
+                    if (!PfnDatabase::get().readPage(committed->pfn, page.get())) {
+                        if (!switchRoot(targetRoot)) ownershipInvariantFailure();
+                        return NtStatus::Unsuccessful;
+                    }
                 } else {
                     std::memcpy(page.get(), reinterpret_cast<const void*>(va), PageSize4KB);
                 }
@@ -2278,8 +2354,10 @@ private:
                 db.freePage(privatePfn);
                 return NtStatus::Unsuccessful;
             }
-            std::memcpy(reinterpret_cast<void*>(privatePfn << PageShift4KB),
-                        reinterpret_cast<const void*>(page->pfn << PageShift4KB), PageSize4KB);
+            if (!db.copyPage(privatePfn, page->pfn)) {
+                db.freePage(privatePfn);
+                return NtStatus::Unsuccessful;
+            }
             const uint32_t hardwareProtection = (page->protection == PAGE_EXECUTE_WRITECOPY ||
                                                  page->protection == PAGE_EXECUTE_READWRITE)
                 ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;

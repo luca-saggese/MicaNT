@@ -26,6 +26,17 @@ enum class EfiMemoryType : uint32_t {
     EfiMaxMemoryType               = 15
 };
 
+inline constexpr uint64_t EFI_MEMORY_RUNTIME = uint64_t{1} << 63;
+
+// After ExitBootServices the OS may reclaim conventional memory and memory
+// previously owned by UEFI Boot Services. Loader and Runtime Services memory
+// remains owned by the handoff/kernel or firmware respectively.
+constexpr bool isReclaimableAfterExitBootServices(EfiMemoryType type) noexcept {
+    return type == EfiMemoryType::EfiConventionalMemory ||
+        type == EfiMemoryType::EfiBootServicesCode ||
+        type == EfiMemoryType::EfiBootServicesData;
+}
+
 struct EfiMemoryDescriptor {
     uint32_t type{0};
     uint32_t pad{0};

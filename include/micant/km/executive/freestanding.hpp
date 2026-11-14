@@ -6,12 +6,18 @@
 namespace micant::ex {
 
 using BootstrapLogRoutine = void (*)(const char*) noexcept;
-using BootstrapMapPagesRoutine = void* (*)(uint64_t firstPfn, size_t pageCount) noexcept;
+using BootstrapReserveHeapRangeRoutine = uintptr_t (*)(size_t pageCount) noexcept;
+using BootstrapReleaseHeapRangeRoutine = bool (*)(uintptr_t address, size_t pageCount) noexcept;
+using BootstrapMapHeapPageRoutine = bool (*)(uintptr_t address, uint64_t pfn) noexcept;
+using BootstrapUnmapHeapPageRoutine = bool (*)(uintptr_t address) noexcept;
 
 // Bootstrap-only: single-CPU with interrupts disabled; not IRQL or scheduler support.
 bool initializeBootstrapRuntime(
     BootstrapLogRoutine log,
-    BootstrapMapPagesRoutine mapPages
+    BootstrapReserveHeapRangeRoutine reserveRange,
+    BootstrapReleaseHeapRangeRoutine releaseRange,
+    BootstrapMapHeapPageRoutine mapPage,
+    BootstrapUnmapHeapPageRoutine unmapPage
 ) noexcept;
 bool verifyBootstrapRuntime() noexcept;
 

@@ -264,7 +264,9 @@ if (MICANT_ENABLE_BAREMETAL)
             "${CMAKE_SOURCE_DIR}/tools/dlls/ntdll.cpp"
             "${CMAKE_SOURCE_DIR}/tools/dlls/native_stack_probe.cpp" -o "${_ntdll_probe_dll}"
         DEPENDS "${CMAKE_SOURCE_DIR}/tools/dlls/ntdll.cpp"
-            "${CMAKE_SOURCE_DIR}/tools/dlls/native_stack_probe.cpp" VERBATIM)
+            "${CMAKE_SOURCE_DIR}/tools/dlls/native_stack_probe.cpp"
+            "${CMAKE_SOURCE_DIR}/include/micant/shared/context.hpp"
+            "${CMAKE_SOURCE_DIR}/include/micant/shared/syscall_numbers.hpp" VERBATIM)
     add_custom_command(OUTPUT "${_ntdll_probe_header}"
         COMMAND "${CMAKE_COMMAND}" -DINPUT=${_ntdll_probe_dll} -DOUTPUT=${_ntdll_probe_header}
             -P "${CMAKE_SOURCE_DIR}/scripts/embed_binary.cmake"
@@ -280,7 +282,9 @@ if (MICANT_ENABLE_BAREMETAL)
             "${CMAKE_SOURCE_DIR}/tools/dlls/ntdll.cpp"
             "${CMAKE_SOURCE_DIR}/tools/dlls/native_stack_probe.cpp" -o "${_ntdll_process_dll}"
         DEPENDS "${CMAKE_SOURCE_DIR}/tools/dlls/ntdll.cpp"
-            "${CMAKE_SOURCE_DIR}/tools/dlls/native_stack_probe.cpp" VERBATIM)
+            "${CMAKE_SOURCE_DIR}/tools/dlls/native_stack_probe.cpp"
+            "${CMAKE_SOURCE_DIR}/include/micant/shared/context.hpp"
+            "${CMAKE_SOURCE_DIR}/include/micant/shared/syscall_numbers.hpp" VERBATIM)
     add_custom_command(OUTPUT "${_ntdll_process_header}"
         COMMAND "${CMAKE_COMMAND}" -DINPUT=${_ntdll_process_dll} -DOUTPUT=${_ntdll_process_header}
             -P "${CMAKE_SOURCE_DIR}/scripts/embed_binary.cmake"

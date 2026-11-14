@@ -79,17 +79,40 @@ bool buildSystemPath(const char* leaf, char16_t* output, size_t capacity,
     return true;
 }
 
-// Section deletion is deferred to a passive worker once the clock runs.
-void drainDeferredDeletes() noexcept {
+// Process and section deletion is deferred to the existing passive reaper
+// once the scheduler clock runs. Let that owner finish before taking or
+// comparing the PFN baseline.
+bool drainDeferredCleanup(size_t expectedActivePages) noexcept {
     using namespace micant;
+    auto* current = ke::KeGetCurrentThread();
+    if (!current || !hal::amd64::bootstrapSchedulerClockActive()) return false;
+    uint64_t previousRoot{};
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(previousRoot));
+    if (!hal::amd64::switchProcessPagingRootByPhysical(
+            hal::amd64::bootstrapKernelPagingRoot())) return false;
     uint64_t flags{};
-    __asm__ __volatile__("pushfq; popq %0; sti" : "=r"(flags) : : "memory");
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const auto priority = current->priority;
+    current->priority = ke::PRIORITY_IDLE;
+    if (ke::g_CurrentCpu.serviceDeferredCleanup)
+        ke::g_CurrentCpu.serviceDeferredCleanup();
     const uint64_t start = hal::amd64::bootstrapSchedulerClockTicks();
-    for (size_t spin = 0; spin < 50000000 && io::IoDeferredFileDeletesPending() &&
-         hal::amd64::bootstrapSchedulerClockTicks() - start < 100; ++spin)
+    __asm__ __volatile__("sti" : : : "memory");
+    bool drained = false;
+    for (size_t spin = 0; spin < 50000000 &&
+         hal::amd64::bootstrapSchedulerClockTicks() - start < 100; ++spin) {
+        if (!io::IoDeferredFileDeletesPending() && !ps::detail::deferredCleanupPending() &&
+            mm::PfnDatabase::get().getActiveCount() == expectedActivePages) {
+            drained = true;
+            break;
+        }
         __asm__ __volatile__("pause");
+    }
     __asm__ __volatile__("cli" : : : "memory");
+    current->priority = priority;
+    const bool restored = hal::amd64::switchProcessPagingRootByPhysical(previousRoot);
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return drained && restored;
 }
 
 } // namespace
@@ -100,6 +123,7 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
     using namespace micant;
     if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return false;
 
+    if (!drainDeferredCleanup(mm::PfnDatabase::get().getActiveCount())) return false;
     const size_t activeBefore = mm::PfnDatabase::get().getActiveCount();
     char16_t imagePath[256]{};
     size_t imagePathLength{};
@@ -274,7 +298,14 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         processHandle.value = 0;
     }
 
-    drainDeferredDeletes();
+    if (!drainDeferredCleanup(activeBefore)) return false;
     // Every PFN the image path acquired must be released again.
-    return mm::PfnDatabase::get().getActiveCount() == activeBefore;
+    const size_t activeAfter = mm::PfnDatabase::get().getActiveCount();
+    if (activeAfter != activeBefore) {
+        reportFailure("[MicaNT Mm] File-backed image PFN accounting delta",
+            static_cast<NtStatus>(activeAfter > activeBefore
+                ? activeAfter - activeBefore : activeBefore - activeAfter));
+        return false;
+    }
+    return true;
 }

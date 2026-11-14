@@ -663,29 +663,6 @@ void zeroPhysicalPage(uint64_t pfn) noexcept {
     micant::hal::amd64::releaseBootstrapPhysicalPage();
 }
 
-void* mapBootstrapHeapPages(uint64_t firstPfn, size_t pageCount) noexcept {
-    const uint64_t totalPages = g_bootPfnCount;
-    if (firstPfn < 256 || !pageCount || firstPfn >= totalPages ||
-        pageCount > totalPages - firstPfn) {
-        return nullptr;
-    }
-    if (firstPfn > UINT64_MAX / 4096 || pageCount > (UINT64_MAX / 4096) - firstPfn)
-        return nullptr;
-    const uint64_t physicalStart = firstPfn * 4096;
-    // The bootstrap executive heap retains a pointer for the allocation's
-    // lifetime, so an ephemeral PFN aperture is not a valid heap mapping.
-    // Accept only a complete, contiguous identity mapping here; Mm accesses
-    // other validated RAM through the temporary HAL aperture.
-    for (size_t index = 0; index < pageCount; ++index) {
-        const uint64_t physical = firstPfn + index;
-        if (physical >= g_bootPfnCount || physical > UINT64_MAX / 4096 ||
-            micant::hal::amd64::translateBootstrapAddress(
-                reinterpret_cast<const void*>(static_cast<uintptr_t>(physical * 4096))) != physical * 4096)
-            return nullptr;
-    }
-    return reinterpret_cast<void*>(static_cast<uintptr_t>(physicalStart));
-}
-
 micant::NtStatus probeBootstrapRange(uintptr_t address, size_t size, bool writable,
                                      micant::mm::KPROCESSOR_MODE mode) noexcept {
     uint64_t flags{};
@@ -785,6 +762,14 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     }
     size_t rangeCount{};
     uint64_t deferredPages{};
+    uint64_t reclaimedBootServicesPages{};
+    uint64_t stackPointer{};
+    __asm__ __volatile__("movq %%rsp, %0" : "=r"(stackPointer));
+    const uint64_t activeStackPhysical = hal::amd64::translateBootstrapAddress(
+        reinterpret_cast<const void*>(static_cast<uintptr_t>(stackPointer)));
+    const uint64_t handoffPhysical = hal::amd64::translateBootstrapAddress(&handoff);
+    if (!activeStackPhysical || !handoffPhysical)
+        stopWithError("[MicaNT Mm] Active UEFI bootstrap stack/handoff is not mapped\r\n");
     for (size_t index = 0; index < descriptorCount; ++index) {
         uefi::EfiMemoryDescriptor descriptor{};
         if (!readBootMemoryDescriptor(handoff, index, descriptor))
@@ -803,10 +788,24 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
                 stopWithError("[MicaNT Mm] Overlapping firmware memory descriptors\r\n");
             }
         }
-        if (descriptor.type != static_cast<uint32_t>(
-                uefi::EfiMemoryType::EfiConventionalMemory)) continue;
+        const auto memoryType = static_cast<uefi::EfiMemoryType>(descriptor.type);
+        if (!uefi::isReclaimableAfterExitBootServices(memoryType)) continue;
+        const bool containsActiveBootstrapData =
+            (descriptor.physicalStart <= activeStackPhysical && activeStackPhysical < end) ||
+            (descriptor.physicalStart <= handoffPhysical && handoffPhysical < end);
+        if (containsActiveBootstrapData) {
+            deferredPages += descriptor.numberOfPages;
+            serialWrite("[MicaNT Mm] Protected active EFI stack/handoff descriptor type=");
+            serialWriteNumber(descriptor.type);
+            serialWrite(" start=");
+            serialWriteNumber(descriptor.physicalStart);
+            serialWrite(" pages=");
+            serialWriteNumber(descriptor.numberOfPages);
+            serialWrite("\r\n");
+            continue;
+        }
         uint64_t enrolled{};
-        if (!(descriptor.attribute & (uint64_t{1} << 63))) {
+        if (!(descriptor.attribute & uefi::EFI_MEMORY_RUNTIME)) {
             uint64_t first = descriptor.physicalStart / 4096;
             uint64_t last = end / 4096;
             if (first < 256) first = 256;
@@ -842,17 +841,110 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
             }
         }
         deferredPages += descriptor.numberOfPages - enrolled;
+        if (memoryType == uefi::EfiMemoryType::EfiBootServicesCode ||
+            memoryType == uefi::EfiMemoryType::EfiBootServicesData)
+            reclaimedBootServicesPages += enrolled;
     }
     auto& database = mm::PfnDatabase::get();
     serialWrite("[MicaNT Mm] Initializing PFN database from UEFI ranges\r\n");
     if (database.initializeFromBootMemory(
             metadata, std::span(ranges.data(), rangeCount),
-            zeroPhysicalPage) != NtStatus::Success ||
+            zeroPhysicalPage, hal::amd64::copyBootstrapPhysicalPage,
+            hal::amd64::readBootstrapPhysicalPage) != NtStatus::Success ||
         database.getFreeCount() < 3 || database.getZeroedCount() != 0 ||
         database.getActiveCount() != 0) {
         stopWithError("[MicaNT Mm] Canonical PFN database initialization failed\r\n");
     }
+    size_t mmioDescriptorCount{};
+    size_t excludedDescriptorCount{};
+    constexpr uint64_t displacedPfn = micant::UserSharedDataAddress / 4096;
+    for (size_t index = 0; index < descriptorCount; ++index) {
+        uefi::EfiMemoryDescriptor descriptor{};
+        if (!readBootMemoryDescriptor(handoff, index, descriptor))
+            stopWithError("[MicaNT Mm] Firmware memory map descriptor is inaccessible\r\n");
+        const auto memoryType = static_cast<uefi::EfiMemoryType>(descriptor.type);
+        if (memoryType == uefi::EfiMemoryType::EfiMemoryMappedIO) ++mmioDescriptorCount;
+        const uint64_t first = descriptor.physicalStart / 4096;
+        const uint64_t last = first + descriptor.numberOfPages;
+        if (first >= metadata.size() || first + descriptor.numberOfPages < first) continue;
+        uint64_t sampleFirst = first < 256 ? 256 : first;
+        uint64_t sampleLast = last ? last - 1 : 0;
+        if (sampleFirst == displacedPfn) ++sampleFirst;
+        if (sampleLast == displacedPfn && sampleLast > sampleFirst) --sampleLast;
+        const bool hasSample = sampleFirst < last && sampleLast >= sampleFirst &&
+            sampleLast < metadata.size() && sampleFirst != displacedPfn &&
+            sampleLast != displacedPfn;
+        if (!hasSample) continue;
+        const bool activeBootstrapDescriptor =
+            (descriptor.physicalStart <= activeStackPhysical && activeStackPhysical <
+                descriptor.physicalStart + descriptor.numberOfPages * 4096) ||
+            (descriptor.physicalStart <= handoffPhysical && handoffPhysical <
+                descriptor.physicalStart + descriptor.numberOfPages * 4096);
+        const bool expectedAvailable = !activeBootstrapDescriptor &&
+            uefi::isReclaimableAfterExitBootServices(memoryType) &&
+            !(descriptor.attribute & uefi::EFI_MEMORY_RUNTIME);
+        if (!expectedAvailable) ++excludedDescriptorCount;
+        if (database.isAvailablePage(sampleFirst) != expectedAvailable ||
+            database.isAvailablePage(sampleLast) != expectedAvailable) {
+            stopWithError("[MicaNT Mm] PFN availability disagrees with UEFI descriptor type\r\n");
+        }
+    }
+    uint64_t largestHoleStart{};
+    uint64_t largestHolePages{};
+    for (size_t left = 0; left < descriptorCount; ++left) {
+        uefi::EfiMemoryDescriptor firstDescriptor{};
+        if (!readBootMemoryDescriptor(handoff, left, firstDescriptor))
+            stopWithError("[MicaNT Mm] Firmware memory map descriptor is inaccessible\r\n");
+        const uint64_t firstEnd = firstDescriptor.physicalStart +
+            firstDescriptor.numberOfPages * 4096;
+        uint64_t nearestFollowingStart = UINT64_MAX;
+        for (size_t right = 0; right < descriptorCount; ++right) {
+            uefi::EfiMemoryDescriptor nextDescriptor{};
+            if (!readBootMemoryDescriptor(handoff, right, nextDescriptor))
+                stopWithError("[MicaNT Mm] Firmware memory map descriptor is inaccessible\r\n");
+            if (nextDescriptor.physicalStart >= firstEnd &&
+                nextDescriptor.physicalStart < nearestFollowingStart)
+                nearestFollowingStart = nextDescriptor.physicalStart;
+        }
+        if (nearestFollowingStart != UINT64_MAX) {
+            const uint64_t gapStart = firstEnd / 4096;
+            const uint64_t gapEnd = nearestFollowingStart / 4096;
+            if (gapStart >= 256 && gapEnd > gapStart && gapEnd - gapStart > largestHolePages) {
+                largestHoleStart = gapStart;
+                largestHolePages = gapEnd - gapStart;
+            }
+        }
+    }
+    uint64_t holeSamplePfn{};
+    if (largestHolePages) {
+        holeSamplePfn = largestHoleStart + largestHolePages / 2;
+        if (holeSamplePfn < metadata.size() && database.isAvailablePage(holeSamplePfn)) {
+            serialWrite("[MicaNT Mm] UEFI hole sample unexpectedly available pfn/start/pages=");
+            serialWriteNumber(holeSamplePfn);
+            serialWrite("/");
+            serialWriteNumber(largestHoleStart);
+            serialWrite("/");
+            serialWriteNumber(largestHolePages);
+            serialWrite("\r\n");
+            stopWithError("[MicaNT Mm] PFN allocator enrolled a firmware-map hole\r\n");
+        }
+    }
+    serialWrite("[MicaNT Mm] UEFI ranges/excluded/MMIO/hole PFN verified=");
+    serialWriteNumber(rangeCount);
+    serialWrite("/");
+    serialWriteNumber(excludedDescriptorCount);
+    serialWrite("/");
+    serialWriteNumber(mmioDescriptorCount);
+    serialWrite("/");
+    serialWriteNumber(holeSamplePfn);
+    serialWrite("\r\n");
     serialWrite("[MicaNT Mm] Dynamic PFN database initialized\r\n");
+    size_t reservedPageTables{};
+    if (!hal::amd64::reserveBootstrapPageTableStorage(reservedPageTables))
+        stopWithError("[MicaNT Mm] Could not reserve inherited page-table PFNs\r\n");
+    serialWrite("[MicaNT Mm] Inherited page-table PFNs reserved=");
+    serialWriteNumber(reservedPageTables);
+    serialWrite("\r\n");
     const size_t initialFree = database.getFreeCount();
     serialWrite("[MicaNT Mm] PFN probe allocate\r\n");
     const uint64_t pfn = database.allocatePage(false);
@@ -912,16 +1004,42 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     const uint64_t highPfn = database.getTotalPages() > oldPfnBoundary
         ? database.allocatePageInRange(oldPfnBoundary, database.getTotalPages() - 1) : 0;
     if (highPfn) {
+        const uint64_t copyPfn = database.allocatePage(false);
+        if (!copyPfn || copyPfn == highPfn) {
+            if (copyPfn) database.freePage(copyPfn);
+            database.freePage(highPfn);
+            stopWithError("[MicaNT Mm] Physical copy destination allocation failed\r\n");
+        }
         auto* highBytes = physicalPageBytes(highPfn);
-        highBytes[0] = 0x6d;
-        highBytes[4095] = 0xa7;
-        const bool highPageMapped = highBytes[0] == 0x6d && highBytes[4095] == 0xa7;
+        for (size_t index = 0; index < 4096; ++index)
+            highBytes[index] = static_cast<uint8_t>((index * 37u + 0x6du) & 0xffu);
+        const bool highPageMapped = highBytes[0] == 0x6d &&
+            highBytes[4095] == static_cast<uint8_t>((4095u * 37u + 0x6du) & 0xffu);
         hal::amd64::releaseBootstrapPhysicalPage();
+        if (!database.copyPage(copyPfn, highPfn)) {
+            database.freePage(copyPfn);
+            database.freePage(highPfn);
+            stopWithError("[MicaNT Mm] High PFN physical copy failed\r\n");
+        }
+        auto* copiedBytes = physicalPageBytes(copyPfn);
+        bool copyMatches = true;
+        for (size_t index = 0; index < 4096; ++index) {
+            if (copiedBytes[index] != static_cast<uint8_t>((index * 37u + 0x6du) & 0xffu)) {
+                copyMatches = false;
+                break;
+            }
+        }
+        hal::amd64::releaseBootstrapPhysicalPage();
+        uint8_t readback[4096]{};
+        const bool readMatches = database.readPage(highPfn, readback) &&
+            readback[0] == 0x6d &&
+            readback[4095] == static_cast<uint8_t>((4095u * 37u + 0x6du) & 0xffu);
+        database.freePage(copyPfn);
         database.freePage(highPfn);
         database.zeroPage(highPfn);
         const uint64_t reclaimed = database.allocatePageInRange(highPfn, highPfn);
-        if (!highPageMapped || reclaimed != highPfn) {
-            stopWithError("[MicaNT Mm] PFN above 1 GiB mapping/reclamation failed\r\n");
+        if (!highPageMapped || !copyMatches || !readMatches || reclaimed != highPfn) {
+            stopWithError("[MicaNT Mm] PFN above 1 GiB map/copy/reclamation failed\r\n");
         }
         database.freePage(reclaimed);
         if (database.getActiveCount() != 0 || database.getFreeCount() != initialFree) {
@@ -935,6 +1053,8 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     serialWriteNumber(initialFree);
     serialWrite("; deferred conventional pages=");
     serialWriteNumber(deferredPages);
+    serialWrite("; reclaimed Boot Services pages=");
+    serialWriteNumber(reclaimedBootServicesPages);
     serialWrite("\r\n");
     serialWrite("[MicaNT Mm] Canonical physical allocation, zeroing and release verified\r\n");
 }
@@ -2370,6 +2490,10 @@ bool launchExplorerProcess() noexcept {
         g_explorerProcessHandle = 0;
         serialWrite("[MicaNT Explorer] Ps process creation failed status=");
         serialWriteNumber(static_cast<uint32_t>(result));
+        serialWrite(" free PFNs=");
+        serialWriteNumber(mm::PfnDatabase::get().getFreeCount());
+        serialWrite(" zeroed PFNs=");
+        serialWriteNumber(mm::PfnDatabase::get().getZeroedCount());
         serialWrite("\r\n");
         return false;
     }
@@ -3864,7 +3988,11 @@ extern "C" micant::NtStatus KiSystemStartup(
         stopWithError("[MicaNT Mm] PFN-backed page-table verification failed\r\n");
     }
     serialWrite("[MicaNT Mm] PFN-backed page tables, TLB and reclaim verified\r\n");
-    if (!micant::ex::initializeBootstrapRuntime(serialWrite, mapBootstrapHeapPages) ||
+    if (!micant::ex::initializeBootstrapRuntime(serialWrite,
+            micant::hal::amd64::reserveBootstrapKernelHeapRange,
+            micant::hal::amd64::releaseBootstrapKernelHeapRange,
+            micant::hal::amd64::mapBootstrapKernelHeapPage,
+            micant::hal::amd64::unmapBootstrapKernelHeapPage) ||
         !micant::ex::verifyBootstrapRuntime()) {
         stopWithError("[MicaNT Ex] Bootstrap runtime verification failed\r\n");
     }

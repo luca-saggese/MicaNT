@@ -12,40 +12,58 @@ specification. The compatibility inventory is
   buffer is too small. Descriptor normalization is sized to the complete map
   count; the former 512-entry truncation is removed.
 - Handoff V8 carries dynamically allocated PFN metadata and an available-range
-  array. Kernel initialization validates strided descriptors, address/size
-  arithmetic, overlap, memory type and all conventional RAM extents; holes and
-  runtime/MMIO/reserved regions remain unavailable. PFN metadata is sized to
-  the highest conventional PFN, including holes marked unavailable.
-- AMD64 exposes a locked, one-page supervisor physical aperture for validated
-  PFN access. The bootstrap heap retains pointers, so its mapping callback now
-  verifies the full identity mapping before exposing a physical address. The
-  supervisor device aperture grows in slot 129 and is sized to the slot; its
-  first page is reserved for firmware-copy scratch mappings. The former 16 MiB
-  framebuffer and staged-image validation caps have been removed.
-- Process VAD backend reach now spans the lower-half user PML4 slots 133–255
+  array. Kernel initialization validates descriptor stride, page alignment,
+  arithmetic, overlap, and memory types. It enrolls Conventional and
+  post-`ExitBootServices` Boot Services pages without the runtime attribute;
+  firmware, MMIO, holes and unsupported types remain unavailable. PFN metadata
+  is sized to the highest reclaimable PFN, including unavailable holes.
+- Inherited firmware page-table PFNs are reserved before allocation. The
+  allocator tracks every enrolled PFN, and the boot probe allocates, writes,
+  copies, reads, frees and reclaims a PFN above 1 GiB through the temporary
+  physical aperture. COW and `PAGE_NOACCESS` image cloning now copy PFNs through
+  Mm callbacks and the validated HAL mapping instead of writing through an
+  assumed identity mapping.
+- The bootstrap executive heap maps individually allocated PFNs into
+  supervisor RW/NX kernel VA and rolls back partially mapped allocations. The
+  heap uses the existing architecture-derived PML4 slot; page-table PFNs still
+  require identity-mapped storage in the current bootstrap backend. The
+  supervisor device aperture grows in slot 129; its first page remains
+  reserved for firmware-copy scratch mappings. The former 16 MiB framebuffer
+  and staged-image validation caps have been removed.
+- Process VAD backend reach spans lower-half user PML4 slots 133–255
   (architecture-derived 61.5 TiB); bootstrap-owned slots 129–132 remain
-  supervisor mappings. PE preferred-base checks and stack
-  allocation no longer use the former 16 MiB window as a general limit. The
-  TLS test maps a DLL at 200 MiB. The Ps fixture contains a 20 MiB reserved
-  stack test and overflow rejection.
-- QEMU 2 GiB and 4 GiB runs with the dynamic UEFI map reached the marker
-  proving a PFN above 1 GiB was allocated, mapped, written, freed, zeroed and
-  reallocated. The 2 GiB run passed the 20 MiB stack, 200 MiB DLL, stack-growth
-  and Ring 3 syscall tests, then hit `#UD` in `EThread::prepareUserApc`. The
-  4 GiB run initialized 1,572,864 PFN entries, reached the same high-PFN marker
-  and entered the Ring 3 syscall suite before timeout. A 1 GiB run initialized
-  261,702 PFN entries from 98 UEFI descriptors but timed out in that suite.
-  The 512 MiB profile reached a separate timer stack-bound `#UD` in one run and
-  timed out during process setup in a subsequent run. The 256 MiB
-  profile did not reach the bootloader (OVMF returned to its shell with
-  `Out of Resources`); 512 MiB and larger boots reached later Ps tests.
-- Full QEMU runs are not passing yet. Earlier runs hit `#UD` at
-  `EThread::prepareUserApc`; the latest 1 GiB run stalls in the Ring 3 process
-  syscall suite before producing a trap record. Explorer was not reached. This
-  work is therefore implemented in part and unverified as an integrated
-  milestone. The remaining concrete work is to resolve the Ps suite failure,
-  complete memory-pressure/rollback and fragmented-map coverage, run all
-  viable profiles, then resume Explorer E1-E6.
+  supervisor mappings. PE preferred-base checks and stack allocation no
+  longer use the former 16 MiB window as a general limit. QEMU reaches the
+  20 MiB reserved-stack test and maps a DLL at 200 MiB, beyond the former
+  128 MiB window.
+- QEMU 512 MiB initializes 130,804 PFN entries and 32,399 usable pages. The
+  file-backed SEC_IMAGE process test passes, but Explorer dependency loading
+  returns `STATUS_NO_MEMORY` with 16,295 PFNs still free. The 1 GiB profile
+  initializes 261,876 entries and 161,935 usable pages; the 20 MiB stack,
+  200 MiB DLL, syscall, file-backed SEC_IMAGE, and PFN cleanup checks pass.
+  Explorer reaches image finalization and explicitly returns
+  `STATUS_NOT_IMPLEMENTED` for unsupported TLS callbacks, with 74,472 PFNs
+  free.
+- At 2 GiB, 524,020 entries and 421,007 usable pages are initialized. The
+  high-PFN map/copy/read/reclaim probe, real PFN exhaustion and partial heap
+  rollback test, 20 MiB stack, 200 MiB DLL, CPL3 syscall tests, and file-backed
+  SEC_IMAGE cleanup pass. Explorer reaches the same TLS callback limitation
+  with 333,545 PFNs free, so that error is independent of memory pressure.
+- At 4 GiB, UEFI reports 1,572,864 PFN entries and 933,003 usable pages. The
+  high-PFN probe, file-backed SEC_IMAGE cleanup, 20 MiB stack, 200 MiB DLL,
+  and timer-preempted kernel/CPL3 context tests pass. Two runs failed the live
+  timer checkpoint; a subsequent run passed it and reached Explorer's explicit
+  TLS callback rejection with 845,541 PFNs free. At 256 MiB, OVMF reports
+  `Out of Resources` before starting the bootloader.
+- UEFI endpoint and hole sample checks pass, including a large unavailable
+  physical gap. The active 32-page EFI stack/handoff descriptor is excluded,
+  and APIC MMIO remains supervisor-only at CPL3. These checks do not yet prove
+  arbitrary multi-node fragmented RAM coverage or MMIO descriptor accounting.
+- Remaining work: implement and verify HAL page-table access for PFNs outside
+  the identity-mapped range; resolve the 512 MiB memory-pressure failure; make
+  4 GiB timer verification stable; and rerun Explorer after the independent TLS
+  callback limitation is implemented. This migration remains incomplete and
+  is not a verified end-to-end milestone.
 
 ## Verified baseline
 

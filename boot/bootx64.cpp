@@ -2767,26 +2767,27 @@ extern "C" micant::uefi::EfiStatus EfiMain(
         micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: memory map unavailable for PFN sizing.\r\n");
         return mapStatus;
     }
-    uint64_t highestConventionalPfn{};
+    uint64_t highestReclaimablePfn{};
     const size_t descriptorCount = static_cast<size_t>(memoryMapSize / descriptorSize);
     for (size_t index = 0; index < descriptorCount; ++index) {
         micant::uefi::EfiMemoryDescriptor descriptor{};
         std::memcpy(&descriptor, s_memoryMapBuffer + index * descriptorSize, sizeof(descriptor));
-        if (descriptor.type != static_cast<uint32_t>(micant::uefi::EfiMemoryType::EfiConventionalMemory) ||
+        if (!micant::uefi::isReclaimableAfterExitBootServices(
+                static_cast<micant::uefi::EfiMemoryType>(descriptor.type)) ||
             !descriptor.numberOfPages || descriptor.numberOfPages >
                 (UINT64_MAX - descriptor.physicalStart) / 4096) continue;
         const uint64_t end = descriptor.physicalStart + descriptor.numberOfPages * 4096;
         const uint64_t lastPfn = end / 4096;
-        if (lastPfn > highestConventionalPfn) highestConventionalPfn = lastPfn;
+        if (lastPfn > highestReclaimablePfn) highestReclaimablePfn = lastPfn;
     }
-    if (!highestConventionalPfn || highestConventionalPfn >
+    if (!highestReclaimablePfn || highestReclaimablePfn >
             UINT64_MAX / sizeof(micant::mm::Mmpfn)) {
         micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: PFN metadata size overflow.\r\n");
         return micant::uefi::EFI_OUT_OF_RESOURCES;
     }
-    const uint64_t metadataBytes = highestConventionalPfn * sizeof(micant::mm::Mmpfn);
+    const uint64_t metadataBytes = highestReclaimablePfn * sizeof(micant::mm::Mmpfn);
     micant::bootloader::UartSerial::print("[MicaNT Boot] Dynamic PFN entries/bytes=");
-    micant::bootloader::UartSerial::printHex64(highestConventionalPfn);
+    micant::bootloader::UartSerial::printHex64(highestReclaimablePfn);
     micant::bootloader::UartSerial::print("/");
     micant::bootloader::UartSerial::printHex64(metadataBytes);
     micant::bootloader::UartSerial::print("\r\n");
