@@ -131,13 +131,17 @@ public:
             if (scalar < start) return 0;
             const int16_t delta = bes16(deltaBase + static_cast<size_t>(i) * 2);
             const uint16_t range = be16(rangeBase + static_cast<size_t>(i) * 2);
-            if (!range) return static_cast<uint16_t>((scalar + delta) & 0xFFFFu);
+            if (!range) {
+                const uint16_t mapped = static_cast<uint16_t>((scalar + delta) & 0xFFFFu);
+                return mapped < metrics_.glyphCount ? mapped : 0;
+            }
             const size_t word = rangeBase + static_cast<size_t>(i) * 2;
             const uint64_t glyphPos = static_cast<uint64_t>(word) + range +
                                       static_cast<uint64_t>(scalar - start) * 2;
-            if (glyphPos + 2 > length_) return 0;
+            if (glyphPos + 2 > static_cast<uint64_t>(cmapOffset_) + cmapLength_) return 0;
             const uint16_t glyph = be16(static_cast<size_t>(glyphPos));
-            return glyph ? static_cast<uint16_t>((glyph + delta) & 0xFFFFu) : 0;
+            const uint16_t mapped = glyph ? static_cast<uint16_t>((glyph + delta) & 0xFFFFu) : 0;
+            return mapped < metrics_.glyphCount ? mapped : 0;
         }
         return 0;
     }
@@ -179,15 +183,189 @@ public:
         return xMin <= xMax && yMin <= yMax;
     }
 
+    [[nodiscard]] static constexpr size_t rasterWorkspaceBytes() noexcept;
+
+    // Rasterize a simple TrueType outline to an 8-bit grayscale coverage mask.
+    // The caller supplies a zeroed, clipped target; composite glyphs and hint
+    // bytecode are deliberately unsupported by this bounded first profile.
+    [[nodiscard]] bool rasterizeSimpleGlyph(uint16_t glyph, uint32_t pixelsPerEm,
+            uint8_t* mask, uint32_t width, uint32_t height, size_t stride,
+            void* workspace, size_t workspaceBytes) const noexcept {
+        if (!valid_ || !mask || !pixelsPerEm || pixelsPerEm > 512 || !width || !height ||
+            width > 512 || height > 512 || stride < width ||
+            static_cast<uint64_t>(stride) * height > 1024 * 1024 || !workspace ||
+            reinterpret_cast<uintptr_t>(workspace) % alignof(RasterWorkspace) ||
+            workspaceBytes < sizeof(RasterWorkspace)) return false;
+        auto& scratch = *static_cast<RasterWorkspace*>(workspace);
+        const uint8_t* raw{}; size_t rawLength{};
+        if (!glyphData(glyph, raw, rawLength)) return false;
+        if (!rawLength) return true;
+        if (rawLength < 10) return false;
+        const size_t base = static_cast<size_t>(raw - data_);
+        const int16_t contourCount = bes16(base);
+        if (contourCount < 0 || contourCount > MaxContours) return false;
+        const int16_t xMin = bes16(base + 2), yMin = bes16(base + 4);
+        const int16_t xMax = bes16(base + 6), yMax = bes16(base + 8);
+        if (xMin > xMax || yMin > yMax) return false;
+        if (!contourCount) return true;
+        size_t cursor = base + 10;
+        if (!range(cursor, static_cast<size_t>(contourCount) * 2 + 2)) return false;
+        for (int16_t i = 0; i < contourCount; ++i) scratch.ends[i] = be16(cursor + static_cast<size_t>(i) * 2);
+        const size_t pointCount = static_cast<size_t>(scratch.ends[contourCount - 1]) + 1;
+        if (!pointCount || pointCount > MaxPoints) return false;
+        cursor += static_cast<size_t>(contourCount) * 2;
+        const uint16_t instructionLength = be16(cursor);
+        cursor += 2;
+        if (!range(cursor, instructionLength)) return false;
+        cursor += instructionLength;
+
+        size_t pointsRead = 0;
+        while (pointsRead < pointCount) {
+            if (!range(cursor, 1)) return false;
+            const uint8_t flag = data_[cursor++];
+            size_t repeat = 1;
+            if (flag & 0x08) {
+                if (!range(cursor, 1)) return false;
+                repeat += data_[cursor++];
+            }
+            if (repeat > pointCount - pointsRead) return false;
+            for (size_t j = 0; j < repeat; ++j) scratch.flags[pointsRead++] = flag;
+        }
+        int32_t coordinate = 0;
+        for (size_t i = 0; i < pointCount; ++i) {
+            const uint8_t f = scratch.flags[i]; int32_t delta = 0;
+            if (f & 0x02) {
+                if (!range(cursor, 1)) return false;
+                const int32_t magnitude = data_[cursor++];
+                delta = (f & 0x10) ? magnitude : -magnitude;
+            } else if (!(f & 0x10)) {
+                if (!range(cursor, 2)) return false;
+                delta = bes16(cursor); cursor += 2;
+            }
+            coordinate += delta;
+            if (coordinate < -32768 || coordinate > 32767) return false;
+            scratch.xs[i] = coordinate;
+        }
+        coordinate = 0;
+        for (size_t i = 0; i < pointCount; ++i) {
+            const uint8_t f = scratch.flags[i]; int32_t delta = 0;
+            if (f & 0x04) {
+                if (!range(cursor, 1)) return false;
+                const int32_t magnitude = data_[cursor++];
+                delta = (f & 0x20) ? magnitude : -magnitude;
+            } else if (!(f & 0x20)) {
+                if (!range(cursor, 2)) return false;
+                delta = bes16(cursor); cursor += 2;
+            }
+            coordinate += delta;
+            if (coordinate < -32768 || coordinate > 32767) return false;
+            scratch.ys[i] = coordinate;
+        }
+
+        struct Edge { float x0, y0, x1, y1; };
+        size_t edgeCount = 0;
+        const float scale = static_cast<float>(pixelsPerEm) / metrics_.unitsPerEm;
+        bool overflow = false;
+        const auto addEdge = [&](float ax, float ay, float bx, float by) noexcept {
+            if (edgeCount >= MaxEdges) { overflow = true; return; }
+            scratch.edges[edgeCount++] = {ax, ay, bx, by};
+        };
+        const auto line = [&](float ax, float ay, float bx, float by) noexcept {
+            addEdge((ax - xMin) * scale, (yMax - ay) * scale,
+                    (bx - xMin) * scale, (yMax - by) * scale);
+        };
+        for (int16_t c = 0; c < contourCount && !overflow; ++c) {
+            const size_t first = c ? static_cast<size_t>(scratch.ends[c - 1]) + 1 : 0;
+            const size_t last = scratch.ends[c];
+            const auto on = [&](size_t i) noexcept { return (scratch.flags[i] & 1) != 0; };
+            const auto mid = [&](size_t a, size_t b, float& x, float& y) noexcept {
+                x = (static_cast<float>(scratch.xs[a]) + scratch.xs[b]) * 0.5f;
+                y = (static_cast<float>(scratch.ys[a]) + scratch.ys[b]) * 0.5f;
+            };
+            float cx{}, cy{}; size_t i{};
+            if (on(first)) { cx = static_cast<float>(scratch.xs[first]); cy = static_cast<float>(scratch.ys[first]); i = first + 1; }
+            else if (on(last)) { cx = static_cast<float>(scratch.xs[last]); cy = static_cast<float>(scratch.ys[last]); i = first; }
+            else { mid(last, first, cx, cy); i = first; }
+            size_t consumed = 0, contourSize = last - first + 1;
+            while (consumed < contourSize && !overflow) {
+                const size_t p = i > last ? first : i;
+                if (on(p)) {
+                    const float nx = static_cast<float>(scratch.xs[p]), ny = static_cast<float>(scratch.ys[p]);
+                    line(cx, cy, nx, ny); cx = nx; cy = ny; ++i; ++consumed;
+                } else {
+                    const size_t q = p == last ? first : p + 1;
+                    float ex{}, ey{}; size_t advance{};
+                    if (on(q)) { ex = static_cast<float>(scratch.xs[q]); ey = static_cast<float>(scratch.ys[q]); advance = 2; }
+                    else { mid(p, q, ex, ey); advance = 1; }
+                    const float qx = static_cast<float>(scratch.xs[p]), qy = static_cast<float>(scratch.ys[p]);
+                    float px = cx, py = cy;
+                    for (uint32_t step = 1; step <= 8; ++step) {
+                        const float t = static_cast<float>(step) / 8.0f, u = 1.0f - t;
+                        const float nx = u * u * cx + 2.0f * u * t * qx + t * t * ex;
+                        const float ny = u * u * cy + 2.0f * u * t * qy + t * t * ey;
+                        line(px, py, nx, ny); px = nx; py = ny;
+                    }
+                    cx = ex; cy = ey; i += advance; consumed += advance;
+                }
+            }
+        }
+        if (overflow) return false;
+        const uint32_t sampleGrid = 4;
+        for (uint32_t py = 0; py < height; ++py) {
+            for (uint32_t px = 0; px < width; ++px) scratch.rowCoverage[px] = 0;
+            for (uint32_t sy = 0; sy < sampleGrid; ++sy) {
+                const float y = py + (static_cast<float>(sy) + 0.5f) / sampleGrid;
+                size_t crossings = 0;
+                for (size_t e = 0; e < edgeCount; ++e) {
+                    const auto& edge = scratch.edges[e];
+                    const float low = edge.y0 < edge.y1 ? edge.y0 : edge.y1;
+                    const float high = edge.y0 > edge.y1 ? edge.y0 : edge.y1;
+                    if (y < low || y >= high || edge.y0 == edge.y1) continue;
+                    if (crossings >= MaxEdges) return false;
+                    const float x = edge.x0 + (y - edge.y0) *
+                        (edge.x1 - edge.x0) / (edge.y1 - edge.y0);
+                    size_t at = crossings++;
+                    while (at && scratch.intersections[at - 1] > x) {
+                        scratch.intersections[at] = scratch.intersections[at - 1];
+                        --at;
+                    }
+                    scratch.intersections[at] = x;
+                }
+                size_t passed = 0;
+                for (uint32_t sx = 0; sx < width * sampleGrid; ++sx) {
+                    const float x = (static_cast<float>(sx) + 0.5f) / sampleGrid;
+                    while (passed < crossings && scratch.intersections[passed] <= x) ++passed;
+                    if ((crossings - passed) & 1) ++scratch.rowCoverage[sx / sampleGrid];
+                }
+            }
+            for (uint32_t px = 0; px < width; ++px)
+                mask[static_cast<size_t>(py) * stride + px] =
+                    static_cast<uint8_t>(scratch.rowCoverage[px] * 255 / 16);
+        }
+        return true;
+    }
+
 private:
     static constexpr size_t MaxFileBytes = 16 * 1024 * 1024;
     static constexpr uint16_t MaxTables = 128;
     static constexpr uint16_t MaxGlyphs = 65535;
+    static constexpr uint16_t MaxContours = 128;
+    static constexpr size_t MaxPoints = 512;
+    static constexpr size_t MaxEdges = 4096;
     static constexpr uint32_t TagHead = 0x68656164, TagMaxp = 0x6D617870;
     static constexpr uint32_t TagHhea = 0x68686561, TagHmtx = 0x686D7478;
     static constexpr uint32_t TagCmap = 0x636D6170, TagLoca = 0x6C6F6361;
     static constexpr uint32_t TagGlyf = 0x676C7966, TagOs2 = 0x4F532F32;
     struct Table { uint32_t tag{}, offset{}, length{}; };
+    struct Edge { float x0, y0, x1, y1; };
+    struct RasterWorkspace {
+        uint16_t ends[MaxContours]{};
+        uint8_t flags[MaxPoints]{};
+        int32_t xs[MaxPoints]{}, ys[MaxPoints]{};
+        Edge edges[MaxEdges]{};
+        float intersections[MaxEdges]{};
+        uint8_t rowCoverage[512]{};
+    };
 
     [[nodiscard]] bool fail() noexcept { valid_ = false; return false; }
     [[nodiscard]] bool range(size_t offset, size_t size) const noexcept {
@@ -209,7 +387,7 @@ private:
         if (table.length < 4 || be16(table.offset) != 0) return false;
         const uint16_t count = be16(table.offset + 2);
         if (!count || count > 256 || static_cast<uint64_t>(count) * 8 + 4 > table.length) return false;
-        uint32_t format12 = 0, format4 = 0;
+        uint32_t format12 = 0, format4 = 0, format12Length = 0, format4Length = 0;
         uint16_t groups = 0, segments = 0;
         for (uint16_t i = 0; i < count; ++i) {
             const size_t record = table.offset + 4 + static_cast<size_t>(i) * 8;
@@ -223,7 +401,16 @@ private:
                 const uint32_t size = be32(sub + 4), n = be32(sub + 12);
                 if (size < 16 || size > table.length - rel || n > 0xFFFF ||
                     static_cast<uint64_t>(n) * 12 + 16 > size) return false;
+                uint32_t previousEnd = 0;
+                for (uint32_t group = 0; group < n; ++group) {
+                    const size_t gp = sub + 16 + static_cast<size_t>(group) * 12;
+                    const uint32_t first = be32(gp), last = be32(gp + 4), glyph = be32(gp + 8);
+                    if (first > last || last > 0x10FFFF || (group && first <= previousEnd) ||
+                        static_cast<uint64_t>(glyph) + last - first >= metrics_.glyphCount) return false;
+                    previousEnd = last;
+                }
                 format12 = static_cast<uint32_t>(sub); groups = static_cast<uint16_t>(n);
+                format12Length = size;
             } else if (format == 4 && platform == 3 && (encoding == 1 || encoding == 10)) {
                 if (table.length - rel < 16) return false;
                 const uint16_t size = be16(sub + 2), segCountX2 = be16(sub + 6);
@@ -231,10 +418,11 @@ private:
                 const uint16_t n = segCountX2 / 2;
                 if (static_cast<uint64_t>(n) * 8 + 16 > size) return false;
                 format4 = static_cast<uint32_t>(sub); segments = n;
+                format4Length = size;
             }
         }
-        if (format12) { cmapFormat_ = 12; cmapOffset_ = format12; cmapGroups_ = groups; }
-        else if (format4) { cmapFormat_ = 4; cmapOffset_ = format4; cmapSegments_ = segments; }
+        if (format12) { cmapFormat_ = 12; cmapOffset_ = format12; cmapLength_ = format12Length; cmapGroups_ = groups; }
+        else if (format4) { cmapFormat_ = 4; cmapOffset_ = format4; cmapLength_ = format4Length; cmapSegments_ = segments; }
         else return false;
         return true;
     }
@@ -244,10 +432,14 @@ private:
     Table tables_[MaxTables]{};
     uint16_t tableCount_{};
     FaceMetrics metrics_{};
-    uint32_t hmtxOffset_{}, locaOffset_{}, glyfOffset_{}, glyfLength_{}, cmapOffset_{};
+    uint32_t hmtxOffset_{}, locaOffset_{}, glyfOffset_{}, glyfLength_{}, cmapOffset_{}, cmapLength_{};
     uint16_t cmapFormat_{}, cmapSegments_{}, cmapGroups_{};
     int16_t locaFormat_{};
     bool valid_{};
 };
+
+constexpr size_t FaceView::rasterWorkspaceBytes() noexcept {
+    return sizeof(RasterWorkspace);
+}
 
 } // namespace micant::um::graphics::truetype
