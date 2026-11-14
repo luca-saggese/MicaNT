@@ -126,6 +126,21 @@ differs from the historical integration inventory below.
 The detailed increments and commands below record the checks actually run;
 an isolated diagnostic does not establish a complete milestone contract.
 
+### File-backed M4 process/thread lifecycle increment
+
+The file-backed `SEC_IMAGE` fixture now proceeds through an Ob-owned process,
+starts the mapped PE entry point as a CPL3 thread, terminates through
+`NtTerminateThread`, waits and closes the child thread handle in its owning
+handle table, waits for process termination from the parent, and checks PFN
+recovery after cleanup. The child handle-table ownership check caught and
+corrected a test rollback path that could otherwise close a same-valued parent
+handle. This verifies the exercised lifecycle slice; it does not launch
+`explorer.exe` or close general M4 NT lifecycle contracts.
+
+| Command | Result |
+|---|---|
+| `TMPDIR=/private/tmp python3 qemu.py --headless --timeout 120 --diagnostics-dir /private/tmp/micant-m4-fileimage-lifecycle-rollback` | Passed; modular bare-metal kernel linked, file-backed process/thread lifecycle, bootstrap two/three-thread tests, timer-preempted Ring 0/Ring 3, APC/DPC, reaper, PS/2 input and 5-second serial stability verified |
+
 The current M3 implementation batch has been incrementally built and booted
 in QEMU. Its LAPIC calibration uses five PIT measurements, takes the
 median, rejects an unstable middle range, and corrects for the PIT interval's
