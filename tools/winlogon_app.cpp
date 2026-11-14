@@ -48,20 +48,6 @@ extern "C" void _start(const char* = nullptr) {
 #endif
     DoSyscall(0x11, csVal & 3, 0);
 
-    PrintLine("MicaNT Logon Process (winlogon.exe) [PID 680]");
-    PrintLine("=============================================");
-    PrintLine("Station:            WinSta0 (Interactive Window Station)");
-    PrintLine("Desktop:            Winlogon -> Default (Desktop Active)");
-    PrintLine("Authentication:     LSA Isolated (lsaiso.exe Auth Token Verified)");
-    PrintLine("User Session:       MICANT\\MicaAdmin (SID S-1-5-21-329-0-1000)");
-    PrintLine("Privileges:         SeTcbPrivilege, SeAssignPrimaryToken [ACTIVE]");
-    PrintLine("Shell Handover:     surshell.exe / explorer.exe Launched");
-
-    DoSyscall(0x01, 0, 0);
-
-    while (true) {
-#if defined(__x86_64__)
-        __asm__ __volatile__("pause");
-#endif
-    }
+    PrintLine("Winlogon startup failed: no authenticated LSASS IPC, secure desktop, or session lifecycle is available.");
+    DoSyscall(0x01, 0xC00000BBu, 0); // STATUS_NOT_SUPPORTED
 }

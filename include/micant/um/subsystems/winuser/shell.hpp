@@ -333,10 +333,9 @@ public:
         whp::InitializeWhpSubsystemExports();
         winget::InitializeWinGetSubsystemExports();
 
-        // Establish default interactive logon session (admin) if not already active
-        if (winlogon::WinlogonManager::get().getState() == winlogon::LogonState::LoggedOff) {
-            winlogon::WinlogonManager::get().initiateLogon(L"admin", L"mica");
-        }
+        // Interactive logon is owned by the native Winlogon process. Library
+        // initialization must never synthesize an account or authenticate a
+        // built-in credential.
     }
 
     void printBanner(std::ostream& out = std::cout) {

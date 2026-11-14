@@ -712,27 +712,15 @@
         }
 
         if (isAdd) {
-            std::wstring wPass(password.begin(), password.end());
-            NTSTATUS st = sam::SamDatabase::get().createUser(wTargetUser, wPass);
-            if (st == STATUS_SUCCESS) {
-                out << "The command completed successfully.\n\n";
-            } else if (st == STATUS_USER_EXISTS) {
-                out << "The account already exists.\n\n";
-            } else {
-                out << "System error 5 has occurred.\nAccess is denied.\n\n";
-            }
+            (void)password;
+            out << "System error 50 has occurred.\n"
+                << "Account changes require the authenticated SAM service, which is unavailable.\n\n";
             return;
         }
 
         if (isDelete) {
-            NTSTATUS st = sam::SamDatabase::get().deleteUser(wTargetUser);
-            if (st == STATUS_SUCCESS) {
-                out << "The command completed successfully.\n\n";
-            } else if (st == STATUS_ACCESS_DENIED) {
-                out << "System error 5 has occurred.\nAccess is denied.\n\n";
-            } else {
-                out << "The user name could not be found.\n\n";
-            }
+            out << "System error 50 has occurred.\n"
+                << "Account changes require the authenticated SAM service, which is unavailable.\n\n";
             return;
         }
 

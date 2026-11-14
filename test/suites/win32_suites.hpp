@@ -2248,7 +2248,7 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     using namespace micant;
 
     // ========================================================================
-    // 1. SAM Database Engine & Cryptographic NT-Hash
+    // 1. SAM Database Engine & Password Verifier
     // ========================================================================
     auto& samDb = sam::SamDatabase::get();
 
@@ -2263,14 +2263,32 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     TEST_ASSERT(guestUser->rid == sam::DOMAIN_USER_RID_GUEST, "Guest RID must be 501");
     TEST_ASSERT((guestUser->userFlags & sam::USER_ACCOUNT_DISABLED) != 0, "Guest account must be disabled by default");
 
-    auto micaUser = samDb.getUser(L"admin");
-    TEST_ASSERT(micaUser.has_value(), "Default interactive admin user must exist in SAM");
-    TEST_ASSERT(micaUser->rid == 1000, "Default user RID must be 1000");
+    TEST_ASSERT((adminUser->userFlags & sam::USER_ACCOUNT_DISABLED) != 0,
+        "Built-in Administrator must begin disabled until explicitly provisioned");
+    TEST_ASSERT(!adminUser->hasPassword, "Built-in Administrator must not have a sample password");
+    TEST_ASSERT(!samDb.getUser(L"admin").has_value(), "Sample admin/mica account must not be provisioned");
+    TEST_ASSERT(samDb.setAccountEnabled(L"Administrator", true) == STATUS_PASSWORD_EXPIRED,
+        "An account without a provisioned password must stay disabled");
 
-    // Test NT-Hash (MD4 of little-endian UTF-16 password)
-    auto ntHashAdmin = sam::crypto::computeNtHash(L"AdminPassword123!");
-    TEST_ASSERT(ntHashAdmin.size() == 16, "NT-Hash must be exactly 16 bytes");
-    TEST_ASSERT(ntHashAdmin == adminUser->ntHash, "Administrator NT-Hash must match computed MD4 UTF-16 hash");
+    // RFC 8018 PBKDF2-HMAC-SHA-256 known-answer vector at the minimum policy cost.
+    const std::array<uint8_t, 8> kdfPassword{'p','a','s','s','w','o','r','d'};
+    const std::array<uint8_t, 4> kdfSalt{'s','a','l','t'};
+    std::array<uint8_t, 32> kdfOutput{};
+    const std::array<uint8_t, 32> kdfExpected{
+        0x03,0x94,0xa2,0xed,0xe3,0x32,0xc9,0xa1,0x3e,0xb8,0x2e,0x9b,0x24,0x63,0x16,0x04,
+        0xc3,0x1d,0xf9,0x78,0xb4,0xe2,0xf0,0xfb,0xd2,0xc5,0x49,0x94,0x4f,0x9d,0x79,0xa5};
+    TEST_ASSERT(shared::crypto::Pbkdf2Sha256::derive(kdfPassword, kdfSalt,
+        shared::crypto::Pbkdf2Sha256::MIN_ITERATIONS, kdfOutput), "PBKDF2 must derive at the supported minimum cost");
+    TEST_ASSERT(kdfOutput == kdfExpected, "PBKDF2-HMAC-SHA-256 must match RFC 8018 known-answer vector");
+    TEST_ASSERT(!shared::crypto::Pbkdf2Sha256::derive(kdfPassword, kdfSalt,
+        shared::crypto::Pbkdf2Sha256::MIN_ITERATIONS - 1, kdfOutput), "PBKDF2 must reject costs below policy minimum");
+
+    TEST_ASSERT(samDb.setPassword(L"Administrator", L"short") == STATUS_ACCOUNT_RESTRICTION,
+        "Password policy must reject a short password");
+    TEST_ASSERT(samDb.setPassword(L"Administrator", L"AdminPassword2026!") == STATUS_SUCCESS,
+        "Explicit password provisioning must create a salted password verifier");
+    TEST_ASSERT(samDb.setAccountEnabled(L"Administrator", true) == STATUS_SUCCESS,
+        "A provisioned built-in Administrator may be explicitly enabled");
 
     // Test user creation
     NTSTATUS stCreate = samDb.createUser(L"testdeveloper", L"Pass@word2026!", L"Test Developer", L"Software Engineer", true);
@@ -2334,13 +2352,13 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     TEST_ASSERT(lsa.getPipeName() == L"\\\\.\\pipe\\lsass", "LSASS named pipe must be \\\\.\\pipe\\lsass");
     TEST_ASSERT(lsa.getAlpcPortName() == L"\\LsaAuthenticationPort", "LSASS ALPC port must be \\LsaAuthenticationPort");
 
-    // Interactive logon via LSASS
+    // Hosted compatibility adapter logon via LSASS (not Ring 3 proof).
     std::shared_ptr<se::TokenObject> adminToken;
     Luid adminLogonId{0, 0};
     NTSTATUS stLsaLogon = lsa.logonUser(
         L"MICANT",
-        L"admin",
-        L"mica",
+        L"Administrator",
+        L"AdminPassword2026!",
         lsass::SecurityLogonType::Interactive,
         L"MSV1_0",
         adminToken,
@@ -2355,14 +2373,29 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     // Verify privileges in token
     TEST_ASSERT(adminToken->hasPrivilege(se::SE_DEBUG_NAME), "Admin token must possess SeDebugPrivilege");
     TEST_ASSERT(adminToken->hasPrivilege(se::SE_SHUTDOWN_NAME), "Admin token must possess SeShutdownPrivilege");
-    TEST_ASSERT(adminToken->hasPrivilege(se::SE_TCB_NAME), "Admin token must possess SeTcbPrivilege");
+    TEST_ASSERT(!adminToken->hasPrivilege(se::SE_TCB_NAME), "Local administrator logon must not grant SeTcbPrivilege");
+    TEST_ASSERT(!adminToken->hasPrivilege(se::SE_CREATE_TOKEN_NAME), "Local administrator logon must not grant SeCreateTokenPrivilege");
+    TEST_ASSERT(!adminToken->hasPrivilege(se::SE_ASSIGNPRIMARYTOKEN_NAME), "Local administrator logon must not grant SeAssignPrimaryTokenPrivilege");
+
+    std::shared_ptr<se::TokenObject> unsupportedLogonToken;
+    Luid unsupportedLogonId{7, 1};
+    TEST_ASSERT(lsa.logonUser(L"OTHERDOMAIN", L"Administrator", L"AdminPassword2026!",
+        lsass::SecurityLogonType::Interactive, L"MSV1_0", unsupportedLogonToken,
+        unsupportedLogonId) == STATUS_LOGON_FAILURE,
+        "Local LSASS adapter must reject nonlocal domains");
+    TEST_ASSERT(!unsupportedLogonToken && unsupportedLogonId.toUint64() == 0,
+        "Rejected domain logon must not retain a token or logon identifier");
+    TEST_ASSERT(lsa.logonUser(L"MICANT", L"Administrator", L"AdminPassword2026!",
+        lsass::SecurityLogonType::Service, L"MSV1_0", unsupportedLogonToken,
+        unsupportedLogonId) == STATUS_NOT_SUPPORTED,
+        "Unimplemented service logon must fail explicitly");
 
     // Test failed logon
     std::shared_ptr<se::TokenObject> failToken;
     Luid failLuid{0, 0};
     NTSTATUS stLsaFail = lsa.logonUser(
         L"MICANT",
-        L"admin",
+        L"Administrator",
         L"IncorrectPassword!",
         lsass::SecurityLogonType::Interactive,
         L"MSV1_0",
@@ -2371,11 +2404,9 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     );
     TEST_ASSERT(stLsaFail == STATUS_LOGON_FAILURE, "LSASS logon with wrong password must fail");
 
-    // Test NTLM challenge-response verification
+    // Legacy NT-hash challenge-response is deliberately unsupported.
     std::vector<uint8_t> serverChallenge = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF};
-    auto adminNtHash = micaUser->ntHash;
-    auto clientResponse = lsass::crypto::computeChallengeResponse(adminNtHash, serverChallenge);
-    TEST_ASSERT(clientResponse.size() == 16, "NTLM challenge response digest must be 16 bytes");
+    std::vector<uint8_t> clientResponse(16, 0);
 
     std::shared_ptr<se::TokenObject> crToken;
     Luid crLogonId{0, 0};
@@ -2389,8 +2420,8 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
         crToken,
         crLogonId
     );
-    TEST_ASSERT(stCrLogon == STATUS_SUCCESS, "LSASS NTLM challenge-response logon must succeed");
-    TEST_ASSERT(crToken != nullptr, "Challenge-response token must be created");
+    TEST_ASSERT(stCrLogon == STATUS_NOT_SUPPORTED, "LSASS legacy challenge-response must fail explicitly");
+    TEST_ASSERT(crToken == nullptr, "Unsupported challenge-response must not create a token");
 
     // Enumerate logon sessions
     auto sessions = lsa.enumerateLogonSessions();
@@ -2398,7 +2429,7 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
 
     auto sessionData = lsa.getLogonSessionData(adminLogonId);
     TEST_ASSERT(sessionData.has_value(), "Must find logon session data for admin LUID");
-    TEST_ASSERT(sessionData->userName == L"admin", "Logon session username must match admin");
+    TEST_ASSERT(sessionData->userName == L"Administrator", "Logon session username must match the authenticated account");
     TEST_ASSERT(sessionData->domainName == L"MICANT", "Logon session domain must match MICANT");
     TEST_ASSERT(sessionData->logonType == lsass::SecurityLogonType::Interactive, "Logon type must be Interactive");
 
@@ -2411,12 +2442,16 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     TEST_ASSERT(sidFound && outName == L"Administrators" && outDomain == L"BUILTIN", "S-1-5-32-544 must resolve to BUILTIN\\Administrators");
 
     se::Sid outSid;
-    bool nameFound = lsa.lookupAccountName(L"admin", outSid, outDomain);
-    TEST_ASSERT(nameFound && outDomain == L"MICANT", "admin account name must resolve to MICANT domain");
+    bool nameFound = lsa.lookupAccountName(L"Administrator", outSid, outDomain);
+    TEST_ASSERT(nameFound && outDomain == L"MICANT", "Administrator account name must resolve to MICANT domain");
 
-    // Clean up network logon session
-    lsa.logoffUser(crLogonId);
-    TEST_ASSERT(!lsa.getLogonSessionData(crLogonId).has_value(), "Logged off session must be removed");
+    // Unsupported challenge-response must not have created a logon session.
+    TEST_ASSERT(crLogonId.toUint64() == 0 && !lsa.getLogonSessionData(crLogonId).has_value(),
+        "Rejected challenge-response must not publish a logon session");
+    TEST_ASSERT(lsa.logoffUser(adminLogonId) == STATUS_SUCCESS,
+        "Hosted compatibility logon session must release its session reference");
+    TEST_ASSERT(!lsa.getLogonSessionData(adminLogonId).has_value(),
+        "Logged-off session must be removed");
 
     // ========================================================================
     // 3. Winlogon Subsystem & Desktop Isolation
@@ -2426,63 +2461,45 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     // Reset to clean state for test
     winlogon.logoff();
     TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOff, "Winlogon state after logoff must be LoggedOff");
-    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Winlogon, "LoggedOff state must present secure Winlogon desktop");
+    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Winlogon, "LoggedOff state must select the Winlogon desktop state");
 
     // SAS in LoggedOff triggers LogonPrompt
     auto sasAction = winlogon.triggerSas();
     TEST_ASSERT(sasAction == winlogon::SasAction::LogonPrompt, "SAS when logged off must trigger LogonPrompt");
 
-    // Interactive Logon
-    NTSTATUS stWLogon = winlogon.initiateLogon(L"admin", L"mica");
-    TEST_ASSERT(stWLogon == STATUS_SUCCESS, "Winlogon initiateLogon must succeed for valid credentials");
-    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOn, "Winlogon state must transition to LoggedOn");
-    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Default, "Active desktop must switch to Default for user shell");
-    TEST_ASSERT(winlogon.getLoggedOnUser() == L"admin", "Logged-on user must be admin");
-    TEST_ASSERT(winlogon.getShellPid() != 0, "User shell PID must be assigned");
+    // The hosted compatibility manager has no authenticated native service path.
+    NTSTATUS stWLogon = winlogon.initiateLogon(L"Administrator", L"AdminPassword2026!");
+    TEST_ASSERT(stWLogon == STATUS_NOT_SUPPORTED, "Hosted Winlogon must reject logon without authenticated service integration");
+    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOff, "Rejected logon must leave Winlogon logged off");
+    TEST_ASSERT(winlogon.getLoggedOnUser().empty(), "Rejected logon must not publish a user identity");
+    TEST_ASSERT(winlogon.getActiveToken() == nullptr, "Rejected logon must not retain a token");
+    TEST_ASSERT(winlogon.getShellPid() == 0, "Rejected logon must not publish a shell process");
 
-    // Lock Workstation
+    // Lock Workstation must not claim success without an active session.
     bool locked = winlogon.lockWorkstation();
-    TEST_ASSERT(locked, "Winlogon lockWorkstation must succeed");
-    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::Locked, "State must transition to Locked");
-    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Winlogon, "Locked state must switch desktop to secure Winlogon desktop");
+    TEST_ASSERT(!locked, "Winlogon lockWorkstation must fail without an active session");
+    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOff, "Failed lock must preserve LoggedOff state");
 
-    // SAS in Locked triggers UnlockPrompt
+    // SAS while logged off continues to request the login UI.
     sasAction = winlogon.triggerSas();
-    TEST_ASSERT(sasAction == winlogon::SasAction::UnlockPrompt, "SAS when locked must trigger UnlockPrompt");
-
-    // Attempt unlock with wrong password
-    NTSTATUS stBadUnlock = winlogon.unlockWorkstation(L"WrongPassword");
-    TEST_ASSERT(stBadUnlock == STATUS_LOGON_FAILURE, "Unlocking with wrong password must return STATUS_LOGON_FAILURE");
-    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::Locked, "State must remain Locked after failed unlock");
-
-    // Unlock with valid password
-    NTSTATUS stGoodUnlock = winlogon.unlockWorkstation(L"mica");
-    TEST_ASSERT(stGoodUnlock == STATUS_SUCCESS, "Unlocking with valid password must succeed");
-    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOn, "State must transition back to LoggedOn");
-    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Default, "Active desktop must restore to Default");
-
-    // SAS in LoggedOn triggers SecurityOptions
-    sasAction = winlogon.triggerSas();
-    TEST_ASSERT(sasAction == winlogon::SasAction::SecurityOptions, "SAS when logged on must trigger SecurityOptions");
-    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Winlogon, "SecurityOptions must switch to Winlogon desktop");
-
-    winlogon.dismissSecurityOptions();
-    TEST_ASSERT(winlogon.getActiveDesktop() == winlogon::DesktopType::Default, "Dismissing security options must restore Default desktop");
+    TEST_ASSERT(sasAction == winlogon::SasAction::LogonPrompt, "SAS while logged off must request LogonPrompt");
+    TEST_ASSERT(winlogon.unlockWorkstation(L"WrongPassword") == STATUS_NOT_SUPPORTED,
+        "Unlock must fail explicitly when no interactive session exists");
 
     // ========================================================================
     // 4. Win32 advapi32.dll & user32.dll API Integration
     // ========================================================================
     win32::HANDLE hLogonToken = nullptr;
     win32::BOOL bLogon = advapi32::LogonUserW(
-        L"admin",
+        L"Administrator",
         L"MICANT",
-        L"mica",
+        L"AdminPassword2026!",
         2, // LOGON32_LOGON_INTERACTIVE
         0,
         &hLogonToken
     );
-    TEST_ASSERT(bLogon == win32::TRUE, "advapi32::LogonUserW must return TRUE for valid credentials");
-    TEST_ASSERT(hLogonToken != nullptr, "advapi32::LogonUserW must return valid token handle");
+    TEST_ASSERT(bLogon == win32::FALSE, "LogonUserW must fail until a native token handle path is available");
+    TEST_ASSERT(hLogonToken == nullptr, "Failed LogonUserW must not return a synthetic token handle");
 
     // Test LookupAccountSidW
     wchar_t acctName[64]{};
@@ -2531,64 +2548,56 @@ void Test_Lsass_Winlogon_And_SamDatabase() {
     std::ostringstream ssWhoami;
     int rcWhoami = testShell.execute("whoami", ssWhoami);
     TEST_ASSERT(rcWhoami == 0, "Executing 'whoami' must succeed");
-    TEST_ASSERT(ssWhoami.str().find("MICANT\\admin") != std::string::npos, "whoami output must contain MICANT\\admin");
+    TEST_ASSERT(ssWhoami.str().find("No interactive user is logged on") != std::string::npos, "whoami must not invent a current user");
 
     // Test 'whoami /user'
     std::ostringstream ssWhoamiUser;
     testShell.execute("whoami /user", ssWhoamiUser);
-    TEST_ASSERT(ssWhoamiUser.str().find("USER INFORMATION") != std::string::npos, "whoami /user must output header");
-    TEST_ASSERT(ssWhoamiUser.str().find("S-1-5-21-") != std::string::npos, "whoami /user must output SID");
+    TEST_ASSERT(ssWhoamiUser.str().find("No interactive user is logged on") != std::string::npos, "whoami /user must fail without an authenticated identity");
 
     // Test 'whoami /groups'
     std::ostringstream ssWhoamiGroups;
     testShell.execute("whoami /groups", ssWhoamiGroups);
-    TEST_ASSERT(ssWhoamiGroups.str().find("GROUP INFORMATION") != std::string::npos, "whoami /groups must output header");
-    TEST_ASSERT(ssWhoamiGroups.str().find("BUILTIN\\Administrators") != std::string::npos, "whoami /groups must include Administrators");
+    TEST_ASSERT(ssWhoamiGroups.str().find("No interactive user is logged on") != std::string::npos, "whoami /groups must fail without an authenticated identity");
 
     // Test 'whoami /priv'
     std::ostringstream ssWhoamiPriv;
     testShell.execute("whoami /priv", ssWhoamiPriv);
-    TEST_ASSERT(ssWhoamiPriv.str().find("PRIVILEGES INFORMATION") != std::string::npos, "whoami /priv must output header");
-    TEST_ASSERT(ssWhoamiPriv.str().find("SeDebugPrivilege") != std::string::npos, "whoami /priv must include SeDebugPrivilege");
-    TEST_ASSERT(ssWhoamiPriv.str().find("SeShutdownPrivilege") != std::string::npos, "whoami /priv must include SeShutdownPrivilege");
+    TEST_ASSERT(ssWhoamiPriv.str().find("No interactive user is logged on") != std::string::npos, "whoami /priv must fail without an authenticated identity");
 
     // Test 'net user'
     std::ostringstream ssNetUser;
     testShell.execute("net user", ssNetUser);
     TEST_ASSERT(ssNetUser.str().find("User accounts for \\\\MICANT-DESKTOP") != std::string::npos, "net user must list accounts");
     TEST_ASSERT(ssNetUser.str().find("Administrator") != std::string::npos, "net user must include Administrator");
-    TEST_ASSERT(ssNetUser.str().find("admin") != std::string::npos, "net user must include admin");
+    TEST_ASSERT(ssNetUser.str().find("admin") == std::string::npos, "net user must not include the removed sample account");
 
-    // Test 'net user admin' (detailed user info)
+    // The removed sample account must not be reported as provisioned.
     std::ostringstream ssNetUserAdmin;
     testShell.execute("net user admin", ssNetUserAdmin);
-    TEST_ASSERT(ssNetUserAdmin.str().find("User name                    admin") != std::string::npos, "net user admin must display username");
-    TEST_ASSERT(ssNetUserAdmin.str().find("Account active               Yes") != std::string::npos, "net user admin must show account active");
-    TEST_ASSERT(ssNetUserAdmin.str().find("*Administrators") != std::string::npos, "net user admin must show Administrators group");
+    TEST_ASSERT(ssNetUserAdmin.str().find("The user name could not be found") != std::string::npos, "net user admin must report the removed sample account absent");
 
     // Test 'net user alice Password123! /add'
     std::ostringstream ssAddUser;
     testShell.execute("net user alice Password123! /add", ssAddUser);
-    TEST_ASSERT(ssAddUser.str().find("The command completed successfully") != std::string::npos, "net user /add must succeed");
-    TEST_ASSERT(samDb.getUser(L"alice").has_value(), "User 'alice' must exist in SAM after /add");
+    TEST_ASSERT(ssAddUser.str().find("System error 50") != std::string::npos, "net user /add must report unavailable SAM service");
+    TEST_ASSERT(!samDb.getUser(L"alice").has_value(), "Shell account management must not mutate the hosted SAM adapter");
 
     // Test 'net user alice /delete'
     std::ostringstream ssDelUser;
     testShell.execute("net user alice /delete", ssDelUser);
-    TEST_ASSERT(ssDelUser.str().find("The command completed successfully") != std::string::npos, "net user /delete must succeed");
-    TEST_ASSERT(!samDb.getUser(L"alice").has_value(), "User 'alice' must be removed from SAM after /delete");
+    TEST_ASSERT(ssDelUser.str().find("System error 50") != std::string::npos, "net user /delete must report unavailable SAM service");
 
     // Test 'lock'
     std::ostringstream ssLock;
     testShell.execute("lock", ssLock);
-    TEST_ASSERT(ssLock.str().find("The workstation is now locked") != std::string::npos, "lock command must notify workstation locked");
-    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::Locked, "Workstation must be locked after 'lock'");
+    TEST_ASSERT(ssLock.str().find("Unable to lock workstation") != std::string::npos, "lock command must report unavailable session");
+    TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOff, "Failed lock must leave workstation logged off");
 
     // Unlock and test 'logoff'
-    winlogon.unlockWorkstation(L"mica");
     std::ostringstream ssLogoff;
     testShell.execute("logoff", ssLogoff);
-    TEST_ASSERT(ssLogoff.str().find("Session terminated. User logged off") != std::string::npos, "logoff command must notify user logged off");
+    TEST_ASSERT(ssLogoff.str().find("No interactive user is logged on") != std::string::npos, "logoff must not claim a session was terminated when none existed");
     TEST_ASSERT(winlogon.getState() == winlogon::LogonState::LoggedOff, "State must be LoggedOff after 'logoff'");
 }
 

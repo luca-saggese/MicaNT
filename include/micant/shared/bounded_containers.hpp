@@ -57,7 +57,15 @@ class BoundedVector : public std::vector<T> {
     using Base = std::vector<T>;
 public:
     using Base::Base;
-    [[nodiscard]] bool good() const noexcept { return true; }
+    [[nodiscard]] bool good() const noexcept { return good_; }
+    bool reserve(size_t count) noexcept {
+        try { Base::reserve(count); return true; }
+        catch (...) { good_ = false; return false; }
+    }
+    bool resize(size_t count) noexcept {
+        try { Base::resize(count); return true; }
+        catch (...) { good_ = false; return false; }
+    }
     bool push_back(const T& value) { Base::push_back(value); return true; }
     bool push_back(T&& value) { Base::push_back(std::move(value)); return true; }
     friend bool operator==(const BoundedVector& left, const BoundedVector& right)
@@ -69,9 +77,11 @@ public:
     bool append(const T* values, size_t count) {
         if (!values && count) return false;
         if (!count) return true;
-        Base::insert(Base::end(), values, values + count);
-        return true;
+        try { Base::insert(Base::end(), values, values + count); return true; }
+        catch (...) { good_ = false; return false; }
     }
+private:
+    bool good_{true};
 };
 #else
 template <class T>

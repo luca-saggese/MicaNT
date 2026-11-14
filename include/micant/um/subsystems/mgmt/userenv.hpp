@@ -19,16 +19,15 @@ using BOOL = int32_t;
 using DWORD = uint32_t;
 using HANDLE = void*;
 
-inline BOOL WINAPI GetUserProfileDirectoryW(HANDLE /*hToken*/, wchar_t* lpProfileDir, DWORD* lpcchSize) noexcept {
-    static const wchar_t defaultProfile[] = L"C:\\Users\\admin";
+inline BOOL WINAPI GetUserProfileDirectoryW(HANDLE hToken, wchar_t* lpProfileDir, DWORD* lpcchSize) noexcept {
+    (void)hToken;
+    (void)lpProfileDir;
     if (!lpcchSize) return 0;
-    if (!lpProfileDir || *lpcchSize < 16) {
-        *lpcchSize = 16;
-        return 0;
-    }
-    std::memcpy(lpProfileDir, defaultProfile, sizeof(defaultProfile));
-    *lpcchSize = 15;
-    return 1;
+    // Profile lookup is not implemented until token identity is connected to
+    // the per-SID profile manager. Never report the old shared admin path as
+    // if it belonged to the supplied token.
+    *lpcchSize = 0;
+    return 0;
 }
 
 inline void InitializeUserenvSubsystemExports() {

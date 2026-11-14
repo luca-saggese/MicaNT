@@ -376,12 +376,16 @@
         if (winlogon::WinlogonManager::get().lockWorkstation()) {
             out << "The workstation is now locked. Switched to secure Winlogon desktop.\n";
         } else {
-            out << "Failed to lock workstation. Session is not in logged-on state.\n";
+            out << "Unable to lock workstation: no interactive session is available.\n";
         }
     }
 
 
     void cmdLogoff(std::ostream& out) {
+        if (winlogon::WinlogonManager::get().getState() == winlogon::LogonState::LoggedOff) {
+            out << "No interactive user is logged on.\n";
+            return;
+        }
         winlogon::WinlogonManager::get().logoff();
         out << "Session terminated. User logged off. Switched to secure Winlogon desktop.\n";
     }

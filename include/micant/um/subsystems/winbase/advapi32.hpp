@@ -677,28 +677,19 @@ inline win32::BOOL LogonUserW(
     uint32_t /*dwLogonProvider*/,
     win32::HANDLE* phToken
 ) noexcept {
+    if (phToken) *phToken = nullptr;
     if (!lpszUsername || !phToken) {
         win32::SetLastError(87); // ERROR_INVALID_PARAMETER
         return win32::FALSE;
     }
-
-    std::wstring user(lpszUsername);
-    std::wstring dom = lpszDomain ? lpszDomain : L"";
-    std::wstring pass = lpszPassword ? lpszPassword : L"";
-
-    std::shared_ptr<se::TokenObject> token;
-    Luid logonId{0, 0};
-    NTSTATUS st = lsass::LocalSecurityAuthority::get().logonUser(
-        dom, user, pass, static_cast<lsass::SecurityLogonType>(dwLogonType), L"MSV1_0", token, logonId
-    );
-
-    if (st != STATUS_SUCCESS) {
-        win32::SetLastError(1326); // ERROR_LOGON_FAILURE
-        return win32::FALSE;
-    }
-
-    *phToken = reinterpret_cast<win32::HANDLE>(static_cast<uintptr_t>(logonId.toUint64()));
-    return win32::TRUE;
+    (void)lpszDomain;
+    (void)lpszPassword;
+    (void)dwLogonType;
+    // The hosted compatibility layer has no native token handle table or
+    // authenticated LSASS syscall. Returning a LUID-shaped pseudo handle here
+    // would grant callers a value that cannot be referenced or closed safely.
+    win32::SetLastError(50); // ERROR_NOT_SUPPORTED
+    return win32::FALSE;
 }
 
 inline win32::BOOL LookupAccountSidW(

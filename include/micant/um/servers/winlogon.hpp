@@ -105,76 +105,28 @@ public:
         const std::wstring& password,
         const std::wstring& domain = L"MICANT"
     ) {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (state_ == LogonState::LoggedOn) {
-            return STATUS_LOGON_FAILURE;
-        }
-
-        state_ = LogonState::Authenticating;
-
-        std::shared_ptr<se::TokenObject> token;
-        Luid logonId{0, 0};
-
-        NTSTATUS status = lsass::LocalSecurityAuthority::get().logonUser(
-            domain,
-            username,
-            password,
-            lsass::SecurityLogonType::Interactive,
-            L"MSV1_0",
-            token,
-            logonId
-        );
-
-        if (status != STATUS_SUCCESS) {
-            state_ = LogonState::LoggedOff;
-            activeDesktop_ = DesktopType::Winlogon;
-            return status;
-        }
-
-        loggedOnUser_ = username;
-        loggedOnDomain_ = domain;
-        activeLogonId_ = logonId;
-        activeToken_ = token;
-        state_ = LogonState::LoggedOn;
-        activeDesktop_ = DesktopType::Default;
-        shellPid_ = 512; // Simulated primary shell PID (cmd.exe / explorer.exe)
-
-        return STATUS_SUCCESS;
+        (void)username;
+        (void)password;
+        (void)domain;
+        // This hosted compatibility manager has no authenticated LPC path,
+        // kernel-issued token assignment, secure desktop, or shell process
+        // lifecycle. Never convert its in-process SAM adapter into a logon.
+        return STATUS_NOT_SUPPORTED;
     }
 
     /**
      * @brief Locks workstation display and switches to secure Winlogon desktop.
      */
     bool lockWorkstation() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ != LogonState::LoggedOn) {
-            return false;
-        }
-
-        state_ = LogonState::Locked;
-        activeDesktop_ = DesktopType::Winlogon;
-        return true;
+        return false;
     }
 
     /**
      * @brief Unlocks workstation with current user credentials.
      */
     NTSTATUS unlockWorkstation(const std::wstring& password) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ != LogonState::Locked) {
-            return STATUS_UNSUCCESSFUL;
-        }
-
-        uint32_t rid = 0;
-        NTSTATUS status = sam::SamDatabase::get().verifyCredentials(loggedOnUser_, password, rid);
-        if (status != STATUS_SUCCESS) {
-            return status;
-        }
-
-        state_ = LogonState::LoggedOn;
-        activeDesktop_ = DesktopType::Default;
-        return STATUS_SUCCESS;
+        (void)password;
+        return STATUS_NOT_SUPPORTED;
     }
 
     /**
@@ -211,7 +163,6 @@ public:
                 return SasAction::LogonPrompt;
 
             case LogonState::LoggedOn:
-                activeDesktop_ = DesktopType::Winlogon;
                 return SasAction::SecurityOptions;
 
             case LogonState::Locked:
@@ -226,18 +177,15 @@ public:
      * @brief Dismisses security options dialog and returns to user desktop.
      */
     void dismissSecurityOptions() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == LogonState::LoggedOn) {
-            activeDesktop_ = DesktopType::Default;
-        }
+        // No secure desktop switch is implemented in this hosted adapter.
     }
 
     /**
      * @brief Switches current active desktop.
      */
     void switchDesktop(DesktopType desktop) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        activeDesktop_ = desktop;
+        (void)desktop;
+        // A desktop name cannot substitute for compositor/input isolation.
     }
 
     // Accessors

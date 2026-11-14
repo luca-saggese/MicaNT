@@ -178,31 +178,16 @@ public:
         uint32_t& outUserRid
     ) override {
         (void)domain;
+        (void)username;
         (void)logonType;
-
-        auto userOpt = sam::SamDatabase::get().getUserByName(username);
-        if (!userOpt) {
-            return STATUS_NO_SUCH_USER;
-        }
-
-        const auto& user = *userOpt;
-
-        if ((user.userFlags & sam::USER_ACCOUNT_DISABLED) != 0) {
-            return STATUS_ACCOUNT_DISABLED;
-        }
-        if ((user.userFlags & sam::USER_ACCOUNT_AUTO_LOCKED) != 0) {
-            return STATUS_ACCOUNT_LOCKED_OUT;
-        }
-
-        auto expectedResponse = crypto::computeChallengeResponse(user.ntHash, challenge);
-        if (response.size() != expectedResponse.size() ||
-            !std::equal(response.begin(), response.end(), expectedResponse.begin(), expectedResponse.end())) {
-            return STATUS_LOGON_FAILURE;
-        }
-
-        outUserRid = user.rid;
-        outToken = buildSecurityToken(user);
-        return STATUS_SUCCESS;
+        (void)challenge;
+        (void)response;
+        (void)outToken;
+        (void)outUserRid;
+        // NT hash based legacy challenge-response is deliberately disabled;
+        // this implementation does not persist a reversible-to-NT-hash
+        // credential verifier or advertise NTLM support.
+        return STATUS_NOT_SUPPORTED;
     }
 
 private:
@@ -226,12 +211,9 @@ private:
             token->addPrivilege(se::SE_RESTORE_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_SECURITY_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_TAKE_OWNERSHIP_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
-            token->addPrivilege(se::SE_TCB_NAME, se::SE_PRIVILEGE_ENABLED | se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_SYSTEM_ENVIRONMENT_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_CHANGE_NOTIFY_NAME, se::SE_PRIVILEGE_ENABLED | se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_IMPERSONATE_NAME, se::SE_PRIVILEGE_ENABLED | se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
-            token->addPrivilege(se::SE_CREATE_TOKEN_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
-            token->addPrivilege(se::SE_ASSIGNPRIMARYTOKEN_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_INCREASE_QUOTA_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
             token->addPrivilege(se::SE_LOAD_DRIVER_NAME, se::SE_PRIVILEGE_ENABLED_BY_DEFAULT);
         } else {
@@ -292,6 +274,14 @@ public:
         std::shared_ptr<se::TokenObject>& outToken,
         Luid& outLogonId
     ) {
+        outToken.reset();
+        outLogonId = Luid{0, 0};
+        // This adapter authenticates local interactive accounts only. It has
+        // no service, batch, network, cached, or domain authority; accepting
+        // those labels would let callers misrepresent the logon context.
+        if (logonType != SecurityLogonType::Interactive) return STATUS_NOT_SUPPORTED;
+        if (!domain.empty() && toLower(domain) != L"micant") return STATUS_LOGON_FAILURE;
+
         std::shared_ptr<ILsaAuthenticationPackage> pkg;
         {
             std::lock_guard<std::mutex> lock(mutex_);

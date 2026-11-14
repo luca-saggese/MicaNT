@@ -13,23 +13,16 @@
         std::wstring curUser = winlogon::WinlogonManager::get().getLoggedOnUser();
         std::wstring curDomain = winlogon::WinlogonManager::get().getLoggedOnDomain();
         if (curUser.empty()) {
-            curUser = L"admin";
-            curDomain = L"MICANT";
+            out << "No interactive user is logged on.\n";
+            return;
         }
 
         std::string sUser = wideToAscii(curUser);
         std::string sDomain = wideToAscii(curDomain);
         auto token = winlogon::WinlogonManager::get().getActiveToken();
         if (!token) {
-            auto userOpt = sam::SamDatabase::get().getUser(curUser);
-            if (userOpt) {
-                token = std::make_shared<se::TokenObject>(userOpt->userSid);
-                for (const auto& g : sam::SamDatabase::get().getGroupSidsForUser(userOpt->rid)) {
-                    token->addGroup(g);
-                }
-            } else {
-                token = se::TokenObject::createUserToken(se::Sid(5, {21, 1988, 1993, 2026, 1000}));
-            }
+            out << "Current logon token is unavailable.\n";
+            return;
         }
 
         if (flag == "/?" || flag == "-?") {

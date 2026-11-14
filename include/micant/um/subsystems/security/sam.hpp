@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,8 +13,10 @@
 #include <algorithm>
 #include <span>
 #include <mutex>
+#include <random>
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/ntstatus.hpp"
+#include "micant/shared/crypto_primitives.hpp"
 #include "micant/km/executive/se.hpp"
 
 namespace micant::sam {
@@ -166,8 +169,13 @@ struct SamUser {
     std::wstring accountName;
     std::wstring fullName;
     std::wstring comment;
-    std::vector<uint8_t> ntHash;
-    std::vector<uint8_t> salt;
+    // Versioned PBKDF2-HMAC-SHA-256 verifier. NT hash storage is intentionally
+    // absent; legacy challenge-response authentication is unsupported.
+    uint32_t passwordVerifierVersion{1};
+    uint32_t passwordVerifierIterations{micant::shared::crypto::Pbkdf2Sha256::MIN_ITERATIONS};
+    std::array<uint8_t, 16> passwordSalt{};
+    std::array<uint8_t, 32> passwordVerifier{};
+    bool hasPassword{false};
     uint32_t primaryGroupRid{DOMAIN_ALIAS_RID_USERS};
     uint32_t userFlags{USER_NORMAL_ACCOUNT};
     uint32_t badPasswordCount{0};
@@ -194,6 +202,12 @@ struct SamGroup {
 
 class SamDatabase {
 public:
+    struct PasswordPolicy {
+        size_t minimumLength{12};
+        uint32_t minimumCharacterClasses{3};
+        uint32_t maximumFailedAttempts{5};
+    };
+
     static SamDatabase& get() {
         static SamDatabase instance;
         return instance;
@@ -233,18 +247,21 @@ public:
                         bool isAdmin = false) {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        if (!validAccountName(accountName) || !passwordMeetsPolicy(password)) return STATUS_ACCOUNT_RESTRICTION;
+
         std::wstring nameLower = toLower(accountName);
         if (usersByName_.contains(nameLower)) {
             return STATUS_USER_EXISTS;
         }
 
+        if (nextUserRid_ < 1000 || nextUserRid_ == UINT32_MAX) return STATUS_ACCOUNT_RESTRICTION;
         uint32_t rid = nextUserRid_++;
         SamUser user;
         user.rid = rid;
         user.accountName = std::wstring(accountName);
         user.fullName = std::wstring(fullName);
         user.comment = std::wstring(comment);
-        user.ntHash = crypto::computeNtHash(password);
+        if (!createPasswordVerifier(password, user)) return STATUS_NOT_SUPPORTED;
         user.primaryGroupRid = isAdmin ? DOMAIN_ALIAS_RID_ADMINS : DOMAIN_ALIAS_RID_USERS;
         user.userFlags = USER_NORMAL_ACCOUNT | USER_DONT_EXPIRE_PASSWORD;
         user.userSid = makeUserSid(rid);
@@ -252,6 +269,8 @@ public:
 
         usersByRid_[rid] = user;
         usersByName_[nameLower] = rid;
+        wipe(user.passwordSalt);
+        wipe(user.passwordVerifier);
 
         // Add to groups
         addUserToGroupInternal(rid, DOMAIN_ALIAS_RID_USERS);
@@ -281,17 +300,22 @@ public:
         if (user.userFlags & USER_ACCOUNT_AUTO_LOCKED) {
             return STATUS_ACCOUNT_LOCKED_OUT;
         }
+        if (!user.hasPassword) return STATUS_PASSWORD_EXPIRED;
 
-        auto inputHash = crypto::computeNtHash(password);
-        if (inputHash == user.ntHash) {
+        std::array<uint8_t, 32> inputVerifier{};
+        if (!derivePasswordVerifier(password, user, inputVerifier)) return STATUS_NOT_SUPPORTED;
+        if (constantTimeEqual(inputVerifier, user.passwordVerifier)) {
+            wipe(inputVerifier);
             user.badPasswordCount = 0;
             user.logonCount++;
             outRid = user.rid;
             return STATUS_SUCCESS;
         }
 
-        user.badPasswordCount++;
-        if (user.badPasswordCount >= 5 && user.rid != DOMAIN_USER_RID_ADMIN) {
+        wipe(inputVerifier);
+
+        if (user.badPasswordCount != UINT32_MAX) ++user.badPasswordCount;
+        if (user.badPasswordCount >= passwordPolicy_.maximumFailedAttempts) {
             user.userFlags |= USER_ACCOUNT_AUTO_LOCKED;
         }
         return STATUS_LOGON_FAILURE;
@@ -303,6 +327,8 @@ public:
     NTSTATUS setPassword(std::wstring_view accountName, std::wstring_view newPassword) {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        if (!passwordMeetsPolicy(newPassword)) return STATUS_ACCOUNT_RESTRICTION;
+
         std::wstring nameLower = toLower(accountName);
         auto it = usersByName_.find(nameLower);
         if (it == usersByName_.end()) {
@@ -310,7 +336,16 @@ public:
         }
 
         SamUser& user = usersByRid_[it->second];
-        user.ntHash = crypto::computeNtHash(newPassword);
+        SamUser replacement = user;
+        if (!createPasswordVerifier(newPassword, replacement)) return STATUS_NOT_SUPPORTED;
+        user.passwordSalt = replacement.passwordSalt;
+        user.passwordVerifier = replacement.passwordVerifier;
+        user.passwordVerifierVersion = replacement.passwordVerifierVersion;
+        user.passwordVerifierIterations = replacement.passwordVerifierIterations;
+        user.hasPassword = true;
+        user.passwordLastSetTimestamp = 0; // replaced with a trusted system time when that service is available
+        wipe(replacement.passwordSalt);
+        wipe(replacement.passwordVerifier);
         user.badPasswordCount = 0;
         user.userFlags &= ~USER_ACCOUNT_AUTO_LOCKED;
         return STATUS_SUCCESS;
@@ -352,6 +387,17 @@ public:
         SamUser& user = usersByRid_[it->second];
         user.badPasswordCount = 0;
         user.userFlags &= ~USER_ACCOUNT_AUTO_LOCKED;
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS setAccountEnabled(std::wstring_view accountName, bool enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = usersByName_.find(toLower(accountName));
+        if (it == usersByName_.end()) return STATUS_NO_SUCH_USER;
+        auto& user = usersByRid_.at(it->second);
+        if (enabled && !user.hasPassword) return STATUS_PASSWORD_EXPIRED;
+        if (enabled) user.userFlags &= ~USER_ACCOUNT_DISABLED;
+        else user.userFlags |= USER_ACCOUNT_DISABLED;
         return STATUS_SUCCESS;
     }
 
@@ -447,6 +493,91 @@ public:
     }
 
 private:
+    static bool constantTimeEqual(std::span<const uint8_t> left,
+                                  std::span<const uint8_t> right) noexcept {
+        if (left.size() != right.size()) return false;
+        uint8_t difference = 0;
+        for (size_t i = 0; i < left.size(); ++i) difference |= left[i] ^ right[i];
+        return difference == 0;
+    }
+
+    static bool validAccountName(std::wstring_view name) noexcept {
+        if (name.empty() || name.size() > 64 || name == L"." || name == L"..") return false;
+        for (wchar_t ch : name)
+            if (ch < 0x20 || ch == L'\\' || ch == L'/' || ch == L':' || ch == L'@') return false;
+        return true;
+    }
+
+    bool passwordMeetsPolicy(std::wstring_view password) const noexcept {
+        if (password.size() < passwordPolicy_.minimumLength || password.size() > 1024) return false;
+        bool upper = false, lower = false, digit = false, punctuation = false;
+        for (wchar_t ch : password) {
+            upper |= ch >= L'A' && ch <= L'Z';
+            lower |= ch >= L'a' && ch <= L'z';
+            digit |= ch >= L'0' && ch <= L'9';
+            punctuation |= !((ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z') ||
+                             (ch >= L'0' && ch <= L'9'));
+        }
+        return static_cast<uint32_t>(upper) + static_cast<uint32_t>(lower) +
+            static_cast<uint32_t>(digit) + static_cast<uint32_t>(punctuation) >=
+            passwordPolicy_.minimumCharacterClasses;
+    }
+
+    static void wipe(std::span<uint8_t> bytes) noexcept {
+        volatile uint8_t* p = bytes.data();
+        for (size_t i = 0; i < bytes.size(); ++i) p[i] = 0;
+    }
+
+    static bool encodePassword(std::wstring_view password, std::vector<uint8_t>& bytes) {
+        // Windows WCHAR is UTF-16. Convert scalar wchar_t values to UTF-16LE
+        // explicitly so hosted 32-bit wchar_t builds use the same encoding.
+        bytes.clear();
+        if (password.size() > 1024) return false;
+        bytes.reserve(password.size() * 4);
+        for (uint32_t cp : password) {
+            if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
+            if (cp <= 0xffff) {
+                bytes.push_back(static_cast<uint8_t>(cp));
+                bytes.push_back(static_cast<uint8_t>(cp >> 8));
+            } else {
+                cp -= 0x10000;
+                const uint16_t high = static_cast<uint16_t>(0xd800 | (cp >> 10));
+                const uint16_t low = static_cast<uint16_t>(0xdc00 | (cp & 0x3ff));
+                bytes.push_back(static_cast<uint8_t>(high)); bytes.push_back(static_cast<uint8_t>(high >> 8));
+                bytes.push_back(static_cast<uint8_t>(low)); bytes.push_back(static_cast<uint8_t>(low >> 8));
+            }
+        }
+        return !bytes.empty();
+    }
+
+    static bool derivePasswordVerifier(std::wstring_view password, const SamUser& user,
+                                      std::array<uint8_t, 32>& verifier) {
+        if (user.passwordVerifierVersion != 1 ||
+            user.passwordVerifierIterations < micant::shared::crypto::Pbkdf2Sha256::MIN_ITERATIONS ||
+            user.passwordVerifierIterations > micant::shared::crypto::Pbkdf2Sha256::MAX_ITERATIONS) return false;
+        std::vector<uint8_t> passwordBytes;
+        if (!encodePassword(password, passwordBytes)) return false;
+        const bool ok = micant::shared::crypto::Pbkdf2Sha256::derive(passwordBytes, user.passwordSalt,
+            user.passwordVerifierIterations, verifier);
+        wipe(passwordBytes);
+        return ok;
+    }
+
+    static bool createPasswordVerifier(std::wstring_view password, SamUser& user) {
+        // SamDatabase is currently only a hosted adapter. Native user-mode
+        // SAM must obtain salt through its authorized kernel RNG interface.
+        // Do not let this host-only source become the freestanding contract.
+        try {
+            std::random_device source;
+            std::uniform_int_distribution<unsigned> byte(0, 255);
+            for (auto& value : user.passwordSalt) value = static_cast<uint8_t>(byte(source));
+        } catch (...) {
+            user.passwordSalt.fill(0);
+            return false;
+        }
+        return derivePasswordVerifier(password, user, user.passwordVerifier);
+    }
+
     void initializeDefaultAccounts() {
         // Builtin Groups
         groupsByRid_[DOMAIN_ALIAS_RID_ADMINS] = SamGroup{
@@ -479,9 +610,8 @@ private:
         admin.accountName = L"Administrator";
         admin.fullName = L"Built-in account for administering the computer";
         admin.comment = L"MicaNT Built-in Superuser";
-        admin.ntHash = crypto::computeNtHash(L"AdminPassword123!");
         admin.primaryGroupRid = DOMAIN_ALIAS_RID_ADMINS;
-        admin.userFlags = USER_NORMAL_ACCOUNT | USER_DONT_EXPIRE_PASSWORD;
+        admin.userFlags = USER_NORMAL_ACCOUNT | USER_ACCOUNT_DISABLED | USER_PASSWORD_EXPIRED;
         admin.userSid = makeUserSid(DOMAIN_USER_RID_ADMIN);
         usersByRid_[DOMAIN_USER_RID_ADMIN] = admin;
         usersByName_[L"administrator"] = DOMAIN_USER_RID_ADMIN;
@@ -492,7 +622,6 @@ private:
         guest.accountName = L"Guest";
         guest.fullName = L"Built-in account for guest access";
         guest.comment = L"Disabled by default";
-        guest.ntHash = crypto::computeNtHash(L"");
         guest.primaryGroupRid = DOMAIN_ALIAS_RID_GUESTS;
         guest.userFlags = USER_NORMAL_ACCOUNT | USER_ACCOUNT_DISABLED;
         guest.userSid = makeUserSid(DOMAIN_USER_RID_GUEST);
@@ -500,21 +629,6 @@ private:
         usersByName_[L"guest"] = DOMAIN_USER_RID_GUEST;
 
         // MicaNT Default Interactive User (RID 1000)
-        SamUser micaUser;
-        micaUser.rid = 1000;
-        micaUser.accountName = L"admin";
-        micaUser.fullName = L"Workstation Administrator";
-        micaUser.comment = L"Primary Workstation Operator";
-        micaUser.ntHash = crypto::computeNtHash(L"mica");
-        micaUser.primaryGroupRid = DOMAIN_ALIAS_RID_ADMINS;
-        micaUser.userFlags = USER_NORMAL_ACCOUNT | USER_DONT_EXPIRE_PASSWORD;
-        micaUser.userSid = makeUserSid(1000);
-        usersByRid_[1000] = micaUser;
-        usersByName_[L"admin"] = 1000;
-
-        addUserToGroupInternal(1000, DOMAIN_ALIAS_RID_USERS);
-        addUserToGroupInternal(1000, DOMAIN_ALIAS_RID_ADMINS);
-
         nextUserRid_ = 1001;
     }
 
@@ -535,6 +649,7 @@ private:
     }
 
     mutable std::mutex mutex_;
+    PasswordPolicy passwordPolicy_{};
     se::Sid domainSid_;
     uint32_t nextUserRid_{1000};
     std::unordered_map<uint32_t, SamUser> usersByRid_;

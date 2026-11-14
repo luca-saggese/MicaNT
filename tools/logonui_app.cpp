@@ -18,7 +18,7 @@ constexpr uint32_t WIN_W = 600;
 constexpr uint32_t WIN_H = 450;
 alignas(4096) uint32_t s_logonBuffer[WIN_W * WIN_H];
 
-void RenderLogonUiWindow() noexcept {
+[[maybe_unused]] void RenderLogonUiWindow() noexcept {
     // 1. Full Atmospheric Gradient Background
     for (uint32_t y = 0; y < WIN_H; ++y) {
         uint8_t r = static_cast<uint8_t>(8 + (y * 12) / WIN_H);
@@ -80,22 +80,6 @@ void RenderLogonUiWindow() noexcept {
 } // namespace
 
 extern "C" void _start() noexcept {
-    const char* banner =
-        "MicaNT Windows Logon User Interface [Version 10.0.26040]\n"
-        "(C) Sovereign MicaNT Systems. All rights reserved.\n\n"
-        "[LogonUI] Initializing interactive user credential provider...\n"
-        "Active Session ID      : 1 (Interactive Console Session)\n"
-        "Security Subsystem     : LSASS.EXE (Local Security Authority)\n"
-        "Active Account         : MICANT\\MicaAdmin (User Principal)\n"
-        "Authentication Package : Sovereign Kerberos / NTLM / Windows Hello PIN\n"
-        "Interactive State      : Desktop Unlocked (High-Integrity Token Active)\n"
-        "Status: Presenting logonui.exe window (600x450 @ 32-bpp BGRA)\n\n";
-
-    PrintStr(banner);
-
-    RenderLogonUiWindow();
-    PresentWindow(s_logonBuffer, WIN_W, WIN_H);
-
-    PrintStr("[LogonUI] Authentication session active. Exiting with code 0.\n");
-    DoSyscall(0x01, 0, 0); // NtTerminateProcess(0)
+    PrintStr("LogonUI startup failed: secure desktop input and authenticated LSASS transport are unavailable.\n");
+    DoSyscall(0x01, 0xC00000BBu, 0); // STATUS_NOT_SUPPORTED
 }

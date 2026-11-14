@@ -830,8 +830,69 @@ public:
         Sha256::update(outerCtx, std::span<const uint8_t>(innerHash.data(), 32));
         std::array<uint8_t, 32> outerHash{};
         Sha256::final(outerCtx, std::span<uint8_t, 32>(outerHash.data(), 32));
+        auto result = outerHash;
+        auto secureClear = [](void* memory, size_t size) noexcept {
+            volatile uint8_t* p = static_cast<volatile uint8_t*>(memory);
+            while (size--) *p++ = 0;
+        };
+        secureClear(k, sizeof(k));
+        secureClear(k_ipad, sizeof(k_ipad));
+        secureClear(k_opad, sizeof(k_opad));
+        secureClear(innerHash.data(), innerHash.size());
+        secureClear(outerHash.data(), outerHash.size());
+        secureClear(&innerCtx, sizeof(innerCtx));
+        secureClear(&outerCtx, sizeof(outerCtx));
+        return result;
+    }
+};
 
-        return outerHash;
+// PBKDF2-HMAC-SHA-256 (RFC 8018). Bounds keep untrusted record parameters
+// from turning account verification into an unbounded CPU/allocation request.
+class Pbkdf2Sha256 {
+public:
+    static constexpr uint32_t MIN_ITERATIONS = 100'000;
+    static constexpr uint32_t MAX_ITERATIONS = 2'000'000;
+    static constexpr size_t MAX_OUTPUT_BYTES = 1024;
+
+    static bool derive(std::span<const uint8_t> password,
+                       std::span<const uint8_t> salt,
+                       uint32_t iterations,
+                       std::span<uint8_t> output) noexcept {
+        if (password.empty() || salt.empty() || salt.size() > 64 || iterations < MIN_ITERATIONS ||
+            iterations > MAX_ITERATIONS || output.empty() || output.size() > MAX_OUTPUT_BYTES ||
+            output.size() > static_cast<size_t>(UINT32_MAX) * HmacSha256::DIGEST_SIZE) return false;
+
+        std::array<uint8_t, 68> saltBlock{};
+        std::array<uint8_t, 32> u{};
+        std::array<uint8_t, 32> accumulator{};
+        size_t offset = 0;
+        uint32_t block = 1;
+        while (offset < output.size()) {
+            micant::shared::boundedMemoryCopy(saltBlock.data(), salt.data(), salt.size());
+            const size_t blockOffset = salt.size();
+            saltBlock[blockOffset] = static_cast<uint8_t>(block >> 24);
+            saltBlock[blockOffset + 1] = static_cast<uint8_t>(block >> 16);
+            saltBlock[blockOffset + 2] = static_cast<uint8_t>(block >> 8);
+            saltBlock[blockOffset + 3] = static_cast<uint8_t>(block);
+            u = HmacSha256::compute(password, std::span<const uint8_t>(saltBlock.data(), blockOffset + 4));
+            accumulator = u;
+            for (uint32_t iteration = 1; iteration < iterations; ++iteration) {
+                u = HmacSha256::compute(password, u);
+                for (size_t i = 0; i < accumulator.size(); ++i) accumulator[i] ^= u[i];
+            }
+            const size_t count = std::min(accumulator.size(), output.size() - offset);
+            micant::shared::boundedMemoryCopy(output.data() + offset, accumulator.data(), count);
+            offset += count;
+            if (block == UINT32_MAX && offset < output.size()) return false;
+            ++block;
+        }
+        volatile uint8_t* wipe = u.data();
+        for (size_t i = 0; i < u.size(); ++i) wipe[i] = 0;
+        wipe = accumulator.data();
+        for (size_t i = 0; i < accumulator.size(); ++i) wipe[i] = 0;
+        wipe = saltBlock.data();
+        for (size_t i = 0; i < saltBlock.size(); ++i) wipe[i] = 0;
+        return true;
     }
 };
 
@@ -894,7 +955,7 @@ public:
         hkdfLabel.insert(hkdfLabel.end(), fullLabel.begin(), fullLabel.end());
         hkdfLabel.push_back(static_cast<uint8_t>(context.size()));
         hkdfLabel.insert(hkdfLabel.end(), context.begin(), context.end());
-        if (!hkdfLabel.good() || !fullLabel.good()) return {};
+        if (!hkdfLabel.good()) return {};
 
         return expand(secret, hkdfLabel, length);
     }

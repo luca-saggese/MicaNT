@@ -48,20 +48,6 @@ extern "C" void _start(const char* = nullptr) {
 #endif
     DoSyscall(0x11, csVal & 3, 0);
 
-    PrintLine("Local Security Authority Subsystem (lsass.exe) [PID 716]");
-    PrintLine("=======================================================");
-    PrintLine("Security Context:   Sovereign Token Sovereign-Authority");
-    PrintLine("Security Providers: NTLM, Kerberos v5, Sovereign-PKI");
-    PrintLine("SAM Database:       \\SystemRoot\\System32\\config\\SAM (Mounted)");
-    PrintLine("Security Hive:      \\SystemRoot\\System32\\config\\SECURITY (Mounted)");
-    PrintLine("Token SID Cache:    S-1-5-18 (SYSTEM), S-1-5-32-544 (Administrators)");
-    PrintLine("Credential Guard:   VBS Hardware Enclave Active (SLAT/VT-x)");
-
-    DoSyscall(0x01, 0, 0);
-
-    while (true) {
-#if defined(__x86_64__)
-        __asm__ __volatile__("pause");
-#endif
-    }
+    PrintLine("LSASS startup failed: authenticated IPC, persistent SAM, and kernel-authorized token issuance are unavailable.");
+    DoSyscall(0x01, 0xC00000BBu, 0); // STATUS_NOT_SUPPORTED
 }
