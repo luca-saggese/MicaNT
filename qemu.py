@@ -352,6 +352,7 @@ def main() -> int:
                 "network_probe_boot",
                 "https_probe_boot",
                 "file_image_boot",
+                "shell32_boot",
                 "explorer_runtime_boot",
                 "compositor_boot",
             ]

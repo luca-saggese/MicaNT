@@ -1115,27 +1115,13 @@ inline DWORD_PTR SHGetFileInfoW(
 ) noexcept {
     if (!psfi || cbFileInfo < sizeof(SHFILEINFOW) || !pszPath) return 0;
     std::memset(psfi, 0, sizeof(SHFILEINFOW));
-
-    if (uFlags & SHGFI_DISPLAYNAME) {
-        const wchar_t* fn = PathFindFileNameW(pszPath);
-        if (fn) {
-            std::wcsncpy(psfi->szDisplayName, fn, 260);
-        }
-    }
-    if (uFlags & SHGFI_TYPENAME) {
-        const wchar_t* ext = PathFindExtensionW(pszPath);
-        if (ext && _wcsicmp(ext, L".exe") == 0) {
-            std::wcsncpy(psfi->szTypeName, L"Application", 80);
-        } else if (ext && _wcsicmp(ext, L".dll") == 0) {
-            std::wcsncpy(psfi->szTypeName, L"Application Extension", 80);
-        } else {
-            std::wcsncpy(psfi->szTypeName, L"File", 80);
-        }
-    }
-    if (uFlags & SHGFI_ICON) {
-        psfi->hIcon = reinterpret_cast<HICON>(0x1001);
-    }
-    return 1;
+    // This header-level shell adapter has no connected filesystem identity,
+    // association database or User32 HICON allocator. In particular, do not
+    // manufacture an icon handle or report a successful file lookup based on
+    // the path's extension. The canonical Shell32 path must provide those
+    // services before SHGetFileInfo can return a result.
+    (void)uFlags;
+    return 0;
 }
 
 inline DWORD_PTR SHGetFileInfoA(
@@ -1166,7 +1152,7 @@ inline DWORD_PTR SHGetFileInfoA(
 }
 
 inline HICON ExtractIconW(HINSTANCE /*hInst*/, LPCWSTR /*lpszExeFileName*/, UINT /*nIconIndex*/) noexcept {
-    return reinterpret_cast<HICON>(0x1002);
+    return nullptr;
 }
 
 inline HICON ExtractIconA(HINSTANCE hInst, LPCSTR lpszExeFileName, UINT nIconIndex) noexcept {
@@ -1501,9 +1487,9 @@ inline HRESULT ShellOrdinal165(void* /*p1*/, void* /*p2*/, void* /*p3*/, void* /
 }
 
 inline HRESULT SHDefExtractIconW(LPCWSTR /*pszIconFile*/, int /*iIndex*/, UINT /*uFlags*/, void** phiconLarge, void** phiconSmall, UINT /*nIconSize*/) noexcept {
-    if (phiconLarge) *phiconLarge = reinterpret_cast<void*>(0x00010001);
-    if (phiconSmall) *phiconSmall = reinterpret_cast<void*>(0x00010002);
-    return S_OK;
+    if (phiconLarge) *phiconLarge = nullptr;
+    if (phiconSmall) *phiconSmall = nullptr;
+    return E_NOTIMPL;
 }
 
 inline int SHGetIconOverlayIndexW(LPCWSTR /*pszIconPath*/, int /*iIconIndex*/) noexcept {

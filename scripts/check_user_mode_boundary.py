@@ -20,6 +20,8 @@ class Variant:
 def variants() -> tuple[Variant, ...]:
     result = [
         Variant("ntdll_boot", "tools/dlls/ntdll.cpp"),
+        Variant("shell32_boot", "tools/dlls/shell32_icon.cpp",
+                ("MICANT_NATIVE_USERMODE",)),
         Variant("ws2_32_boot", "tools/dlls/ws2_32.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("dnsapi_boot", "tools/dlls/dnsapi.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("crypt32_boot", "tools/dlls/crypt32.cpp", ("MICANT_NATIVE_USERMODE",)),

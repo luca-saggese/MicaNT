@@ -99,7 +99,8 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     put16(root + 14, 2);
     put32(root + 16, 3); put32(root + 20, 0x80000080u);
     put32(root + 24, 14); put32(root + 28, 0x80000020u);
-    put16(root + 0x20 + 14, 1); put32(root + 0x20 + 16, 101); put32(root + 0x20 + 20, 0x80000040u);
+    put16(root + 0x20 + 14, 2); put32(root + 0x20 + 16, 101); put32(root + 0x20 + 20, 0x80000040u);
+    put32(root + 0x20 + 24, 202); put32(root + 0x20 + 28, 0x80000040u);
     put16(root + 0x40 + 14, 1); put32(root + 0x40 + 16, 1033); put32(root + 0x40 + 20, 0x60);
     put32(root + 0x60, 0x10c0); put32(root + 0x64, 4); put32(root + 0x68, 1200);
     pe[0x2c0] = 0xde; pe[0x2c1] = 0xad; pe[0x2c2] = 0xbe; pe[0x2c3] = 0xef;
@@ -118,6 +119,15 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     pe::PeImageView64 image;
     TEST_ASSERT(image.inspect(pe) == NtStatus::Success, "synthetic PE fixture validates");
     pe::PeResourceView resources(image);
+    std::array<uint16_t, 4> iconGroupIds{};
+    size_t iconGroupCount{};
+    TEST_ASSERT(resources.numericNames({14, {}, false}, iconGroupIds, iconGroupCount) == NtStatus::Success &&
+                iconGroupCount == 2 && iconGroupIds[0] == 101 && iconGroupIds[1] == 202,
+                "PE resource enumeration preserves numeric icon group ID order");
+    std::array<uint16_t, 1> tooSmallGroupBuffer{};
+    TEST_ASSERT(resources.numericNames({14, {}, false}, tooSmallGroupBuffer, iconGroupCount) ==
+                    NtStatus::BufferTooSmall && iconGroupCount == 2,
+                "PE resource enumeration reports required capacity without truncating silently");
     pe::PeResourceData result{};
     TEST_ASSERT(resources.find({14, {}, false}, {101, {}, false}, 1033, result) == NtStatus::Success,
                  "numeric type/name and exact language resolve");

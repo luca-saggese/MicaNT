@@ -978,6 +978,48 @@ class PeResourceView {
 public:
     explicit PeResourceView(const PeImageView64& image) noexcept : image_(&image) {}
 
+    // Enumerate numeric resource names below a numeric type node. This is
+    // used by shell APIs whose public index is an ordinal within a resource
+    // group table. Named resource keys are safely skipped by this bounded API.
+    [[nodiscard]] NtStatus numericNames(PeResourceIdentifier type,
+                                        std::span<uint16_t> output,
+                                        size_t& count) const noexcept {
+        count = 0;
+        if (!image_ || type.isName) return NtStatus::InvalidParameter;
+        const auto directory = image_->dataDirectory(IMAGE_DIRECTORY_ENTRY_RESOURCE);
+        if (!directory.virtualAddress || directory.size < 16 ||
+            directory.size > MaxDirectoryBytes) return NtStatus::NotFound;
+        const auto root = image_->fileBackedRange(directory.virtualAddress, directory.size);
+        if (root.size() != directory.size) return NtStatus::InvalidImageFormat;
+        uint32_t node{};
+        NtStatus status = findDirectoryEntry(root, 0, type, node);
+        if (status != NtStatus::Success) return status;
+        if (!(node & DirectoryFlag)) return NtStatus::InvalidImageFormat;
+        const uint32_t offset = node & OffsetMask;
+        if (!fits(root.size(), offset, 16)) return NtStatus::InvalidImageFormat;
+        const uint32_t named = read16(root.data() + offset + 12);
+        const uint32_t ids = read16(root.data() + offset + 14);
+        const uint64_t entries = static_cast<uint64_t>(named) + ids;
+        if (!entries || entries > 65535 ||
+            !fits(root.size(), offset + 16, static_cast<size_t>(entries) * 8))
+            return NtStatus::InvalidImageFormat;
+        size_t required = 0;
+        for (uint32_t i = 0; i < entries; ++i) {
+            const uint32_t rawName = read32(root.data() + offset + 16 + i * 8);
+            if (rawName & DirectoryFlag) continue;
+            if (rawName & 0xffff0000u) return NtStatus::InvalidImageFormat;
+            ++required;
+        }
+        count = required;
+        if (required > output.size()) return NtStatus::BufferTooSmall;
+        size_t written = 0;
+        for (uint32_t i = 0; i < entries; ++i) {
+            const uint32_t rawName = read32(root.data() + offset + 16 + i * 8);
+            if (!(rawName & DirectoryFlag)) output[written++] = static_cast<uint16_t>(rawName);
+        }
+        return NtStatus::Success;
+    }
+
     [[nodiscard]] NtStatus find(PeResourceIdentifier type, PeResourceIdentifier name,
                                 uint16_t preferredLanguage,
                                 PeResourceData& result) const noexcept {
