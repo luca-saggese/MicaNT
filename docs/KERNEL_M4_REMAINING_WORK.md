@@ -214,8 +214,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 - Verifica end-to-end processo/thread da PE file-backed: `TMPDIR=/private/tmp
   python3 qemu.py --headless --timeout 120 --diagnostics-dir
-  /private/tmp/micant-m4-fileimage-lifecycle-rollback` è passata, inclusa la
-  chiusura di rollback nella handle table figlia. Anche i test
+  /private/tmp/micant-m4-fileimage-attach-rollback` è passata, inclusa la
+  chiusura dell'handle in rollback nella handle table figlia e il detach basato
+  sulla profondità acquisita. Anche i test
   bootstrap a due/tre thread, timer-preemption Ring 0/Ring 3, APC/DPC, reaper,
   PS/2 e seriale stabile per 5 secondi sono verdi.
 - Verifica integrata del test CPL3 di terminazione del thread sospeso con APC

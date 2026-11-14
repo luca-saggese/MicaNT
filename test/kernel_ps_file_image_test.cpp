@@ -214,7 +214,8 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         const auto previousRoot = callerThread->directoryTableBase;
         ke::KAPC_STATE attachState{};
         ke::KeStackAttachProcess(createdProcess, &attachState);
-        const bool attached = callerThread->attachedProcess == createdProcess &&
+        const bool attachAcquired = callerThread->processAttachDepth == previousAttachDepth + 1;
+        const bool attached = attachAcquired && callerThread->attachedProcess == createdProcess &&
             callerThread->directoryTableBase == createdProcess->getDirectoryTableBase() &&
             callerThread->processAttachDepth == previousAttachDepth + 1;
         if (attached) {
@@ -228,7 +229,7 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         } else {
             status = NtStatus::Unsuccessful;
         }
-        if (attached) ke::KeUnstackDetachProcess(&attachState);
+        if (attachAcquired) ke::KeUnstackDetachProcess(&attachState);
         if (callerThread->processAttachDepth != previousAttachDepth ||
             callerThread->directoryTableBase != previousRoot || callerThread->attachedProcess) {
             reportFailure("[MicaNT Ps] SEC_IMAGE attach restoration", NtStatus::Unsuccessful);
@@ -241,7 +242,8 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         const auto waitAttachDepth = callerThread->processAttachDepth;
         ke::KAPC_STATE waitAttachState{};
         ke::KeStackAttachProcess(createdProcess, &waitAttachState);
-        const bool waitAttached = callerThread->attachedProcess == createdProcess &&
+        const bool waitAttachAcquired = callerThread->processAttachDepth == waitAttachDepth + 1;
+        const bool waitAttached = waitAttachAcquired && callerThread->attachedProcess == createdProcess &&
             callerThread->directoryTableBase == createdProcess->getDirectoryTableBase() &&
             callerThread->processAttachDepth == waitAttachDepth + 1;
         if (waitAttached) status = sys::NtWaitForSingleObject(threadHandle.value, false, nullptr);
@@ -252,7 +254,7 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
             if (closeStatus != NtStatus::Success) status = closeStatus;
             else threadHandle.value = 0;
         }
-        if (waitAttached) ke::KeUnstackDetachProcess(&waitAttachState);
+        if (waitAttachAcquired) ke::KeUnstackDetachProcess(&waitAttachState);
         if (callerThread->processAttachDepth != waitAttachDepth ||
             callerThread->directoryTableBase != previousRoot || callerThread->attachedProcess)
             return false;

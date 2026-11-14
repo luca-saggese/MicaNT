@@ -139,7 +139,7 @@ handle. This verifies the exercised lifecycle slice; it does not launch
 
 | Command | Result |
 |---|---|
-| `TMPDIR=/private/tmp python3 qemu.py --headless --timeout 120 --diagnostics-dir /private/tmp/micant-m4-fileimage-lifecycle-rollback` | Passed; modular bare-metal kernel linked, file-backed process/thread lifecycle, bootstrap two/three-thread tests, timer-preempted Ring 0/Ring 3, APC/DPC, reaper, PS/2 input and 5-second serial stability verified |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --timeout 120 --diagnostics-dir /private/tmp/micant-m4-fileimage-attach-rollback` | Passed; modular bare-metal kernel linked, file-backed process/thread lifecycle and attach/handle rollback, bootstrap two/three-thread tests, timer-preempted Ring 0/Ring 3, APC/DPC, reaper, PS/2 input and 5-second serial stability verified |
 
 The current M3 implementation batch has been incrementally built and booted
 in QEMU. Its LAPIC calibration uses five PIT measurements, takes the
