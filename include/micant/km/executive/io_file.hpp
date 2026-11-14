@@ -28,6 +28,7 @@ using FileReadRoutine = NtStatus (*)(void* context, uint64_t offset,
 using FileWriteRoutine = NtStatus (*)(void* context, uint64_t offset,
                                       const void* buffer, size_t length,
                                       size_t* bytesWritten) noexcept;
+using FileFlushRoutine = NtStatus (*)(void* context) noexcept;
 using FileSizeRoutine = uint64_t (*)(void* context) noexcept;
 using FileCommitCreateRoutine = NtStatus (*)(void* context) noexcept;
 using FileReleaseRoutine = void (*)(void* context) noexcept;
@@ -71,6 +72,9 @@ struct FileBackend {
     void (*releaseImage)(void*) noexcept{};
     NtStatus (*publishImageControl)(void*, void*, bool (*)(void*) noexcept,
                                     void (*)(void*) noexcept, void**) noexcept{};
+    // Optional ordered backend flush. Missing means IoFlushBuffersFile fails
+    // with NotSupported; success must include all lower-layer flushes.
+    FileFlushRoutine flush{};
 };
 
 class FileObject {
@@ -86,6 +90,13 @@ public:
 
     [[nodiscard]] uint64_t size() const noexcept {
         return backend_.querySize ? backend_.querySize(backend_.context) : backend_.size;
+    }
+    [[nodiscard]] NtStatus flush() const noexcept {
+        if (!backend_.flush) return NtStatus::NotSupported;
+#if defined(MICANT_FREESTANDING)
+        if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidDeviceRequest;
+#endif
+        return backend_.flush(backend_.context);
     }
     [[nodiscard]] bool isStream() const noexcept { return backend_.stream; }
     [[nodiscard]] bool supportsImageControl() const noexcept {
@@ -313,6 +324,8 @@ NtStatus IoReadFileHandle(Handle fileHandle, bool useCurrentOffset, uint64_t off
                           const void* requestStatus = nullptr) noexcept;
 NtStatus IoWriteFileHandle(Handle fileHandle, bool useCurrentOffset, uint64_t offset,
                            const void* buffer, size_t length, size_t* bytesWritten) noexcept;
+// Synchronous file-buffer flush used by the native NtFlushBuffersFile service.
+NtStatus IoFlushBuffersFile(Handle fileHandle) noexcept;
 NtStatus IoCancelFileReads(Handle fileHandle, const void* requestStatus) noexcept;
 bool IoCurrentReadCancelled() noexcept;
 // Request cancellation of owned reads; IRPs and backend references remain

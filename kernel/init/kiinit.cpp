@@ -1416,6 +1416,7 @@ struct BootBlockBackendAdapter {
     int32_t (*Read)(void*, uint64_t, uint32_t, void*, uint32_t*){};
     void (*Release)(void*){};
     int32_t (*Write)(void*, uint64_t, uint32_t, const void*, uint32_t*){};
+    int32_t (*Flush)(void*){};
 };
 
 micant::NtStatus bootBlockReadAdapter(void* context, uint64_t lba,
@@ -1451,6 +1452,12 @@ micant::NtStatus bootBlockWriteAdapter(void* context, uint64_t lba,
         adapter->Context, lba, count, buffer, blocksWritten)));
 }
 
+micant::NtStatus bootBlockFlushAdapter(void* context) noexcept {
+    auto* adapter = static_cast<BootBlockBackendAdapter*>(context);
+    if (!adapter || !adapter->Flush) return micant::NtStatus::NotSupported;
+    return static_cast<micant::NtStatus>(static_cast<uint32_t>(adapter->Flush(adapter->Context)));
+}
+
 int32_t bootCreateReadOnlyBlockDevice(void* driverContext, uint64_t totalBlocks,
     uint32_t blockSize, void* backendContext,
     int32_t (*read)(void*, uint64_t, uint32_t, void*, uint32_t*),
@@ -1484,6 +1491,10 @@ int32_t bootWriteBlockDevice(void*, uint64_t handle, uint64_t lba,
         static_cast<micant::Handle>(handle), lba, blockCount, buffer, blocksWritten));
 }
 
+int32_t bootFlushBlockDevice(void*, uint64_t handle) noexcept {
+    return bootStatus(micant::io::IoFlushBlockDeviceHandle(static_cast<micant::Handle>(handle)));
+}
+
 int32_t bootCreateWritableBlockDevice(void* driverContext, uint64_t totalBlocks,
     uint32_t blockSize, void* backendContext,
     int32_t (*read)(void*, uint64_t, uint32_t, void*, uint32_t*),
@@ -1498,6 +1509,32 @@ int32_t bootCreateWritableBlockDevice(void* driverContext, uint64_t totalBlocks,
     micant::io::BlockDeviceBackend backend{
         adapter, totalBlocks, blockSize, bootBlockReadAdapter,
         bootBlockReleaseAdapter, bootBlockWriteAdapter};
+    micant::Handle nativeHandle{};
+    const auto status = micant::io::IoCreateBlockDevice(&nativeHandle, desiredAccess, backend);
+    *handle = static_cast<uint64_t>(nativeHandle);
+    if (status == micant::NtStatus::Success && !trackBootDriverHandle(driverContext, *handle)) {
+        (void)micant::sys::NtClose(nativeHandle);
+        *handle = 0;
+        return bootStatus(micant::NtStatus::InsufficientResources);
+    }
+    return bootStatus(status);
+}
+
+int32_t bootCreateDurableWritableBlockDevice(void* driverContext, uint64_t totalBlocks,
+    uint32_t blockSize, void* backendContext,
+    int32_t (*read)(void*, uint64_t, uint32_t, void*, uint32_t*),
+    int32_t (*write)(void*, uint64_t, uint32_t, const void*, uint32_t*),
+    int32_t (*flush)(void*), void (*release)(void*), uint32_t desiredAccess,
+    uint64_t* handle) noexcept {
+    if (handle) *handle = 0;
+    if (!handle || !read || !write || !flush || !release)
+        return bootStatus(micant::NtStatus::InvalidParameter);
+    auto* adapter = new (std::nothrow_t{}) BootBlockBackendAdapter{
+        backendContext, read, release, write, flush};
+    if (!adapter) { release(backendContext); return bootStatus(micant::NtStatus::NoMemory); }
+    micant::io::BlockDeviceBackend backend{
+        adapter, totalBlocks, blockSize, bootBlockReadAdapter,
+        bootBlockReleaseAdapter, bootBlockWriteAdapter, bootBlockFlushAdapter};
     micant::Handle nativeHandle{};
     const auto status = micant::io::IoCreateBlockDevice(&nativeHandle, desiredAccess, backend);
     *handle = static_cast<uint64_t>(nativeHandle);
@@ -1727,6 +1764,9 @@ void initializeKernelServices(micant::boot_driver::KernelServices& services,
     services.MsiInterruptVersion = MSI_INTERRUPT_SERVICES_VERSION;
     services.ConnectMsiInterrupt = bootConnectMsiInterrupt;
     services.DisconnectMsiInterrupt = bootDisconnectMsiInterrupt;
+    services.DurableBlockDeviceVersion = 1;
+    services.CreateDurableWritableBlockDevice = bootCreateDurableWritableBlockDevice;
+    services.FlushBlockDevice = bootFlushBlockDevice;
     services.RegisterFileOpenRoutine = bootRegisterFileOpenRoutine;
     services.UnregisterFileOpenRoutine = bootUnregisterFileOpenRoutine;
     services.OpenBackendFile = bootOpenBackendFile;
@@ -2924,6 +2964,27 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (ex::ExSafeCopyToUser(ioStatusAddress, &ioResult, sizeof(ioResult)) != NtStatus::Success)
             return status(NtStatus::AccessViolation);
         return status(writeStatus);
+    }
+    if (number == sys::SSN_NtFlushBuffersFile) {
+        auto* ioStatusAddress = reinterpret_cast<IoStatusBlock*>(second);
+        const auto* issuingThread = ke::KeGetCurrentThread();
+        if (!ioStatusAddress) return status(NtStatus::InvalidParameter);
+        if (!issuingThread || !issuingThread->owningProcess ||
+            !issuingThread->kernelStackTop || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+            return status(NtStatus::InvalidDeviceRequest);
+        if (ex::ProbeForWrite(ioStatusAddress, sizeof(IoStatusBlock), alignof(IoStatusBlock)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        __asm__ __volatile__("swapgs" : : : "memory");
+        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        const bool enableFlushInterrupts = hal::amd64::bootstrapSchedulerClockActive();
+        if (enableFlushInterrupts) __asm__ __volatile__("sti" : : : "memory");
+        IoStatusBlock ioResult{};
+        const auto flushStatus = sys::NtFlushBuffersFile(static_cast<Handle>(first), &ioResult);
+        if (enableFlushInterrupts) __asm__ __volatile__("cli" : : : "memory");
+        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        __asm__ __volatile__("swapgs" : : : "memory");
+        const auto copyStatus = ex::ExSafeCopyToUser(ioStatusAddress, &ioResult, sizeof(ioResult));
+        return status(copyStatus == NtStatus::Success ? flushStatus : NtStatus::AccessViolation);
     }
     if (number == sys::SSN_NtCreateFile) {
         uint64_t extra[7]{};

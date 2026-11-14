@@ -69,6 +69,8 @@ inline constexpr uint32_t PORT_CMD_CR   = (1u << 15); // Command List Running
 inline constexpr uint8_t ATA_CMD_READ_DMA_EXT   = 0x25;
 inline constexpr uint8_t ATA_CMD_WRITE_DMA_EXT  = 0x35;
 inline constexpr uint8_t ATA_CMD_IDENTIFY       = 0xEC;
+inline constexpr uint8_t ATA_CMD_FLUSH_CACHE    = 0xE7;
+inline constexpr uint8_t ATA_CMD_FLUSH_CACHE_EXT = 0xEA;
 
 #pragma pack(push, 1)
 
@@ -160,6 +162,8 @@ private:
     bool     m_supports64BitDma{false};
     uint8_t  m_dataPort{0xFF};
     uint64_t m_port1TotalSectors{0};
+    bool m_supportsFlushCache{false};
+    bool m_supportsFlushCacheExt{false};
     MmioMapper m_mmioMapper{};
     DmaTranslator m_dmaTranslator{};
     PciRead32 m_pciRead32{};
@@ -429,6 +433,10 @@ private:
 
         // Total 48-bit LBA sectors (Words 100..103, bytes 200..207)
         const uint16_t commandSet83 = *reinterpret_cast<const uint16_t*>(&idBuf[166]);
+        const uint16_t commandSet82 = *reinterpret_cast<const uint16_t*>(&idBuf[164]);
+        const bool commandSet83Valid = (commandSet83 & 0xC000u) == 0x4000u;
+        m_supportsFlushCache = commandSet83Valid && (commandSet82 & 0x1000u) != 0;
+        m_supportsFlushCacheExt = commandSet83Valid && (commandSet83 & 0x1000u) != 0;
         uint64_t sectorCount{};
         if ((commandSet83 & 0xC400u) == 0x4400u)
             std::memcpy(&sectorCount, &idBuf[200], sizeof(sectorCount));
@@ -578,6 +586,41 @@ public:
 
         uint32_t tfd = pRegs[PORT_REG_TFD / 4];
         return (tfd & (1 | 0x20)) == 0;
+    }
+
+    // Drain the ATA device's volatile write cache. The drive must advertise
+    // one of the IDENTIFY FLUSH CACHE command bits; otherwise durability is
+    // explicitly unavailable. This command has no data phase.
+    NtStatus flushCache() noexcept {
+        if (!m_port1Online) return NtStatus::DeviceNotReady;
+        if (!m_supportsFlushCacheExt && !m_supportsFlushCache)
+            return NtStatus::NotSupported;
+
+        volatile uint32_t* pRegs = getPortRegs(m_dataPort);
+        auto* cmdHeaders = reinterpret_cast<AhciCommandHeader*>(s_ahciCmdListMem);
+        cmdHeaders[0].cfl = sizeof(FisRegH2D) / sizeof(uint32_t);
+        cmdHeaders[0].w = 0;
+        cmdHeaders[0].prdtl = 0;
+        cmdHeaders[0].prdbc = 0;
+
+        std::memset(&s_ahciCmdTable.cfis, 0, sizeof(s_ahciCmdTable.cfis));
+        auto* fis = reinterpret_cast<FisRegH2D*>(s_ahciCmdTable.cfis);
+        fis->fis_type = 0x27;
+        fis->pmport_c = 0x80;
+        fis->command = m_supportsFlushCacheExt
+            ? ATA_CMD_FLUSH_CACHE_EXT : ATA_CMD_FLUSH_CACHE;
+
+        pRegs[PORT_REG_IS / 4] = 0xFFFFFFFF;
+        pRegs[PORT_REG_CI / 4] = 1;
+        for (int i = 0; i < 200000; ++i) {
+            if ((pRegs[PORT_REG_CI / 4] & 1) == 0) break;
+#if defined(__x86_64__)
+            __asm__ __volatile__("pause");
+#endif
+        }
+        if (pRegs[PORT_REG_CI / 4] & 1) return NtStatus::IoTimeout;
+        return (pRegs[PORT_REG_TFD / 4] & (1u | 0x20u)) == 0
+            ? NtStatus::Success : NtStatus::DeviceDataError;
     }
 
 };

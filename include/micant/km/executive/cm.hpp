@@ -1454,7 +1454,10 @@ inline NtStatus CmDeleteKey(
 
 inline NtStatus CmFlushKey(std::shared_ptr<KeyObject> key) {
     if (!key) return NtStatus::InvalidHandle;
-    return NtStatus::Success;
+    // Registry keys still live only in the in-memory ConfigurationManager
+    // tree. Reporting success here would falsely promise that changes survive
+    // shutdown; until a hive is attached to a durable file backend, fail.
+    return NtStatus::NotSupported;
 }
 
 } // namespace micant::cm

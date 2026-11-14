@@ -302,6 +302,12 @@ void SyscallDispatcher::initializeStandardTable() {
         return NtWriteFile(fileHandle, event, apcRoutine, apcContext, iosb, buffer, length, byteOffset, key);
     });
 
+    registerSyscall(SSN_NtFlushBuffersFile, "NtFlushBuffersFile", 2,
+        [](const SyscallFrame& f) -> NtStatus {
+            return NtFlushBuffersFile(static_cast<Handle>(f.arg1),
+                reinterpret_cast<IoStatusBlock*>(f.arg2));
+        });
+
     // 27. NtDeviceIoControlFile (SSN: 0x0007)
     registerSyscall(SSN_NtDeviceIoControlFile, "NtDeviceIoControlFile", 10, [](const SyscallFrame& f) -> NtStatus {
         Handle fileHandle = static_cast<Handle>(f.arg1);

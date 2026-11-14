@@ -15,6 +15,7 @@ using BlockDeviceReadRoutine = NtStatus (*)(void* context, uint64_t lba,
 using BlockDeviceWriteRoutine = NtStatus (*)(void* context, uint64_t lba,
                                               uint32_t blockCount, const void* buffer,
                                               uint32_t* blocksWritten) noexcept;
+using BlockDeviceFlushRoutine = NtStatus (*)(void* context) noexcept;
 using BlockDeviceReleaseRoutine = void (*)(void* context) noexcept;
 
 // Io consumes context when create is called and releases it on failure or
@@ -28,6 +29,9 @@ struct BlockDeviceBackend {
     BlockDeviceReadRoutine read{};
     BlockDeviceReleaseRoutine release{};
     BlockDeviceWriteRoutine write{};
+    // Optional cache flush/barrier. Missing means durability cannot be
+    // established and IoFlushBlockDeviceHandle returns NotSupported.
+    BlockDeviceFlushRoutine flush{};
 };
 
 class BlockDeviceObject {
@@ -52,6 +56,7 @@ public:
     // writers are excluded while any image lease exists on this device.
     NtStatus writeMounted(uint64_t lba, uint32_t blockCount, const void* buffer,
                           uint32_t* blocksWritten) const noexcept;
+    NtStatus flush() const noexcept;
     bool acquireImageLease() const noexcept;
     void releaseImageLease() const noexcept;
 
@@ -76,5 +81,6 @@ NtStatus IoReadBlockDeviceHandle(Handle deviceHandle, uint64_t lba,
 NtStatus IoWriteBlockDeviceHandle(Handle deviceHandle, uint64_t lba,
                                   uint32_t blockCount, const void* buffer,
                                   uint32_t* blocksWritten) noexcept;
+NtStatus IoFlushBlockDeviceHandle(Handle deviceHandle) noexcept;
 
 } // namespace micant::io

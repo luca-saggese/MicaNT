@@ -11,6 +11,7 @@
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/context.hpp"
 #include "micant/shared/ntstatus.hpp"
+#include "micant/shared/native_nt_api.hpp"
 #include "micant/km/core/dispatcher.hpp"
 #include "micant/km/executive/heap.hpp"
 #include "micant/um/native/ldr.hpp"
@@ -1326,8 +1327,17 @@ inline NtStatus WINAPI NtDuplicateObject(
     return sys::SyscallDispatcher::get().dispatch(frame);
 }
 
-inline NtStatus WINAPI NtFlushBuffersFile(void* /*FileHandle*/, void* /*IoStatusBlock*/) noexcept {
-    return NtStatus::Success;
+inline NtStatus WINAPI NtFlushBuffersFile(Handle fileHandle, IoStatusBlock* ioStatusBlock) noexcept {
+    if (!ioStatusBlock) return NtStatus::InvalidParameter;
+#if defined(MICANT_NATIVE_USERMODE) && defined(_WIN32)
+    return native_nt::NtFlushBuffersFile(fileHandle, ioStatusBlock);
+#else
+    return sys::SyscallDispatcher::get().dispatch({
+        .ssn = sys::SSN_NtFlushBuffersFile,
+        .arg1 = static_cast<uint64_t>(fileHandle),
+        .arg2 = reinterpret_cast<uint64_t>(ioStatusBlock)
+    });
+#endif
 }
 
 inline NtStatus WINAPI NtFsControlFile(

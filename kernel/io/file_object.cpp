@@ -565,6 +565,16 @@ NtStatus IoWriteFileHandle(Handle fileHandle, bool useCurrentOffset, uint64_t of
     return status;
 }
 
+NtStatus IoFlushBuffersFile(Handle fileHandle) noexcept {
+    FileObject* file{};
+    ob::ObjectHeader* reference{};
+    const NtStatus status = IoReferenceFileHandle(fileHandle, 0x0002, file, reference);
+    if (status != NtStatus::Success) return status;
+    const NtStatus flushStatus = file->flush();
+    ob::ObDereferenceObject(reference);
+    return flushStatus;
+}
+
 #if defined(MICANT_FREESTANDING) && defined(MICANT_BAREMETAL)
 namespace {
 void finishAsyncReads(void*) noexcept {
@@ -1012,3 +1022,14 @@ NtStatus IoCancelFileReads(Handle handle, const void* statusBlock) noexcept {
 #endif
 }
 } // namespace micant::io
+
+namespace micant::sys {
+NtStatus NtFlushBuffersFile(Handle fileHandle, IoStatusBlock* ioStatusBlock) noexcept {
+    const NtStatus status = io::IoFlushBuffersFile(fileHandle);
+    if (ioStatusBlock) {
+        ioStatusBlock->status = status;
+        ioStatusBlock->information = 0;
+    }
+    return status;
+}
+} // namespace micant::sys

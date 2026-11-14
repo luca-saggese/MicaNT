@@ -174,6 +174,8 @@ public:
 
     [[nodiscard]] virtual NtStatus readBlocks(uint64_t lba, uint32_t count, void* buffer) = 0;
     [[nodiscard]] virtual NtStatus writeBlocks(uint64_t lba, uint32_t count, const void* buffer) = 0;
+    // Providers without a real media-cache flush must preserve this failure.
+    [[nodiscard]] virtual NtStatus flushBlocks() { return NtStatus::NotSupported; }
     [[nodiscard]] virtual uint32_t getBlockSize() const noexcept = 0;
     [[nodiscard]] virtual uint64_t getTotalBlocks() const noexcept = 0;
     [[nodiscard]] virtual uint64_t getTotalBytes() const noexcept {
@@ -280,6 +282,10 @@ public:
         if (!parentDevice_) return NtStatus::DeviceNotReady;
         if (lba + count > blockCount_) return NtStatus::DiskFull;
         return parentDevice_->writeBlocks(startLba_ + lba, count, buffer);
+    }
+
+    [[nodiscard]] NtStatus flushBlocks() override {
+        return parentDevice_ ? parentDevice_->flushBlocks() : NtStatus::DeviceNotReady;
     }
 
     [[nodiscard]] uint32_t getBlockSize() const noexcept override {
@@ -494,6 +500,9 @@ inline NtStatus DiskDriverDispatch(io::DeviceObject* dev, io::Irp* irp) {
             NtStatus st = blockDevice->writeBlocks(lba, blockCount, irp->userBuffer);
             return complete(st, NT_SUCCESS(st) ? irp->length : 0);
         }
+
+        case io::IRP_MJ_FLUSH_BUFFERS:
+            return complete(blockDevice->flushBlocks());
 
         case io::IRP_MJ_DEVICE_CONTROL: {
             uint32_t ioctl = irp->byteOffset.lowPart;

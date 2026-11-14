@@ -3941,7 +3941,13 @@ inline HANDLE FindFirstFileExW(
     return FindFirstFileW(lpFileName, reinterpret_cast<WIN32_FIND_DATAW*>(lpFindFileData));
 }
 
-inline BOOL FlushFileBuffers(HANDLE /*hFile*/) noexcept {
+inline BOOL FlushFileBuffers(HANDLE hFile) noexcept {
+    IoStatusBlock ioStatus{};
+    const NtStatus status = ntdll::NtFlushBuffersFile(reinterpret_cast<Handle>(hFile), &ioStatus);
+    if (!NT_SUCCESS(status)) {
+        SetLastError(ntdll::RtlNtStatusToDosError(status));
+        return FALSE;
+    }
     return TRUE;
 }
 

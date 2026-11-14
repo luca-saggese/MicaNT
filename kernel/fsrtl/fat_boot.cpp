@@ -841,6 +841,18 @@ NtStatus writeFile(void* opaque, uint64_t offset, const void* buffer,
     current = nullptr; *done = transferred;
     return ok ? NtStatus::Success : NtStatus::DeviceDataError;
 }
+NtStatus flushFile(void* opaque) noexcept {
+    if (!opaque) return NtStatus::InvalidParameter;
+    Gate guard; if (!guard.held) return NtStatus::DeviceNotReady;
+    auto& file = *static_cast<FileContext*>(opaque);
+    if (!file.inUse || !file.owner || file.owner->offline || !file.owner->device)
+        return NtStatus::DeviceNotReady;
+    if (!file.owner->device->writable()) return NtStatus::MediaWriteProtected;
+    current = file.owner;
+    const NtStatus status = file.owner->device->flush();
+    current = nullptr;
+    return status;
+}
 NtStatus acquireImage(void* opaque) noexcept {
     if (!opaque) return NtStatus::InvalidParameter;
     Gate guard; if (!guard.held) return NtStatus::DeviceNotReady;
@@ -1094,6 +1106,7 @@ NtStatus openFile(uint64_t targetMount, std::u16string_view name, bool openIf, u
             ++stream->references;
             backend = {stream, entry.Size, name, readFile, releaseFile};
             backend.write = mount.device->writable() ? writeFile : nullptr;
+            backend.flush = mount.device->writable() ? flushFile : nullptr;
             backend.created = created;
             if (created) backend.commitCreate = commitFileCreate;
             backend.querySize = fileSize;

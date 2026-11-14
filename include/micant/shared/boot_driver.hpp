@@ -134,6 +134,14 @@ struct KernelServices {
     uint32_t MsiInterruptVersion;
     int32_t (*ConnectMsiInterrupt)(void*, void (*)(void*) noexcept, void*, MsiInterruptRouteV1*);
     int32_t (*DisconnectMsiInterrupt)(void*, uint64_t);
+    // Optional durability extension. A flush callback is mandatory for these
+    // devices; the legacy writable registration remains explicitly flush-less.
+    uint32_t DurableBlockDeviceVersion;
+    int32_t (*CreateDurableWritableBlockDevice)(void*, uint64_t, uint32_t, void*,
+        int32_t (*)(void*, uint64_t, uint32_t, void*, uint32_t*),
+        int32_t (*)(void*, uint64_t, uint32_t, const void*, uint32_t*),
+        int32_t (*)(void*), void (*)(void*), uint32_t, uint64_t*);
+    int32_t (*FlushBlockDevice)(void*, uint64_t);
 };
 
 inline constexpr size_t KERNEL_SERVICES_V1_SIZE = offsetof(KernelServices, PciReadConfig32);

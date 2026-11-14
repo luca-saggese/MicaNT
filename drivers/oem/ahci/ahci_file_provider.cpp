@@ -694,6 +694,16 @@ int32_t writeDiskBlocks(void* context, uint64_t lba, uint32_t count,
     return STATUS_SUCCESS;
 }
 
+int32_t flushDisk(void* context) noexcept {
+    if (!context) return STATUS_INVALID_PARAMETER;
+    auto& state = *static_cast<DriverState*>(context);
+    if (!state.Initialized || !g_state.FlushCommand) return STATUS_NOT_SUPPORTED;
+    spinLock(g_ioLock);
+    const bool ok = executeCommand(g_state.FlushCommand, 0, 0);
+    spinUnlock(g_ioLock);
+    return ok ? STATUS_SUCCESS : STATUS_DEVICE_DATA_ERROR;
+}
+
 void releaseBlockContext(void*) noexcept {
     // The backend context is static image state, so the generic Io object has
     // no allocation to release here. Published callbacks pin this boot image.
@@ -708,7 +718,8 @@ bool validServices(const KernelServices* services) noexcept {
         services->QueryMonotonicClock &&
         services->DelayMicroseconds && services->ClaimPciDevice &&
         services->ReleasePciDevice && services->WritableBlockDeviceVersion == 1 &&
-        services->CreateWritableBlockDevice && services->WriteBlockDevice &&
+        services->DurableBlockDeviceVersion == 1 && services->CreateDurableWritableBlockDevice &&
+        services->FlushBlockDevice && services->CreateWritableBlockDevice && services->WriteBlockDevice &&
         services->ReadBlockDevice && services->FatFilesystemVersion == 1 &&
         services->MountFatBlockDevice && services->UnmountFatBlockDevice && services->CloseHandle;
 }
@@ -736,9 +747,9 @@ extern "C" int32_t DriverEntry(DriverObject* driverObject,
         services->Log(services->Context, "AHCI claim, BAR, DMA or SATA initialization failed");
         return g_controllerStatus;
     }
-    const int32_t blockStatus = services->CreateWritableBlockDevice(
+    const int32_t blockStatus = services->CreateDurableWritableBlockDevice(
         services->Context, g_state.DiskSectors, kSectorSize, &g_state,
-        &readDiskBlocks, &writeDiskBlocks, &releaseBlockContext,
+        &readDiskBlocks, &writeDiskBlocks, &flushDisk, &releaseBlockContext,
         kFileReadData | kFileWriteData | kFileSynchronize,
         &g_state.BlockDeviceHandle);
     if (blockStatus != STATUS_SUCCESS || !g_state.BlockDeviceHandle) {

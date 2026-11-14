@@ -5188,6 +5188,8 @@ void Test_Horizon22_ConfigurationManager_HiveRefinement_Coalescing_And_Security(
     std::span<const uint8_t> adminValBytes(reinterpret_cast<const uint8_t*>(&adminVal), sizeof(adminVal));
     NtStatus setSt = cm::CmSetValueKey(secureKey, L"AdminParam", cm::RegType::Dword, adminValBytes, adminToken.get());
     TEST_ASSERT(NT_SUCCESS(setSt), "Admin token must be allowed to set value");
+    TEST_ASSERT(cm::CmFlushKey(secureKey) == NtStatus::NotSupported,
+        "Registry flush must not report persistence without an attached durable hive");
 
     // User sets value -> Access Denied (user only has KEY_READ)
     uint32_t userVal = 99;

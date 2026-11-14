@@ -63,6 +63,18 @@ NtStatus BlockDeviceObject::writeMounted(uint64_t lba, uint32_t blockCount, cons
                                          uint32_t* blocksWritten) const noexcept {
     return writeInternal(lba, blockCount, buffer, blocksWritten, true);
 }
+NtStatus BlockDeviceObject::flush() const noexcept {
+    if (!backend_.flush) return NtStatus::NotSupported;
+    auto state = imageLeaseState_.load(std::memory_order_acquire);
+    for (;;) {
+        if (state & WriterBit) return NtStatus::DeviceBusy;
+        if (imageLeaseState_.compare_exchange_weak(state, state | WriterBit,
+                std::memory_order_acq_rel, std::memory_order_acquire)) break;
+    }
+    const NtStatus status = backend_.flush(backend_.context);
+    imageLeaseState_.fetch_and(~WriterBit, std::memory_order_release);
+    return status;
+}
 bool BlockDeviceObject::acquireImageLease() const noexcept {
     auto state = imageLeaseState_.load(std::memory_order_acquire);
     for (;;) {
@@ -199,6 +211,17 @@ NtStatus IoWriteBlockDeviceHandle(Handle deviceHandle, uint64_t lba,
     const NtStatus writeStatus = device->write(lba, blockCount, buffer, blocksWritten);
     ob::ObDereferenceObject(reference);
     return writeStatus;
+}
+
+NtStatus IoFlushBlockDeviceHandle(Handle deviceHandle) noexcept {
+    BlockDeviceObject* device{};
+    ob::ObjectHeader* reference{};
+    const NtStatus status = IoReferenceBlockDeviceHandle(deviceHandle, 0x0002,
+                                                          device, reference);
+    if (status != NtStatus::Success) return status;
+    const NtStatus flushStatus = device->flush();
+    ob::ObDereferenceObject(reference);
+    return flushStatus;
 }
 
 } // namespace micant::io

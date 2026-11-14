@@ -37,6 +37,8 @@ MICANT_NT_API_IMPORT micant::NtStatus NtWriteFile(
     micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
     void* apcContext, micant::IoStatusBlock* ioStatusBlock, const void* buffer,
     uint32_t length, micant::LargeInteger* byteOffset, uint32_t* key) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtFlushBuffersFile(
+    micant::Handle fileHandle, micant::IoStatusBlock* ioStatusBlock) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtCreateFile(
     micant::Handle* fileHandle, uint32_t desiredAccess,
     micant::ObjectAttributes* objectAttributes, micant::IoStatusBlock* ioStatusBlock,

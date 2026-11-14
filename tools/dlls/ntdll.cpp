@@ -1927,6 +1927,12 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtFlushInstructionCache(
                          ", %eax\n\tsyscall\n\tret\n\t");
 }
 
+__attribute__((naked)) __declspec(dllexport) int32_t NtFlushBuffersFile(
+    void* /*fileHandle*/, void* /*ioStatusBlock*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $" MICANT_STRINGIFY(MICANT_SSN_NT_FLUSH_BUFFERS_FILE)
+                         ", %eax\n\tsyscall\n\tret\n\t");
+}
+
 __attribute__((naked)) __declspec(dllexport) uint64_t NtReadFile(
     void* /*fileHandle*/,
     void* /*event*/,
