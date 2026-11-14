@@ -52,11 +52,14 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   token/DACL, handle pseudo e attributi di sicurezza. Un handle con diritti
   insufficienti deve fallire con lo status previsto senza pubblicare handle o
   oggetti parziali.
-- [x] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
+- [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
   processi.** Verificare diritti concessi, callback Ob, handle ereditabili,
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
-  riferimenti. QEMU copre i casi Ob registrati nel ledger; riutilizzare le
-  tabelle canoniche nei nuovi percorsi nativi.
+  riferimenti. I test kernel coprono le primitive Ob; manca ancora la prova
+  syscall CPL3 che crea un oggetto `OBJ_INHERIT`, clona il processo, chiude
+  l'handle sorgente e usa la copia nel figlio. `NtCreateEvent` ora accetta e
+  registra `OBJ_INHERIT`; il percorso end-to-end resta aperto finché QEMU non lo
+  verifica.
 - [x] **Verificare gli attributi di handle e gli errori di chiusura.** Coprire
   `OBJ_PROTECT_CLOSE`, chiusura forzata durante teardown e output utente non
   valido senza doppia chiusura o perdita di riferimenti; i casi documentati nel

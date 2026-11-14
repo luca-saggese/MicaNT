@@ -218,11 +218,14 @@ NtStatus NtCreateEvent(Handle* out, uint32_t access, ObjectAttributes* attribute
                        uint32_t type, bool initialState) {
     if (!out) return NtStatus::InvalidParameter;
     if (type > 1) return NtStatus::InvalidParameter4;
+    uint32_t handleAttributes{};
     if (attributes) {
         if (attributes->length != sizeof(ObjectAttributes)) return NtStatus::InvalidParameter;
-        if (attributes->rootDirectory || attributes->objectName || attributes->attributes ||
+        if (attributes->rootDirectory || attributes->objectName ||
+            (attributes->attributes & ~OBJ_INHERIT) ||
             attributes->securityDescriptor || attributes->securityQualityOfService)
             return NtStatus::NotImplemented;
+        handleAttributes = attributes->attributes & OBJ_INHERIT;
     }
     if (access & ~EventAllAccess) return NtStatus::NotImplemented;
     void* body{};
@@ -230,7 +233,7 @@ NtStatus NtCreateEvent(Handle* out, uint32_t access, ObjectAttributes* attribute
     auto status = ob::ObCreateObject(ob::KernelMode, &eventType, nullptr, sizeof(Event), &body, &header);
     if (status != NtStatus::Success) return status;
     new (body) Event(type == 0, initialState);
-    status = ob::detail::currentHandleTable().createHandle(header, *out, access);
+    status = ob::detail::currentHandleTable().createHandle(header, *out, access, handleAttributes);
     ob::ObDereferenceObject(header);
     return status;
 }
