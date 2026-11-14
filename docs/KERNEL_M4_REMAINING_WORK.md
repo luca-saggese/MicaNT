@@ -64,14 +64,16 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   `DUPLICATE_SAME_ACCESS`, rifiuto dei diritti insufficienti, handle sorgente
   invalido e output non mappato. Il target non pubblicato viene ritirato anche
   per handle `OBJ_PROTECT_CLOSE`, usando il close callback canonico. I test
-  kernel coprono il rollback della callback Ob. Manca ancora la prova syscall
-  CPL3 che crea un oggetto `OBJ_INHERIT`, clona il processo, chiude l'handle
-  sorgente e usa la copia nel figlio, oltre ai casi CPL3 `DUPLICATE_CLOSE_SOURCE`
-  e fallimento di copyout dopo una probe valida. Il percorso kernel M4 verifica in
+  kernel coprono il rollback della callback Ob. QEMU CPL3 verifica inoltre la
+  creazione di un evento `OBJ_INHERIT`, la clonazione con flag di inheritance,
+  la chiusura dell'handle sorgente nel parent e il suo uso da un thread child;
+  un secondo evento non inheritable viene rifiutato nel figlio e resta non
+  segnalato. Restano i casi CPL3 `DUPLICATE_CLOSE_SOURCE` e copyout fallito dopo
+  una probe valida. Il percorso kernel M4 verifica in
   QEMU `NtCreateEvent` con `OBJ_INHERIT`, `NtCreateProcessEx` con inheritance,
   chiusura dell'handle sorgente e wait sul valore-handle dopo attach al figlio.
   `NtCreateEvent` registra l'attributo nella handle table. Resta aperta la prova
-  CPL3 end-to-end e il rollback completo dei fallimenti d'inheritance.
+  del rollback in caso di fallimento di tutte le fasi d'inheritance.
 - [x] **Verificare gli attributi di handle e gli errori di chiusura.** Coprire
   `OBJ_PROTECT_CLOSE`, chiusura forzata durante teardown e output utente non
   valido senza doppia chiusura o perdita di riferimenti; i casi documentati nel
@@ -87,8 +89,9 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   exception port e `InJob`, oltre al rifiuto di un parent handle senza
   `PROCESS_CREATE_PROCESS`. Verifica inoltre la cattura syscall di un
   self-relative security descriptor con DACL vuota: `STATUS_ACCESS_DENIED` e
-  handle nullo. Restano aperti inheritance end-to-end, gli altri access mode e
-  il rollback QEMU di tutte le fasi.
+  handle nullo. L'inheritance `OBJ_INHERIT` positiva e negativa ora passa in
+  CPL3/QEMU; restano aperti gli altri access mode e il rollback QEMU di tutte le
+  fasi di creazione e inheritance.
 - [ ] **Generalizzare `NtCreateThreadEx` e `NtResumeThread`.** Verificare
   processo target, routine/argomento, stack reserve/commit e guard, attributi
   `CLIENT_ID`/TEB, sospensione iniziale, resume count, context AMD64 e rollback

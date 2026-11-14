@@ -171,6 +171,7 @@ extern "C" {
 extern const uint8_t MicantTwoUserThreadsEnd[];
 extern const uint8_t MicantNativeThreadStart[];
 extern const uint8_t MicantGrowStackThreadStart[];
+extern const uint8_t MicantInheritedEventThreadStart[];
 void MicantRing3ProcessCreateStart() noexcept;
 __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexcept {
     __asm__ __volatile__(
@@ -308,7 +309,18 @@ __attribute__((naked, section(".uthreads$a"))) void MicantTwoUserThreads() noexc
         "movq %xmm0, %rdx\ncmpq %rax, %rdx\njne 13f\n"
         "movq %gs:0x10, %rdx\nmovq %rdx, 8(%rcx)\n"
         "movq $0x12345678, (%rcx)\nmovl $0xc0000022, %eax\nretq\n"
-        "13: movl $0xc000000d, %eax\nretq\n");
+        "13: movl $0xc000000d, %eax\nretq\n"
+        // A child created with handle inheritance receives the source handle
+        // at the same value. The noninheritable handle must remain absent.
+        ".globl MicantInheritedEventThreadStart\n"
+        "MicantInheritedEventThreadStart: pushq %r12\npushq %r15\nmovq %rcx, %r12\n"
+        "movq 0(%r12), %r15\nmovq 16(%r12), %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
+        "testl %eax, %eax\njnz .Lmicant_inherit_thread_done\n"
+        "movq 24(%r12), %rcx\nxorl %edx, %edx\ncallq *16(%r15)\n"
+        "cmpl $0xc0000008, %eax\nje .Lmicant_inherit_thread_success\n"
+        "movl $0xc0000280, %eax\njmp .Lmicant_inherit_thread_done\n"
+        ".Lmicant_inherit_thread_success: xorl %eax, %eax\n"
+        ".Lmicant_inherit_thread_done: popq %r15\npopq %r12\nretq\n");
 }
 __asm__(".section .uthreads$z,\"xr\"\n.globl MicantTwoUserThreadsEnd\n"
         "MicantTwoUserThreadsEnd:\n.text\n");
@@ -425,6 +437,78 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "movq $0, 0x20(%rsp)\nmovq $0, 0x28(%rsp)\nmovq $2, 0x30(%rsp)\n"
         "callq *144(%r15)\ncmpl $0xc0000005, %eax\nje .Lmicant_duplicate_complete\n"
         "movl $0xc0000277, %r13d\njmp 90f\n.Lmicant_duplicate_complete:\n"
+        // Exercise OBJ_INHERIT through the real process-create syscall. The
+        // child sets the inherited event after the parent closes its source
+        // handle, then confirms a second, noninheritable event is absent.
+        "movq $0, 0x70(%rsp)\nmovq $0, 0x78(%rsp)\nmovq $0, 0x80(%rsp)\n"
+        "movq $0, 0x88(%rsp)\nmovq $0, 0x90(%rsp)\nmovq $0, 0x98(%rsp)\n"
+        "xorl %eax, %eax\nmovq %rax, 0x130(%rsp)\nmovq %rax, 0x138(%rsp)\n"
+        "movq %rax, 0x140(%rsp)\nmovq %rax, 0x148(%rsp)\nmovq %rax, 0x150(%rsp)\n"
+        "movq %rax, 0x158(%rsp)\nmovl $48, 0x130(%rsp)\nmovl $2, 0x140(%rsp)\n"
+        "leaq 0x78(%rsp), %rcx\nmovl $0x00100002, %edx\nleaq 0x130(%rsp), %r8\nxorl %r9d, %r9d\n"
+        "movq $0, 0x20(%rsp)\ncallq *152(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_first_event\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_first_event:\n"
+        "movl $0, 0x140(%rsp)\nleaq 0x70(%rsp), %rcx\nmovl $0x00100002, %edx\n"
+        "leaq 0x130(%rsp), %r8\nxorl %r9d, %r9d\nmovq $0, 0x20(%rsp)\n"
+        "callq *152(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_second_event\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_second_event:\n"
+        // Keep a parent wait reference to the inheritable event; do not mark
+        // that duplicate inheritable itself.
+        "leaq 0x80(%rsp), %r9\nmovq $-1, %rcx\nmovq 0x78(%rsp), %rdx\nmovq $-1, %r8\n"
+        "xorl %eax, %eax\nmovq %rax, 0x20(%rsp)\nmovq %rax, 0x28(%rsp)\nmovq $2, 0x30(%rsp)\n"
+        "callq *144(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_observer\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_observer:\n"
+        "movq 0x78(%rsp), %rax\nmovq %rax, 16(%r12)\nmovq 0x70(%rsp), %rax\nmovq %rax, 24(%r12)\n"
+        "leaq 0x88(%rsp), %rcx\nmovl $0x00100003, %edx\nxorl %r8d, %r8d\nmovq $-1, %r9\n"
+        "movq $4, 0x20(%rsp)\nxorl %eax, %eax\nmovq %rax, 0x28(%rsp)\nmovq %rax, 0x30(%rsp)\n"
+        "movq %rax, 0x38(%rsp)\nmovq %rax, 0x40(%rsp)\ncallq *40(%r15)\n"
+        "testl %eax, %eax\njz .Lmicant_inherit_child_created\nmovl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n"
+        ".Lmicant_inherit_child_created:\nmovq 0x78(%rsp), %rcx\ncallq *88(%r15)\n"
+        "testl %eax, %eax\njz .Lmicant_inherit_source_closed\nmovl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n"
+        ".Lmicant_inherit_source_closed:\nmovq $0, 0x78(%rsp)\nmovq $0, 0x100(%rsp)\n"
+        "movq 16(%r12), %rcx\nxorl %edx, %edx\nleaq 0x100(%rsp), %r8\ncallq *8(%r15)\n"
+        "cmpl $0xc0000008, %eax\nje .Lmicant_inherit_source_invalid\nmovl $0xc0000281, %r13d\njmp .Lmicant_inherit_cleanup\n"
+        ".Lmicant_inherit_source_invalid:\nleaq 0x90(%rsp), %rcx\nmovl $0x00100000, %edx\nxorl %r8d, %r8d\n"
+        "movq 0x88(%rsp), %r9\nleaq MicantInheritedEventThreadStart(%rip), %rax\nmovq %rax, 0x20(%rsp)\n"
+        "movq %r12, %rax\nmovq %rax, 0x28(%rsp)\nmovq $1, 0x30(%rsp)\n"
+        "movq $0, 0x38(%rsp)\nmovq $4096, 0x40(%rsp)\nmovq $32768, 0x48(%rsp)\n"
+        "movq $0, 0x50(%rsp)\ncallq *48(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_thread_created\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_thread_created:\n"
+        "leaq 0x98(%rsp), %rdx\nmovq 0x90(%rsp), %rcx\ncallq *56(%r15)\n"
+        "testl %eax, %eax\njz .Lmicant_inherit_resumed\nmovl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n"
+        ".Lmicant_inherit_resumed:\ncmpq $1, 0x98(%rsp)\nje .Lmicant_inherit_wait_thread\n"
+        "movl $0xc0000282, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_wait_thread:\n"
+        "movq $-10000000, 0x100(%rsp)\nmovq 0x90(%rsp), %rcx\nxorl %edx, %edx\n"
+        "leaq 0x100(%rsp), %r8\ncallq *8(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_wait_event\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_wait_event:\n"
+        "movq $-10000000, 0x100(%rsp)\nmovq 0x80(%rsp), %rcx\nxorl %edx, %edx\n"
+        "leaq 0x100(%rsp), %r8\ncallq *8(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_noninherit\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_noninherit:\n"
+        "movq $0, 0x100(%rsp)\nmovq 0x70(%rsp), %rcx\nxorl %edx, %edx\n"
+        "leaq 0x100(%rsp), %r8\ncallq *8(%r15)\ncmpl $0x102, %eax\nje .Lmicant_inherit_cleanup_success\n"
+        "movl $0xc0000283, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_cleanup_success:\n"
+        "movq 0x90(%rsp), %rcx\ncallq *88(%r15)\nmovq $0, 0x90(%rsp)\n"
+        "movq 0x70(%rsp), %rcx\ncallq *88(%r15)\nmovq $0, 0x70(%rsp)\n"
+        "movq 0x80(%rsp), %rcx\ncallq *88(%r15)\nmovq $0, 0x80(%rsp)\n"
+        "movq 0x88(%rsp), %rcx\nmovl $0, %edx\ncallq *24(%r15)\n"
+        "testl %eax, %eax\njz .Lmicant_inherit_terminated\ncmp $0xc000010a, %eax\nje .Lmicant_inherit_terminated\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_terminated:\n"
+        "movq $-10000000, 0x100(%rsp)\nmovq 0x88(%rsp), %rcx\nxorl %edx, %edx\n"
+        "leaq 0x100(%rsp), %r8\ncallq *8(%r15)\ntestl %eax, %eax\njz .Lmicant_inherit_close_child\n"
+        "movl %eax, %r13d\njmp .Lmicant_inherit_cleanup\n.Lmicant_inherit_close_child:\n"
+        "movq 0x88(%rsp), %rcx\ncallq *88(%r15)\nmovq $0, 0x88(%rsp)\n"
+        "xorl %r13d, %r13d\njmp .Lmicant_inherit_done\n"
+        ".Lmicant_inherit_cleanup:\nmovq 0x88(%rsp), %rcx\ntestq %rcx, %rcx\njz .Lmicant_inherit_cleanup_thread\n"
+        "movl $0, %edx\ncallq *24(%r15)\n.Lmicant_inherit_cleanup_thread:\n"
+        "movq 0x90(%rsp), %rcx\ntestq %rcx, %rcx\njz .Lmicant_inherit_cleanup_child\n"
+        "callq *88(%r15)\n.Lmicant_inherit_cleanup_child:\nmovq 0x88(%rsp), %rcx\n"
+        "testq %rcx, %rcx\njz .Lmicant_inherit_cleanup_observer\ncallq *88(%r15)\n"
+        ".Lmicant_inherit_cleanup_observer:\nmovq 0x80(%rsp), %rcx\ntestq %rcx, %rcx\n"
+        "jz .Lmicant_inherit_cleanup_noninherit\ncallq *88(%r15)\n"
+        ".Lmicant_inherit_cleanup_noninherit:\nmovq 0x70(%rsp), %rcx\ntestq %rcx, %rcx\njz .Lmicant_inherit_cleanup_source\n"
+        "callq *88(%r15)\n.Lmicant_inherit_cleanup_source:\nmovq 0x78(%rsp), %rcx\n"
+        "testq %rcx, %rcx\njz .Lmicant_inherit_done\ncallq *88(%r15)\n"
+        ".Lmicant_inherit_done:\n"
         // The opened parent handle grants query access only; process creation
         // must require PROCESS_CREATE_PROCESS and publish no child on denial.
         "leaq 0x78(%rsp), %rcx\nmovq $0, 0x78(%rsp)\nmovl $0x0010043b, %edx\n"
@@ -1021,7 +1105,7 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
             "NtTerminateProcess", "NtQueryInformationThread", "NtCreateProcessEx", "NtCreateThreadEx",
             "NtResumeThread", "NtOpenProcess", "NtOpenThread", "NtQueryInformationProcess", "NtClose",
             "NtQuerySystemTime", "NtDelayExecution", "NtAlertThread", "NtQueueApcThread", "NtTestAlert",
-            "NtTerminateThread", "NtDuplicateObject"};
+            "NtTerminateThread", "NtDuplicateObject", "NtCreateEvent"};
         for (size_t i = 0; i < std::size(names); ++i) {
             const uint64_t rva = dataRva + 0x200 + i * 0x40;
             std::memcpy(rawData + 0xe0 + i * 8, &rva, sizeof(rva));
