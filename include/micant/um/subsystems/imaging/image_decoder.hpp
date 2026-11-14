@@ -72,6 +72,20 @@ public:
     [[nodiscard]] std::span<uint8_t> span() noexcept { return {data_, size_}; }
     [[nodiscard]] std::span<const uint8_t> span() const noexcept { return {data_, size_}; }
 
+    // Transfer the page range to a longer-lived owner such as a process-owned
+    // desktop cache. The caller must release it through the owning allocator
+    // or let the process address-space teardown reclaim it.
+    [[nodiscard]] uint8_t* releaseOwnership(size_t& size,
+                                           ImageAllocator& allocator) noexcept {
+        size = size_;
+        allocator = allocator_;
+        uint8_t* result = data_;
+        data_ = nullptr;
+        size_ = 0;
+        allocator_ = {};
+        return result;
+    }
+
 private:
     void take(ImageBuffer& other) noexcept {
         data_ = std::exchange(other.data_, nullptr);

@@ -4004,6 +4004,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             } else if (explorerWindowCreateCount == 5) {
                 ++g_explorerApplicationWindowCount;
                 serialWrite("[MicaNT Explorer] Second overlapping application window created\r\n");
+            } else if (explorerWindowCreateCount >= 6) {
+                ++g_explorerApplicationWindowCount;
             }
         }
         if (fromExplorer && resultStatus == NtStatus::Success &&

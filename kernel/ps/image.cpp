@@ -32,6 +32,23 @@ void traceImageInitializationFailure(const char* stage, NtStatus status) noexcep
     MicantNetbootSerialWrite("\r\n");
 }
 
+void traceForwarderFailure(const um::NativeUserImageSet64::ForwarderFailure& failure) noexcept {
+    const auto writeField = [](const char* label, std::string_view value) noexcept {
+        char text[260]{};
+        const size_t length = value.size() < sizeof(text) - 1 ? value.size() : sizeof(text) - 1;
+        if (length) std::memcpy(text, value.data(), length);
+        MicantNetbootSerialWrite(label);
+        MicantNetbootSerialWrite(text);
+    };
+    MicantNetbootSerialWrite("[MicaNT Ps] Forwarder resolve rejected");
+    writeField(" importer=", failure.importer);
+    writeField(" library=", failure.library);
+    writeField(" symbol=", failure.symbol);
+    MicantNetbootSerialWrite(" status=");
+    MicantNetbootSerialWriteNumber(static_cast<uint32_t>(failure.status));
+    MicantNetbootSerialWrite("\r\n");
+}
+
 bool initializeLoaderMetadata(const um::NativeUserImageSet64& images, uintptr_t address,
                               std::span<const std::u16string_view> paths) noexcept;
 
@@ -1779,11 +1796,13 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
     // rescan because their own imports may add further dependencies.
     for (;;) {
         const size_t previousCount = imageSet->size();
+        um::NativeUserImageSet64::ForwarderFailure forwarderFailure{};
         status = imageSet->forEachMissingForwarderLibrary(
             [&](std::string_view library, std::string_view importingModule) noexcept -> NtStatus {
                 return appendSystemDependency(library, importingModule);
-            });
+            }, 0, SIZE_MAX, &forwarderFailure);
         if (status != NtStatus::Success) {
+            traceForwarderFailure(forwarderFailure);
             traceImageInitializationFailure("forwarder loading", status);
             return status;
         }

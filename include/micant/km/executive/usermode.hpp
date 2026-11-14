@@ -1476,6 +1476,12 @@ public:
         std::string_view importer{};
         uint16_t ordinal{};
     };
+    struct ForwarderFailure {
+        std::string_view library{};
+        std::string_view symbol{};
+        std::string_view importer{};
+        NtStatus status{NtStatus::Success};
+    };
 
     void setApiSetHostResolver(void* context, ApiSetHostResolver resolver) noexcept {
         apiSetContext_ = context;
@@ -1705,7 +1711,9 @@ public:
     template <typename Visitor>
     NtStatus forEachMissingForwarderLibrary(Visitor&& visitor,
                                             size_t firstModule = 0,
-                                            size_t lastModule = SIZE_MAX) const noexcept {
+                                            size_t lastModule = SIZE_MAX,
+                                            ForwarderFailure* failure = nullptr) const noexcept {
+        if (failure) *failure = {};
         if (firstModule > count_ || lastModule < firstModule) return NtStatus::InvalidParameter;
         const size_t endModule = lastModule < count_ ? lastModule : count_;
         for (size_t moduleIndex = firstModule; moduleIndex < endModule; ++moduleIndex) {
@@ -1718,9 +1726,14 @@ public:
                     const auto resolveStatus = resolve(library, name, ordinal, address,
                                                        &missingLibrary, current.name);
                     if (resolveStatus == NtStatus::Success) return NtStatus::Success;
-                    if (resolveStatus != NtStatus::NoSuchFile || missingLibrary.empty())
+                    if (resolveStatus != NtStatus::NoSuchFile || missingLibrary.empty()) {
+                        if (failure) *failure = {library, name, current.name, resolveStatus};
                         return resolveStatus;
-                    return visitor(missingLibrary, current.name);
+                    }
+                    const auto visitorStatus = visitor(missingLibrary, current.name);
+                    if (visitorStatus != NtStatus::Success && failure)
+                        *failure = {missingLibrary, name, current.name, visitorStatus};
+                    return visitorStatus;
                 });
             if (status != NtStatus::Success) return status;
         }

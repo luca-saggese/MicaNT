@@ -263,6 +263,12 @@ void* User32_GetForegroundWindow() noexcept {
     return fn ? fn() : nullptr;
 }
 
+void* User32_SetFocus(void* hWnd) noexcept {
+    using Fn=void* (*)(void*);
+    auto fn=Win32kProc<Fn>("MicaWin32kSetFocus");
+    return fn ? fn(hWnd) : nullptr;
+}
+
 int32_t User32_AdjustWindowRectEx(WinNtRect* lpRect, uint32_t /*dwStyle*/, int32_t /*bMenu*/, uint32_t /*dwExStyle*/) noexcept {
     return lpRect ? 1 : 0;
 }
@@ -640,6 +646,9 @@ __declspec(dllexport) int32_t IsIconic(void* hWnd) {
 }
 __declspec(dllexport) void* GetForegroundWindow(void) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetForegroundWindow();
+}
+__declspec(dllexport) void* SetFocus(void* hWnd) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetFocus(hWnd);
 }
 __declspec(dllexport) int32_t AdjustWindowRectEx(micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* lpRect, uint32_t dwStyle, int32_t bMenu, uint32_t dwExStyle) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_AdjustWindowRectEx(lpRect, dwStyle, bMenu, dwExStyle);

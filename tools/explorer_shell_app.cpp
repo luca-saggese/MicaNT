@@ -50,6 +50,8 @@ struct ShellState {
     HDC desktopDc{};
     uint32_t* desktopPixels{};
     uint32_t* wallpaperPixels{};
+    size_t wallpaperBytes{};
+    micant::um::imaging::ImageAllocator wallpaperAllocator{};
     HWND taskbar{};
     HDC taskbarDc{};
     uint32_t* taskbarPixels{};
@@ -74,6 +76,26 @@ constexpr wchar_t kStartTitle[] = L"Start";
 
 inline uint32_t rgb(uint8_t r, uint8_t green, uint8_t b) noexcept {
     return PackBGRA(r, green, b);
+}
+
+void traceWallpaperStatus(const char* stage, uint32_t status) noexcept {
+    char message[96] = "[MicaNT Explorer] Wallpaper ";
+    size_t length = 28;
+    while (stage && *stage && length + 1 < sizeof(message)) message[length++] = *stage++;
+    constexpr char statusText[] = " status=";
+    for (char value : statusText) {
+        if (!value) break;
+        if (length + 1 < sizeof(message)) message[length++] = value;
+    }
+    char digits[10]{};
+    size_t count = 0;
+    do { digits[count++] = static_cast<char>('0' + status % 10); status /= 10; } while (status && count < sizeof(digits));
+    while (count && length + 1 < sizeof(message)) message[length++] = digits[--count];
+    message[length++] = '\r';
+    message[length++] = '\n';
+    micant::IoStatusBlock io{};
+    (void)micant::native_nt::NtWriteFile(static_cast<micant::Handle>(-11), 0,
+        nullptr, nullptr, &io, message, static_cast<uint32_t>(length), nullptr, nullptr);
 }
 
 void fill(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
@@ -210,28 +232,34 @@ void loadPackagedWallpaper() noexcept {
     micant::um::imaging::ImageFrame decoded{};
     const auto decodeStatus = micant::um::imaging::DecodeImageFile(
         path, decoded, allocator, limits);
-    if (decodeStatus != micant::um::imaging::ImageStatus::Success) return;
+    if (decodeStatus != micant::um::imaging::ImageStatus::Success) {
+        traceWallpaperStatus("decode failed", static_cast<uint32_t>(decodeStatus));
+        return;
+    }
 
     micant::um::imaging::ImageFrame composed{};
     const uint32_t background = PackBGRA(28, 58, 92);
     if (decoded.pixels.size() >= limits.maxIntermediateBytes) return;
     const uint64_t compositionBudget = limits.maxIntermediateBytes - decoded.pixels.size();
-    const uint64_t outputBudget = compositionBudget / 2;
+    // ComposeWallpaper allocates the final surface once and that allocation is
+    // retained directly as the wallpaper cache below.
+    const uint64_t outputBudget = compositionBudget;
     const auto composeStatus = micant::um::imaging::ComposeWallpaper(
         &decoded, g.screenW, g.screenH - TASKBAR_H,
         micant::um::imaging::WallpaperStyle::Fill, background,
         allocator, composed,
         outputBudget < limits.maxDecodedBytes ? outputBudget : limits.maxDecodedBytes);
-    if (composeStatus != micant::um::imaging::ImageStatus::Success) return;
-    const size_t pixelCount = static_cast<size_t>(g.screenW) * (g.screenH - TASKBAR_H);
-    if (pixelCount > SIZE_MAX / sizeof(uint32_t)) return;
-    const size_t bytes = pixelCount * sizeof(uint32_t);
-    auto* surface = static_cast<uint32_t*>(micant::um::imaging::AllocateImagePages(
-        nullptr, bytes));
-    if (!surface) return;
-    const auto* source = reinterpret_cast<const uint32_t*>(composed.pixels.data());
-    for (size_t index = 0; index < pixelCount; ++index) surface[index] = source[index];
-    g.wallpaperPixels = surface;
+    if (composeStatus != micant::um::imaging::ImageStatus::Success) {
+        traceWallpaperStatus("composition failed", static_cast<uint32_t>(composeStatus));
+        return;
+    }
+    // The cache belongs to this process until its address space is torn down.
+    // Keep only the trivial pointer/allocator state in the global shell object
+    // so the freestanding image does not need a CRT atexit registration.
+    auto* pixels = composed.pixels.releaseOwnership(g.wallpaperBytes,
+                                                     g.wallpaperAllocator);
+    g.wallpaperPixels = reinterpret_cast<uint32_t*>(pixels);
+    traceWallpaperStatus("loaded", static_cast<uint32_t>(micant::um::imaging::ImageStatus::Success));
 }
 
 void chooseFallbackActiveApp() noexcept {
@@ -257,6 +285,7 @@ void openView(View view) noexcept {
             g.activeApp = static_cast<uint8_t>(&existing - g.apps);
             ShowWindow(existing.hwnd, SW_RESTORE);
             SetWindowPos(existing.hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetFocus(existing.hwnd);
             redrawDesktop();
             present(existing.hwnd);
             return;
@@ -291,6 +320,7 @@ void openView(View view) noexcept {
     app->open = true;
     app->minimized = false;
     g.activeApp = static_cast<uint8_t>(app - g.apps);
+    SetFocus(app->hwnd);
     ++g.appCount;
     app->dc = CreateCompatibleDC(nullptr);
     void* appBits = nullptr;

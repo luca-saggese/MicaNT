@@ -1730,5 +1730,20 @@ registered write-back RAM for this path, and the PCI Command write enables
 memory decoding and bus mastering only after the owned DMA buffer exists. The
 QEMU runner accepts either this canonical display service or the documented
 GOP fallback as its ordered display milestone. VirGL was not offered by this
-QEMU device, so E5's GPU composition submission/completion remains open. E6
-stabilization has not been run.
+QEMU device, so E5's GPU composition submission/completion remains open.
+
+E6 stabilization now passes in `build/explorer-ring3-main-e6-run5/serial.log`.
+The exercised path opens overlapping windows, moves/resizes and raises them,
+closes each owner window, then repeats open/close three times from the desktop
+and returns to stable scanout. `user32.dll` now exports the `SetFocus` entry
+used by Explorer's close/reopen path; Explorer sets focus when opening or
+restoring an application window and restores desktop focus after closing the
+last app. The kernel lifecycle evidence counter now accounts for every later
+Explorer application window, so repeated teardown is observed past the initial
+pair. QMP input verification, scanout captures and five-second serial stability
+all passed. This closes E6 stabilization for the current bounded single-boot
+profile; E5 VirGL support remains open.
+
+| Command | Result |
+|---|---|
+| `python3 qemu.py --headless --timeout 180 --memory-mib 1024 --diagnostics-dir build/explorer-ring3-main-e6-run5` | Passed E6 stabilization; repeated Explorer window create/destroy cycles, focus return, mouse/keyboard dispatch, scanout updates and five-second serial stability verified |

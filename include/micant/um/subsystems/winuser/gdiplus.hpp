@@ -2280,26 +2280,27 @@ inline Status __stdcall GdipImageGetFrameCount(GpImage* image, const void*, uint
     return Ok;
 }
 
-inline Status __stdcall GdipImageSelectActiveFrame(GpImage* image, const void*, uint32_t) noexcept {
+inline Status __stdcall GdipImageSelectActiveFrame(GpImage* image, const void*, uint32_t frameIndex) noexcept {
     if (!image) return InvalidParameter;
-    return Ok;
+    // The shared decoder currently materializes one still frame. Only that
+    // frame is selectable; do not report success for an unrepresented frame.
+    return frameIndex == 0 ? Ok : InvalidParameter;
 }
 
 inline Status __stdcall GdipGetPropertyItemSize(GpImage* image, uint32_t, uint32_t* size) noexcept {
     if (!image || !size) return InvalidParameter;
-    *size = 16;
-    return Ok;
+    *size = 0;
+    return NotImplemented;
 }
 
 inline Status __stdcall GdipGetPropertyItem(GpImage* image, uint32_t, uint32_t propSize, void* buffer) noexcept {
     if (!image || !buffer || propSize == 0) return InvalidParameter;
-    std::memset(buffer, 0, propSize);
-    return Ok;
+    return NotImplemented;
 }
 
 inline Status __stdcall GdipSetPropertyItem(GpImage* image, const void*) noexcept {
     if (!image) return InvalidParameter;
-    return Ok;
+    return NotImplemented;
 }
 
 inline Status __stdcall GdipGetImageEncodersSize(uint32_t* numEncoders, uint32_t* size) noexcept {

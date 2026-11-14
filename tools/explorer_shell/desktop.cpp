@@ -76,34 +76,13 @@ void DrawDesktop(uint32_t* pixels, uint32_t width, uint32_t height,
         const size_t count = static_cast<size_t>(width) * height;
         for (size_t index = 0; index < count; ++index) pixels[index] = wallpaper[index];
     } else {
+        // Safe fallback when the configured or packaged image cannot be read
+        // or decoded. Keep the desktop deterministic and usable without a
+        // partially initialized wallpaper surface.
+        const uint32_t fallback = color(28, 58, 92);
         for (uint32_t y = 0; y < height; ++y) {
-            for (uint32_t x = 0; x < width; ++x) {
-                uint32_t pixel;
-                const int32_t horizon = static_cast<int32_t>(height * 48 / 100);
-                if (static_cast<int32_t>(y) < horizon) {
-                    const uint32_t amount = static_cast<uint32_t>(y) * 100 / (horizon ? horizon : 1);
-                    pixel = color(static_cast<uint8_t>(46 + amount / 4),
-                                  static_cast<uint8_t>(133 + amount / 3),
-                                  static_cast<uint8_t>(205 + amount / 6));
-                    const int32_t sx = static_cast<int32_t>(x) - static_cast<int32_t>(width * 78 / 100);
-                    const int32_t sy = static_cast<int32_t>(y) - static_cast<int32_t>(height * 15 / 100);
-                    if (sx * sx + sy * sy < static_cast<int32_t>(height * height / 150))
-                        pixel = color(248, 222, 141);
-                } else {
-                    const int32_t dx = static_cast<int32_t>(x) - static_cast<int32_t>(width * 57 / 100);
-                    const int32_t curve = (dx * dx) / static_cast<int32_t>(width * 5) + horizon -
-                                          static_cast<int32_t>(height * 6 / 100);
-                    pixel = static_cast<int32_t>(y) < curve
-                        ? color(37, 126, 49)
-                        : color(static_cast<uint8_t>(52 + x % 23),
-                                static_cast<uint8_t>(151 + x % 31), 59);
-                    const int32_t dx2 = static_cast<int32_t>(x) - static_cast<int32_t>(width * 15 / 100);
-                    const int32_t curve2 = (dx2 * dx2) / static_cast<int32_t>(width * 4) + horizon +
-                                           static_cast<int32_t>(height / 100);
-                    if (static_cast<int32_t>(y) > curve2) pixel = color(41, 139, 48);
-                }
-                pixels[static_cast<size_t>(y) * width + x] = pixel;
-            }
+            uint32_t* row = pixels + static_cast<size_t>(y) * width;
+            for (uint32_t x = 0; x < width; ++x) row[x] = fallback;
         }
     }
     drawDesktopIcon(pixels, width, height, 28, Icon::Computer, "My Computer");

@@ -248,6 +248,97 @@ inline bool sourceBounds(uint32_t sourceWidth, uint32_t sourceHeight, const WICR
     return x <= sourceWidth && width <= sourceWidth - x &&
            y <= sourceHeight && height <= sourceHeight - y;
 }
+
+inline imaging::ImageStatus decodeStream(IStream* stream, imaging::ImageFrame& output,
+                                          imaging::ImageFormat expected = imaging::ImageFormat::Unknown) noexcept {
+    if (!stream) return imaging::ImageStatus::MalformedData;
+    const auto allocator = imaging::NativeImageAllocator();
+    imaging::ImageLimits limits{};
+    if (!limits.maxEncodedBytes || limits.maxEncodedBytes > SIZE_MAX ||
+        limits.maxEncodedBytes > limits.maxIntermediateBytes)
+        return imaging::ImageStatus::ImageTooLarge;
+    imaging::ImageBuffer encoded{};
+    if (!encoded.allocate(static_cast<size_t>(limits.maxEncodedBytes), allocator))
+        return imaging::ImageStatus::OutOfMemory;
+
+    size_t length = 0;
+    while (length < encoded.size()) {
+        const uint32_t request = static_cast<uint32_t>(std::min<size_t>(
+            encoded.size() - length, 64 * 1024));
+        uint32_t read{};
+        const HRESULT result = stream->Read(encoded.data() + length, request, &read);
+        if (result < 0 || read > request) return imaging::ImageStatus::IoFailure;
+        if (read == 0) break;
+        length += read;
+    }
+    if (length == encoded.size()) {
+        uint8_t extra{};
+        uint32_t read{};
+        const HRESULT result = stream->Read(&extra, 1, &read);
+        if (result < 0 || read > 1) return imaging::ImageStatus::IoFailure;
+        if (read) return imaging::ImageStatus::ImageTooLarge;
+    }
+    if (length == 0) return imaging::ImageStatus::TruncatedInput;
+    if (length > limits.maxIntermediateBytes) return imaging::ImageStatus::ImageTooLarge;
+    imaging::ImageFormat format{};
+    const auto probe = imaging::ProbeImage({encoded.data(), length}, format);
+    if (probe != imaging::ImageStatus::Success) return probe;
+    if (expected != imaging::ImageFormat::Unknown && format != expected)
+        return imaging::ImageStatus::UnknownFormat;
+    limits.maxIntermediateBytes -= length;
+    limits.maxDecodedBytes = std::min(limits.maxDecodedBytes, limits.maxIntermediateBytes);
+    imaging::ImageFrame decoded{};
+    const auto status = imaging::DecodeImage({encoded.data(), length}, decoded, allocator, limits);
+    if (status == imaging::ImageStatus::Success) output = static_cast<imaging::ImageFrame&&>(decoded);
+    return status;
+}
+
+inline imaging::ImageStatus decodeFileHandle(uintptr_t rawHandle, imaging::ImageFrame& output,
+        imaging::ImageFormat expected = imaging::ImageFormat::Unknown) noexcept {
+    if (!rawHandle || rawHandle == UINTPTR_MAX) return imaging::ImageStatus::MalformedData;
+    const auto allocator = imaging::NativeImageAllocator();
+    imaging::ImageLimits limits{};
+    const auto handle = static_cast<Handle>(rawHandle);
+    IoStatusBlock io{};
+    FileStandardInformation standard{};
+    NtStatus status = native_nt::NtQueryInformationFile(handle, &io, &standard,
+        sizeof(standard), FileInformationClass::FileStandardInformation);
+    if (status != NtStatus::Success) return imaging::ImageStatus::IoFailure;
+    if (standard.directory || standard.endOfFile.quadPart <= 0)
+        return imaging::ImageStatus::MalformedData;
+    const uint64_t length = static_cast<uint64_t>(standard.endOfFile.quadPart);
+    if (length > limits.maxEncodedBytes || length > limits.maxIntermediateBytes ||
+        length > SIZE_MAX) return imaging::ImageStatus::ImageTooLarge;
+    imaging::ImageBuffer encoded{};
+    if (!encoded.allocate(static_cast<size_t>(length), allocator))
+        return imaging::ImageStatus::OutOfMemory;
+    size_t completed = 0;
+    while (completed < encoded.size()) {
+        const uint32_t request = static_cast<uint32_t>(std::min<size_t>(
+            encoded.size() - completed, 64 * 1024));
+        LargeInteger offset{};
+        offset.quadPart = static_cast<int64_t>(completed);
+        io = {};
+        status = native_nt::NtReadFile(handle, 0, nullptr, nullptr, &io,
+            encoded.data() + completed, request, &offset, nullptr);
+        if (status != NtStatus::Success) return imaging::ImageStatus::IoFailure;
+        if (io.information == 0) return imaging::ImageStatus::TruncatedInput;
+        if (io.information > request) return imaging::ImageStatus::IoFailure;
+        completed += static_cast<size_t>(io.information);
+    }
+    imaging::ImageFormat format{};
+    const auto probe = imaging::ProbeImage(encoded.span(), format);
+    if (probe != imaging::ImageStatus::Success) return probe;
+    if (expected != imaging::ImageFormat::Unknown && format != expected)
+        return imaging::ImageStatus::UnknownFormat;
+    limits.maxIntermediateBytes -= length;
+    limits.maxDecodedBytes = std::min(limits.maxDecodedBytes, limits.maxIntermediateBytes);
+    imaging::ImageFrame decoded{};
+    const auto decodeStatus = imaging::DecodeImage(encoded.span(), decoded, allocator, limits);
+    if (decodeStatus == imaging::ImageStatus::Success)
+        output = static_cast<imaging::ImageFrame&&>(decoded);
+    return decodeStatus;
+}
 } // namespace detail
 
 class BitmapFrame final : public IWICBitmapFrameDecode {
@@ -318,6 +409,11 @@ class BitmapDecoder final : public IWICBitmapDecoder {
 public:
     BitmapDecoder(BitmapFrame* frame, const GUID& container) noexcept : frame_(frame), container_(container) {
         if (frame_) frame_->AddRef();
+        initialized_ = frame_ != nullptr;
+        detail::g_liveObjects.fetch_add(1, std::memory_order_relaxed);
+    }
+    explicit BitmapDecoder(imaging::ImageFormat expected) noexcept : expected_(expected) {
+        if (const auto* container = detail::containerGuid(expected_)) container_ = *container;
         detail::g_liveObjects.fetch_add(1, std::memory_order_relaxed);
     }
     HRESULT __stdcall QueryInterface(const GUID& iid, void** out) override {
@@ -332,9 +428,25 @@ public:
         return count;
     }
     HRESULT __stdcall QueryCapability(void*, uint32_t*) override { return E_NOTIMPL; }
-    HRESULT __stdcall Initialize(void*, uint32_t) override { return WINCODEC_ERR_WRONGSTATE; }
+    HRESULT __stdcall Initialize(void* stream, uint32_t cacheOption) override {
+        if (!stream) return E_POINTER;
+        if (initialized_ || cacheOption > 2) return WINCODEC_ERR_WRONGSTATE;
+        imaging::ImageFrame image{};
+        const auto status = detail::decodeStream(static_cast<IStream*>(stream), image, expected_);
+        if (status != imaging::ImageStatus::Success) return detail::statusToHr(status);
+        const GUID* detectedContainer = detail::containerGuid(image.sourceFormat);
+        if (!detectedContainer) return WINCODEC_ERR_UNKNOWNIMAGEFORMAT;
+        auto* frame = detail::createObject<BitmapFrame>(static_cast<imaging::ImageFrame&&>(image));
+        if (!frame) return E_OUTOFMEMORY;
+        frame_ = frame;
+        container_ = *detectedContainer;
+        initialized_ = true;
+        return S_OK;
+    }
     HRESULT __stdcall GetContainerFormat(GUID* format) override {
-        if (!format) return E_POINTER; *format = container_; return S_OK;
+        if (!format) return E_POINTER;
+        if (!initialized_) return WINCODEC_ERR_WRONGSTATE;
+        *format = container_; return S_OK;
     }
     HRESULT __stdcall GetDecoderInfo(void** info) override {
         if (!info) return E_POINTER; *info = nullptr; return WINCODEC_ERR_UNSUPPORTEDOPERATION;
@@ -354,10 +466,13 @@ public:
         if (!thumbnail) return E_POINTER; *thumbnail = nullptr; return WINCODEC_ERR_UNSUPPORTEDOPERATION;
     }
     HRESULT __stdcall GetFrameCount(uint32_t* count) override {
-        if (!count) return E_POINTER; *count = frame_ ? 1 : 0; return S_OK;
+        if (!count) return E_POINTER;
+        if (!initialized_) return WINCODEC_ERR_WRONGSTATE;
+        *count = 1; return S_OK;
     }
     HRESULT __stdcall GetFrame(uint32_t index, IWICBitmapFrameDecode** frame) override {
         if (!frame) return E_POINTER; *frame = nullptr;
+        if (!initialized_) return WINCODEC_ERR_WRONGSTATE;
         if (index != 0 || !frame_) return E_INVALIDARG;
         frame_->AddRef(); *frame = frame_; return S_OK;
     }
@@ -366,6 +481,8 @@ private:
     std::atomic<ULONG> refs_{1};
     BitmapFrame* frame_{};
     GUID container_{};
+    imaging::ImageFormat expected_{imaging::ImageFormat::Unknown};
+    bool initialized_{};
 };
 
 class FormatConverter final : public IWICFormatConverter {
@@ -633,17 +750,58 @@ public:
         if (!result) return E_OUTOFMEMORY;
         *decoder = result; return S_OK;
     }
-    HRESULT __stdcall CreateDecoderFromStream(IStream*, const GUID*, uint32_t, IWICBitmapDecoder** decoder) override {
-        if (!decoder) return E_POINTER; *decoder = nullptr; return E_NOTIMPL;
+    HRESULT __stdcall CreateDecoderFromStream(IStream* stream, const GUID* vendor,
+        uint32_t metadataOptions, IWICBitmapDecoder** decoder) override {
+        if (!decoder) return E_POINTER;
+        *decoder = nullptr;
+        if (!stream || vendor || metadataOptions > 1) return E_INVALIDARG;
+        imaging::ImageFrame image{};
+        const auto status = detail::decodeStream(stream, image);
+        if (status != imaging::ImageStatus::Success) return detail::statusToHr(status);
+        const GUID* container = detail::containerGuid(image.sourceFormat);
+        if (!container) return WINCODEC_ERR_UNKNOWNIMAGEFORMAT;
+        auto* frame = detail::createObject<BitmapFrame>(static_cast<imaging::ImageFrame&&>(image));
+        if (!frame) return E_OUTOFMEMORY;
+        auto* result = detail::createObject<BitmapDecoder>(frame, *container);
+        frame->Release();
+        if (!result) return E_OUTOFMEMORY;
+        *decoder = result;
+        return S_OK;
     }
-    HRESULT __stdcall CreateDecoderFromFileHandle(uintptr_t, const GUID*, uint32_t, IWICBitmapDecoder** decoder) override {
-        if (!decoder) return E_POINTER; *decoder = nullptr; return E_NOTIMPL;
+    HRESULT __stdcall CreateDecoderFromFileHandle(uintptr_t handle, const GUID* vendor,
+        uint32_t metadataOptions, IWICBitmapDecoder** decoder) override {
+        if (!decoder) return E_POINTER;
+        *decoder = nullptr;
+        if (!handle || vendor || metadataOptions > 1) return E_INVALIDARG;
+        imaging::ImageFrame image{};
+        const auto status = detail::decodeFileHandle(handle, image);
+        if (status != imaging::ImageStatus::Success) return detail::statusToHr(status);
+        const GUID* container = detail::containerGuid(image.sourceFormat);
+        if (!container) return WINCODEC_ERR_UNKNOWNIMAGEFORMAT;
+        auto* frame = detail::createObject<BitmapFrame>(static_cast<imaging::ImageFrame&&>(image));
+        if (!frame) return E_OUTOFMEMORY;
+        auto* result = detail::createObject<BitmapDecoder>(frame, *container);
+        frame->Release();
+        if (!result) return E_OUTOFMEMORY;
+        *decoder = result;
+        return S_OK;
     }
     HRESULT __stdcall CreateComponentInfo(const GUID&, void** info) override {
         if (!info) return E_POINTER; *info = nullptr; return WINCODEC_ERR_COMPONENTNOTFOUND;
     }
-    HRESULT __stdcall CreateDecoder(const GUID&, const GUID*, IWICBitmapDecoder** decoder) override {
-        if (!decoder) return E_POINTER; *decoder = nullptr; return E_NOTIMPL;
+    HRESULT __stdcall CreateDecoder(const GUID& container, const GUID* vendor, IWICBitmapDecoder** decoder) override {
+        if (!decoder) return E_POINTER;
+        *decoder = nullptr;
+        if (vendor) return E_INVALIDARG;
+        imaging::ImageFormat format = imaging::ImageFormat::Unknown;
+        if (container == GUID_ContainerFormatBmp) format = imaging::ImageFormat::Bmp;
+        else if (container == GUID_ContainerFormatPng) format = imaging::ImageFormat::Png;
+        else if (container == GUID_ContainerFormatJpeg) format = imaging::ImageFormat::Jpeg;
+        if (format == imaging::ImageFormat::Unknown) return WINCODEC_ERR_COMPONENTNOTFOUND;
+        auto* result = detail::createObject<BitmapDecoder>(format);
+        if (!result) return E_OUTOFMEMORY;
+        *decoder = result;
+        return S_OK;
     }
     HRESULT __stdcall CreateEncoder(const GUID& container, const GUID* vendor, IWICBitmapEncoder** encoder) override {
         if (!encoder) return E_POINTER; *encoder = nullptr;
