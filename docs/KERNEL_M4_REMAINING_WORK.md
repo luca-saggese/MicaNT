@@ -57,8 +57,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   insufficienti deve fallire con lo status previsto senza pubblicare handle o
   oggetti parziali. Il test kernel UserMode verifica ora `NtOpenProcess` negato
   dalla DACL senza `SeDebugPrivilege` e consentito con il privilegio abilitato,
-  controllando i diritti concessi e ripristinando il token. Restano i casi di
-  creazione/uso generali, KernelMode e handle pseudo. QEMU CPL3 verifica anche
+  controllando i diritti concessi e ripristinando il token. QEMU verifica anche
+  che `NtOpenProcess` e `NtOpenThread` in KernelMode ignorino un deny ACE senza
+  concedere diritti oltre quelli richiesti. Restano i casi di creazione/uso
+  generali e handle pseudo. QEMU CPL3 verifica anche
   che un `NtCreateThreadEx` con self-relative security descriptor e DACL vuota
   ritorni `STATUS_ACCESS_DENIED` senza pubblicare l'handle.
 - [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei

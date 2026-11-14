@@ -1139,8 +1139,8 @@ bool testUserModeProcessOpenAccess() noexcept {
     bool valid = ps::detail::createProcessObject(target, targetReference, &security,
         0x0001 | ob::SYNCHRONIZE, &processAccess) == NtStatus::Success && target && targetReference;
     if (!valid) g_attachFailureStage = 41;
-    Handle processHandle{}, deniedHandle{}, allowedHandle{}, debugHandle{};
-    Handle securedThreadHandle{}, openedThreadHandle{};
+    Handle processHandle{}, deniedHandle{}, allowedHandle{}, debugHandle{}, kernelModeProcessHandle{};
+    Handle securedThreadHandle{}, openedThreadHandle{}, kernelModeThreadHandle{};
     ps::EThread* securedThread{};
     se::FreestandingAccessToken* callerToken{};
     ob::ObjectHeader* callerTokenReference{};
@@ -1185,6 +1185,21 @@ bool testUserModeProcessOpenAccess() noexcept {
         }
     }
     if (valid) {
+        // KernelMode bypasses the process DACL but still returns only the
+        // explicitly requested valid access rights.
+        currentThread->previousUserMode = false;
+        valid = ps::detail::openProcessByClientId({target->processId(), 0}, 0x0001, 0,
+            kernelModeProcessHandle) == NtStatus::Success && kernelModeProcessHandle;
+        const auto* entry = kernelModeProcessHandle
+            ? target->getHandleTable().getEntry(kernelModeProcessHandle) : nullptr;
+        valid = valid && entry && entry->grantedAccess == 0x0001;
+        if (kernelModeProcessHandle) {
+            valid = target->getHandleTable().closeHandle(kernelModeProcessHandle) == NtStatus::Success && valid;
+            kernelModeProcessHandle = 0;
+        }
+        currentThread->previousUserMode = true;
+    }
+    if (valid) {
         se::FreestandingSecurityDescriptor threadSecurity{};
         threadSecurity.DaclPresent = true;
         threadSecurity.AceCount = 2;
@@ -1204,6 +1219,19 @@ bool testUserModeProcessOpenAccess() noexcept {
             const auto* openedEntry = openedThreadHandle
                 ? target->getHandleTable().getEntry(openedThreadHandle) : nullptr;
             valid = valid && openedEntry && openedEntry->grantedAccess == 0x0040;
+            if (valid) {
+                currentThread->previousUserMode = false;
+                valid = ps::detail::openThreadByClientId(securedThreadId, 0x0001, 0,
+                    kernelModeThreadHandle) == NtStatus::Success && kernelModeThreadHandle;
+                const auto* kernelEntry = kernelModeThreadHandle
+                    ? target->getHandleTable().getEntry(kernelModeThreadHandle) : nullptr;
+                valid = valid && kernelEntry && kernelEntry->grantedAccess == 0x0001;
+                if (kernelModeThreadHandle) {
+                    valid = target->getHandleTable().closeHandle(kernelModeThreadHandle) == NtStatus::Success && valid;
+                    kernelModeThreadHandle = 0;
+                }
+                currentThread->previousUserMode = true;
+            }
         }
     }
     currentThread->previousUserMode = previousMode;
