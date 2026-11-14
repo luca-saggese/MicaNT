@@ -428,6 +428,34 @@ public:
         return count && count <= mappedRemaining(rva);
     }
 
+    // Return bytes that are physically present in the PE file. Unlike
+    // mappedRange(), this never exposes zero-filled virtual section tails.
+    [[nodiscard]] std::span<const uint8_t> fileBackedRange(
+        uint32_t rva, size_t count) const noexcept {
+        if (file_.empty() || !count) return {};
+        if (rva < headers_.optionalHeader.sizeOfHeaders) {
+            const size_t available = headers_.optionalHeader.sizeOfHeaders - rva;
+            if (count <= available && fits(file_.size(), rva, count))
+                return file_.subspan(rva, count);
+            return {};
+        }
+        for (size_t index = 0; index < headers_.fileHeader.numberOfSections; ++index) {
+            const auto sec = section(index);
+            if (rva < sec.virtualAddress) continue;
+            const uint32_t delta = rva - sec.virtualAddress;
+            if (delta >= sec.sizeOfRawData || count > sec.sizeOfRawData - delta) continue;
+            const uint64_t rawOffset = static_cast<uint64_t>(sec.pointerToRawData) + delta;
+            if (rawOffset > SIZE_MAX || !fits(file_.size(), static_cast<size_t>(rawOffset), count))
+                return {};
+            return file_.subspan(static_cast<size_t>(rawOffset), count);
+        }
+        return {};
+    }
+
+    [[nodiscard]] ImageDataDirectory dataDirectory(uint32_t index) const noexcept {
+        return directory(index);
+    }
+
     NtStatus map(std::span<uint8_t> destination, uint64_t actualBase) const noexcept {
         if (file_.empty() || destination.size() < headers_.optionalHeader.sizeOfImage) {
             return NtStatus::BufferTooSmall;
@@ -930,6 +958,230 @@ private:
     std::span<const uint8_t> file_{};
     ImageNtHeaders64 headers_{};
     size_t sectionsOffset_{};
+};
+
+struct PeResourceIdentifier {
+    uint16_t id{};
+    std::u16string_view name{};
+    bool isName{};
+};
+
+struct PeResourceData {
+    std::span<const uint8_t> bytes{};
+    uint32_t codePage{};
+    uint16_t language{};
+};
+
+// Fixed-depth PE resource reader for the documented type/name/language tree.
+// It only returns file-backed data; no resource RVA is exposed as a pointer.
+class PeResourceView {
+public:
+    explicit PeResourceView(const PeImageView64& image) noexcept : image_(&image) {}
+
+    [[nodiscard]] NtStatus find(PeResourceIdentifier type, PeResourceIdentifier name,
+                                uint16_t preferredLanguage,
+                                PeResourceData& result) const noexcept {
+        result = {};
+        if (!image_) return NtStatus::InvalidParameter;
+        const auto directory = image_->dataDirectory(IMAGE_DIRECTORY_ENTRY_RESOURCE);
+        if (!directory.virtualAddress || directory.size < 16 || directory.size > MaxDirectoryBytes)
+            return NtStatus::NotFound;
+        const auto root = image_->fileBackedRange(directory.virtualAddress, directory.size);
+        if (root.size() != directory.size) return NtStatus::InvalidImageFormat;
+
+        uint32_t nameNode{};
+        NtStatus status = findDirectoryEntry(root, 0, type, nameNode);
+        if (status != NtStatus::Success) return status;
+        if (!(nameNode & DirectoryFlag)) return NtStatus::InvalidImageFormat;
+        const uint32_t namesOffset = nameNode & OffsetMask;
+
+        uint32_t languageNode{};
+        status = findDirectoryEntry(root, namesOffset, name, languageNode);
+        if (status != NtStatus::Success) return status;
+        if (!(languageNode & DirectoryFlag)) return NtStatus::InvalidImageFormat;
+        const uint32_t languagesOffset = languageNode & OffsetMask;
+
+        uint32_t dataEntryOffset{};
+        uint16_t selectedLanguage{};
+        status = findLanguageEntry(root, languagesOffset, preferredLanguage,
+                                   dataEntryOffset, selectedLanguage);
+        if (status != NtStatus::Success) return status;
+        if (dataEntryOffset & DirectoryFlag) return NtStatus::InvalidImageFormat;
+        const uint32_t entryOffset = dataEntryOffset & OffsetMask;
+        if (!fits(root.size(), entryOffset, 16)) return NtStatus::InvalidImageFormat;
+        const uint32_t dataRva = read32(root.data() + entryOffset);
+        const uint32_t dataSize = read32(root.data() + entryOffset + 4);
+        const uint32_t codePage = read32(root.data() + entryOffset + 8);
+        if (!dataRva || !dataSize) return NtStatus::InvalidImageFormat;
+        auto data = image_->fileBackedRange(dataRva, dataSize);
+        if (data.size() != dataSize) return NtStatus::InvalidImageFormat;
+        result = {data, codePage, selectedLanguage};
+        return NtStatus::Success;
+    }
+
+    static uint16_t read16(const uint8_t* p) noexcept {
+        return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
+    }
+    static uint32_t read32(const uint8_t* p) noexcept {
+        return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    }
+
+private:
+    static constexpr uint32_t DirectoryFlag = 0x80000000u;
+    static constexpr uint32_t OffsetMask = 0x7fffffffu;
+    static constexpr uint32_t MaxDirectoryBytes = 16u * 1024u * 1024u;
+
+    static bool fits(size_t size, size_t offset, size_t count) noexcept {
+        return offset <= size && count <= size - offset;
+    }
+    static bool matchesName(std::span<const uint8_t> root, uint32_t nameOffset,
+                            std::u16string_view expected) noexcept {
+        if (!fits(root.size(), nameOffset, 2)) return false;
+        const uint16_t length = read16(root.data() + nameOffset);
+        if (length != expected.size() || !fits(root.size(), nameOffset + 2,
+                                                static_cast<size_t>(length) * 2)) return false;
+        for (size_t i = 0; i < length; ++i)
+            if (read16(root.data() + nameOffset + 2 + i * 2) != expected[i]) return false;
+        return true;
+    }
+    static NtStatus findDirectoryEntry(std::span<const uint8_t> root, uint32_t offset,
+                                       PeResourceIdentifier wanted,
+                                       uint32_t& value) noexcept {
+        value = 0;
+        if (!fits(root.size(), offset, 16)) return NtStatus::InvalidImageFormat;
+        const uint32_t named = read16(root.data() + offset + 12);
+        const uint32_t ids = read16(root.data() + offset + 14);
+        const uint64_t count = static_cast<uint64_t>(named) + ids;
+        if (!count || count > 65535 || !fits(root.size(), offset + 16, count * 8))
+            return NtStatus::InvalidImageFormat;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint8_t* entry = root.data() + offset + 16 + static_cast<size_t>(i) * 8;
+            const uint32_t rawName = read32(entry);
+            bool matches = false;
+            if (rawName & DirectoryFlag) {
+                if (wanted.isName)
+                    matches = matchesName(root, rawName & OffsetMask, wanted.name);
+            } else if (!wanted.isName && (rawName & 0xffff0000u) == 0) {
+                matches = static_cast<uint16_t>(rawName) == wanted.id;
+            }
+            if (matches) { value = read32(entry + 4); return NtStatus::Success; }
+        }
+        return NtStatus::NotFound;
+    }
+    static NtStatus findLanguageEntry(std::span<const uint8_t> root, uint32_t offset,
+                                       uint16_t preferred, uint32_t& value,
+                                       uint16_t& language) noexcept {
+        value = 0; language = 0;
+        if (!fits(root.size(), offset, 16)) return NtStatus::InvalidImageFormat;
+        const uint32_t named = read16(root.data() + offset + 12);
+        const uint32_t ids = read16(root.data() + offset + 14);
+        const uint64_t count = static_cast<uint64_t>(named) + ids;
+        if (!count || count > 65535 || !fits(root.size(), offset + 16, count * 8))
+            return NtStatus::InvalidImageFormat;
+        uint32_t first{}; uint16_t firstLanguage{};
+        uint32_t neutral{};
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint8_t* entry = root.data() + offset + 16 + static_cast<size_t>(i) * 8;
+            const uint32_t rawName = read32(entry);
+            if (rawName & DirectoryFlag) continue;
+            if (rawName & 0xffff0000u) return NtStatus::InvalidImageFormat;
+            const uint16_t id = static_cast<uint16_t>(rawName);
+            if (!first) { first = read32(entry + 4); firstLanguage = id; }
+            if (id == preferred) { value = read32(entry + 4); language = id; return NtStatus::Success; }
+            if (id == 0) neutral = read32(entry + 4);
+        }
+        if (neutral) { value = neutral; language = 0; return NtStatus::Success; }
+        if (first) { value = first; language = firstLanguage; return NtStatus::Success; }
+        return NtStatus::NotFound;
+    }
+
+    const PeImageView64* image_{};
+};
+
+inline constexpr uint16_t IMAGE_RESOURCE_TYPE_ICON = 3;
+inline constexpr uint16_t IMAGE_RESOURCE_TYPE_GROUP_ICON = 14;
+
+struct PeGroupIconEntry {
+    uint32_t width{};
+    uint32_t height{};
+    uint8_t colorCount{};
+    uint16_t planes{};
+    uint16_t bitCount{};
+    uint32_t byteCount{};
+    uint16_t resourceId{};
+};
+
+struct PeIconResource {
+    PeGroupIconEntry entry{};
+    PeResourceData resource{};
+};
+
+class PeGroupIconView {
+public:
+    explicit PeGroupIconView(const PeResourceView& resources) noexcept : resources_(&resources) {}
+
+    [[nodiscard]] NtStatus findIcon(uint16_t groupId, uint16_t language,
+                                    uint32_t width, uint32_t height,
+                                    uint16_t preferredBitCount,
+                                    PeIconResource& result) const noexcept {
+        result = {};
+        if (!resources_ || !groupId || !width || !height || width > 4096 || height > 4096)
+            return NtStatus::InvalidParameter;
+        PeResourceData group{};
+        NtStatus status = resources_->find(
+            {IMAGE_RESOURCE_TYPE_GROUP_ICON, {}, false}, {groupId, {}, false}, language, group);
+        if (status != NtStatus::Success) return status;
+        if (group.bytes.size() < 6) return NtStatus::InvalidImageFormat;
+        const uint8_t* bytes = group.bytes.data();
+        if (PeResourceView::read16(bytes) != 0 || PeResourceView::read16(bytes + 2) != 1)
+            return NtStatus::InvalidImageFormat;
+        const uint16_t count = PeResourceView::read16(bytes + 4);
+        if (!count || count > 1024 || group.bytes.size() != 6u + static_cast<size_t>(count) * 14u)
+            return NtStatus::InvalidImageFormat;
+
+        uint16_t bestIndex{};
+        uint64_t bestScore = UINT64_MAX;
+        for (uint16_t i = 0; i < count; ++i) {
+            const uint8_t* p = bytes + 6u + static_cast<size_t>(i) * 14u;
+            const uint32_t itemWidth = p[0] ? p[0] : 256;
+            const uint32_t itemHeight = p[1] ? p[1] : 256;
+            const uint16_t planes = PeResourceView::read16(p + 4);
+            const uint16_t depth = PeResourceView::read16(p + 6);
+            const uint32_t byteCount = PeResourceView::read32(p + 8);
+            const uint16_t id = PeResourceView::read16(p + 12);
+            if (p[3] || !planes || !byteCount || !id || itemWidth > 256 || itemHeight > 256)
+                return NtStatus::InvalidImageFormat;
+            const uint64_t scalePenalty = (itemWidth < width || itemHeight < height)
+                ? 1'000'000ull + (static_cast<uint64_t>(width - std::min(width, itemWidth)) +
+                                   height - std::min(height, itemHeight)) * 1024ull
+                : (static_cast<uint64_t>(itemWidth - width) + itemHeight - height) * 1024ull;
+            const uint64_t depthPenalty = preferredBitCount
+                ? (depth >= preferredBitCount ? depth - preferredBitCount
+                                              : preferredBitCount - depth)
+                : 0;
+            const uint64_t score = scalePenalty + depthPenalty;
+            if (i == 0 || score < bestScore) { bestIndex = i; bestScore = score; }
+        }
+
+        const uint8_t* selected = bytes + 6u + static_cast<size_t>(bestIndex) * 14u;
+        PeGroupIconEntry entry{
+            selected[0] ? static_cast<uint32_t>(selected[0]) : 256u,
+            selected[1] ? static_cast<uint32_t>(selected[1]) : 256u,
+            selected[2], PeResourceView::read16(selected + 4),
+            PeResourceView::read16(selected + 6), PeResourceView::read32(selected + 8),
+            PeResourceView::read16(selected + 12)};
+        PeResourceData icon{};
+        status = resources_->find({IMAGE_RESOURCE_TYPE_ICON, {}, false},
+                                  {entry.resourceId, {}, false}, group.language, icon);
+        if (status != NtStatus::Success) return status;
+        if (icon.bytes.size() != entry.byteCount) return NtStatus::InvalidImageFormat;
+        result = {entry, icon};
+        return NtStatus::Success;
+    }
+
+private:
+    const PeResourceView* resources_{};
 };
 
 /**
