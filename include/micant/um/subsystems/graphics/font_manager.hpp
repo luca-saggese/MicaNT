@@ -9,6 +9,16 @@
 
 namespace micant::um::graphics {
 
+struct TextExtentPixels { int32_t width{}; int32_t height{}; };
+struct FontMetricsPixels {
+    int32_t ascent{};
+    int32_t descent{};
+    int32_t lineGap{};
+    int32_t lineHeight{};
+    int32_t averageAdvance{};
+    int32_t maximumAdvance{};
+};
+
 // Per-process Ring 3 font collection for the installed system faces. Font
 // bytes, parser views and scratch memory remain owned by this manager.
 class FontManager {
@@ -41,6 +51,99 @@ public:
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
     [[nodiscard]] const FontAssetChoice& selectedAsset() const noexcept { return asset_; }
     [[nodiscard]] const truetype::FaceMetrics& metrics() const noexcept { return primary_.metrics(); }
+
+    [[nodiscard]] bool pixelMetrics(FontMetricsPixels& result) const noexcept {
+        result = {};
+        if (!initialized_) return false;
+        const uint32_t pxEm = truetype::pixelsFromPoints(asset_.pointSize, asset_.dpi);
+        const auto& m = primary_.metrics();
+        if (!pxEm || !m.unitsPerEm) return false;
+        result.ascent = scale(m.ascender, pxEm, m.unitsPerEm);
+        result.descent = -scale(m.descender, pxEm, m.unitsPerEm);
+        result.lineGap = scale(m.lineGap, pxEm, m.unitsPerEm);
+        result.lineHeight = result.ascent + result.descent + result.lineGap;
+        if (result.lineHeight <= 0) result.lineHeight = result.ascent + result.descent;
+        uint32_t totalAdvance = 0;
+        uint32_t maximumAdvance = 0;
+        uint32_t count = 0;
+        for (uint32_t scalar = 32; scalar <= 126; ++scalar) {
+            const auto* face = &primary_;
+            uint16_t glyph = face->glyphIndex(scalar);
+            truetype::GlyphMetrics gm{};
+            if (!glyph && fallback_.valid()) {
+                face = &fallback_;
+                glyph = face->glyphIndex(scalar);
+            }
+            if (!glyph || !face->glyphMetrics(glyph, gm)) continue;
+            const int32_t advance = scale(gm.advanceWidth, pxEm, face->metrics().unitsPerEm);
+            if (advance < 0) return false;
+            totalAdvance += static_cast<uint32_t>(advance);
+            if (static_cast<uint32_t>(advance) > maximumAdvance)
+                maximumAdvance = static_cast<uint32_t>(advance);
+            ++count;
+        }
+        if (!count || maximumAdvance > INT32_MAX) return false;
+        result.averageAdvance = static_cast<int32_t>((totalAdvance + count / 2) / count);
+        result.maximumAdvance = static_cast<int32_t>(maximumAdvance);
+        return result.lineHeight > 0;
+    }
+
+    [[nodiscard]] bool measureUtf8(const char* text, TextExtentPixels& extent) const noexcept {
+        extent = {};
+        if (!initialized_ || !text) return false;
+        constexpr size_t MaxTextBytes = 4096;
+        const uint32_t pxEm = truetype::pixelsFromPoints(asset_.pointSize, asset_.dpi);
+        const auto& m = primary_.metrics();
+        if (!pxEm || !m.unitsPerEm) return false;
+        int32_t pen = 0, maxWidth = 0;
+        uint32_t lines = 1;
+        FontMetricsPixels projectedMetrics{};
+        if (!pixelMetrics(projectedMetrics)) return false;
+        const int32_t effectiveLineHeight = projectedMetrics.lineHeight;
+        if (effectiveLineHeight <= 0) return false;
+        const truetype::FaceView* previousFace = nullptr;
+        uint16_t previousGlyph = 0;
+        size_t cursor = 0;
+        while (text[cursor]) {
+            if (cursor >= MaxTextBytes) return false;
+            uint32_t scalar{};
+            const size_t consumed = decodeUtf8(text + cursor, scalar);
+            if (!consumed) return false;
+            cursor += consumed;
+            if (scalar == '\n') {
+                if (pen > maxWidth) maxWidth = pen;
+                pen = 0; ++lines; previousFace = nullptr; previousGlyph = 0;
+                continue;
+            }
+            uint32_t baseScalar = scalar, markScalar = 0;
+            decomposeAccent(scalar, baseScalar, markScalar);
+            const truetype::FaceView* face = &primary_;
+            uint16_t glyph = face->glyphIndex(baseScalar);
+            truetype::GlyphMetrics gm{};
+            if ((!glyph || !face->glyphMetrics(glyph, gm)) && fallback_.valid()) {
+                face = &fallback_;
+                glyph = face->glyphIndex(baseScalar);
+            }
+            if (!glyph || !face->glyphMetrics(glyph, gm)) return false;
+            if (previousGlyph && previousFace == face) {
+                const int32_t kern = scale(face->kerning(previousGlyph, glyph), pxEm,
+                                           face->metrics().unitsPerEm);
+                if ((kern < 0 && pen < -kern) || (kern > 0 && pen > INT32_MAX - kern))
+                    return false;
+                pen += kern;
+            }
+            const int32_t advance = scale(gm.advanceWidth, pxEm, face->metrics().unitsPerEm);
+            if (advance < 0 || pen > INT32_MAX - advance) return false;
+            pen += advance;
+            previousFace = face;
+            previousGlyph = glyph;
+            (void)markScalar;
+        }
+        if (pen > maxWidth) maxWidth = pen;
+        if (lines > static_cast<uint32_t>(INT32_MAX / effectiveLineHeight)) return false;
+        extent = {maxWidth, static_cast<int32_t>(lines) * effectiveLineHeight};
+        return true;
+    }
 
     void shutdown() noexcept {
         initialized_ = false;

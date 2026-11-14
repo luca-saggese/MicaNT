@@ -134,7 +134,7 @@ bool renderExplorerText(uint32_t* pixels, uint32_t width, uint32_t height,
     if (pixels == g.desktopPixels) dc = g.desktopDc;
     else if (pixels == g.taskbarPixels) dc = g.taskbarDc;
     else if (pixels == g.menuPixels) dc = g.menuDc;
-    else for (auto& app : g.apps) if (pixels == app.pixels) return false;
+    else for (auto& app : g.apps) if (pixels == app.pixels) { dc = app.dc; break; }
     if (!dc) return false;
     wchar_t wide[4096]{}; size_t units{};
     if (!decodeUtf8ToUtf16(value, wide, sizeof(wide) / sizeof(wide[0]), units) || !units) return false;
@@ -315,6 +315,22 @@ void initializeSystemFonts() noexcept {
         return;
     }
     micant_gui::SetTextRenderer(renderExplorerText);
+    if (g.desktopDc && SelectObject(g.desktopDc, g.uiFont)) {
+        SIZE textSize{};
+        TEXTMETRICW metrics{};
+        if (!GetTextExtentPoint32W(g.desktopDc, L"MicaNT", 6, &textSize)) {
+            PrintLine("[MicaNT FontProbe] GetTextExtentPoint32W failed");
+        } else if (!GetTextMetricsW(g.desktopDc, &metrics)) {
+            PrintLine("[MicaNT FontProbe] GetTextMetricsW failed");
+        } else if (textSize.cx > 0 && textSize.cy == metrics.tmHeight &&
+                   metrics.tmAscent > 0 && metrics.tmDescent >= 0) {
+            PrintLine("[MicaNT FontProbe] GDI layout metrics read from selected TTF");
+        } else {
+            PrintLine("[MicaNT FontProbe] GDI TTF metric values inconsistent");
+        }
+    } else {
+        PrintLine("[MicaNT FontProbe] GDI metric DC/font selection failed");
+    }
     PrintLine("[MicaNT FontProbe] GDI TrueType font selected for Explorer surfaces");
 }
 

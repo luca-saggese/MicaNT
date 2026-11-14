@@ -86,6 +86,17 @@ struct GdiLogFontW {
     uint8_t italic, underline, strikeOut, charSet, outPrecision, clipPrecision, quality, pitchAndFamily;
     wchar_t faceName[32];
 };
+struct GdiSize { int32_t cx{}, cy{}; };
+struct GdiTextMetricW {
+    int32_t height{}, ascent{}, descent{}, internalLeading{}, externalLeading{};
+    int32_t averageCharWidth{}, maximumCharWidth{}, weight{}, overhang{};
+    int32_t digitizedAspectX{}, digitizedAspectY{};
+    wchar_t firstChar{}, lastChar{}, defaultChar{}, breakChar{};
+    uint8_t italic{}, underlined{}, struckOut{}, pitchAndFamily{}, charSet{};
+};
+static_assert(sizeof(GdiSize) == 8);
+static_assert(sizeof(GdiTextMetricW) == 60);
+static_assert(offsetof(GdiTextMetricW, firstChar) == 44);
 struct GdiFontObject {
     uint64_t magic{0x4D494341464F4E54ULL};
     bool active{};
@@ -1100,6 +1111,50 @@ int32_t Gdi32_ExtTextOutW(void* hdc, int32_t x, int32_t y, uint32_t options,
         return 0;
     return Gdi32_TextOutW(hdc, x, y, text, static_cast<int32_t>(count));
 }
+
+int32_t Gdi32_GetTextExtentPoint32W(void* hdc, const wchar_t* text, int32_t count,
+                                    GdiSize* output) noexcept {
+    if (!hdc || !text || !output || count < 0 || count > 4096) return 0;
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc || !dc->font || !dc->font->active) return 0;
+    if (count == 0) {
+        micant::um::graphics::FontMetricsPixels metrics{};
+        if (!dc->font->manager.pixelMetrics(metrics)) return 0;
+        *output = {0, metrics.lineHeight};
+        return 1;
+    }
+    char utf8[16385]{};
+    if (!Utf16ToUtf8(text, count, utf8, sizeof(utf8))) return 0;
+    micant::um::graphics::TextExtentPixels extent{};
+    if (!dc->font->manager.measureUtf8(utf8, extent)) return 0;
+    *output = {extent.width, extent.height};
+    return 1;
+}
+
+int32_t Gdi32_GetTextMetricsW(void* hdc, GdiTextMetricW* output) noexcept {
+    if (!hdc || !output) return 0;
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc || !dc->font || !dc->font->active) return 0;
+    micant::um::graphics::FontMetricsPixels metrics{};
+    if (!dc->font->manager.pixelMetrics(metrics)) return 0;
+    *output = {};
+    output->height = metrics.lineHeight;
+    output->ascent = metrics.ascent;
+    output->descent = metrics.descent;
+    output->externalLeading = metrics.lineGap;
+    output->averageCharWidth = metrics.averageAdvance;
+    output->maximumCharWidth = metrics.maximumAdvance;
+    output->weight = dc->font->request.weight;
+    output->digitizedAspectX = static_cast<int32_t>(dc->font->request.dpi);
+    output->digitizedAspectY = static_cast<int32_t>(dc->font->request.dpi);
+    output->firstChar = L' ';
+    output->lastChar = L'~';
+    output->defaultChar = L'?';
+    output->breakChar = L' ';
+    output->italic = dc->font->request.italic ? 1 : 0;
+    output->charSet = 1;
+    return 1;
+}
 #endif
 
 // imm32.dll implementations
@@ -1479,6 +1534,15 @@ __declspec(dllexport) uint32_t SetTextColor(void* hdc, uint32_t color) {
 }
 __declspec(dllexport) int32_t SetBkMode(void* hdc, int32_t mode) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetBkMode(hdc, mode);
+}
+__declspec(dllexport) int32_t GetTextExtentPoint32W(void* hdc, const wchar_t* text,
+        int32_t count, micant::um::winnt_user32_gdi32_imm32_abi::GdiSize* size) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetTextExtentPoint32W(
+        hdc, text, count, size);
+}
+__declspec(dllexport) int32_t GetTextMetricsW(void* hdc,
+        micant::um::winnt_user32_gdi32_imm32_abi::GdiTextMetricW* metrics) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetTextMetricsW(hdc, metrics);
 }
 } // extern "C"
 #elif defined(BUILD_SYSTEM32_IMM32_DLL)

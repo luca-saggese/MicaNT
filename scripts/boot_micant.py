@@ -248,6 +248,24 @@ def verify_mouse(
                     raise RuntimeError("Truncated VirtIO scanout screenshot")
                 return pixels
 
+            def changed_pixels(left: bytes, right: bytes) -> int:
+                return sum(1 for offset in range(0, len(left), 3)
+                           if left[offset:offset + 3] != right[offset:offset + 3])
+
+            def wait_for_changed_screen(reference: bytes, name: str,
+                                        minimum_pixels: int, timeout: float = 5.0) -> bytes:
+                deadline = time.monotonic() + timeout
+                latest = b""
+                while time.monotonic() < deadline:
+                    latest = screen(name)
+                    if changed_pixels(reference, latest) >= minimum_pixels:
+                        return latest
+                    time.sleep(0.1)
+                raise RuntimeError(
+                    f"Explorer scanout did not change by {minimum_pixels} pixels "
+                    f"within {timeout:g}s after the window creation marker"
+                )
+
             execute("qmp_capabilities")
             startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
             irq_enabled = "[MicaNT Input] PS/2 mouse interrupt routing active" in startup_serial
@@ -281,14 +299,7 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not dispatch Enter into an application window action")
-            time.sleep(0.5)
-            opened = screen("app-window.ppm")
-            visible_pixels = sum(
-                1 for offset in range(0, len(after), 3)
-                if after[offset:offset + 3] != opened[offset:offset + 3]
-            )
-            if visible_pixels < 10000:
-                raise RuntimeError("Explorer's user-mode application window was not presented")
+            opened = wait_for_changed_screen(after, "app-window.ppm", 10000)
             for down in (True, False):
                 execute("input-send-event", {"events": [{
                     "type": "key", "data": {
@@ -305,14 +316,7 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not create its second overlapping user-mode window")
-            time.sleep(0.5)
-            overlapping = screen("overlapping-windows.ppm")
-            overlap_pixels = sum(
-                1 for offset in range(0, len(opened), 3)
-                if opened[offset:offset + 3] != overlapping[offset:offset + 3]
-            )
-            if overlap_pixels < 5000:
-                raise RuntimeError("The second Explorer surface was not composed over the first")
+            overlapping = wait_for_changed_screen(opened, "overlapping-windows.ppm", 5000)
             for down in (True, False):
                 execute("input-send-event", {"events": [{
                     "type": "key", "data": {

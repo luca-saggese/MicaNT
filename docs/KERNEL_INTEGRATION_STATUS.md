@@ -1747,3 +1747,26 @@ profile; E5 VirGL support remains open.
 | Command | Result |
 |---|---|
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024 --diagnostics-dir build/explorer-ring3-main-e6-run5` | Passed E6 stabilization; repeated Explorer window create/destroy cycles, focus return, mouse/keyboard dispatch, scanout updates and five-second serial stability verified |
+
+### Ring 3 TrueType/GDI integration checkpoint — 2026-11-15
+
+Explorer now selects a Segoe UI logical font through GDI32 and routes its
+desktop, taskbar, menu, notification and application DIB text through
+`CreateFontW`, `SelectObject` and `TextOutW`. The GDI font objects own bounded
+Ring 3 `FontManager` instances backed by the staged TTF files. GDI text extent
+and `TEXTMETRICW` queries project the selected face's real advance widths,
+ascender, descender and line gap at its configured point size and DPI. The
+boot probe confirms a successful extent/metrics query against the selected
+TTF. This is a bounded TrueType GDI subset: complex glyph outlines and
+unsupported text options still fail explicitly; F3 font enumeration, runtime
+multi-face selection, persistence and DirectWrite face/collection behavior
+remain open.
+
+QEMU's Explorer input verification now waits for the actual scanout pixels to
+change after the kernel window-creation event. That event can precede the
+user-mode paint, so the test polls for up to five seconds before treating an
+unchanged frame as a failure.
+
+| Command | Result |
+|---|---|
+| `python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-font-f2-build --cxx build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ --diagnostics-dir /private/tmp/micant-f3-metrics-pass` | Passed; modular kernel and Explorer dependency closure linked, GDI TTF extent/metrics probe succeeded, app DIBs rendered and composed, overlapping/move/resize/cleanup input checks passed, and serial remained stable for five seconds |
