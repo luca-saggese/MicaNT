@@ -32,8 +32,12 @@ void reportFailure(const char* stage, micant::NtStatus status) noexcept {
 
 struct ScopedHandle {
     micant::Handle value{};
+    micant::ob::HandleTable* ownerTable{};
     ~ScopedHandle() {
-        if (value && micant::sys::NtClose(value) != micant::NtStatus::Success) __builtin_trap();
+        if (!value) return;
+        const auto status = ownerTable ? ownerTable->closeHandle(value)
+                                       : micant::sys::NtClose(value);
+        if (status != micant::NtStatus::Success) __builtin_trap();
     }
 };
 
@@ -199,6 +203,7 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
             mainModule->view.headers().optionalHeader.addressOfEntryPoint;
 
         ScopedHandle threadHandle;
+        threadHandle.ownerTable = &createdProcess->getHandleTable();
         ps::EThread* createdThread{};
         auto* callerThread = ke::KeGetCurrentThread();
         if (!callerThread || !callerThread->directoryTableBase) {
