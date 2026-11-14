@@ -339,6 +339,14 @@ __attribute__((naked, section(".uthreads$a"))) void MicantRing3ProcessCreateStar
         "xorl %r13d, %r13d\nsubq $0x180, %rsp\n"
         "movabsq $0x400020003700, %rax\nmovq $0, (%rax)\n"
         "movq $0, 0x60(%rsp)\nmovq $0, 0x68(%rsp)\nmovq $0, 0x70(%rsp)\nmovq $0, 0x78(%rsp)\n"
+        // Current process and thread pseudo handles are waitable; while each
+        // object is still live, a zero-time wait must report timeout.
+        "movq $0, 0x100(%rsp)\nmovq $-1, %rcx\nxorl %edx, %edx\nleaq 0x100(%rsp), %r8\n"
+        "callq *8(%r15)\ncmpl $0x102, %eax\nje .Lmicant_wait_process_pseudo\n"
+        "movl $0xc0000290, %r13d\njmp 90f\n.Lmicant_wait_process_pseudo:\n"
+        "movq $0, 0x100(%rsp)\nmovq $-2, %rcx\nxorl %edx, %edx\nleaq 0x100(%rsp), %r8\n"
+        "callq *8(%r15)\ncmpl $0x102, %eax\nje .Lmicant_wait_thread_pseudo\n"
+        "movl $0xc0000291, %r13d\njmp 90f\n.Lmicant_wait_thread_pseudo:\n"
         // The freestanding Ps namespace is not implemented. A named
         // ObjectAttributes input must fail explicitly before publication.
         "movq $0, 0x130(%rsp)\nmovq $0, 0x138(%rsp)\nmovq $0, 0x140(%rsp)\n"

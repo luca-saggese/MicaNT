@@ -64,7 +64,10 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
   `UniqueThread`, rifiuta un `UniqueProcess` non corrispondente e non pubblica
   handle nel caso negativo. QEMU CPL3 verifica anche
   che un `NtCreateThreadEx` con self-relative security descriptor e DACL vuota
-  ritorni `STATUS_ACCESS_DENIED` senza pubblicare l'handle.
+  ritorni `STATUS_ACCESS_DENIED` senza pubblicare l'handle. La fixture CPL3
+  verifica anche i pseudo-handle di processo e thread correnti in
+  `NtWaitForSingleObject`: con timeout zero entrambi restituiscono
+  `STATUS_TIMEOUT` mentre i relativi oggetti restano attivi.
 - [ ] **Chiudere i percorsi verificati di duplicazione e inheritance degli handle nei
   processi.** Verificare diritti concessi, callback Ob, handle ereditabili,
   rollback se una callback o la copia dell'output fallisce e rilascio esatto dei
@@ -196,6 +199,11 @@ compilazione o una regressione hosted non chiudono un punto d'accettazione.
 
 ## Stato QEMU annotato
 
+- Verifica integrata dei pseudo-handle current-process/current-thread in
+  `NtWaitForSingleObject`, insieme ai test process flags e resume copyout:
+  `python3 qemu.py --headless --timeout 120 --diagnostics-dir
+  /private/tmp/micant-m4-pseudo-waits-batch` è passata: build/link bare-metal,
+  fixture CPL3, input PS/2 e seriale stabile per 5 secondi.
 - Verifica integrata dei test CPL3 `NtCreateProcessEx(Flags=1)` e rollback
   `NtResumeThread` su copyout invalido:
   `python3 qemu.py --headless --timeout 120 --diagnostics-dir
