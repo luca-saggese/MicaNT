@@ -188,6 +188,12 @@ inline void Test_IconHandles_OwnershipCopyAndLeaseLifetime() {
     TEST_ASSERT(!table.acquire(ownedCopy, invalid), "retired handle is no longer discoverable");
     TEST_ASSERT(lease.bitmap().pixels.size() == 4 && lease.bitmap().pixels[2] == 30,
                 "active lease keeps immutable pixel storage alive after destroy");
+    HICON scaledCopy = table.copyScaled(lease, 2, 2, allocator);
+    TEST_ASSERT(scaledCopy && table.acquire(scaledCopy, invalid) &&
+                invalid.bitmap().width == 2 && invalid.bitmap().height == 2,
+                "CopyImage scaling creates a validated independent icon");
+    invalid = {};
+    TEST_ASSERT(table.destroy(scaledCopy), "scaled image copy has owned lifetime");
     lease = {};
     HICON windowIcon = table.create(makeFrame(), allocator, false);
     void* hwnd = reinterpret_cast<void*>(0x1234);

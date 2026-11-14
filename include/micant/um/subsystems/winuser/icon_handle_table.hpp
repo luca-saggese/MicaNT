@@ -163,14 +163,26 @@ public:
 
     [[nodiscard]] HICON copy(HICON handle, const imaging::ImageAllocator& allocator) noexcept {
         Lease source{};
-        if (!acquire(handle, source) || !allocator.allocate || !allocator.deallocate) return nullptr;
+        if (!acquire(handle, source)) return nullptr;
+        return copyScaled(source, source.bitmap().width, source.bitmap().height, allocator);
+    }
+
+    [[nodiscard]] HICON copyScaled(const Lease& source, uint32_t width, uint32_t height,
+                                   const imaging::ImageAllocator& allocator) noexcept {
+        if (!source || !width || !height || width > 4096 || height > 4096 ||
+            !allocator.allocate || !allocator.deallocate) return nullptr;
         const auto& view = source.bitmap();
-        const size_t bytes = view.pixels.size();
         imaging::ImageFrame frame{};
         frame.width = view.width; frame.height = view.height; frame.stride = view.stride;
         frame.format = imaging::PixelFormat::Bgra8Premultiplied;
-        if (!frame.pixels.allocate(bytes, allocator)) return nullptr;
-        std::memcpy(frame.pixels.data(), view.pixels.data(), bytes);
+        if (!frame.pixels.allocate(view.pixels.size(), allocator)) return nullptr;
+        std::memcpy(frame.pixels.data(), view.pixels.data(), view.pixels.size());
+        if (width != view.width || height != view.height) {
+            imaging::ImageFrame scaled{};
+            if (imaging::ScaleIconFrame(frame, width, height, scaled, allocator) !=
+                imaging::ImageStatus::Success) return nullptr;
+            frame = std::move(scaled);
+        }
         return create(std::move(frame), allocator, false);
     }
 
