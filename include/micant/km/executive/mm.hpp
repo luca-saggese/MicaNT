@@ -400,9 +400,10 @@ public:
 
     [[nodiscard]] uint64_t allocateContiguousPages(size_t pageCount,
                                                     uint64_t highestPfn = UINT64_MAX,
-                                                    uint64_t alignmentPages = 1) {
+                                                    uint64_t alignmentPages = 1,
+                                                    bool (*physicalRangeAllowed)(uint64_t, size_t) noexcept = nullptr) {
         Guard guard(*this);
-        if (pageCount == 0 || pageCount > entries_.size() || !alignmentPages ||
+        if (pageCount == 0 || pageCount > entries_.size() || pageCount > SIZE_MAX / 4096 || !alignmentPages ||
             (alignmentPages & (alignmentPages - 1))) return 0;
 
         size_t consecutive = 0;
@@ -417,6 +418,11 @@ public:
                 }
                 consecutive++;
                 if (consecutive == pageCount) {
+                    if (physicalRangeAllowed && !physicalRangeAllowed(
+                            candidateStart << 12, pageCount * size_t{4096})) {
+                        consecutive = 0;
+                        continue;
+                    }
                     for (uint64_t p = candidateStart; p < candidateStart + pageCount; ++p) {
                         (void)removeFromListLocked(p);
                         entries_[p].location = PageLocation::ActiveAndValid;

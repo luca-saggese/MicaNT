@@ -480,6 +480,18 @@ def serial_progress(serial_log: str, expected: tuple[str, ...] = EXPECTED_SERIAL
     """Return how many expected messages occur, in order, in the serial log."""
     cursor = 0
     for index, marker in enumerate(expected):
+        if marker == "[MicaNT Display] OEM driver unavailable; GOP framebuffer pass-through active":
+            candidates = (
+                marker,
+                "[MicaNT OEM] virtio_gpu.sys: VirtIO 1.0 2D scanout initialized",
+            )
+            matches = [(serial_log.find(candidate, cursor), candidate) for candidate in candidates]
+            matches = [(position, candidate) for position, candidate in matches if position >= 0]
+            if not matches:
+                return index
+            found, matched_marker = min(matches, key=lambda item: item[0])
+            cursor = found + len(matched_marker)
+            continue
         found = serial_log.find(marker, cursor)
         if found < 0:
             return index

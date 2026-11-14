@@ -1704,6 +1704,7 @@ unsupported on bare metal for now.
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024` | Passed for E1; real Explorer Ring 3 entry, class registration and first user-mode window observed, then stable for 5 seconds |
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024` (E2) | Passed; QMP mouse click and keyboard Enter/Escape traversed Explorer's window queue, user-mode app paint changed scanout, owner destruction redrew it; serial remained stable for 5 seconds |
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024 --diagnostics-dir build/explorer-ring3-main-e3-movefront` | Passed E3; two Explorer windows overlap, keyboard path moves/resizes the upper window, click raises the exposed sibling, each closes independently and scanout reveals the remaining surface; serial remained stable for 5 seconds |
+| `python3 qemu.py --headless --timeout 180 --memory-mib 1024 --diagnostics-dir build/explorer-ring3-main-e4-final` | Passed E4; the canonical VirtIO 1.0 2D driver initialized, the CPL3 surface was verified on VirtIO scanout, Explorer mouse/keyboard interaction and window cleanup passed, and serial remained stable for 5 seconds |
 
 E3 now runs `compositor.exe` as a separate Ps process. Ob/Mm committed sections
 back the bounded surface pixels and compositor metadata; Explorer maps pixels
@@ -1721,7 +1722,13 @@ E3's multi-window QMP evidence is in
 `build/explorer-ring3-main-e3-movefront/serial.log` and the captures
 `overlapping-windows.ppm`, `moved-resized-window.ppm`,
 `brought-forward-window.ppm`, `one-window-after-close.ppm`, and
-`interactive.ppm`. This run's display service used the GOP pass-through
-fallback, so E4's required canonical VirtIO-GPU presentation has not yet been
-accepted. E5 has no evidence of GPU composition submission and completion.
-E6 stabilization has not been run.
+`interactive.ppm`. E4's accepted VirtIO-GPU evidence is in
+`build/explorer-ring3-main-e4-final/serial.log` and `cpl3-surface.ppm`; the
+driver now allocates its queue and scanout storage through the claimed device's
+DMA service. The PFN allocator selects contiguous pages only from firmware
+registered write-back RAM for this path, and the PCI Command write enables
+memory decoding and bus mastering only after the owned DMA buffer exists. The
+QEMU runner accepts either this canonical display service or the documented
+GOP fallback as its ordered display milestone. VirGL was not offered by this
+QEMU device, so E5's GPU composition submission/completion remains open. E6
+stabilization has not been run.

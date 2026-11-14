@@ -849,8 +849,8 @@ __attribute__((noinline)) bool testNativePeerThread(micant::Handle process, uint
 
 __attribute__((noinline)) bool testClonedImageLifetime(micant::Handle process) noexcept {
     using namespace micant;
-    static mm::Mmpfn baselineEntries[512]{};
-    static mm::Mmpfn rollbackEntries[512]{};
+    static mm::Mmpfn baselineEntries[8192]{};
+    static mm::Mmpfn rollbackEntries[8192]{};
     const auto baselineEntryCount = mm::PfnDatabase::get().snapshotActiveEntries(baselineEntries);
     ob::detail::HandleTableGuard interruptGuard;
     ps::EProcess* child{};
@@ -1429,8 +1429,8 @@ static bool runUserThreads(bool preemptive, size_t threadCount) noexcept {
         invalidTls.callbackCount = 1;
         progress.stage = "thread PFN baseline";
         if (!drainPreviousDeferredCleanup()) return false;
-        static mm::Mmpfn beforeThreadEntries[1024]{};
-        static mm::Mmpfn finalThreadEntries[1024]{};
+        static mm::Mmpfn beforeThreadEntries[8192]{};
+        static mm::Mmpfn finalThreadEntries[8192]{};
         const size_t beforeThread = mm::PfnDatabase::get().getActiveCount();
         const auto beforeThreadEntryCount =
             mm::PfnDatabase::get().snapshotActiveEntries(beforeThreadEntries);

@@ -83,7 +83,8 @@ inline NtStatus allocate(const void* owner, uint64_t claim, size_t bytes, size_t
     const size_t pages = (bytes + 4095) / 4096;
     const uint64_t alignmentPages = alignment <= 4096 ? 1 : alignment / 4096;
     const uint64_t highestPfn = provider.map == mapDirect ? (highestAddress >> 12) : UINT64_MAX;
-    const uint64_t pfn = mm::PfnDatabase::get().allocateContiguousPages(pages, highestPfn, alignmentPages);
+    const uint64_t pfn = mm::PfnDatabase::get().allocateContiguousPages(
+        pages, highestPfn, alignmentPages, isWriteBackRam);
     if (!pfn) { (void)km::arb::releaseDma(owner, claim); return NtStatus::InsufficientResources; }
     if (!isWriteBackRam(pfn << 12, pages * 4096)) {
         mm::PfnDatabase::get().freeContiguousPages(pfn, pages);

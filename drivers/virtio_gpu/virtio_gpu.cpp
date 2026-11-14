@@ -197,13 +197,7 @@ bool findGpu(PciLocation& result, PciCaps& caps, const KernelServices& services)
                 }
             }
 
-            // PCI ownership exists, but this kernel ABI has no safe DMA-buffer
-            // allocator/IOMMU mapping yet. Do not set Command or touch BARs.
-            (void)services.ReleasePciDevice(services.Context, g_pciClaimToken);
-            g_pciClaimToken = 0;
-            if (services.Log) services.Log(services.Context,
-                "virtio_gpu.sys: safe DMA allocator unavailable; startup declined");
-            return false;
+            return true;
         }
     }
     return false;
@@ -249,6 +243,15 @@ struct LayerResource {
     bool active{};
 };
 
+struct alignas(4096) DmaPayload {
+    VirtqDesc descriptors[kQueueSize]{};
+    alignas(4096) VirtqAvail available{};
+    alignas(4096) VirtqUsed used{};
+    alignas(4096) uint8_t frame[kMaxWidth * kMaxHeight * 4]{};
+    alignas(16) uint8_t command[sizeof(CommandAttachPrefix) + kMaxBackingPages * sizeof(MemoryEntry)]{};
+    alignas(16) ResponseHeader response{};
+};
+
 static_assert(sizeof(CommandHeader) == 24);
 static_assert(sizeof(CommandCreate3D) == 72);
 static_assert(sizeof(CommandContextCreate) == 96);
@@ -256,12 +259,10 @@ static_assert(sizeof(CommandTransfer3D) == 72);
 static_assert(sizeof(CommandSubmit3D) == 32);
 
 struct alignas(4096) DeviceState {
-    VirtqDesc descriptors[kQueueSize]{};
-    alignas(4096) VirtqAvail available{};
-    alignas(4096) VirtqUsed used{};
-    alignas(4096) uint8_t frame[kMaxWidth * kMaxHeight * 4]{};
-    alignas(16) uint8_t command[sizeof(CommandAttachPrefix) + kMaxBackingPages * sizeof(MemoryEntry)]{};
-    alignas(16) ResponseHeader response{};
+    DmaPayload* dma{};
+    uint64_t dmaToken{};
+    uint64_t dmaAddress{};
+    uint32_t originalPciCommand{};
     uint32_t width{}, height{}, pitch{}, pages{};
     uint64_t framePhysicalPages[kMaxBackingPages]{};
     volatile uint8_t* common{};
@@ -282,6 +283,27 @@ struct alignas(4096) DeviceState {
 
 DeviceState g_device{};
 
+bool allocateDma(const KernelServices& services, uint64_t claim) {
+    if (services.DmaVersion != DMA_SERVICES_VERSION || !services.AllocateDmaBuffer ||
+        !services.FreeDmaBuffer) {
+        if (services.Log) services.Log(services.Context, "virtio_gpu.sys: DMA service ABI unavailable");
+        return false;
+    }
+    void* memory{};
+    const int32_t status = services.AllocateDmaBuffer(services.Context, claim, sizeof(DmaPayload),
+            alignof(DmaPayload), UINT64_MAX, &memory, &g_device.dmaAddress,
+            &g_device.dmaToken);
+    if (status != STATUS_SUCCESS || !memory || !g_device.dmaAddress || !g_device.dmaToken) {
+        if (services.Log) {
+            logHex(services, "virtio_gpu.sys: AllocateDmaBuffer status ",
+                   static_cast<uint32_t>(status));
+        }
+        return false;
+    }
+    g_device.dma = static_cast<DmaPayload*>(memory);
+    return true;
+}
+
 template <typename T> T mmioRead(volatile uint8_t* base, size_t offset) {
     return *reinterpret_cast<volatile T*>(base + offset);
 }
@@ -290,6 +312,13 @@ template <typename T> void mmioWrite(volatile uint8_t* base, size_t offset, T va
 }
 
 uint64_t physicalAddress(const void* address, size_t length) {
+    if (g_device.dma && address && length) {
+        const auto base = reinterpret_cast<uintptr_t>(g_device.dma);
+        const auto value = reinterpret_cast<uintptr_t>(address);
+        if (value >= base && value - base <= sizeof(DmaPayload) &&
+            length <= sizeof(DmaPayload) - (value - base))
+            return g_device.dmaAddress + (value - base);
+    }
     uint64_t physical{};
     return g_device.services && g_device.services->TranslateDmaRange &&
         g_device.services->TranslateDmaRange(g_device.services->Context, address,
@@ -306,32 +335,32 @@ bool runCommand(const void* request, uint32_t requestBytes, ResponseHeader* resp
         __atomic_store_n(&g_device.queueLock, 0u, __ATOMIC_RELEASE);
         return false;
     }
-    g_device.response.type = 0;
+    g_device.dma->response.type = 0;
 
     const uint16_t first = 0;
     const uint16_t second = 1;
-    g_device.descriptors[first] = {requestPa, requestBytes, kDescNext, second};
-    g_device.descriptors[second] = {responsePa, responseBytes, kDescWrite, 0};
-    const uint64_t descPa = physicalAddress(g_device.descriptors, sizeof(g_device.descriptors));
-    const uint64_t availPa = physicalAddress(&g_device.available, sizeof(g_device.available));
-    const uint64_t usedPa = physicalAddress(&g_device.used, sizeof(g_device.used));
+    g_device.dma->descriptors[first] = {requestPa, requestBytes, kDescNext, second};
+    g_device.dma->descriptors[second] = {responsePa, responseBytes, kDescWrite, 0};
+    const uint64_t descPa = physicalAddress(g_device.dma->descriptors, sizeof(g_device.dma->descriptors));
+    const uint64_t availPa = physicalAddress(&g_device.dma->available, sizeof(g_device.dma->available));
+    const uint64_t usedPa = physicalAddress(&g_device.dma->used, sizeof(g_device.dma->used));
     if (!descPa || !availPa || !usedPa) {
         __atomic_store_n(&g_device.queueLock, 0u, __ATOMIC_RELEASE);
         return false;
     }
 
-    const uint16_t slot = static_cast<uint16_t>(g_device.available.index % g_device.queueSize);
-    g_device.available.ring[slot] = first;
+    const uint16_t slot = static_cast<uint16_t>(g_device.dma->available.index % g_device.queueSize);
+    g_device.dma->available.ring[slot] = first;
     ioBarrier();
-    g_device.available.index = static_cast<uint16_t>(g_device.available.index + 1);
+    g_device.dma->available.index = static_cast<uint16_t>(g_device.dma->available.index + 1);
     ioBarrier();
     mmioWrite<uint16_t>(g_device.notify,
         static_cast<size_t>(g_device.notifyOffset) * g_device.notifyMultiplier, 0);
 
     for (uint32_t spin = 0; spin < 20000000u; ++spin) {
         ioBarrier();
-        if (g_device.used.index != g_device.lastUsed) {
-            g_device.lastUsed = g_device.used.index;
+        if (g_device.dma->used.index != g_device.lastUsed) {
+            g_device.lastUsed = g_device.dma->used.index;
             ioBarrier();
             const bool succeeded = response->type == expectedResponse;
             __atomic_store_n(&g_device.queueLock, 0u, __ATOMIC_RELEASE);
@@ -350,8 +379,8 @@ void initHeader(CommandHeader& header, uint32_t type) {
 }
 
 bool sendNoData(const void* request, uint32_t requestSize) {
-    return runCommand(request, requestSize, &g_device.response,
-                      sizeof(g_device.response), kRespOkNoData);
+    return runCommand(request, requestSize, &g_device.dma->response,
+                      sizeof(g_device.dma->response), kRespOkNoData);
 }
 
 bool initializeQueue(const PciLocation& location, const PciCaps& caps,
@@ -411,9 +440,9 @@ bool initializeQueue(const PciLocation& location, const PciCaps& caps,
     g_device.notifyOffset = mmioRead<uint16_t>(g_device.common, 30);
     g_device.notifyMultiplier = caps.notify.notifyMultiplier;
 
-    const uint64_t descPa = physicalAddress(g_device.descriptors, sizeof(g_device.descriptors));
-    const uint64_t availPa = physicalAddress(&g_device.available, sizeof(g_device.available));
-    const uint64_t usedPa = physicalAddress(&g_device.used, sizeof(g_device.used));
+    const uint64_t descPa = physicalAddress(g_device.dma->descriptors, sizeof(g_device.dma->descriptors));
+    const uint64_t availPa = physicalAddress(&g_device.dma->available, sizeof(g_device.dma->available));
+    const uint64_t usedPa = physicalAddress(&g_device.dma->used, sizeof(g_device.dma->used));
     if (!descPa || !availPa || !usedPa) {
         if (services.Log) services.Log(services.Context, "virtio_gpu.sys: queue ring address translation failed");
         return false;
@@ -457,7 +486,7 @@ bool createScanout(uint32_t width, uint32_t height) {
     if (g_device.pages > kMaxBackingPages) return false;
 
     for (uint32_t page = 0; page < g_device.pages; ++page) {
-        const uint64_t pa = physicalAddress(g_device.frame + static_cast<size_t>(page) * 4096, 4096);
+        const uint64_t pa = physicalAddress(g_device.dma->frame + static_cast<size_t>(page) * 4096, 4096);
         if (!pa) return false;
         g_device.framePhysicalPages[page] = pa & ~0xFFFULL;
     }
@@ -470,17 +499,17 @@ bool createScanout(uint32_t width, uint32_t height) {
     create.height = g_device.height;
     if (!sendNoData(&create, sizeof(create))) return false;
 
-    auto* attach = reinterpret_cast<CommandAttachPrefix*>(g_device.command);
+    auto* attach = reinterpret_cast<CommandAttachPrefix*>(g_device.dma->command);
     initHeader(attach->header, kCmdResourceAttachBacking);
     attach->resourceId = kResourceId;
     attach->entries = g_device.pages;
-    auto* entries = reinterpret_cast<MemoryEntry*>(g_device.command + sizeof(CommandAttachPrefix));
+    auto* entries = reinterpret_cast<MemoryEntry*>(g_device.dma->command + sizeof(CommandAttachPrefix));
     uint32_t remaining = frameBytes;
     for (uint32_t page = 0; page < g_device.pages; ++page) {
         entries[page] = {g_device.framePhysicalPages[page], 4096, 0};
         remaining = remaining > 4096 ? remaining - 4096 : 0;
     }
-    if (!sendNoData(g_device.command, sizeof(CommandAttachPrefix) + g_device.pages * sizeof(MemoryEntry))) {
+    if (!sendNoData(g_device.dma->command, sizeof(CommandAttachPrefix) + g_device.pages * sizeof(MemoryEntry))) {
         CommandUnref unref{};
         initHeader(unref.header, kCmdResourceUnref);
         unref.resourceId = kResourceId;
@@ -518,18 +547,18 @@ bool attachResourceBacking(uint32_t resourceId, const uint32_t* pixels,
     const uint32_t pageCount = static_cast<uint32_t>((firstOffset + bytes + 4095) / 4096);
     if (pageCount == 0 || pageCount > kMaxBackingPages) return false;
 
-    auto* attach = reinterpret_cast<CommandAttachPrefix*>(g_device.command);
+    auto* attach = reinterpret_cast<CommandAttachPrefix*>(g_device.dma->command);
     initHeader(attach->header, kCmdResourceAttachBacking);
     attach->resourceId = resourceId;
     attach->entries = pageCount;
-    auto* entries = reinterpret_cast<MemoryEntry*>(g_device.command + sizeof(CommandAttachPrefix));
+    auto* entries = reinterpret_cast<MemoryEntry*>(g_device.dma->command + sizeof(CommandAttachPrefix));
     for (uint32_t page = 0; page < pageCount; ++page) {
         const auto* va = reinterpret_cast<const void*>(firstPageVa + static_cast<uint64_t>(page) * 4096);
         const uint64_t pa = physicalAddress(va, 4096);
         if (!pa) return false;
         entries[page] = {pa & ~0xFFFULL, 4096, 0};
     }
-    return sendNoData(g_device.command,
+    return sendNoData(g_device.dma->command,
         sizeof(CommandAttachPrefix) + pageCount * sizeof(MemoryEntry));
 }
 
@@ -591,12 +620,12 @@ bool setupVirgl() {
     if (!sendNoData(&context, sizeof(context))) return false;
 
     if (!createResource3D(kVirglOutputResourceId, g_device.width, g_device.height,
-                          reinterpret_cast<const uint32_t*>(g_device.frame), g_device.pitch)) {
+                          reinterpret_cast<const uint32_t*>(g_device.dma->frame), g_device.pitch)) {
         destroyResource3D(kVirglOutputResourceId);
         return false;
     }
     if (!transferResource3D(kVirglOutputResourceId,
-            reinterpret_cast<const uint32_t*>(g_device.frame), g_device.width, g_device.height, g_device.pitch)) {
+            reinterpret_cast<const uint32_t*>(g_device.dma->frame), g_device.width, g_device.height, g_device.pitch)) {
         destroyResource3D(kVirglOutputResourceId);
         return false;
     }
@@ -618,11 +647,11 @@ bool setupVirgl() {
 bool submitCopyRegion(uint32_t sourceResource, uint32_t srcX, uint32_t srcY,
                       uint32_t dstX, uint32_t dstY, uint32_t width, uint32_t height) {
     if (!width || !height) return true;
-    auto* submit = reinterpret_cast<CommandSubmit3D*>(g_device.command);
+    auto* submit = reinterpret_cast<CommandSubmit3D*>(g_device.dma->command);
     initHeader(submit->header, kCmdSubmit3D);
     submit->header.contextId = kVirglContextId;
     submit->size = 14 * sizeof(uint32_t); // 1 VirGL header dword + 13 payload dwords.
-    auto* words = reinterpret_cast<uint32_t*>(g_device.command + sizeof(CommandSubmit3D));
+    auto* words = reinterpret_cast<uint32_t*>(g_device.dma->command + sizeof(CommandSubmit3D));
     words[0] = kVirglCopyRegion | (13u << 16);
     words[1] = kVirglOutputResourceId;
     words[2] = 0;
@@ -632,7 +661,7 @@ bool submitCopyRegion(uint32_t sourceResource, uint32_t srcX, uint32_t srcY,
     words[8] = srcX; words[9] = srcY; words[10] = 0;
     words[11] = width; words[12] = height; words[13] = 1;
     ioBarrier();
-    return sendNoData(g_device.command, sizeof(CommandSubmit3D) + submit->size);
+    return sendNoData(g_device.dma->command, sizeof(CommandSubmit3D) + submit->size);
 }
 
 LayerResource* findOrCreateLayer(const micant::boot_driver::CompositionLayer& layer) {
@@ -691,13 +720,13 @@ bool presentComposition(void*, const uint32_t* base, uint32_t width, uint32_t he
     ++g_device.compositionFrame;
     for (uint32_t row = 0; row < height; ++row) {
         const uint32_t* source = base + static_cast<size_t>(row) * pitch;
-        uint32_t* destination = reinterpret_cast<uint32_t*>(g_device.frame) +
+        uint32_t* destination = reinterpret_cast<uint32_t*>(g_device.dma->frame) +
             static_cast<size_t>(row) * g_device.pitch;
         for (uint32_t col = 0; col < width; ++col) destination[col] = source[col];
     }
     ioBarrier();
     if (!transferResource3D(kVirglOutputResourceId,
-            reinterpret_cast<const uint32_t*>(g_device.frame), width, height, g_device.pitch)) return false;
+            reinterpret_cast<const uint32_t*>(g_device.dma->frame), width, height, g_device.pitch)) return false;
 
     for (uint32_t index = 0; index < layerCount; ++index) {
         const auto& layer = layers[index];
@@ -738,13 +767,13 @@ bool presentFrame(void*, const uint32_t* pixels, uint32_t width, uint32_t height
     if (copyWidth <= 0 || copyHeight <= 0) return false;
     for (int64_t row = 0; row < copyHeight; ++row) {
         const uint32_t* src = pixels + (srcTop + row) * pitch + srcLeft;
-        uint32_t* dst = reinterpret_cast<uint32_t*>(g_device.frame) + (top + row) * g_device.pitch + left;
+        uint32_t* dst = reinterpret_cast<uint32_t*>(g_device.dma->frame) + (top + row) * g_device.pitch + left;
         for (int64_t col = 0; col < copyWidth; ++col) dst[col] = src[col];
     }
     ioBarrier();
     if (g_device.virglActive) {
         return transferResource3D(kVirglOutputResourceId,
-            reinterpret_cast<const uint32_t*>(g_device.frame), g_device.width,
+            reinterpret_cast<const uint32_t*>(g_device.dma->frame), g_device.width,
             g_device.height, g_device.pitch);
     }
     CommandTransfer2D transfer{};
@@ -773,7 +802,9 @@ extern "C" int32_t DriverEntry(micant::boot_driver::DriverObject* driver,
         services.Version != KERNEL_SERVICES_VERSION || !services.PciReadConfig32 ||
         !services.PciWriteConfig32 || !services.ClaimPciDevice ||
         !services.ReleasePciDevice || !services.TranslateDmaRange ||
-        !services.MapDeviceMemory || !services.ReleaseDeviceMemory)
+        !services.MapDeviceMemory || !services.ReleaseDeviceMemory ||
+        services.DmaVersion != DMA_SERVICES_VERSION || !services.AllocateDmaBuffer ||
+        !services.FreeDmaBuffer)
         return STATUS_INVALID_PARAMETER;
     g_device.services = &services;
     PciLocation location{};
@@ -782,6 +813,27 @@ extern "C" int32_t DriverEntry(micant::boot_driver::DriverObject* driver,
         if (services.Log) services.Log(services.Context,
             "virtio_gpu.sys: no safe controller start; PCI claim/DMA backend unavailable or no GPU");
         return STATUS_NOT_SUPPORTED;
+    }
+    if (!allocateDma(services, g_pciClaimToken)) {
+        (void)services.ReleasePciDevice(services.Context, g_pciClaimToken);
+        g_pciClaimToken = 0;
+        if (services.Log) services.Log(services.Context,
+            "virtio_gpu.sys: claimed controller has no safe DMA buffer");
+        return STATUS_DEVICE_NOT_READY;
+    }
+    if (services.PciReadConfig32(services.Context, location.bus, location.device,
+            location.function, 0x04, &g_device.originalPciCommand) != STATUS_SUCCESS ||
+        services.PciWriteConfig32(services.Context, location.bus, location.device,
+            location.function, 0x04,
+            (g_device.originalPciCommand & 0x0000FFFFu) | 0x00000006u) != STATUS_SUCCESS) {
+        if (services.Log) services.Log(services.Context,
+            "virtio_gpu.sys: PCI memory/bus-master enable failed");
+        (void)services.FreeDmaBuffer(services.Context, g_device.dmaToken);
+        g_device.dma = nullptr;
+        g_device.dmaToken = 0;
+        (void)services.ReleasePciDevice(services.Context, g_pciClaimToken);
+        g_pciClaimToken = 0;
+        return STATUS_DEVICE_NOT_READY;
     }
     if (!caps.hasCommon || !caps.hasNotify || !caps.hasDevice || !services.MapDeviceMemory) {
         if (services.Log) {
@@ -793,6 +845,14 @@ extern "C" int32_t DriverEntry(micant::boot_driver::DriverObject* driver,
         return STATUS_NOT_SUPPORTED;
     }
     if (!initializeQueue(location, caps, services)) {
+        (void)services.PciWriteConfig32(services.Context, location.bus, location.device,
+            location.function, 0x04,
+            (g_device.originalPciCommand & 0x0000FFFFu) & ~0x00000004u);
+        (void)services.FreeDmaBuffer(services.Context, g_device.dmaToken);
+        g_device.dma = nullptr;
+        g_device.dmaToken = 0;
+        (void)services.ReleasePciDevice(services.Context, g_pciClaimToken);
+        g_pciClaimToken = 0;
         if (services.Log) services.Log(services.Context, "virtio_gpu.sys: modern PCI transport initialization failed");
         return STATUS_DEVICE_NOT_READY;
     }
@@ -800,6 +860,15 @@ extern "C" int32_t DriverEntry(micant::boot_driver::DriverObject* driver,
     const uint32_t requestedHeight = services.BootHeight;
     if (!createScanout(requestedWidth, requestedHeight)) {
         g_device.initialized = false;
+        mmioWrite<uint8_t>(g_device.common, 20, 0);
+        (void)services.PciWriteConfig32(services.Context, location.bus, location.device,
+            location.function, 0x04,
+            (g_device.originalPciCommand & 0x0000FFFFu) & ~0x00000004u);
+        (void)services.FreeDmaBuffer(services.Context, g_device.dmaToken);
+        g_device.dma = nullptr;
+        g_device.dmaToken = 0;
+        (void)services.ReleasePciDevice(services.Context, g_pciClaimToken);
+        g_pciClaimToken = 0;
         if (services.Log) services.Log(services.Context, "virtio_gpu.sys: 2D resource or scanout setup failed");
         return STATUS_DEVICE_NOT_READY;
     }
