@@ -81,6 +81,15 @@ extern "C" bool MicantTestObOpenAccess() noexcept {
     uint32_t duplicateGranted{};
     if (ok) ok = table.lookup(maximumDuplicate, &duplicateGranted) != nullptr && duplicateGranted == kRead;
     if (maximumDuplicate) (void)table.closeHandle(maximumDuplicate);
+    Handle sameAccessDuplicate{};
+    // DUPLICATE_SAME_ACCESS copies the exact source grant. DesiredAccess is
+    // ignored by that option, even if it contains a bit outside the type mask.
+    if (ok) ok = table.duplicateHandle(handle, table, sameAccessDuplicate, 0x80000000u,
+                                       false, 2) == NtStatus::Success && sameAccessDuplicate;
+    duplicateGranted = 0;
+    if (ok) ok = table.lookup(sameAccessDuplicate, &duplicateGranted) == &object &&
+        duplicateGranted == kRead;
+    if (sameAccessDuplicate) (void)table.closeHandle(sameAccessDuplicate);
     if (handle) (void)table.closeHandle(handle);
     ok = ok && object.handleCount == 0;
     if (!ok) return false;

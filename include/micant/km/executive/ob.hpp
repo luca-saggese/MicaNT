@@ -587,14 +587,21 @@ public:
             if (object) {
                 const auto* sourceEntry = getEntry(sourceHandle);
                 if (!sourceEntry) __builtin_trap();
-                const uint32_t requested = object->type ? MapGenericAccess(desiredAccess, object->type->genericMapping)
-                                                        : desiredAccess;
+                // DUPLICATE_SAME_ACCESS makes DesiredAccess informationally
+                // irrelevant: preserve the source grant exactly, including
+                // when the caller supplied bits that are not valid for this
+                // object type. Otherwise map generic rights before validating
+                // the requested subset against the source grant.
+                const bool sameAccess = (options & 2) != 0;
+                const uint32_t requested = sameAccess ? 0 :
+                    (object->type ? MapGenericAccess(desiredAccess, object->type->genericMapping)
+                                  : desiredAccess);
                 const bool maximumAllowed = (requested & MAXIMUM_ALLOWED) != 0;
                 const uint32_t required = requested & ~MAXIMUM_ALLOWED;
-                const uint32_t access = (options & 2) ? granted : maximumAllowed ? granted : requested;
+                const uint32_t access = sameAccess ? granted : maximumAllowed ? granted : requested;
                 const uint32_t attributes = (options & 4) ? sourceEntry->handleAttributes :
                                             (inherit ? OBJ_INHERIT : 0);
-                if ((required & ~granted) != 0 || (access & ~granted) != 0)
+                if (!sameAccess && ((required & ~granted) != 0 || (access & ~granted) != 0))
                     status = NtStatus::AccessDenied;
                 else {
                     status = targetTable.createHandle(object, targetHandle, access, attributes);
