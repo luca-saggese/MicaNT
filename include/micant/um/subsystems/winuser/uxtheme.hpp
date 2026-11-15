@@ -233,22 +233,65 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
     const auto* style = detail::style(*handle, iStateId);
-    if (!style || !(style->flags & MICANT_THEME_HAS_BACKGROUND)) return detail::kNotFound;
-    if ((style->background >> 24) != 255u) return detail::kNotImplemented;
+    if (!style || !(style->flags & (MICANT_THEME_HAS_BACKGROUND | MICANT_THEME_HAS_BORDER)))
+        return detail::kNotFound;
+    if ((style->flags & MICANT_THEME_HAS_RADIUS) && style->borderRadius)
+        return detail::kNotImplemented;
+    if (((style->flags & MICANT_THEME_HAS_BACKGROUND) &&
+         (style->background >> 24) != 255u) ||
+        ((style->flags & MICANT_THEME_HAS_BORDER) && (style->border >> 24) != 255u) ||
+        ((style->flags & MICANT_THEME_HAS_OPACITY) && style->opacity != 255u))
+        return detail::kNotImplemented;
     const auto& source = *static_cast<const MicaWin32kRect*>(pRect);
-    MicaWin32kRect rectangle{source.left, source.top, source.right, source.bottom};
+    if (source.right < source.left || source.bottom < source.top)
+        return detail::kInvalidArgument;
+    const MicaWin32kRect bounds{source.left, source.top, source.right, source.bottom};
+    MicaWin32kRect clip{bounds};
     if (pClipRect) {
-        const auto& clip = *static_cast<const MicaWin32kRect*>(pClipRect);
+        const auto& requested = *static_cast<const MicaWin32kRect*>(pClipRect);
+        if (requested.right < requested.left || requested.bottom < requested.top)
+            return detail::kInvalidArgument;
+        clip.left = std::max(clip.left, requested.left);
+        clip.top = std::max(clip.top, requested.top);
+        clip.right = std::min(clip.right, requested.right);
+        clip.bottom = std::min(clip.bottom, requested.bottom);
+    }
+    if (clip.right <= clip.left || clip.bottom <= clip.top) return 0;
+    const auto fill = [&](MicaWin32kRect rectangle, uint32_t color) noexcept {
         rectangle.left = std::max(rectangle.left, clip.left);
         rectangle.top = std::max(rectangle.top, clip.top);
         rectangle.right = std::min(rectangle.right, clip.right);
         rectangle.bottom = std::min(rectangle.bottom, clip.bottom);
+        if (rectangle.right <= rectangle.left || rectangle.bottom <= rectangle.top) return true;
+        const uint32_t colorRef = ((color >> 16) & 0xFFu) | (color & 0xFF00u) |
+                                  ((color & 0xFFu) << 16);
+        return MicaWin32kFillRect(hdc, &rectangle, colorRef) != 0;
+    };
+    if ((style->flags & MICANT_THEME_HAS_BACKGROUND) && !fill(bounds, style->background))
+        return detail::kFailure;
+    if (style->flags & MICANT_THEME_HAS_BORDER) {
+        uint32_t borderWidth = (style->flags & MICANT_THEME_HAS_BORDER_WIDTH)
+            ? style->borderWidth : 1u;
+        const uint64_t width = static_cast<uint64_t>(int64_t(bounds.right) - bounds.left);
+        const uint64_t height = static_cast<uint64_t>(int64_t(bounds.bottom) - bounds.top);
+        const uint32_t maximum = static_cast<uint32_t>(std::min(width, height) / 2u);
+        if (borderWidth > maximum) borderWidth = maximum;
+        if (borderWidth) {
+            const int32_t inset = static_cast<int32_t>(borderWidth);
+            const MicaWin32kRect top{bounds.left, bounds.top, bounds.right,
+                                     bounds.top + inset};
+            const MicaWin32kRect bottom{bounds.left, bounds.bottom - inset,
+                                        bounds.right, bounds.bottom};
+            const MicaWin32kRect left{bounds.left, bounds.top + inset,
+                                      bounds.left + inset, bounds.bottom - inset};
+            const MicaWin32kRect right{bounds.right - inset, bounds.top + inset,
+                                       bounds.right, bounds.bottom - inset};
+            if (!fill(top, style->border) || !fill(bottom, style->border) ||
+                !fill(left, style->border) || !fill(right, style->border))
+                return detail::kFailure;
+        }
     }
-    if (rectangle.right <= rectangle.left || rectangle.bottom <= rectangle.top) return 0;
-    const uint32_t color = style->background;
-    const uint32_t colorRef = ((color >> 16) & 0xFFu) | (color & 0xFF00u) |
-                              ((color & 0xFFu) << 16);
-    return MicaWin32kFillRect(hdc, &rectangle, colorRef) ? 0 : detail::kFailure;
+    return 0;
 }
 
 inline win32::HRESULT DrawThemeParentBackground(win32::HWND /*hwnd*/, void* /*hdc*/, const void* /*prc*/) noexcept {
