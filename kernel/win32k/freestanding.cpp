@@ -1,6 +1,8 @@
 #include "micant/km/win32k/freestanding.hpp"
 #include "micant/shared/compositor_surface.h"
+#include <algorithm>
 #include <atomic>
+#include <climits>
 
 namespace micant::win32k::freestanding {
 namespace {
@@ -36,6 +38,8 @@ constexpr uint32_t kWsBorder = 0x00800000u;
 constexpr uint32_t kWsDlgFrame = 0x00400000u;
 constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
 constexpr uint32_t kWsThickFrame = 0x00040000u;
+constexpr int32_t kScreenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
+constexpr int32_t kScreenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
 std::atomic_flag g_stateLock = ATOMIC_FLAG_INIT;
 
 class StateLockGuard {
@@ -101,6 +105,9 @@ uint32_t g_messageTime{};
 uint64_t g_foregroundWindow{};
 uint64_t g_nextZOrder{};
 int32_t g_mouseX{-1}, g_mouseY{-1};
+MicaWin32kRect g_cursorClip{0, 0, kScreenWidth, kScreenHeight};
+uint64_t g_cursorClipOwner{};
+int32_t g_cursorDisplayCount{1};
 uint64_t g_captionCapture{};
 uint8_t g_pressedCaptionButton{};
 
@@ -554,6 +561,56 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             request.result = window->icons[type];
             return NtStatus::Success;
         }
+        case MICANT_WIN32K_OP_GET_CURSOR_POS:
+            request.rect.left = g_mouseX < 0 ? 0 : g_mouseX;
+            request.rect.top = g_mouseY < 0 ? 0 : g_mouseY;
+            request.result = 1;
+            return NtStatus::Success;
+        case MICANT_WIN32K_OP_GET_CURSOR_CLIP:
+            request.rect = g_cursorClip;
+            request.result = 1;
+            return NtStatus::Success;
+        case MICANT_WIN32K_OP_SET_CURSOR_POS: {
+            const int32_t requestedX = static_cast<int32_t>(request.args[0]);
+            const int32_t requestedY = static_cast<int32_t>(request.args[1]);
+            const int32_t left = std::max(0, g_cursorClip.left);
+            const int32_t top = std::max(0, g_cursorClip.top);
+            const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
+            const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
+            if (right <= left || bottom <= top) return NtStatus::InvalidParameter;
+            g_mouseX = std::clamp(requestedX, left, right - 1);
+            g_mouseY = std::clamp(requestedY, top, bottom - 1);
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_SET_CURSOR_CLIP: {
+            if (request.args[0] == 0) {
+                g_cursorClip = {0, 0, kScreenWidth, kScreenHeight};
+                g_cursorClipOwner = 0;
+                request.result = 1;
+                return NtStatus::Success;
+            }
+            const auto rect = request.rect;
+            if (rect.left < 0 || rect.top < 0 || rect.right > kScreenWidth ||
+                rect.bottom > kScreenHeight || rect.right <= rect.left || rect.bottom <= rect.top)
+                return NtStatus::InvalidParameter;
+            g_cursorClip = rect;
+            g_cursorClipOwner = ownerProcessId;
+            g_mouseX = std::clamp(g_mouseX, rect.left, rect.right - 1);
+            g_mouseY = std::clamp(g_mouseY, rect.top, rect.bottom - 1);
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_SHOW_CURSOR: {
+            const int32_t delta = static_cast<int32_t>(request.args[0]);
+            if (delta != -1 && delta != 1) return NtStatus::InvalidParameter;
+            if ((delta > 0 && g_cursorDisplayCount == INT32_MAX) ||
+                (delta < 0 && g_cursorDisplayCount == INT32_MIN))
+                return NtStatus::InvalidParameter;
+            g_cursorDisplayCount += delta;
+            request.result = static_cast<uint64_t>(static_cast<int64_t>(g_cursorDisplayCount));
+            return NtStatus::Success;
+        }
         case MICANT_WIN32K_OP_SET_WINDOW_LONG: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
@@ -607,14 +664,22 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         }
         for (auto& windowClass : g_classes)
             if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
+        if (g_cursorClipOwner == ownerProcessId) {
+            g_cursorClip = {0, 0, kScreenWidth, kScreenHeight};
+            g_cursorClipOwner = 0;
+        }
     }
     if (publish) publish();
 }
 
 bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     StateLockGuard lock;
-    const int32_t x = event.x;
-    const int32_t y = event.y;
+    const int32_t left = std::max(0, g_cursorClip.left);
+    const int32_t top = std::max(0, g_cursorClip.top);
+    const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
+    const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
+    const int32_t x = std::clamp(event.x, left, std::max(left, right - 1));
+    const int32_t y = std::clamp(event.y, top, std::max(top, bottom - 1));
     const uint32_t previousButtons = g_mouseButtons;
     const uint32_t currentButtons = event.buttons & 0x07u;
     const bool moved = x != g_mouseX || y != g_mouseY;

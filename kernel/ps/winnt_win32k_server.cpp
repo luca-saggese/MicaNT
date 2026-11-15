@@ -612,4 +612,43 @@ void* MicaWin32kCreateDibSection(void*, int32_t width, int32_t height,
     return reinterpret_cast<void*>(bitmap->handle);
 }
 
+int32_t MicaWin32kGetCursorPos(MicaWin32kPoint* output) {
+    if (!output) return 0;
+    MicaWin32kRequest value{};
+    if (!request(MICANT_WIN32K_OP_GET_CURSOR_POS, value) || !value.result) return 0;
+    output->x = value.rect.left;
+    output->y = value.rect.top;
+    return 1;
+}
+
+int32_t MicaWin32kGetClipCursor(MicaWin32kRect* output) {
+    if (!output) return 0;
+    MicaWin32kRequest value{};
+    if (!request(MICANT_WIN32K_OP_GET_CURSOR_CLIP, value) || !value.result) return 0;
+    *output = value.rect;
+    return 1;
+}
+
+int32_t MicaWin32kSetCursorPos(int32_t x, int32_t y) {
+    MicaWin32kRequest value{};
+    value.args[0] = static_cast<uint64_t>(static_cast<int64_t>(x));
+    value.args[1] = static_cast<uint64_t>(static_cast<int64_t>(y));
+    return request(MICANT_WIN32K_OP_SET_CURSOR_POS, value) && value.result ? 1 : 0;
+}
+
+int32_t MicaWin32kClipCursor(const MicaWin32kRect* rect) {
+    MicaWin32kRequest value{};
+    value.args[0] = rect ? 1 : 0;
+    if (rect) value.rect = *rect;
+    return request(MICANT_WIN32K_OP_SET_CURSOR_CLIP, value) && value.result ? 1 : 0;
+}
+
+int32_t MicaWin32kShowCursor(int32_t show) {
+    if (show != 0 && show != 1) return INT32_MIN;
+    MicaWin32kRequest value{};
+    value.args[0] = show ? 1 : static_cast<uint64_t>(static_cast<int64_t>(-1));
+    if (!request(MICANT_WIN32K_OP_SHOW_CURSOR, value)) return INT32_MIN;
+    return static_cast<int32_t>(static_cast<int64_t>(value.result));
+}
+
 }

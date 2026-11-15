@@ -103,7 +103,12 @@ enum {
     MICANT_WIN32K_OP_PRESENT_WINDOW,
     MICANT_WIN32K_OP_SET_FOCUS,
     MICANT_WIN32K_OP_SET_WINDOW_ICON,
-    MICANT_WIN32K_OP_GET_WINDOW_ICON
+    MICANT_WIN32K_OP_GET_WINDOW_ICON,
+    MICANT_WIN32K_OP_GET_CURSOR_POS,
+    MICANT_WIN32K_OP_GET_CURSOR_CLIP,
+    MICANT_WIN32K_OP_SET_CURSOR_POS,
+    MICANT_WIN32K_OP_SET_CURSOR_CLIP,
+    MICANT_WIN32K_OP_SHOW_CURSOR
 };
 
 typedef struct MicaWin32kRequest {
@@ -172,6 +177,11 @@ MICANT_WIN32K_API int32_t MicaWin32kIsWindowVisible(void*);
 MICANT_WIN32K_API int32_t MicaWin32kIsIconic(void*);
 MICANT_WIN32K_API void* MicaWin32kGetForegroundWindow(void);
 MICANT_WIN32K_API void* MicaWin32kSetFocus(void*);
+MICANT_WIN32K_API int32_t MicaWin32kGetCursorPos(MicaWin32kPoint*);
+MICANT_WIN32K_API int32_t MicaWin32kGetClipCursor(MicaWin32kRect*);
+MICANT_WIN32K_API int32_t MicaWin32kSetCursorPos(int32_t, int32_t);
+MICANT_WIN32K_API int32_t MicaWin32kClipCursor(const MicaWin32kRect*);
+MICANT_WIN32K_API int32_t MicaWin32kShowCursor(int32_t);
 
 #ifdef __cplusplus
 }

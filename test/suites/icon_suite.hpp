@@ -5,6 +5,7 @@
 #include "micant/um/subsystems/winuser/icon_handle_table.hpp"
 #include "micant/um/subsystems/winuser/cursor_image.hpp"
 #include "micant/um/subsystems/winuser/ani_image.hpp"
+#include "micant/km/win32k/freestanding.hpp"
 #include "micant/shared/pixel_composite.h"
 #include <cstdlib>
 #include <vector>
@@ -330,6 +331,55 @@ inline void Test_CursorHandles_HotspotAndTypedOwnership() {
     TEST_ASSERT(bad.pixels.allocate(4, allocator), "invalid cursor fixture allocates");
     TEST_ASSERT(!ProcessIconHandles().createCursor(std::move(bad), allocator, 1, 0),
                 "hotspot outside image bounds is rejected");
+}
+
+inline void Test_Win32kCursorPositionClipAndVisibilityState() {
+    using namespace micant;
+    constexpr uint64_t owner = 0x435552534f52ull;
+    MicaWin32kRequest request{};
+    request.operation = MICANT_WIN32K_OP_SET_CURSOR_CLIP;
+    request.args[0] = 1;
+    request.rect = {10, 20, 30, 40};
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success,
+                "Win32k accepts a valid owner-scoped cursor clip rectangle");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_SET_CURSOR_POS;
+    request.args[0] = static_cast<uint64_t>(static_cast<int64_t>(-10));
+    request.args[1] = 100;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success,
+                "Win32k applies cursor position through the active clip");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_POS;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success &&
+                request.rect.left == 10 && request.rect.top == 39,
+                "cursor position reports the clipped screen point");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_CLIP;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success &&
+                request.rect.left == 10 && request.rect.bottom == 40,
+                "cursor clip query returns the canonical desktop bounds");
+    MicaWin32kInputEvent event{100, -5, 0, 1};
+    (void)win32k::freestanding::dispatchMouseInput(event);
+    request = {};
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_POS;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success &&
+                request.rect.left == 29 && request.rect.top == 20,
+                "hardware mouse coordinates obey the shared clip");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_SHOW_CURSOR;
+    request.args[0] = 1;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success && request.result == 2,
+                "ShowCursor increments canonical visibility state");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_SHOW_CURSOR;
+    request.args[0] = static_cast<uint64_t>(static_cast<int64_t>(-1));
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success && request.result == 1,
+                "ShowCursor decrements canonical visibility state");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_SET_CURSOR_CLIP;
+    win32k::freestanding::releaseProcess(owner);
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success,
+                "null ClipCursor restores the full desktop bounds");
 }
 
 inline void Test_IconDrawing_PremultipliedSourceOver() {

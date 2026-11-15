@@ -447,6 +447,7 @@ int main(int argc, char* argv[]) {
         RUN_TEST(Test_PeResources_BoundedTypeNameLanguageLookup);
         RUN_TEST(Test_IconHandles_OwnershipCopyAndLeaseLifetime);
         RUN_TEST(Test_CursorHandles_HotspotAndTypedOwnership);
+        RUN_TEST(Test_Win32kCursorPositionClipAndVisibilityState);
         RUN_TEST(Test_IconDrawing_PremultipliedSourceOver);
         return (g_FailedTests == 0) ? 0 : 1;
     }

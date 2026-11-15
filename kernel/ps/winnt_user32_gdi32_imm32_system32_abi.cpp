@@ -46,6 +46,11 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kIsIconic);
     MICA_WIN32K_PROC(MicaWin32kGetForegroundWindow);
     MICA_WIN32K_PROC(MicaWin32kSetFocus);
+    MICA_WIN32K_PROC(MicaWin32kGetCursorPos);
+    MICA_WIN32K_PROC(MicaWin32kGetClipCursor);
+    MICA_WIN32K_PROC(MicaWin32kSetCursorPos);
+    MICA_WIN32K_PROC(MicaWin32kClipCursor);
+    MICA_WIN32K_PROC(MicaWin32kShowCursor);
     MICA_WIN32K_PROC(MicaWin32kSetWindowIcon);
     MICA_WIN32K_PROC(MicaWin32kGetWindowIcon);
     MICA_WIN32K_PROC(MicaWin32kRegisterClassW);
@@ -277,8 +282,6 @@ RegisteredClassIcons* findRegisteredClassIcons(const wchar_t* name) noexcept {
 }
 #endif
 
-int32_t g_cursorShowCount = 0;
-WinNtPoint g_cursorPos{1920, 1080};
 int32_t g_activePixelFormat = 1;
 int32_t g_imeOpenStatus = 0;
 intptr_t AuditWindowProc(void*,uint32_t message,uintptr_t,intptr_t) noexcept {
@@ -849,23 +852,34 @@ uint32_t User32_GetRawInputData(void* /*hRawInput*/, uint32_t uiCommand, void* p
 
 int32_t User32_GetCursorPos(WinNtPoint* lpPoint) noexcept {
     if (!lpPoint) return 0;
-    *lpPoint = g_cursorPos;
-    return 1;
+    using Fn = int32_t (*)(MicaWin32kPoint*);
+    auto fn = Win32kProc<Fn>("MicaWin32kGetCursorPos");
+    return fn ? fn(reinterpret_cast<MicaWin32kPoint*>(lpPoint)) : 0;
 }
 
 int32_t User32_SetCursorPos(int32_t X, int32_t Y) noexcept {
-    g_cursorPos.x = X;
-    g_cursorPos.y = Y;
-    return 1;
+    using Fn = int32_t (*)(int32_t, int32_t);
+    auto fn = Win32kProc<Fn>("MicaWin32kSetCursorPos");
+    return fn ? fn(X, Y) : 0;
 }
 
-int32_t User32_ClipCursor(const WinNtRect* /*lpRect*/) noexcept {
-    return 1;
+int32_t User32_ClipCursor(const WinNtRect* lpRect) noexcept {
+    using Fn = int32_t (*)(const MicaWin32kRect*);
+    auto fn = Win32kProc<Fn>("MicaWin32kClipCursor");
+    return fn ? fn(reinterpret_cast<const MicaWin32kRect*>(lpRect)) : 0;
+}
+
+int32_t User32_GetClipCursor(WinNtRect* output) noexcept {
+    if (!output) return 0;
+    using Fn = int32_t (*)(MicaWin32kRect*);
+    auto fn = Win32kProc<Fn>("MicaWin32kGetClipCursor");
+    return fn ? fn(reinterpret_cast<MicaWin32kRect*>(output)) : 0;
 }
 
 int32_t User32_ShowCursor(int32_t bShow) noexcept {
-    g_cursorShowCount += (bShow ? 1 : -1);
-    return g_cursorShowCount;
+    using Fn = int32_t (*)(int32_t);
+    auto fn = Win32kProc<Fn>("MicaWin32kShowCursor");
+    return fn ? fn(bShow != 0) : INT32_MIN;
 }
 
 int16_t User32_GetAsyncKeyState(int32_t vKey) noexcept {
@@ -1566,6 +1580,9 @@ __declspec(dllexport) int32_t SetCursorPos(int32_t X, int32_t Y) {
 }
 __declspec(dllexport) int32_t ClipCursor(const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* lpRect) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_ClipCursor(lpRect);
+}
+__declspec(dllexport) int32_t GetClipCursor(micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* lpRect) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetClipCursor(lpRect);
 }
 __declspec(dllexport) int32_t ShowCursor(int32_t bShow) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_ShowCursor(bShow);
