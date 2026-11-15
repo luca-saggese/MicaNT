@@ -13,7 +13,7 @@ requisiti completi in
   Ps somma i tempi di processo, Task Manager calcola e mostra percentuali per
   riga da delta bounded. QEMU passato: `process and thread CPU totals
   reconciled`, `process CPU times validated`, D1 e seriale stabile 5 s in
-  `/private/tmp/micant-taskmgr-p1b-percent`. Commit in preparazione.
+  `/private/tmp/micant-taskmgr-p1b-percent`; commit `9df2acc`.
 - [ ] **U1 — UI interattiva** — canvas fissa, senza navigazione/selezione.
   Dipende da export Ring 3 User32 reali collegati a Win32k/compositor; audit
   individua `tools/dlls/user32.cpp` e `tools/taskmgr_app.cpp` come entrypoint.
@@ -33,14 +33,13 @@ requisiti completi in
 
 ## Punto di ripresa
 
-P1b è verificato in QEMU e pronto per commit selettivo. Il prossimo blocco è
-U1: collegare il Task Manager al percorso nativo Win32k/User32; coordinare i
-file compositor condivisi già modificati da altri owner. La storia grafica
-bounded viene aggiunta con la vista Performance in U1.
+P1b è chiuso. Prossimo blocco U1: collegare il Task Manager al percorso nativo
+Win32k/User32; coordinare i file compositor condivisi già modificati da altri
+owner. La storia grafica bounded viene aggiunta con la vista Performance in U1.
 
 Audit paralleli: S1/S2 dipendono da sessione/autenticazione reali; P2 da
 accounting Mm/Ps; P3 da provider Io/NDIS/GPU; F1 da SCM/session/Userenv reali.
 Nessun valore senza provider va visualizzato come zero o successo.
 
-Commits registro: `cc867e0`, `6278c52`. Aggiornare questa checklist a ogni
+Commits registro: `cc867e0`, `6278c52`, `9df2acc`. Aggiornare questa checklist a ogni
 avanzamento, risultato QEMU e cambio del blocco attivo.
