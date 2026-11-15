@@ -738,6 +738,9 @@ struct GdiDcSelection {
     GdiFontObject* font{};
     uint32_t textColor{0x00000000u}; // COLORREF black
     int32_t backgroundMode{1};       // TRANSPARENT
+    MicaWin32kRect clip{};
+    struct ClipState { uint32_t generation{}; MicaWin32kRect previous{}; bool occupied{}; } clips[16]{};
+    uint32_t nextClipGeneration{1};
 };
 struct GdiBrushObject {
     uint32_t colorRef{};
@@ -2437,6 +2440,9 @@ void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
                 return nullptr;
             }
             dc->bitmap = h;
+            GdiBitmapSurface* surface = FindGdiBitmap(h);
+            dc->clip = {0, 0, static_cast<int32_t>(surface->width),
+                        static_cast<int32_t>(surface->height)};
         }
     }
 #endif
@@ -2529,8 +2535,48 @@ int32_t Gdi32_TextOutW(void* hdc, int32_t x, int32_t y,
     const uint32_t g = (dc->textColor >> 8) & 0xFF;
     const uint32_t b = (dc->textColor >> 16) & 0xFF;
     const uint32_t argb = 0xFF000000u | (r << 16) | (g << 8) | b;
+    const micant::um::graphics::TextClipRect clip{
+        dc->clip.left, dc->clip.top, dc->clip.right, dc->clip.bottom};
     return dc->font->manager.drawUtf8(bitmap->pixels, bitmap->width, bitmap->height,
-        x, y, utf8, argb) ? 1 : 0;
+        x, y, utf8, argb, &clip) ? 1 : 0;
+}
+
+int32_t Gdi32_MicaPushClipRect(void* hdc, const MicaWin32kRect* rectangle,
+                               void** token) noexcept {
+    if (token) *token = nullptr;
+    if (!hdc || !rectangle || !token || rectangle->right < rectangle->left ||
+        rectangle->bottom < rectangle->top) return 0;
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc || !FindGdiBitmap(dc->bitmap)) return 0;
+    size_t slot = 0;
+    while (slot < std::size(dc->clips) && dc->clips[slot].occupied) ++slot;
+    if (slot == std::size(dc->clips)) return 0;
+    uint32_t generation = dc->nextClipGeneration++;
+    if (!generation) generation = dc->nextClipGeneration++;
+    auto& state = dc->clips[slot];
+    state = {generation, dc->clip, true};
+    dc->clip.left = std::max(dc->clip.left, rectangle->left);
+    dc->clip.top = std::max(dc->clip.top, rectangle->top);
+    dc->clip.right = std::min(dc->clip.right, rectangle->right);
+    dc->clip.bottom = std::min(dc->clip.bottom, rectangle->bottom);
+    *token = reinterpret_cast<void*>((static_cast<uintptr_t>(generation) << 5) |
+                                     static_cast<uintptr_t>(slot + 1));
+    return 1;
+}
+
+int32_t Gdi32_MicaPopClipRect(void* hdc, void* token) noexcept {
+    if (!hdc || !token) return 0;
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc) return 0;
+    const uintptr_t encoded = reinterpret_cast<uintptr_t>(token);
+    const uintptr_t slotValue = encoded & 0x1Fu;
+    const uint32_t generation = static_cast<uint32_t>(encoded >> 5);
+    if (!slotValue || slotValue > std::size(dc->clips) || !generation) return 0;
+    auto& state = dc->clips[slotValue - 1];
+    if (!state.occupied || state.generation != generation) return 0;
+    dc->clip = state.previous;
+    state = {};
+    return 1;
 }
 
 int32_t Gdi32_ExtTextOutW(void* hdc, int32_t x, int32_t y, uint32_t options,
@@ -3115,6 +3161,14 @@ __declspec(dllexport) int32_t GetTextExtentPoint32W(void* hdc, const wchar_t* te
         int32_t count, micant::um::winnt_user32_gdi32_imm32_abi::GdiSize* size) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetTextExtentPoint32W(
         hdc, text, count, size);
+}
+__declspec(dllexport) int32_t MicaGdiPushClipRect(void* hdc, const void* rectangle,
+                                                  void** token) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_MicaPushClipRect(
+        hdc, static_cast<const MicaWin32kRect*>(rectangle), token);
+}
+__declspec(dllexport) int32_t MicaGdiPopClipRect(void* hdc, void* token) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_MicaPopClipRect(hdc, token);
 }
 __declspec(dllexport) int32_t GetTextMetricsW(void* hdc,
         micant::um::winnt_user32_gdi32_imm32_abi::GdiTextMetricW* metrics) {

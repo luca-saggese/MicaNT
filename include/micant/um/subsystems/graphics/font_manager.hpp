@@ -11,6 +11,7 @@
 namespace micant::um::graphics {
 
 struct TextExtentPixels { int32_t width{}; int32_t height{}; };
+struct TextClipRect { int32_t left{}, top{}, right{}, bottom{}; };
 struct FontMetricsPixels {
     int32_t ascent{};
     int32_t descent{};
@@ -155,7 +156,8 @@ public:
     // Draw a UTF-8 string onto an owned BGRA8 buffer. Input and output are
     // clipped to the supplied dimensions; y is the top of the em box.
     [[nodiscard]] bool drawUtf8(uint32_t* pixels, uint32_t width, uint32_t height,
-            int32_t x, int32_t y, const char* text, uint32_t color) noexcept {
+            int32_t x, int32_t y, const char* text, uint32_t color,
+            const TextClipRect* clip = nullptr) noexcept {
         if (!initialized_ || !workspace_ || !pixels || !width || !height || !text || width > 16384 || height > 16384)
             return false;
         constexpr uint32_t MaxTextBytes = 4096;
@@ -198,7 +200,7 @@ public:
             if (!baseScalar) {
                 if (!baseFace || !baseGlyph || !drawCombiningMark(*baseFace, baseGlyph,
                         markScalar, pxEm, basePen, baseline, pixels, width, height,
-                        color, mask)) return false;
+                        color, mask, clip)) return false;
                 continue;
             }
             const truetype::FaceView* selected = &primary_;
@@ -215,13 +217,13 @@ public:
                 pen += kern;
             }
             bool painted = drawGlyph(*selected, glyph, pxEm, pen, baseline, pixels,
-                                     width, height, color, mask);
+                                     width, height, color, mask, clip);
             if (!painted && selected == &primary_ && fallback_.valid()) {
                 const uint16_t fallbackGlyph = fallback_.glyphIndex(baseScalar);
                 truetype::GlyphMetrics fallbackMetrics{};
                 if (fallbackGlyph && fallback_.glyphMetrics(fallbackGlyph, fallbackMetrics) &&
                     drawGlyph(fallback_, fallbackGlyph, pxEm, pen, baseline, pixels,
-                              width, height, color, mask)) {
+                              width, height, color, mask, clip)) {
                     selected = &fallback_;
                     glyph = fallbackGlyph;
                     gm = fallbackMetrics;
@@ -230,7 +232,7 @@ public:
             }
             if (!painted) return false;
             if (markScalar && !drawCombiningMark(*selected, glyph, markScalar, pxEm,
-                    pen, baseline, pixels, width, height, color, mask)) return false;
+                    pen, baseline, pixels, width, height, color, mask, clip)) return false;
             baseFace = selected;
             baseGlyph = glyph;
             basePen = pen;
@@ -430,7 +432,8 @@ private:
 
     [[nodiscard]] bool drawGlyph(const truetype::FaceView& face, uint16_t glyph,
             uint32_t pxEm, int32_t pen, int32_t baseline, uint32_t* pixels,
-            uint32_t width, uint32_t height, uint32_t color, uint8_t* mask) noexcept {
+            uint32_t width, uint32_t height, uint32_t color, uint8_t* mask,
+            const TextClipRect* clip) noexcept {
         const uint8_t* outline{}; size_t outlineSize{};
         if (!face.glyphData(glyph, outline, outlineSize)) return false;
         if (!outlineSize) return true;
@@ -459,9 +462,11 @@ private:
         for (uint32_t y = 0; y < GlyphMaskSize; ++y) {
             const int32_t dy = top + static_cast<int32_t>(y);
             if (dy < 0 || dy >= static_cast<int32_t>(height)) continue;
+            if (clip && (dy < clip->top || dy >= clip->bottom)) continue;
             for (uint32_t x = 0; x < GlyphMaskSize; ++x) {
                 const int32_t dx = left + static_cast<int32_t>(x);
                 if (dx < 0 || dx >= static_cast<int32_t>(width)) continue;
+                if (clip && (dx < clip->left || dx >= clip->right)) continue;
                 const uint32_t alpha = coverage[y * GlyphMaskSize + x];
                 if (!alpha) continue;
                 uint32_t& target = pixels[static_cast<size_t>(dy) * width + static_cast<uint32_t>(dx)];
@@ -478,7 +483,7 @@ private:
     [[nodiscard]] bool drawCombiningMark(const truetype::FaceView& baseFace, uint16_t baseGlyph,
             uint32_t markScalar, uint32_t pxEm, int32_t pen, int32_t baseline,
             uint32_t* pixels, uint32_t width, uint32_t height, uint32_t color,
-            uint8_t* mask) noexcept {
+            uint8_t* mask, const TextClipRect* clip) noexcept {
         const truetype::FaceView* markFace = &baseFace;
         uint16_t markGlyph = markFace->glyphIndex(markScalar);
         if (!markGlyph && fallback_.valid()) { markFace = &fallback_; markGlyph = markFace->glyphIndex(markScalar); }
@@ -514,14 +519,14 @@ private:
         int32_t markPen{}, markBaseline{};
         if (!positionedMark(mx0, mx1, my0, my1, markPen, markBaseline)) return false;
         if (drawGlyph(*markFace, markGlyph, pxEm, markPen, markBaseline,
-                      pixels, width, height, color, mask)) return true;
+                      pixels, width, height, color, mask, clip)) return true;
         if (markFace == &primary_ && fallback_.valid()) {
             markFace = &fallback_;
             markGlyph = markFace->glyphIndex(markScalar);
             if (!markGlyph || !markFace->glyphBounds(markGlyph, mx0, my0, mx1, my1)) return false;
             if (!positionedMark(mx0, mx1, my0, my1, markPen, markBaseline)) return false;
             return drawGlyph(*markFace, markGlyph, pxEm, markPen, markBaseline,
-                             pixels, width, height, color, mask);
+                             pixels, width, height, color, mask, clip);
         }
         return false;
     }

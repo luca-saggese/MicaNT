@@ -145,8 +145,11 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-uxtheme-font-failure-output-run2/serial.log`. The full
   input suite later stopped at the concurrent root-folder navigation test;
   this records the focused runtime probe, not a passing full suite.
-- [ ] Add font query and remaining text behaviors; unsupported variants must
-  continue returning documented failures.
+- [ ] Add theme font query support from actual font metadata in the compiled
+  snapshot. `GetThemeFont` still fails explicitly while snapshots contain no
+  family/weight information and current WhiteSur node rules provide no
+  supported `font-size` value; `GetThemeSysFont` remains unsupported because
+  the native system-font source does not return real metrics.
 - [x] Implemented a bounded Buffered Paint lifecycle in the real `uxtheme.dll`:
   per-thread nested init/uninit, generation-tagged thread-owned handles,
   top-down 32bpp DIB buffers, one-shot discard/update, and failure cleanup.
@@ -157,6 +160,14 @@ the evidence named here, not just declarations or a successful compile.
   rejected-format output clearing and cleanup. Full `python3 qemu.py --headless`
   with `--verify-input` passed at
   `/private/tmp/micant-theme-buffered-paint-final-3`.
+- [x] `DrawThemeText` now clips glyph writes to its caller rectangle and restores
+  its DC clip/text state on both success and failure. The production GDI DLL
+  exposes a private, one-shot clip scope for UxTheme; `FontManager` applies it
+  while rasterizing glyph masks. Explorer verified that writes inside a narrow
+  rectangle appear, surrounding pixels remain byte-for-byte unchanged, and a
+  subsequent draw succeeds after clip restoration. Full
+  `python3 qemu.py --headless` with `--verify-input` passed at
+  `/private/tmp/micant-theme-text-clip-final-2`.
 - [x] UxTheme color, part-size, integer, background-content and background-extent
   queries now clear caller outputs before returning an error. Explorer exercised
   the real freestanding DLL imports with invalid handles and sentinel outputs;

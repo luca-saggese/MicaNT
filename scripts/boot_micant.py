@@ -394,13 +394,16 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] Buffered DIB paint init, discard, update and cleanup verified" in serial:
+                if ("[MicaNT Theme] Buffered DIB paint init, discard, update and cleanup verified" in serial and
+                        "[MicaNT Theme] DrawThemeText clips to bounds and restores DC state" in serial):
                     break
                 if "[MicaNT Theme] Buffered DIB paint lifecycle mismatch" in serial:
                     raise RuntimeError("Buffered DIB paint lifecycle failed")
+                if "[MicaNT Theme] DrawThemeText clipping or DC restore mismatch" in serial:
+                    raise RuntimeError("DrawThemeText clipping or DC restore failed")
                 time.sleep(0.1)
             else:
-                raise RuntimeError("Explorer did not execute the Buffered DIB paint probe")
+                raise RuntimeError("Explorer did not execute the Buffered Paint and DrawThemeText probes")
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")

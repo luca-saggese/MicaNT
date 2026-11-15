@@ -38,6 +38,9 @@ MICANT_GDI32_API int32_t WINAPI TextOutW(void*, int32_t, int32_t,
                                           const wchar_t*, int32_t);
 MICANT_GDI32_API int32_t WINAPI GetTextExtentPoint32W(void*, const wchar_t*,
                                                        int32_t, void*);
+/* Internal GDI clip scope used by uxtheme.dll; token is process-local and one-shot. */
+MICANT_GDI32_API int32_t WINAPI MicaGdiPushClipRect(void*, const void*, void**);
+MICANT_GDI32_API int32_t WINAPI MicaGdiPopClipRect(void*, void*);
 
 #ifdef __cplusplus
 }

@@ -37,6 +37,8 @@ __declspec(dllimport) int32_t __stdcall GetTextExtentPoint32W(
     void*, const wchar_t*, int32_t, MicaUxThemeGdiSize*);
 __declspec(dllimport) uint32_t __stdcall SetTextColor(void*, uint32_t);
 __declspec(dllimport) int32_t __stdcall SetBkMode(void*, int32_t);
+__declspec(dllimport) int32_t __stdcall MicaGdiPushClipRect(void*, const void*, void**);
+__declspec(dllimport) int32_t __stdcall MicaGdiPopClipRect(void*, void*);
 __declspec(dllimport) void* __stdcall CreateCompatibleDC(void*);
 __declspec(dllimport) int32_t __stdcall DeleteDC(void*);
 __declspec(dllimport) void* __stdcall CreateDIBSection(void*, const void*, uint32_t,
@@ -712,24 +714,32 @@ inline win32::HRESULT DrawThemeText(HTHEME hTheme, void* hdc, int iPartId,
     else if (textFlags & DT_RIGHT) x = int64_t(bounds.right) - extent.cx;
     if (textFlags & DT_VCENTER) y += (height - extent.cy) / 2;
     else if (textFlags & DT_BOTTOM) y = int64_t(bounds.bottom) - extent.cy;
-    if (x < bounds.left || y < bounds.top || x + extent.cx > bounds.right ||
-        y + extent.cy > bounds.bottom || x < INT32_MIN || x > INT32_MAX ||
+    if (x < INT32_MIN || x > INT32_MAX ||
         y < INT32_MIN || y > INT32_MAX) return detail::kNotImplemented;
     const uint32_t color = textStyle->foreground;
     const uint32_t colorRef = ((color >> 16) & 0xFFu) | (color & 0xFF00u) |
                               ((color & 0xFFu) << 16);
+    void* clipToken{};
+    if (!MicaGdiPushClipRect(hdc, &bounds, &clipToken) || !clipToken)
+        return detail::kFailure;
     const int32_t previousBkMode = SetBkMode(hdc, 1); // TRANSPARENT
-    if (previousBkMode <= 0) return detail::kFailure;
+    if (previousBkMode <= 0) {
+        (void)MicaGdiPopClipRect(hdc, clipToken);
+        return detail::kFailure;
+    }
     const uint32_t previousColor = SetTextColor(hdc, colorRef);
     if (previousColor == 0xFFFFFFFFu) {
         (void)SetBkMode(hdc, previousBkMode);
+        (void)MicaGdiPopClipRect(hdc, clipToken);
         return detail::kFailure;
     }
     const bool drawn = TextOutW(hdc, static_cast<int32_t>(x),
                                 static_cast<int32_t>(y), text, charCount) != 0;
-    (void)SetTextColor(hdc, previousColor);
-    (void)SetBkMode(hdc, previousBkMode);
-    return drawn ? 0 : detail::kFailure;
+    const bool colorRestored = SetTextColor(hdc, previousColor) != 0xFFFFFFFFu;
+    const bool backgroundRestored = SetBkMode(hdc, previousBkMode) > 0;
+    const bool restored = MicaGdiPopClipRect(hdc, clipToken) != 0;
+    return drawn && colorRestored && backgroundRestored && restored
+        ? 0 : detail::kFailure;
 #else
     (void)themedStyle;
     return detail::kNotImplemented;

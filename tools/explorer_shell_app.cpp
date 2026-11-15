@@ -87,6 +87,7 @@ struct ShellState {
     bool themeGdiDrawReported{};
     bool themeGdiEditDrawReported{};
     bool themeTextDrawReported{};
+    bool themeTextClipReported{};
     bool taskbarThemePixelReported{};
     bool trayThemePixelReported{};
     bool statusBarThemePixelReported{};
@@ -501,6 +502,53 @@ void drawAppWindow(AppWindow& app) noexcept {
     if (themedAddress && !g.themeTextDrawReported) {
         PrintLine("[MicaNT Theme] UxTheme DrawThemeText rendered through GDI");
         g.themeTextDrawReported = true;
+    }
+    if (!g.themeTextClipReported && g.visualThemeReady && app.dc &&
+        w > 207 && h >= 12) {
+        constexpr int32_t kClipLeft = 151;
+        constexpr int32_t kClipRight = 183;
+        constexpr int32_t kClipTop = 3;
+        constexpr int32_t kClipBottom = 11;
+        constexpr int32_t kProbeLeft = 151;
+        constexpr int32_t kProbeRight = 208;
+        uint32_t original[57 * 8]{};
+        for (int32_t y = kClipTop; y < kClipBottom; ++y)
+            for (int32_t x = kProbeLeft; x < kProbeRight; ++x)
+                original[(y - kClipTop) * 57 + (x - kProbeLeft)] = p[y * w + x];
+        const MicaThemeHandle clipTheme = OpenThemeData(nullptr, L"TOOLBAR");
+        const RECT clipRect{kClipLeft, kClipTop, kClipRight, kClipBottom};
+        const int32_t clippedStatus = clipTheme
+            ? DrawThemeText(clipTheme, app.dc, 1, 1, L"Address", 7,
+                            0x00000820u, 0, &clipRect)
+            : static_cast<int32_t>(0x80070006u);
+        bool insideChanged = false;
+        bool outsideUnchanged = true;
+        for (int32_t y = kClipTop; y < kClipBottom; ++y) {
+            for (int32_t x = kProbeLeft; x < kProbeRight; ++x) {
+                const uint32_t before = original[(y - kClipTop) * 57 + (x - kProbeLeft)];
+                if (x < kClipRight) insideChanged |= p[y * w + x] != before;
+                else outsideUnchanged &= p[y * w + x] == before;
+            }
+        }
+        const RECT restoredRect{190, kClipTop, 198, kClipBottom};
+        const int32_t restoredStatus = clipTheme
+            ? DrawThemeText(clipTheme, app.dc, 1, 1, L"A", 1,
+                            0x00000820u, 0, &restoredRect)
+            : static_cast<int32_t>(0x80070006u);
+        bool restoredClipDrawn = false;
+        for (int32_t y = kClipTop; y < kClipBottom; ++y)
+            for (int32_t x = restoredRect.left; x < restoredRect.right; ++x)
+                restoredClipDrawn |= p[y * w + x] !=
+                    original[(y - kClipTop) * 57 + (x - kProbeLeft)];
+        const bool clipThemeClosed = clipTheme && CloseThemeData(clipTheme) == 0;
+        for (int32_t y = kClipTop; y < kClipBottom; ++y)
+            for (int32_t x = kProbeLeft; x < kProbeRight; ++x)
+                p[y * w + x] = original[(y - kClipTop) * 57 + (x - kProbeLeft)];
+        g.themeTextClipReported = clippedStatus == 0 && restoredStatus == 0 &&
+            clipThemeClosed && insideChanged && outsideUnchanged && restoredClipDrawn;
+        PrintLine(g.themeTextClipReported
+            ? "[MicaNT Theme] DrawThemeText clips to bounds and restores DC state"
+            : "[MicaNT Theme] DrawThemeText clipping or DC restore mismatch");
     }
     if (!themedAddress) text(p, w, h, 27, 8, "Address", toolbarForeground);
     const bool editNeedsAlphaComposition = entryStyle &&
