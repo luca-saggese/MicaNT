@@ -297,6 +297,41 @@ inline void Test_IconHandles_OwnershipCopyAndLeaseLifetime() {
     TEST_ASSERT(table.ownedCount() == 0, "all owned icon records are reclaimed");
 }
 
+inline void Test_CursorHandles_HotspotAndTypedOwnership() {
+    using namespace micant::um::imaging;
+    using namespace micant::um::winuser;
+    const ImageAllocator allocator{
+        nullptr,
+        [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
+        [](void*, void* address, size_t) noexcept { std::free(address); },
+    };
+    ImageFrame frame{};
+    frame.width = frame.height = 2; frame.stride = 8;
+    frame.format = PixelFormat::Bgra8Premultiplied;
+    TEST_ASSERT(frame.pixels.allocate(16, allocator), "cursor fixture storage allocates");
+    HICON cursor = ProcessIconHandles().createCursor(std::move(frame), allocator, 1, 0);
+    TEST_ASSERT(cursor != nullptr, "cursor handle stores validated hotspot metadata");
+    IconHandleTable::Lease lease{};
+    TEST_ASSERT(ProcessIconHandles().acquireCursor(cursor, lease) &&
+                lease.bitmap().cursor && lease.bitmap().hotX == 1 && lease.bitmap().hotY == 0,
+                "cursor lease exposes its hotspot and cursor object type");
+    IconHandleTable::Lease iconLease{};
+    TEST_ASSERT(!ProcessIconHandles().acquire(cursor, iconLease),
+                "cursor handle cannot be consumed as an icon");
+    HICON copy = ProcessIconHandles().copyCursor(cursor, allocator);
+    TEST_ASSERT(copy && ProcessIconHandles().acquireCursor(copy, iconLease) &&
+                iconLease.bitmap().hotX == 1 && iconLease.bitmap().width == 2,
+                "cursor copy preserves bitmap and hotspot");
+    iconLease = {};
+    TEST_ASSERT(ProcessIconHandles().destroy(cursor) && ProcessIconHandles().destroy(copy),
+                "owned cursors retire through the shared USER bitmap lifetime table");
+    lease = {};
+    ImageFrame bad{}; bad.width = bad.height = 1; bad.stride = 4;
+    TEST_ASSERT(bad.pixels.allocate(4, allocator), "invalid cursor fixture allocates");
+    TEST_ASSERT(!ProcessIconHandles().createCursor(std::move(bad), allocator, 1, 0),
+                "hotspot outside image bounds is rejected");
+}
+
 inline void Test_IconDrawing_PremultipliedSourceOver() {
     using micant::shared::graphics::PremultipliedSourceOver;
     TEST_ASSERT(PremultipliedSourceOver(0x80800000u, 0xff0000ffu) == 0xff80007fu,

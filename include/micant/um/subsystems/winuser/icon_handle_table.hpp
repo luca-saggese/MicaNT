@@ -20,6 +20,9 @@ struct IconBitmapView {
     uint32_t height{};
     uint32_t stride{};
     std::span<const uint8_t> pixels{};
+    uint16_t hotX{};
+    uint16_t hotY{};
+    bool cursor{};
 };
 
 class IconHandleTable {
@@ -65,7 +68,23 @@ public:
     [[nodiscard]] HICON create(imaging::ImageFrame&& frame,
                                const imaging::ImageAllocator& allocator,
                                bool shared = false) noexcept {
+        return createObject(std::move(frame), allocator, shared, false, 0, 0);
+    }
+
+    [[nodiscard]] HICON createCursor(imaging::ImageFrame&& frame,
+                                     const imaging::ImageAllocator& allocator,
+                                     uint16_t hotX, uint16_t hotY,
+                                     bool shared = false) noexcept {
+        return createObject(std::move(frame), allocator, shared, true, hotX, hotY);
+    }
+
+private:
+    [[nodiscard]] HICON createObject(imaging::ImageFrame&& frame,
+                                     const imaging::ImageAllocator& allocator,
+                                     bool shared, bool cursor,
+                                     uint16_t hotX, uint16_t hotY) noexcept {
         if (!validFrame(frame) || !allocator.deallocate) return nullptr;
+        if (cursor && (hotX >= frame.width || hotY >= frame.height)) return nullptr;
         size_t bytes{};
         imaging::ImageAllocator owner{};
         uint8_t* pixels = frame.pixels.releaseOwnership(bytes, owner);
@@ -83,6 +102,7 @@ public:
             record.generation = generation;
             record.width = frame.width; record.height = frame.height;
             record.stride = frame.stride; record.pixelBytes = bytes;
+            record.hotX = hotX; record.hotY = hotY; record.cursor = cursor;
             record.pixels = pixels; record.allocator = owner;
             record.active = true; record.shared = shared; record.retired = false;
             unlock();
@@ -93,23 +113,38 @@ public:
         return nullptr;
     }
 
+public:
+
     [[nodiscard]] bool acquire(HICON handle, Lease& result) noexcept {
+        return acquireKind(handle, result, false);
+    }
+
+    [[nodiscard]] bool acquireCursor(HICON handle, Lease& result) noexcept {
+        return acquireKind(handle, result, true);
+    }
+
+private:
+    [[nodiscard]] bool acquireKind(HICON handle, Lease& result, bool cursor) noexcept {
         result = {};
         uint16_t slot{}; uint64_t generation{};
         if (!decode(handle, slot, generation)) return false;
         lock();
         Record& record = records_[slot];
         if (!record.active || record.generation != generation || !record.pixels ||
+            record.cursor != cursor ||
             record.references == UINT32_MAX) {
             unlock(); return false;
         }
         ++record.references;
         result = Lease(this, slot, generation,
             {record.width, record.height, record.stride,
-             std::span<const uint8_t>(record.pixels, record.pixelBytes)}, record.shared);
+             std::span<const uint8_t>(record.pixels, record.pixelBytes),
+             record.hotX, record.hotY, record.cursor}, record.shared);
         unlock();
         return true;
     }
+
+public:
 
     [[nodiscard]] bool cloneLease(const Lease& source, Lease& result) noexcept {
         result = {};
@@ -123,7 +158,8 @@ public:
         ++record.references;
         result = Lease(this, source.slot_, source.generation_,
             {record.width, record.height, record.stride,
-             std::span<const uint8_t>(record.pixels, record.pixelBytes)}, record.shared);
+             std::span<const uint8_t>(record.pixels, record.pixelBytes),
+             record.hotX, record.hotY, record.cursor}, record.shared);
         unlock();
         return true;
     }
@@ -167,6 +203,19 @@ public:
         return copyScaled(source, source.bitmap().width, source.bitmap().height, allocator);
     }
 
+    [[nodiscard]] HICON copyCursor(HICON handle,
+                                   const imaging::ImageAllocator& allocator) noexcept {
+        Lease source{};
+        if (!acquireCursor(handle, source)) return nullptr;
+        const auto& view = source.bitmap();
+        imaging::ImageFrame frame{};
+        frame.width = view.width; frame.height = view.height; frame.stride = view.stride;
+        frame.format = imaging::PixelFormat::Bgra8Premultiplied;
+        if (!frame.pixels.allocate(view.pixels.size(), allocator)) return nullptr;
+        std::memcpy(frame.pixels.data(), view.pixels.data(), view.pixels.size());
+        return createCursor(std::move(frame), allocator, view.hotX, view.hotY, false);
+    }
+
     [[nodiscard]] HICON copyScaled(const Lease& source, uint32_t width, uint32_t height,
                                    const imaging::ImageAllocator& allocator) noexcept {
         if (!source || !width || !height || width > 4096 || height > 4096 ||
@@ -202,8 +251,9 @@ private:
         size_t pixelBytes{};
         imaging::ImageAllocator allocator{};
         uint32_t width{}, height{}, stride{}, references{};
+        uint16_t hotX{}, hotY{};
         uint64_t generation{};
-        bool active{}, shared{}, retired{};
+        bool active{}, shared{}, retired{}, cursor{};
     };
 
     static bool validFrame(const imaging::ImageFrame& frame) noexcept {
