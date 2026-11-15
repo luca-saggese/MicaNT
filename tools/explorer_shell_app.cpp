@@ -1114,6 +1114,10 @@ extern "C" void _start(const char* = nullptr) {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WindowProc;
+    windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    PrintLine(windowClass.hCursor
+        ? "[MicaNT Cursor] Explorer class arrow loaded"
+        : "[MicaNT Cursor] Explorer class arrow load failed");
     windowClass.lpszClassName = kClassName;
     if (!RegisterClassExW(&windowClass)) {
         for (;;) __asm__ __volatile__("pause");

@@ -130,11 +130,32 @@ bool validCursorFileName(const char* value, size_t length) noexcept {
     return endsWith(cur, sizeof(cur) - 1) || endsWith(ani, sizeof(ani) - 1);
 }
 
+bool cursorSystemPath(const wchar_t* suffix, wchar_t (&path)[512]) noexcept {
+    if (!suffix) return false;
+    auto* shared = reinterpret_cast<volatile const micant::KUserSharedData*>(
+        micant::UserSharedDataAddress);
+    size_t rootLength = 0;
+    while (rootLength < std::size(shared->ntSystemRoot) &&
+           shared->ntSystemRoot[rootLength]) ++rootLength;
+    if (rootLength < 3 || rootLength >= std::size(shared->ntSystemRoot) ||
+        shared->ntSystemRoot[1] != u':' || shared->ntSystemRoot[2] != u'\\') return false;
+    size_t cursor = 0;
+    for (; cursor < rootLength && cursor + 1 < std::size(path); ++cursor)
+        path[cursor] = static_cast<wchar_t>(shared->ntSystemRoot[cursor]);
+    for (size_t i = 0; suffix[i]; ++i) {
+        if (cursor + 1 >= std::size(path)) return false;
+        path[cursor++] = suffix[i];
+    }
+    path[cursor] = L'\0';
+    return true;
+}
+
 void loadCursorThemeMap() noexcept {
     CursorLockGuard lock(g_cursorThemeMapLock);
     if (g_cursorThemeMapLoaded) return;
     g_cursorThemeMapLoaded = true;
-    wchar_t path[] = L"\\MicaNT\\System\\Cursors\\MiniMouse\\cursor.map";
+    wchar_t path[512]{};
+    if (!cursorSystemPath(L"\\System\\Cursors\\MiniMouse\\cursor.map", path)) return;
     imaging::ImageLimits limits{};
     limits.maxEncodedBytes = 4096;
     limits.maxPixels = 1;
@@ -796,18 +817,18 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         if (sharedHandles[i]) return sharedHandles[i];
         wchar_t fileName[64]{};
         cursorThemeFile(id, cursors[i].file, fileName);
-        const auto makePath = [](const wchar_t* file, wchar_t (&path)[128]) noexcept {
-            constexpr wchar_t prefix[] = L"\\MicaNT\\System\\Cursors\\MiniMouse\\";
+        const auto makePath = [](const wchar_t* file, wchar_t (&path)[512]) noexcept {
+            wchar_t suffix[128] = L"\\System\\Cursors\\MiniMouse\\";
             size_t length = 0;
-            for (const wchar_t* p = prefix; *p; ++p) path[length++] = *p;
+            while (length < std::size(suffix) && suffix[length]) ++length;
             size_t fileLength = 0;
-            while (file[fileLength] && length + fileLength + 1 < std::size(path)) {
-                path[length + fileLength] = file[fileLength];
+            while (file[fileLength] && length + fileLength + 1 < std::size(suffix)) {
+                suffix[length + fileLength] = file[fileLength];
                 ++fileLength;
             }
             if (!fileLength || file[fileLength]) return false;
-            path[length + fileLength] = L'\0';
-            return true;
+            suffix[length + fileLength] = L'\0';
+            return cursorSystemPath(suffix, path);
         };
         using namespace micant::um;
         const auto allocator = imaging::NativeImageAllocator();
@@ -817,7 +838,7 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         limits.maxDecodedBytes = 64ull * 1024 * 1024;
         limits.maxIntermediateBytes = 80ull * 1024 * 1024;
         imaging::ImageBuffer encoded{};
-        wchar_t path[128]{};
+        wchar_t path[512]{};
         bool loaded = makePath(fileName, path) &&
             imaging::ReadIconSourceFile(path, encoded, allocator, limits) == imaging::ImageStatus::Success;
         if (!loaded) {
