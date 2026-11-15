@@ -33,7 +33,7 @@ inline void InitializeUxThemeSubsystemExports() {
     ldr.registerExport("uxtheme.dll", "DrawThemeText", reinterpret_cast<void*>(DrawThemeText));
     ldr.registerExport("uxtheme.dll", "IsThemeBackgroundPartiallyTransparent", reinterpret_cast<void*>(IsThemeBackgroundPartiallyTransparent));
     ldr.registerExport("uxtheme.dll", "GetThemeBackgroundRegion", reinterpret_cast<void*>(GetThemeBackgroundRegion));
-    ldr.registerExportOrdinal("uxtheme.dll", 47, reinterpret_cast<void*>(ThemeOrdinal47));
+    ldr.registerExportOrdinal("uxtheme.dll", 47, reinterpret_cast<void*>(DrawThemeBackgroundEx));
     ldr.registerExport("uxtheme.dll", "GetThemeBool", reinterpret_cast<void*>(GetThemeBool));
     ldr.registerExport("uxtheme.dll", "GetThemePropertyOrigin", reinterpret_cast<void*>(GetThemePropertyOrigin));
     ldr.registerExport("uxtheme.dll", "GetThemeEnumValue", reinterpret_cast<void*>(GetThemeEnumValue));

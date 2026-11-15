@@ -137,9 +137,9 @@ __declspec(dllexport) int32_t WINAPI BufferedPaintSetAlpha(void* buffer,
         const void* targetRect, uint8_t alpha) noexcept {
     return micant::uxtheme::BufferedPaintSetAlpha(buffer, targetRect, alpha);
 }
-__declspec(dllexport) int32_t WINAPI ThemeOrdinal47(void* theme, int32_t part,
-        int32_t state, void* rect) noexcept {
-    return micant::uxtheme::ThemeOrdinal47(theme, part, state, rect);
+__declspec(dllexport) int32_t WINAPI DrawThemeBackgroundEx(void* theme, void* dc, int32_t part,
+        int32_t state, const void* rect, const void* options) noexcept {
+    return micant::uxtheme::DrawThemeBackgroundEx(theme, dc, part, state, rect, options);
 }
 __declspec(dllexport) int32_t WINAPI IsThemeActive() noexcept {
     return micant::uxtheme::IsThemeActive();

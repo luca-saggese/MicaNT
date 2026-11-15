@@ -69,11 +69,13 @@ the evidence named here, not just declarations or a successful compile.
   extra query changes are not fully QEMU verified yet.
 - [x] The freestanding `uxtheme.dll` now exports every name in the existing
   UxTheme export registry and ordinal 47, forwarding each to its bounded
-  implementation or explicit unsupported result. `qemu.py --check-explorer`
-  passed, and `llvm-readobj --coff-exports` listed the complete DLL table.
-  The subsequent QEMU boot reached Explorer and logged the UxTheme API probe,
-  then timed out before the desktop window class registered; this does not
-  pass the interactive runtime regression.
+  implementation or explicit unsupported result. The ABI audit corrected
+  ordinal 47 to `DrawThemeBackgroundEx(HTHEME,HDC,int,int,RECT*,DTBGOPTS*)`;
+  it returns `E_NOTIMPL` until that rendering path exists. `qemu.py
+  --check-explorer` passed, and `llvm-readobj --coff-exports` confirmed its
+  name and ordinal. Full QEMU reached both app windows and passed UxTheme/GDI
+  pixel probes, then failed the existing maximize caption hit-target assertion;
+  therefore the interactive regression remains unverified.
 - [ ] Audit every exported UxTheme function against its public signature,
   result codes, handle lifetime and documented unsupported cases.
 - [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`
