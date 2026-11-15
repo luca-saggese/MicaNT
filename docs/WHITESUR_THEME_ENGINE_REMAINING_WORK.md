@@ -86,8 +86,16 @@ the evidence named here, not just declarations or a successful compile.
 - [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`
   and GDI32 imports in QEMU, including invalid/stale handles, clipping,
   rounded fills, alpha and allocation/dispatch failures.
-- [ ] Add and verify the missing drawing paths needed for text, fonts and
-  buffered paint, or return the documented unsupported result until implemented.
+- [x] `DrawThemeText` now draws supported one-line text through the caller's
+  GDI DC and the theme foreground (inheriting WhiteSur HeaderBar foreground
+  when a control omits it). Unsupported flags and text clipping return
+  `E_NOTIMPL`; invalid pointers/rectangles and GDI failure return errors. QEMU
+  reached Explorer's DIB pixel probe and logged the GDI text-render marker in
+  `/private/tmp/micant-uxtheme-drawtext-inherited-run`. The broader
+  `--verify-input` run later failed the concurrent parent-folder navigation
+  check, so full interaction acceptance is not claimed.
+- [ ] Add font query and remaining text behaviors, and verify buffered paint
+  lifecycle; unsupported variants must continue returning documented failures.
 
 ### 2. Win32 and common controls
 

@@ -28,6 +28,18 @@ inline constexpr BOOL FALSE = 0;
 inline constexpr BOOL TRUE = 1;
 }
 
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+struct MicaUxThemeGdiSize { int32_t cx; int32_t cy; };
+extern "C" {
+__declspec(dllimport) int32_t __stdcall TextOutW(void*, int32_t, int32_t,
+                                                 const wchar_t*, int32_t);
+__declspec(dllimport) int32_t __stdcall GetTextExtentPoint32W(
+    void*, const wchar_t*, int32_t, MicaUxThemeGdiSize*);
+__declspec(dllimport) uint32_t __stdcall SetTextColor(void*, uint32_t);
+__declspec(dllimport) int32_t __stdcall SetBkMode(void*, int32_t);
+}
+#endif
+
 namespace micant::uxtheme {
 
 using LPCWSTR = const wchar_t*;
@@ -490,8 +502,80 @@ inline win32::HRESULT GetThemeInt(HTHEME hTheme, int iPartId, int iStateId, int 
     return detail::kNotFound;
 }
 
-inline win32::HRESULT DrawThemeText(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, LPCWSTR /*pszText*/, int /*iCharCount*/, win32::DWORD /*dwTextFlags*/, win32::DWORD /*dwTextFlags2*/, const void* /*pRect*/) noexcept {
+inline win32::HRESULT DrawThemeText(HTHEME hTheme, void* hdc, int iPartId,
+        int iStateId, LPCWSTR text, int charCount, win32::DWORD textFlags,
+        win32::DWORD textFlags2, const void* rect) noexcept {
+    if (!hdc || !text || !rect || charCount < -1) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* themedStyle = detail::style(*handle, iStateId);
+    if (!themedStyle) return detail::kNotFound;
+    const auto* textStyle = themedStyle;
+    if (!(textStyle->flags & MICANT_THEME_HAS_FOREGROUND)) {
+        // WhiteSur toolbars inherit their text color from the window header
+        // palette. Preserve explicit control colors; use that inherited token
+        // only when the compiled control style omits foreground.
+        constexpr size_t headerBarNormal = 13u * MICANT_THEME_STATE_COUNT;
+        const auto& inherited = handle->snapshot.styles[headerBarNormal];
+        if (!(inherited.flags & MICANT_THEME_HAS_FOREGROUND)) return detail::kNotFound;
+        textStyle = &inherited;
+    }
+    const auto& bounds = *static_cast<const MicaWin32kRect*>(rect);
+    if (bounds.right < bounds.left || bounds.bottom < bounds.top)
+        return detail::kInvalidArgument;
+    constexpr uint32_t DT_CENTER = 0x00000001u;
+    constexpr uint32_t DT_RIGHT = 0x00000002u;
+    constexpr uint32_t DT_VCENTER = 0x00000004u;
+    constexpr uint32_t DT_BOTTOM = 0x00000008u;
+    constexpr uint32_t DT_SINGLELINE = 0x00000020u;
+    constexpr uint32_t DT_NOPREFIX = 0x00000800u;
+    constexpr uint32_t supportedFlags = DT_CENTER | DT_RIGHT | DT_VCENTER |
+                                        DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX;
+    if (!(textFlags & DT_SINGLELINE) || (textFlags & ~supportedFlags) || textFlags2 ||
+        ((textFlags & DT_CENTER) && (textFlags & DT_RIGHT)) ||
+        ((textFlags & DT_VCENTER) && (textFlags & DT_BOTTOM)))
+        return detail::kNotImplemented;
+    if (charCount == -1) {
+        charCount = 0;
+        while (charCount < 4096 && text[charCount]) ++charCount;
+        if (charCount == 4096 && text[charCount]) return detail::kInvalidArgument;
+    }
+    if (!charCount) return 0;
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+    MicaUxThemeGdiSize extent{};
+    if (!GetTextExtentPoint32W(hdc, text, charCount, &extent) ||
+        extent.cx < 0 || extent.cy <= 0) return detail::kFailure;
+    const int64_t width = int64_t(bounds.right) - bounds.left;
+    const int64_t height = int64_t(bounds.bottom) - bounds.top;
+    int64_t x = bounds.left;
+    int64_t y = bounds.top;
+    if (textFlags & DT_CENTER) x += (width - extent.cx) / 2;
+    else if (textFlags & DT_RIGHT) x = int64_t(bounds.right) - extent.cx;
+    if (textFlags & DT_VCENTER) y += (height - extent.cy) / 2;
+    else if (textFlags & DT_BOTTOM) y = int64_t(bounds.bottom) - extent.cy;
+    if (x < bounds.left || y < bounds.top || x + extent.cx > bounds.right ||
+        y + extent.cy > bounds.bottom || x < INT32_MIN || x > INT32_MAX ||
+        y < INT32_MIN || y > INT32_MAX) return detail::kNotImplemented;
+    const uint32_t color = textStyle->foreground;
+    const uint32_t colorRef = ((color >> 16) & 0xFFu) | (color & 0xFF00u) |
+                              ((color & 0xFFu) << 16);
+    const int32_t previousBkMode = SetBkMode(hdc, 1); // TRANSPARENT
+    if (previousBkMode <= 0) return detail::kFailure;
+    const uint32_t previousColor = SetTextColor(hdc, colorRef);
+    if (previousColor == 0xFFFFFFFFu) {
+        (void)SetBkMode(hdc, previousBkMode);
+        return detail::kFailure;
+    }
+    const bool drawn = TextOutW(hdc, static_cast<int32_t>(x),
+                                static_cast<int32_t>(y), text, charCount) != 0;
+    (void)SetTextColor(hdc, previousColor);
+    (void)SetBkMode(hdc, previousBkMode);
+    return drawn ? 0 : detail::kFailure;
+#else
+    (void)themedStyle;
     return detail::kNotImplemented;
+#endif
 }
 
 inline win32::BOOL IsThemeBackgroundPartiallyTransparent(HTHEME hTheme, int iPartId, int iStateId) noexcept {

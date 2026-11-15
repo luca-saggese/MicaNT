@@ -467,7 +467,7 @@ if (MICANT_ENABLE_BAREMETAL)
         tools/dlls/uxtheme.cpp tools/dlls/native_stack_probe.cpp
         kernel/ex/freestanding_memory.cpp tools/dlls/uxtheme.def)
     target_include_directories(uxtheme_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
-    target_compile_definitions(uxtheme_boot PRIVATE MICANT_NATIVE_USERMODE MICANT_WIN32K_IMPORTS)
+    target_compile_definitions(uxtheme_boot PRIVATE MICANT_NATIVE_USERMODE MICANT_WIN32K_IMPORTS MICANT_UXTHEME_GDI_IMPORTS)
     target_compile_options(uxtheme_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
@@ -476,7 +476,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(uxtheme_boot PRIVATE
         -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
     )
-    target_link_libraries(uxtheme_boot PRIVATE win32k_boot)
+    target_link_libraries(uxtheme_boot PRIVATE win32k_boot gdi32_boot)
     set_target_properties(uxtheme_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "uxtheme"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"

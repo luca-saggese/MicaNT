@@ -75,6 +75,7 @@ struct ShellState {
     char themeProfile[96]{};
     bool themeGdiDrawReported{};
     bool themeGdiEditDrawReported{};
+    bool themeTextDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -230,6 +231,8 @@ bool renderExplorerText(uint32_t* pixels, uint32_t width, uint32_t height,
     return TextOutW(dc, x, y, wide, static_cast<int>(units)) != FALSE;
 }
 
+void PrintThemeWin32Error(const char* prefix, uint32_t error) noexcept;
+
 void text(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
           const char* value, uint32_t color) noexcept {
     micant_gui::DrawStringClipped(p, w, h, x, y, value, color);
@@ -293,7 +296,34 @@ void drawAppWindow(AppWindow& app) noexcept {
         fill(p, w, h, 0, 0, w, 27, toolbarBackground);
     fill(p, w, h, 0, 26, w, 1, separator);
     fill(p, w, h, 12, 8, 8, 8, entryForeground);
-    text(p, w, h, 27, 8, "Address", toolbarForeground);
+    bool themedAddress = false;
+    if (g.visualThemeReady && g.uiFont) {
+        (void)SelectObject(app.dc, g.uiFont);
+        const MicaThemeHandle textTheme = OpenThemeData(nullptr, L"TOOLBAR");
+        if (textTheme) {
+            RECT addressRect{27, 3, 150, 26};
+            const int32_t drawStatus = DrawThemeText(textTheme, app.dc, 1, 1,
+                L"Address", 7, 0x00000824u, 0, &addressRect);
+            const bool closeSucceeded = CloseThemeData(textTheme) == 0;
+            bool textPixelFound = false;
+            for (uint32_t y = 3; y < 26 && !textPixelFound; ++y)
+                for (uint32_t x = 27; x < 150; ++x)
+                    if (p[static_cast<size_t>(y) * w + x] != toolbarBackground) {
+                        textPixelFound = true;
+                        break;
+                    }
+            themedAddress = drawStatus == 0 && closeSucceeded && textPixelFound;
+            if (drawStatus != 0)
+                PrintThemeWin32Error("[MicaNT Theme] DrawThemeText HRESULT", static_cast<uint32_t>(drawStatus));
+            else if (!textPixelFound)
+                PrintLine("[MicaNT Theme] DrawThemeText returned success without pixel output");
+        }
+    }
+    if (themedAddress && !g.themeTextDrawReported) {
+        PrintLine("[MicaNT Theme] UxTheme DrawThemeText rendered through GDI");
+        g.themeTextDrawReported = true;
+    }
+    if (!themedAddress) text(p, w, h, 27, 8, "Address", toolbarForeground);
     const bool editNeedsAlphaComposition = entryStyle &&
         (entryStyle->flags & MICANT_THEME_HAS_BACKGROUND) &&
         ((entryStyle->background >> 24) != 255u ||
