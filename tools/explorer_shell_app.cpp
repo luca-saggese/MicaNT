@@ -42,6 +42,12 @@ constexpr size_t MAX_APP_WINDOWS = 8;
 
 enum class View : uint8_t { MyComputer, MyDocuments, ControlPanel, Network, RecycleBin, DateTime };
 
+struct DirectoryRow {
+    wchar_t name[260]{};
+    uint32_t attributes{};
+    uint64_t size{};
+};
+
 struct AppWindow {
     HWND hwnd{};
     HDC dc{};
@@ -50,6 +56,9 @@ struct AppWindow {
     uint32_t width{500};
     uint32_t height{320};
     View view{View::MyComputer};
+    wchar_t directoryPath[512]{};
+    DirectoryRow directoryRows[64]{};
+    size_t directoryRowCount{};
     bool open{};
     bool minimized{};
 };
@@ -80,6 +89,7 @@ struct ShellState {
     bool trayThemePixelReported{};
     bool statusBarThemePixelReported{};
     bool explorerRowsThemePixelReported{};
+    bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -94,7 +104,6 @@ struct ShellState {
     bool startOpen{};
     AppWindow apps[MAX_APP_WINDOWS]{};
     micant::explorer::TaskSwitchSnapshot taskSwitch{};
-    uint8_t appCount{};
     uint8_t activeApp{0xFF};
     uint8_t clockSecond{0xFF};
     MicaWin32kSystemTime systemTime{};
@@ -232,14 +241,137 @@ bool renderExplorerText(uint32_t* pixels, uint32_t width, uint32_t height,
     (void)SetTextColor(dc, foreground);
     (void)SetBkMode(dc, TRANSPARENT);
     (void)width; (void)height;
-    return TextOutW(dc, x, y, wide, static_cast<int>(units)) != FALSE;
+    const bool rendered = TextOutW(dc, x, y, wide, static_cast<int>(units)) != FALSE;
+    if (rendered && !g.windowTtfDrawReported) {
+        for (const auto& app : g.apps) {
+            if (pixels == app.pixels) {
+                PrintLine("[MicaNT FontProbe] Explorer window text rendered with selected TTF");
+                g.windowTtfDrawReported = true;
+                break;
+            }
+        }
+    }
+    return rendered;
 }
 
 void PrintThemeWin32Error(const char* prefix, uint32_t error) noexcept;
 
 void text(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
           const char* value, uint32_t color) noexcept {
+    // Explorer's window surfaces are DIBs just like the desktop surfaces.
+    // Keep the selected TrueType face explicit for each window DC before the
+    // shared renderer resolves the pixel buffer back to that DC.
+    for (auto& app : g.apps) {
+        if (p == app.pixels && app.dc && g.uiFont) {
+            (void)SelectObject(app.dc, g.uiFont);
+            break;
+        }
+    }
     micant_gui::DrawStringClipped(p, w, h, x, y, value, color);
+}
+
+void drawAppWindow(AppWindow& app) noexcept;
+void present(HWND hwnd) noexcept;
+
+bool enumerateDirectory(AppWindow& app) noexcept {
+    using namespace micant;
+    app.directoryRowCount = 0;
+    size_t chars = 0;
+    while (chars < std::size(app.directoryPath) && app.directoryPath[chars]) ++chars;
+    if (!chars || chars * sizeof(wchar_t) > UINT16_MAX - sizeof(wchar_t)) return false;
+    UnicodeString name{};
+    name.length = static_cast<uint16_t>(chars * sizeof(wchar_t));
+    name.maximumLength = static_cast<uint16_t>(name.length + sizeof(wchar_t));
+    name.buffer = app.directoryPath;
+    ObjectAttributes attributes{};
+    attributes.length = sizeof(attributes);
+    attributes.objectName = &name;
+    attributes.attributes = OBJ_CASE_INSENSITIVE;
+    Handle directory{};
+    IoStatusBlock io{};
+    constexpr uint32_t FileReadAttributes = 0x00000080u;
+    constexpr uint32_t FileReadData = 0x00000001u;
+    constexpr uint32_t Synchronize = 0x00100000u;
+    const NtStatus openStatus = native_nt::NtCreateFile(&directory,
+        FileReadAttributes | FileReadData | Synchronize,
+        &attributes, &io, nullptr, 0, 1, 1, 0x00000020u, nullptr, 0);
+    if (openStatus != NtStatus::Success) {
+        PrintThemeWin32Error("[MicaNT Explorer] Directory open status", static_cast<uint32_t>(openStatus));
+        return false;
+    }
+    bool success = true;
+    while (app.directoryRowCount < std::size(app.directoryRows)) {
+        FileBothDirInformation entry{};
+        const NtStatus status = native_nt::NtQueryDirectoryFile(directory, 0, nullptr,
+            nullptr, &io, &entry, sizeof(entry), FileInformationClass::FileBothDirectoryInformation,
+            true, nullptr, app.directoryRowCount == 0);
+        if (status == NtStatus::NoMoreFiles) break;
+        if (status != NtStatus::Success || entry.fileNameLength % sizeof(wchar_t) != 0 ||
+            entry.fileNameLength / sizeof(wchar_t) >= std::size(entry.fileName)) {
+            PrintThemeWin32Error("[MicaNT Explorer] Directory query status", static_cast<uint32_t>(status));
+            success = false;
+            app.directoryRowCount = 0;
+            break;
+        }
+        const size_t length = entry.fileNameLength / sizeof(wchar_t);
+        DirectoryRow& row = app.directoryRows[app.directoryRowCount++];
+        for (size_t i = 0; i < length; ++i) row.name[i] = entry.fileName[i];
+        row.name[length] = L'\0';
+        row.attributes = entry.fileAttributes;
+        row.size = entry.endOfFile.quadPart < 0 ? 0 : static_cast<uint64_t>(entry.endOfFile.quadPart);
+    }
+    (void)native_nt::NtClose(directory);
+    return success;
+}
+
+bool enterExplorerFolder(AppWindow& app, size_t rowIndex) noexcept {
+    if (rowIndex >= app.directoryRowCount ||
+        !(app.directoryRows[rowIndex].attributes & 0x10u)) return false;
+    size_t length = 0;
+    while (length < std::size(app.directoryPath) && app.directoryPath[length]) ++length;
+    const DirectoryRow& row = app.directoryRows[rowIndex];
+    const size_t oldLength = length;
+    size_t rowLength = 0;
+    while (rowLength < std::size(row.name) && row.name[rowLength]) ++rowLength;
+    const bool vfsRoot = length == 1 && app.directoryPath[0] == L'.';
+    const bool needsSlash = !vfsRoot && length && app.directoryPath[length - 1] != L'\\';
+    const size_t prefixLength = vfsRoot ? 0 : length;
+    if (prefixLength + static_cast<size_t>(needsSlash) + rowLength >= std::size(app.directoryPath)) return false;
+    if (vfsRoot) length = 0;
+    if (needsSlash) app.directoryPath[length++] = L'\\';
+    for (size_t i = 0; i < rowLength; ++i) app.directoryPath[length + i] = row.name[i];
+    app.directoryPath[length + rowLength] = L'\0';
+    if (!enumerateDirectory(app)) {
+        app.directoryPath[oldLength] = L'\0';
+        (void)enumerateDirectory(app);
+        return false;
+    }
+    drawAppWindow(app);
+    present(app.hwnd);
+    PrintLine("[MicaNT Explorer] Filesystem directory enumerated after folder activation");
+    return true;
+}
+
+void navigateExplorerUp(AppWindow& app) noexcept {
+    size_t length = 0;
+    while (length < std::size(app.directoryPath) && app.directoryPath[length]) ++length;
+    if (length == 1 && app.directoryPath[0] == L'.') return;
+    if (!length) return;
+    if (length <= 3 && app.directoryPath[1] == L':') return;
+    if (length > 3 && app.directoryPath[1] == L':') {
+        while (length > 3 && app.directoryPath[length - 1] != L'\\') --length;
+        if (length > 3) --length;
+        app.directoryPath[length] = L'\0';
+    } else {
+    while (length && app.directoryPath[length - 1] != L'\\') --length;
+    if (length) --length;
+    if (!length) { app.directoryPath[0] = L'.'; length = 1; }
+    app.directoryPath[length] = L'\0';
+    }
+    if (!enumerateDirectory(app)) return;
+    drawAppWindow(app);
+    present(app.hwnd);
+    PrintLine("[MicaNT Explorer] Parent filesystem directory enumerated");
 }
 
 void drawAppWindow(AppWindow& app) noexcept {
@@ -274,9 +406,6 @@ void drawAppWindow(AppWindow& app) noexcept {
     const uint32_t separator = toolbarStyle &&
         (toolbarStyle->flags & MICANT_THEME_HAS_BORDER)
         ? themePixel(toolbarStyle->border) : entryBorder;
-    const uint32_t sidebarBackground = toolbarStyle &&
-        (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
-        ? toolbarBackground : rgb(236, 241, 247);
     const uint32_t secondaryForeground = toolbarForeground;
     const uint32_t statusBarBackground = statusBarStyle &&
         (statusBarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
@@ -284,6 +413,9 @@ void drawAppWindow(AppWindow& app) noexcept {
     const uint32_t statusBarForeground = statusBarStyle &&
         (statusBarStyle->flags & MICANT_THEME_HAS_FOREGROUND)
         ? themePixel(statusBarStyle->foreground) : secondaryForeground;
+    const uint32_t sidebarBackground = toolbarStyle &&
+        (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? toolbarBackground : rgb(236, 241, 247);
     fill(p, w, h, 0, 0, w, h, windowBackground);
     fill(p, w, h, 0, 0, 158, h, sidebarBackground);
     fill(p, w, h, 0, 0, w, 27, toolbarBackground);
@@ -309,7 +441,9 @@ void drawAppWindow(AppWindow& app) noexcept {
     if (!gdiThemeDrawn)
         fill(p, w, h, 0, 0, w, 27, toolbarBackground);
     fill(p, w, h, 0, 26, w, 1, separator);
-    fill(p, w, h, 12, 8, 8, 8, entryForeground);
+    fill(p, w, h, 6, 4, 21, 21, entryBorder);
+    fill(p, w, h, 7, 5, 19, 19, toolbarBackground);
+    text(p, w, h, 11, 6, "\xE2\x86\x91", toolbarForeground);
     bool themedAddress = false;
     if (g.visualThemeReady && g.uiFont) {
         (void)SelectObject(app.dc, g.uiFont);
@@ -371,54 +505,122 @@ void drawAppWindow(AppWindow& app) noexcept {
             g.themeGdiEditDrawReported = true;
         }
     }
-    const char* address = app.view == View::MyComputer ? "My Computer" :
-                          app.view == View::MyDocuments ? "C:\\Documents and Settings\\MicaNT\\My Documents" :
-                          app.view == View::ControlPanel ? "Control Panel" :
-                          app.view == View::RecycleBin ? "Recycle Bin" :
-                          app.view == View::DateTime ? "Date and Time" : "Network Places";
-    text(p, w, h, 22, 40, address, entryForeground);
+    char currentPath[256]{};
+    size_t pathLength = 0;
+    if (app.view == View::MyComputer || app.view == View::MyDocuments) {
+        const char* label = app.view == View::MyComputer ? "Computer: " : "Documents: ";
+        for (size_t i = 0; label[i] && pathLength + 1 < sizeof(currentPath); ++i)
+            currentPath[pathLength++] = label[i];
+        for (size_t i = 0; app.directoryPath[i] && pathLength + 4 < sizeof(currentPath); ++i) {
+            const uint32_t ch = static_cast<uint16_t>(app.directoryPath[i]);
+            if (ch < 0x80) currentPath[pathLength++] = static_cast<char>(ch);
+            else if (ch < 0x800) {
+                currentPath[pathLength++] = static_cast<char>(0xC0 | (ch >> 6));
+                currentPath[pathLength++] = static_cast<char>(0x80 | (ch & 0x3F));
+            } else {
+                currentPath[pathLength++] = static_cast<char>(0xE0 | (ch >> 12));
+                currentPath[pathLength++] = static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+                currentPath[pathLength++] = static_cast<char>(0x80 | (ch & 0x3F));
+            }
+        }
+        currentPath[pathLength] = '\0';
+    } else {
+        const char* label = app.view == View::ControlPanel ? "Control Panel" :
+            app.view == View::RecycleBin ? "Recycle Bin" :
+            app.view == View::DateTime ? "Date and Time" : "Network Places";
+        for (size_t i = 0; label[i] && i + 1 < sizeof(currentPath); ++i) currentPath[i] = label[i];
+    }
+    text(p, w, h, 22, 40, currentPath, entryForeground);
     text(p, w, h, 174, 71, "Name", secondaryForeground);
     text(p, w, h, 370, 71, "Type", secondaryForeground);
     fill(p, w, h, 168, 88, w - 180, 1, separator);
 
-    const char* rowsComputer[] = {"Local Disk (C:)", "Data Volume (D:)", "Linux Root (E:)"};
-    const char* rowsDocuments[] = {"My Pictures", "My Music", "Readme.txt"};
-    const char* rowsControl[] = {"Appearance and Themes", "Network Connections", "User Accounts", "Date and Time"};
-    const char* rowsNetwork[] = {"MicaNT Network", "Workgroup Computers"};
-    const char* rowsRecycle[] = {"The Recycle Bin is empty."};
-    const char* rowsDateTime[] = {"Date", "Time"};
-    const char** rows = rowsComputer;
-    size_t count = 3;
-    if (app.view == View::MyDocuments) rows = rowsDocuments;
-    else if (app.view == View::ControlPanel) { rows = rowsControl; count = 4; }
-    else if (app.view == View::Network) { rows = rowsNetwork; count = 2; }
-    else if (app.view == View::RecycleBin) { rows = rowsRecycle; count = 1; }
-    else if (app.view == View::DateTime) { rows = rowsDateTime; count = 2; }
     using micant::explorer::IconId;
-    IconId rowIcons[4]{IconId::Folder, IconId::Folder, IconId::Folder, IconId::Folder};
-    if (app.view == View::MyComputer) {
-        rowIcons[0] = IconId::HardDisk; rowIcons[1] = IconId::HardDisk;
-        rowIcons[2] = IconId::RemovableDrive;
-    } else if (app.view == View::MyDocuments) {
-        rowIcons[0] = IconId::Pictures; rowIcons[1] = IconId::Music;
-        rowIcons[2] = micant::explorer::ResolveFileIcon(rows[2]);
-    } else if (app.view == View::ControlPanel) {
-        rowIcons[0] = IconId::Folder; rowIcons[1] = IconId::Network;
-        rowIcons[2] = IconId::GenericText; rowIcons[3] = IconId::GenericText;
-    } else if (app.view == View::Network) {
-        rowIcons[0] = IconId::Network; rowIcons[1] = IconId::Computer;
-    } else if (app.view == View::RecycleBin) {
-        rowIcons[0] = IconId::TrashEmpty;
-    } else {
-        rowIcons[0] = IconId::GenericText; rowIcons[1] = IconId::GenericText;
-    }
-    for (size_t i = 0; i < count; ++i) {
+    struct StaticRow { const char* name; const char* type; IconId icon; bool directory; };
+    static constexpr StaticRow controlRows[] = {
+        {"Appearance and Themes", "Control Panel item", IconId::Folder, true},
+        {"Network Connections", "Control Panel item", IconId::Network, true},
+        {"User Accounts", "Control Panel item", IconId::GenericText, true},
+        {"Date and Time", "Control Panel item", IconId::GenericText, true},
+    };
+    static constexpr StaticRow networkRows[] = {
+        {"MicaNT Network", "Network", IconId::Network, true},
+        {"Workgroup Computers", "Computer", IconId::Computer, true},
+    };
+    static constexpr StaticRow recycleRows[] = {
+        {"The Recycle Bin is empty.", "", IconId::TrashEmpty, false},
+    };
+    static constexpr StaticRow dateRows[] = {
+        {"Date", "", IconId::GenericText, false}, {"Time", "", IconId::GenericText, false},
+    };
+    const StaticRow* staticRows = nullptr;
+    size_t staticCount = 0;
+    if (app.view == View::ControlPanel) { staticRows = controlRows; staticCount = std::size(controlRows); }
+    else if (app.view == View::Network) { staticRows = networkRows; staticCount = std::size(networkRows); }
+    else if (app.view == View::RecycleBin) { staticRows = recycleRows; staticCount = std::size(recycleRows); }
+    else if (app.view == View::DateTime) { staticRows = dateRows; staticCount = std::size(dateRows); }
+    const bool filesystemView = app.view == View::MyComputer || app.view == View::MyDocuments;
+    const size_t rowCount = filesystemView ? app.directoryRowCount : staticCount;
+    for (size_t i = 0; i < rowCount; ++i) {
         const int32_t y = 100 + static_cast<int32_t>(i) * 26;
-        if (!findCachedIcon(rowIcons[i], 16)) (void)loadPackagedIcon(rowIcons[i], 16);
-        const auto image = iconImage(rowIcons[i], 16);
+        char displayName[520]{};
+        IconId icon = IconId::Folder;
+        bool isDirectory = false;
+        const char* type = "File";
+        if (filesystemView) {
+            const DirectoryRow& row = app.directoryRows[i];
+            size_t out = 0;
+            for (size_t j = 0; row.name[j] && out + 4 < sizeof(displayName); ++j) {
+                const uint32_t cp = static_cast<uint16_t>(row.name[j]);
+                if (cp < 0x80) displayName[out++] = static_cast<char>(cp);
+                else if (cp < 0x800) {
+                    displayName[out++] = static_cast<char>(0xC0 | (cp >> 6));
+                    displayName[out++] = static_cast<char>(0x80 | (cp & 0x3F));
+                } else {
+                    displayName[out++] = static_cast<char>(0xE0 | (cp >> 12));
+                    displayName[out++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                    displayName[out++] = static_cast<char>(0x80 | (cp & 0x3F));
+                }
+            }
+            isDirectory = (row.attributes & 0x10u) != 0;
+            type = isDirectory ? "File folder" : "File";
+            icon = isDirectory ? IconId::Folder : micant::explorer::ResolveFileIcon(displayName);
+        } else {
+            const StaticRow& row = staticRows[i];
+            size_t j = 0;
+            for (; row.name[j] && j + 1 < sizeof(displayName); ++j) displayName[j] = row.name[j];
+            isDirectory = row.directory;
+            type = row.type;
+            icon = row.icon;
+        }
+        if (!findCachedIcon(icon, 16)) (void)loadPackagedIcon(icon, 16);
+        const auto image = iconImage(icon, 16);
         if (image.pixels) micant::explorer::DrawIconImage(p, w, h, 174, y, 16, image);
         else fill(p, w, h, 174, y, 16, 16, rgb(236, 190, 67));
-        text(p, w, h, 199, y + 4, rows[i], rowForeground);
+        text(p, w, h, 199, y + 4, displayName, rowForeground);
+        if (app.view == View::DateTime) {
+            char value[16]{};
+            if (i == 0) {
+                value[0] = static_cast<char>('0' + g.systemTime.day / 10);
+                value[1] = static_cast<char>('0' + g.systemTime.day % 10);
+                value[2] = '/'; value[3] = static_cast<char>('0' + g.systemTime.month / 10);
+                value[4] = static_cast<char>('0' + g.systemTime.month % 10);
+                value[5] = '/';
+                value[6] = static_cast<char>('0' + (g.systemTime.year / 1000) % 10);
+                value[7] = static_cast<char>('0' + (g.systemTime.year / 100) % 10);
+                value[8] = static_cast<char>('0' + (g.systemTime.year / 10) % 10);
+                value[9] = static_cast<char>('0' + g.systemTime.year % 10);
+            } else {
+                value[0] = static_cast<char>('0' + g.systemTime.hour / 10);
+                value[1] = static_cast<char>('0' + g.systemTime.hour % 10);
+                value[2] = ':';
+                value[3] = static_cast<char>('0' + g.systemTime.minute / 10);
+                value[4] = static_cast<char>('0' + g.systemTime.minute % 10);
+            }
+            text(p, w, h, 370, y + 4, value, secondaryForeground);
+        } else {
+            text(p, w, h, 370, y + 4, type, secondaryForeground);
+        }
         if (!g.explorerRowsThemePixelReported && i == 0 && app.view == View::ControlPanel) {
             const size_t right = w < 360 ? w : 360;
             bool themedInkFound = false;
@@ -437,30 +639,7 @@ void drawAppWindow(AppWindow& app) noexcept {
                 g.explorerRowsThemePixelReported = true;
             }
         }
-        if (app.view == View::DateTime) {
-            char value[16]{};
-            if (i == 0) {
-                value[0] = static_cast<char>('0' + g.systemTime.day / 10);
-                value[1] = static_cast<char>('0' + g.systemTime.day % 10);
-                value[2] = '/';
-                value[3] = static_cast<char>('0' + g.systemTime.month / 10);
-                value[4] = static_cast<char>('0' + g.systemTime.month % 10);
-                value[5] = '/';
-                value[6] = static_cast<char>('0' + (g.systemTime.year / 1000) % 10);
-                value[7] = static_cast<char>('0' + (g.systemTime.year / 100) % 10);
-                value[8] = static_cast<char>('0' + (g.systemTime.year / 10) % 10);
-                value[9] = static_cast<char>('0' + g.systemTime.year % 10);
-            } else {
-                value[0] = static_cast<char>('0' + g.systemTime.hour / 10);
-                value[1] = static_cast<char>('0' + g.systemTime.hour % 10);
-                value[2] = ':';
-                value[3] = static_cast<char>('0' + g.systemTime.minute / 10);
-                value[4] = static_cast<char>('0' + g.systemTime.minute % 10);
-            }
-            text(p, w, h, 370, y + 4, value, secondaryForeground);
-        } else {
-            text(p, w, h, 370, y + 4, app.view == View::MyComputer ? "Disk drive" : "System folder", secondaryForeground);
-        }
+        (void)isDirectory;
     }
     fill(p, w, h, 0, h - 24, w, 24, statusBarBackground);
     if (!g.statusBarThemePixelReported && w > 10 && h > 24 &&
@@ -507,7 +686,7 @@ void redrawTaskbar() noexcept {
                                   buttons, count, g.clockText, activeShellPalette());
     if (!g.taskbarThemePixelReported && g.taskbarPixels) {
         const auto palette = activeShellPalette();
-        if (g.taskbarPixels[5u * g.screenW + 4u] == palette.selected) {
+        if (g.taskbarPixels[5u * g.screenW + 90u] == palette.selected) {
             PrintLine("[MicaNT Theme] Taskbar Start surface uses active theme pixel");
             g.taskbarThemePixelReported = true;
         }
@@ -732,11 +911,6 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] UxTheme failed margin query clears its output");
     else
         PrintLine("[MicaNT Theme] UxTheme failed margin query output mismatch");
-    PrintThemeWin32Error("[MicaNT Theme] margin HRESULT", static_cast<uint32_t>(unsupportedMargin));
-    PrintThemeWin32Error("[MicaNT Theme] margin left", static_cast<uint32_t>(rejectedMargins.cxLeftWidth));
-    PrintThemeWin32Error("[MicaNT Theme] margin right", static_cast<uint32_t>(rejectedMargins.cxRightWidth));
-    PrintThemeWin32Error("[MicaNT Theme] margin top", static_cast<uint32_t>(rejectedMargins.cyTopHeight));
-    PrintThemeWin32Error("[MicaNT Theme] margin bottom", static_cast<uint32_t>(rejectedMargins.cyBottomHeight));
     void* animationFromDc = reinterpret_cast<void*>(1);
     void* animationToDc = reinterpret_cast<void*>(1);
     const auto animationBuffer = BeginBufferedAnimation(nullptr, nullptr, nullptr, 0,
@@ -1094,16 +1268,35 @@ void openView(View view) noexcept {
     for (auto& candidate : g.apps) if (!candidate.open) { app = &candidate; break; }
     if (!app) return;
     app->view = view;
+    const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(micant::UserSharedDataAddress);
+    size_t systemRootLength = 0;
+    while (systemRootLength < std::size(shared->ntSystemRoot) && shared->ntSystemRoot[systemRootLength])
+        ++systemRootLength;
+    if (systemRootLength < 4 || systemRootLength >= std::size(app->directoryPath)) {
+        DestroyWindow(app->hwnd);
+        *app = {};
+        return;
+    }
+    for (size_t i = 0; i <= systemRootLength; ++i)
+        app->directoryPath[i] = static_cast<wchar_t>(shared->ntSystemRoot[i]);
+    // Start in the system root's parent so the first view contains the real
+    // System32 directory and can immediately exercise folder navigation.
+    while (systemRootLength > 3 && app->directoryPath[systemRootLength - 1] != L'\\')
+        --systemRootLength;
+    if (systemRootLength > 3) --systemRootLength;
+    app->directoryPath[systemRootLength] = L'\0';
+    app->directoryRowCount = 0;
     constexpr uint32_t kInitialWindowWidth = 500;
     constexpr uint32_t kInitialWindowHeight = 320;
+    const int32_t appIndex = static_cast<int32_t>(app - g.apps);
     app->hwnd = CreateWindowExW(0, kClassName,
         view == View::MyComputer ? L"My Computer" :
         view == View::MyDocuments ? L"My Documents" :
         view == View::ControlPanel ? L"Control Panel" :
         view == View::RecycleBin ? L"Recycle Bin" :
         view == View::DateTime ? L"Date and Time" : L"Network Places",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 190 + static_cast<int32_t>(g.appCount % 4) * 32,
-        90 + static_cast<int32_t>(g.appCount % 4) * 28,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 190 + (appIndex % 4) * 32,
+        90 + (appIndex % 4) * 28,
         static_cast<int32_t>(kInitialWindowWidth), static_cast<int32_t>(kInitialWindowHeight),
         nullptr, nullptr, nullptr, nullptr);
     if (!app->hwnd) return;
@@ -1118,9 +1311,17 @@ void openView(View view) noexcept {
     app->height = static_cast<uint32_t>(clientRect.bottom - clientRect.top);
     app->open = true;
     app->minimized = false;
+    if (view == View::MyComputer || view == View::MyDocuments) {
+        if (!enumerateDirectory(*app))
+            PrintLine("[MicaNT Explorer] Native directory open/enumeration failed");
+        else {
+            PrintLine("[MicaNT Explorer] Initial filesystem directory enumerated");
+            if (!app->directoryRowCount)
+                PrintLine("[MicaNT Explorer] Initial filesystem directory is empty");
+        }
+    }
     g.activeApp = static_cast<uint8_t>(app - g.apps);
     SetFocus(app->hwnd);
-    ++g.appCount;
     app->dc = CreateCompatibleDC(nullptr);
     void* appBits = nullptr;
     BITMAPINFO appInfo{};
@@ -1290,6 +1491,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             }
         }
         return 0;
+    }
+    if (message == WM_LBUTTONUP) {
+        if (auto* app = appFromHwnd(hwnd)) {
+            const int32_t x = static_cast<int16_t>(static_cast<uint32_t>(lParam) & 0xFFFFU);
+            const int32_t y = static_cast<int16_t>((static_cast<uint32_t>(lParam) >> 16) & 0xFFFFU);
+            if (x >= 0 && x < 40 && y >= 0 && y < 30) {
+                navigateExplorerUp(*app);
+                return 0;
+            }
+            if (x >= 168 && y >= 96) {
+                const size_t row = static_cast<size_t>(y - 100) / 26;
+                if (y >= 100) (void)enterExplorerFolder(*app, row);
+                return 0;
+            }
+        }
     }
     if (hwnd == g.startMenu && message == WM_LBUTTONUP) {
         const int32_t x = static_cast<int16_t>(static_cast<uint32_t>(lParam) & 0xFFFFU);

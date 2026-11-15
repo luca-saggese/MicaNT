@@ -1999,6 +1999,7 @@ bool initializeGopFramebuffer(const micant::boot::KernelFramebufferV1& framebuff
     g_display.Height = framebuffer.height;
     g_display.Pitch = framebuffer.pixelsPerScanLine;
     g_display.PixelFormat = framebuffer.pixelFormat;
+    g_display.Backend = micant::boot_driver::DisplayBackend::Gop;
     g_display.Context = &g_gopDisplayContext;
     g_display.PresentFrame = fallbackPresentFrame;
     g_display.PresentComposition = nullptr;
@@ -3154,6 +3155,53 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const auto copyStatus = ex::ExSafeCopyToUser(ioStatusAddress, &ioResult, sizeof(ioResult));
         return status(copyStatus == NtStatus::Success ? flushStatus : NtStatus::AccessViolation);
     }
+    if (number == sys::SSN_NtQueryDirectoryFile) {
+        uint64_t extra[7]{};
+        if (args.userStack > UINT64_MAX - 40 ||
+            ex::ExSafeCopyFromUser(extra, reinterpret_cast<const void*>(args.userStack + 40),
+                                   sizeof(extra)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        auto* ioStatusAddress = reinterpret_cast<IoStatusBlock*>(extra[0]);
+        auto* information = reinterpret_cast<void*>(extra[1]);
+        const uint32_t informationLength = static_cast<uint32_t>(extra[2]);
+        const auto informationClass = static_cast<FileInformationClass>(
+            static_cast<uint32_t>(extra[3]));
+        const bool singleEntry = extra[4] != 0;
+        auto* fileName = reinterpret_cast<UnicodeString*>(extra[5]);
+        const bool restartScan = extra[6] != 0;
+        if (second || args.third || args.fourth || fileName || !singleEntry ||
+            informationClass != FileInformationClass::FileBothDirectoryInformation)
+            return status(NtStatus::NotSupported);
+        if (!ioStatusAddress || !information || informationLength < sizeof(FileBothDirInformation) ||
+            informationLength > 1024 * 1024 ||
+            ex::ProbeForWrite(ioStatusAddress, sizeof(IoStatusBlock), alignof(IoStatusBlock)) != NtStatus::Success ||
+            ex::ProbeForWrite(information, sizeof(FileBothDirInformation), alignof(FileBothDirInformation)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        const auto* issuingThread = ke::KeGetCurrentThread();
+        if (!issuingThread || !issuingThread->owningProcess || !issuingThread->kernelStackTop ||
+            ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+            return status(NtStatus::InvalidDeviceRequest);
+        FileBothDirInformation result{};
+        __asm__ __volatile__("swapgs" : : : "memory");
+        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
+        if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
+        const auto queryStatus = io::IoQueryDirectoryFile(static_cast<Handle>(first), restartScan, &result);
+        if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
+        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        __asm__ __volatile__("swapgs" : : : "memory");
+        uint32_t bytesReturned = 0;
+        NtStatus copyStatus = NtStatus::Success;
+        if (queryStatus == NtStatus::Success) {
+            copyStatus = ex::ExSafeCopyToUser(information, &result, sizeof(result));
+            if (copyStatus == NtStatus::Success) bytesReturned = sizeof(result);
+        }
+        if (copyStatus != NtStatus::Success) return status(copyStatus);
+        const IoStatusBlock ioResult{queryStatus, bytesReturned};
+        if (ex::ExSafeCopyToUser(ioStatusAddress, &ioResult, sizeof(ioResult)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        return status(queryStatus);
+    }
     if (number == sys::SSN_NtCreateFile) {
         uint64_t extra[7]{};
         ObjectAttributes attributes{};
@@ -3338,7 +3386,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                         result.allocationSize.quadPart = static_cast<int64_t>(fileSize);
                         result.endOfFile.quadPart = static_cast<int64_t>(fileSize);
                         result.numberOfLinks = 1;
-                        result.directory = false;
+                        result.directory = file->isDirectory();
                         queryStatus = ex::ExSafeCopyToUser(information, &result, sizeof(result));
                         if (queryStatus == NtStatus::Success) informationBytes = sizeof(result);
                         ob::ObDereferenceObject(reference);
@@ -3908,7 +3956,22 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             g_bootFramebufferInfo.pixelsPerScanLine;
         const uint32_t pixelFormat = g_display.Width ? g_display.PixelFormat :
             g_bootFramebufferInfo.pixelFormat;
-        const um::UserVideoInfo64 info{width, height, pitch, 32, pixelFormat, 0, 0};
+        const auto backend = static_cast<uint32_t>(g_display.Backend);
+        const uint32_t transport = backend == static_cast<uint32_t>(micant::boot_driver::DisplayBackend::Virtio2D)
+            ? static_cast<uint32_t>(um::DisplayTransportBackend::Virtio2D)
+            : (backend == static_cast<uint32_t>(micant::boot_driver::DisplayBackend::Virgl) ||
+               backend == static_cast<uint32_t>(micant::boot_driver::DisplayBackend::VirglAccelerated))
+                ? static_cast<uint32_t>(um::DisplayTransportBackend::Virgl)
+                : backend == static_cast<uint32_t>(micant::boot_driver::DisplayBackend::Gop)
+                    ? static_cast<uint32_t>(um::DisplayTransportBackend::Gop)
+                    : static_cast<uint32_t>(um::DisplayTransportBackend::Unknown);
+        const uint32_t composition = backend == static_cast<uint32_t>(micant::boot_driver::DisplayBackend::VirglAccelerated)
+            ? static_cast<uint32_t>(um::DisplayCompositionBackend::VirglAccelerated)
+            : backend == static_cast<uint32_t>(micant::boot_driver::DisplayBackend::Virgl)
+                ? static_cast<uint32_t>(um::DisplayCompositionBackend::VirglAvailable)
+                : static_cast<uint32_t>(um::DisplayCompositionBackend::Software);
+        const um::UserVideoInfo64 info{width, height, pitch, 32, pixelFormat,
+                                       transport, composition, 0};
         return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
                                            &info, sizeof(info)));
     }
