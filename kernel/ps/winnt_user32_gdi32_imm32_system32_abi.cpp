@@ -76,10 +76,19 @@ struct SharedPeCursorCacheEntry {
 std::array<SharedPeCursorCacheEntry, 255> g_sharedPeCursorCache{};
 CursorMutex g_animatedCursorLock{};
 CursorMutex g_sharedPeCursorCacheLock{};
+struct SystemCursor { uintptr_t id; const wchar_t* file; };
+constexpr SystemCursor g_systemCursors[]{
+    {32512, L"mini_mouse_arrow.cur"}, {32513, L"mini_mouse_beam.cur"},
+    {32515, L"mini_mouse_cross.cur"}, {32516, L"mini_mouse_up.cur"},
+    {32631, L"mini_mouse_pen.cur"},
+    {32642, L"mini_mouse_nwse.cur"}, {32643, L"mini_mouse_nesw.cur"},
+    {32644, L"mini_mouse_ew.cur"}, {32645, L"mini_mouse_ns.cur"},
+    {32646, L"mini_mouse_move.cur"}, {32648, L"mini_mouse_unavail.cur"},
+    {32649, L"mini_mouse_link.cur"}, {32651, L"mini_mouse_helpsel.cur"},
+    {32514, L"mini_mouse_busy.ani"}, {32650, L"mini_mouse_working.ani"},
+};
 struct SystemCursorCacheEntry { void* handle{}; bool reserved{}; };
-// Keep one cache slot for every entry in User32_LoadCursorW's system table,
-// including IDC_APPSTARTING at the end of that table.
-std::array<SystemCursorCacheEntry, 15> g_systemCursorCache{};
+std::array<SystemCursorCacheEntry, std::size(g_systemCursors)> g_systemCursorCache{};
 CursorMutex g_systemCursorCacheLock{};
 struct SharedCursorReservation {
     size_t slot{g_sharedPeCursorCache.size()};
@@ -860,21 +869,10 @@ int32_t User32_DestroyCursor(void* cursor) noexcept {
 
 void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
     if (instance) return loadPeCursor(instance, name, 32, 32, true);
-    struct SystemCursor { uintptr_t id; const wchar_t* file; };
-    constexpr SystemCursor cursors[]{
-        {32512, L"mini_mouse_arrow.cur"}, {32513, L"mini_mouse_beam.cur"},
-        {32515, L"mini_mouse_cross.cur"}, {32516, L"mini_mouse_up.cur"},
-        {32631, L"mini_mouse_pen.cur"},
-        {32642, L"mini_mouse_nwse.cur"}, {32643, L"mini_mouse_nesw.cur"},
-        {32644, L"mini_mouse_ew.cur"}, {32645, L"mini_mouse_ns.cur"},
-        {32646, L"mini_mouse_move.cur"}, {32648, L"mini_mouse_unavail.cur"},
-        {32649, L"mini_mouse_link.cur"}, {32651, L"mini_mouse_helpsel.cur"},
-        {32514, L"mini_mouse_busy.ani"}, {32650, L"mini_mouse_working.ani"},
-    };
     if (!name || reinterpret_cast<uintptr_t>(name) > UINT16_MAX) return nullptr;
     const uintptr_t id = reinterpret_cast<uintptr_t>(name);
-    for (size_t i = 0; i < std::size(cursors); ++i) {
-        if (cursors[i].id != id) continue;
+    for (size_t i = 0; i < std::size(g_systemCursors); ++i) {
+        if (g_systemCursors[i].id != id) continue;
         for (;;) {
             bool waitForLoader = false;
             {
@@ -889,7 +887,7 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         }
         SystemCursorReservation reservation{i};
         wchar_t fileName[64]{};
-        cursorThemeFile(id, cursors[i].file, fileName);
+        cursorThemeFile(id, g_systemCursors[i].file, fileName);
         const auto makePath = [](const wchar_t* file, wchar_t (&path)[512]) noexcept {
             wchar_t suffix[128] = L"\\System\\Cursors\\MiniMouse\\";
             size_t length = 0;
@@ -916,7 +914,7 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
             imaging::ReadIconSourceFile(path, encoded, allocator, limits) == imaging::ImageStatus::Success;
         if (!loaded) {
             imaging::ImageBuffer fallback{};
-            if (!makePath(cursors[i].file, path) ||
+            if (!makePath(g_systemCursors[i].file, path) ||
                 imaging::ReadIconSourceFile(path, fallback, allocator, limits) !=
                     imaging::ImageStatus::Success) return nullptr;
             encoded = std::move(fallback);
