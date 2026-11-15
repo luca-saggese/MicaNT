@@ -3,6 +3,7 @@
 #include "micant/um/subsystems/imaging/ico_decoder.hpp"
 #include "micant/um/native/pe.hpp"
 #include "micant/um/subsystems/winuser/icon_handle_table.hpp"
+#include "micant/um/subsystems/winuser/cursor_image.hpp"
 #include "micant/shared/pixel_composite.h"
 #include <cstdlib>
 #include <vector>
@@ -60,6 +61,37 @@ inline void Test_IcoDecoder_PngDibAndMalformedInputs() {
     malformed[18] = 0xff;
     TEST_ASSERT(ParseIconDirectory(malformed, directory) == ImageStatus::MalformedData,
                  "ICO payload escaping the input is rejected");
+}
+
+inline void Test_CurDecoder_PngHotspotAndMalformedInput() {
+    using namespace micant::um::imaging;
+    using namespace micant::um::winuser;
+    const ImageAllocator allocator{
+        nullptr,
+        [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
+        [](void*, void* address, size_t) noexcept { std::free(address); },
+    };
+    std::vector<uint8_t> cur{
+        0,0,2,0,1,0, 1,1,0,0,0,0,70,0,0,0,22,0,0,0,
+        137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,
+        0,0,0,13,73,68,65,84,120,156,99,96,96,96,96,0,0,0,5,0,1,165,246,69,64,
+        0,0,0,0,73,69,78,68,174,66,96,130
+    };
+    CursorImage image{};
+    TEST_ASSERT(DecodeCursorImage(cur, 32, 32, image, allocator) == ImageStatus::Success,
+                "CUR directory decodes embedded PNG payload");
+    TEST_ASSERT(image.image.width == 1 && image.image.height == 1 &&
+                image.hotX == 0 && image.hotY == 0,
+                "CUR preserves its hotspot and decoded dimensions");
+    auto badType = cur; badType[2] = 1;
+    TEST_ASSERT(DecodeCursorImage(badType, 32, 32, image, allocator) == ImageStatus::MalformedData,
+                "ICO input is not accepted as a cursor");
+    auto badHotspot = cur; badHotspot[10] = 2;
+    TEST_ASSERT(DecodeCursorImage(badHotspot, 32, 32, image, allocator) == ImageStatus::MalformedData,
+                "hotspot outside the selected image is rejected");
+    auto truncated = cur; truncated.pop_back();
+    TEST_ASSERT(DecodeCursorImage(truncated, 32, 32, image, allocator) != ImageStatus::Success,
+                "truncated CUR payload fails without publishing an image");
 }
 
 inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
