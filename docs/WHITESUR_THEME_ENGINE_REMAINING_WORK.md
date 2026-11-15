@@ -167,6 +167,13 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-theme-statusbar-run/serial.log`. As above, this run
   passed the theme probe but the full input suite later failed the unrelated
   root-folder navigation check.
+- [x] Explorer file names use the active Window foreground and type/date
+  columns use the toolbar secondary foreground instead of fixed colors. The
+  QEMU input script opens Control Panel to render a static row and the real
+  window DIB checks for an exact theme foreground pixel; the marker passed in
+  `/private/tmp/micant-theme-explorer-row-text-run/serial.log`. The later
+  filesystem-navigation assertion still fails on the concurrently changed
+  root directory path, after this theme check passed.
 - [ ] Route remaining fixed-color shell surfaces and text through the active
   theme model or UxTheme/GDI.
 - [ ] Capture and compare QEMU pixels for Explorer chrome, titlebar, toolbar,

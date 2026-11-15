@@ -382,6 +382,33 @@ def verify_mouse(
             else:
                 raise RuntimeError("Explorer did not dispatch Enter into an application window action")
             opened = wait_for_changed_screen(after, "app-window.ppm", 10000)
+            def click_at(x: int, y: int) -> None:
+                move_to(x, y)
+                execute("input-send-event", {"events": [
+                    {"type": "btn", "data": {"button": "left", "down": True}},
+                ]})
+                time.sleep(0.08)
+                execute("input-send-event", {"events": [
+                    {"type": "btn", "data": {"button": "left", "down": False}},
+                ]})
+
+            # Render a static Control Panel row so theme text pixels are
+            # covered even when the filesystem root has no entries.
+            click_at(40, 748)
+            time.sleep(0.2)
+            click_at(40, 562)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if "[MicaNT Theme] Explorer row text uses active theme pixel" in serial:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Explorer Control Panel row missed the active theme text color")
+            # Close the second app window before the existing overlapping
+            # window test sends Enter to open its actual second window.
+            click_at(670, 115)
+            time.sleep(0.3)
             for down in (True, False):
                 execute("input-send-event", {"events": [{
                     "type": "key", "data": {

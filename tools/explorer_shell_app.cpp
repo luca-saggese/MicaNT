@@ -79,6 +79,7 @@ struct ShellState {
     bool taskbarThemePixelReported{};
     bool trayThemePixelReported{};
     bool statusBarThemePixelReported{};
+    bool explorerRowsThemePixelReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -264,6 +265,9 @@ void drawAppWindow(AppWindow& app) noexcept {
     const uint32_t entryForeground = entryStyle &&
         (entryStyle->flags & MICANT_THEME_HAS_FOREGROUND)
         ? themePixel(entryStyle->foreground) : rgb(35, 74, 117);
+    const uint32_t rowForeground = windowStyle &&
+        (windowStyle->flags & MICANT_THEME_HAS_FOREGROUND)
+        ? themePixel(windowStyle->foreground) : entryForeground;
     const uint32_t entryBorder = entryStyle &&
         (entryStyle->flags & MICANT_THEME_HAS_BORDER)
         ? themePixel(entryStyle->border) : rgb(191, 202, 215);
@@ -414,7 +418,25 @@ void drawAppWindow(AppWindow& app) noexcept {
         const auto image = iconImage(rowIcons[i], 16);
         if (image.pixels) micant::explorer::DrawIconImage(p, w, h, 174, y, 16, image);
         else fill(p, w, h, 174, y, 16, 16, rgb(236, 190, 67));
-        text(p, w, h, 199, y + 4, rows[i], rgb(34, 42, 53));
+        text(p, w, h, 199, y + 4, rows[i], rowForeground);
+        if (!g.explorerRowsThemePixelReported && i == 0 && app.view == View::ControlPanel) {
+            const size_t right = w < 360 ? w : 360;
+            bool themedInkFound = false;
+            for (size_t rowY = static_cast<size_t>(y + 4);
+                 rowY < static_cast<size_t>(y + 12) && rowY < h && !themedInkFound;
+                 ++rowY) {
+                for (size_t column = 199; column < right; ++column) {
+                    if (p[rowY * w + column] == rowForeground) {
+                        themedInkFound = true;
+                        break;
+                    }
+                }
+            }
+            if (themedInkFound) {
+                PrintLine("[MicaNT Theme] Explorer row text uses active theme pixel");
+                g.explorerRowsThemePixelReported = true;
+            }
+        }
         if (app.view == View::DateTime) {
             char value[16]{};
             if (i == 0) {
@@ -435,9 +457,9 @@ void drawAppWindow(AppWindow& app) noexcept {
                 value[3] = static_cast<char>('0' + g.systemTime.minute / 10);
                 value[4] = static_cast<char>('0' + g.systemTime.minute % 10);
             }
-            text(p, w, h, 370, y + 4, value, rgb(100, 108, 118));
+            text(p, w, h, 370, y + 4, value, secondaryForeground);
         } else {
-            text(p, w, h, 370, y + 4, app.view == View::MyComputer ? "Disk drive" : "System folder", rgb(100, 108, 118));
+            text(p, w, h, 370, y + 4, app.view == View::MyComputer ? "Disk drive" : "System folder", secondaryForeground);
         }
     }
     fill(p, w, h, 0, h - 24, w, 24, statusBarBackground);
