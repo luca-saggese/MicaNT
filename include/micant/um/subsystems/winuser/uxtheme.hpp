@@ -191,7 +191,10 @@ inline win32::HRESULT GetThemeColor(HTHEME hTheme, int iPartId, int iStateId, in
     return 0;
 }
 
-inline win32::HRESULT GetThemeFont(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, void* /*pFont*/) noexcept {
+inline win32::HRESULT GetThemeFont(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, void* pFont) noexcept {
+    // LOGFONTW is ABI-stable at 92 bytes on the supported Windows targets.
+    // Clear the caller's output before reporting the unsupported font query.
+    if (pFont) std::memset(pFont, 0, 92);
     return detail::kNotImplemented;
 }
 
@@ -447,7 +450,8 @@ inline win32::DWORD GetThemeSysColor(HTHEME /*hTheme*/, int /*iColorId*/) noexce
     return 0xFFFFFFFFu; // CLR_INVALID: no fabricated system-color value
 }
 
-inline win32::HRESULT GetThemeSysFont(HTHEME /*hTheme*/, int /*iFontId*/, void* /*plf*/) noexcept {
+inline win32::HRESULT GetThemeSysFont(HTHEME /*hTheme*/, int /*iFontId*/, void* plf) noexcept {
+    if (plf) std::memset(plf, 0, 92);
     return detail::kNotImplemented;
 }
 

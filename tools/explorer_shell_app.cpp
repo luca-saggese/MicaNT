@@ -653,6 +653,13 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool queried = themeHandle && (button.flags & MICANT_THEME_HAS_BACKGROUND) &&
         GetThemeColor(themeHandle, 1, 1, 3802, &queriedColor) == 0 &&
         queriedColor == expectedColor;
+    uint8_t themeFontOutput[92];
+    std::memset(themeFontOutput, 0xA5, sizeof(themeFontOutput));
+    const int32_t unsupportedFont = themeHandle
+        ? GetThemeFont(themeHandle, nullptr, 1, 1, 210, themeFontOutput)
+        : 0;
+    bool themeFontOutputCleared = true;
+    for (uint8_t value : themeFontOutput) themeFontOutputCleared &= value == 0;
     MicaThemeMargins rejectedMargins{1, 2, 3, 4};
     const int32_t unsupportedMargin = themeHandle ? GetThemeMargins(themeHandle,
         nullptr, 1, 1, 0x7FFFFFFF, nullptr, &rejectedMargins) : 0;
@@ -663,6 +670,10 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
+    if (unsupportedFont == static_cast<int32_t>(0x80004001u) && themeFontOutputCleared)
+        PrintLine("[MicaNT Theme] Unsupported font query clears LOGFONTW output");
+    else
+        PrintLine("[MicaNT Theme] Unsupported font query output mismatch");
     if (unsupportedMargin == static_cast<int32_t>(0x80070490u) &&
         rejectedMargins.cxLeftWidth == 0 && rejectedMargins.cxRightWidth == 0 &&
         rejectedMargins.cyTopHeight == 0 && rejectedMargins.cyBottomHeight == 0)

@@ -96,6 +96,14 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-uxtheme-drawtext-inherited-run`. The broader
   `--verify-input` run later failed the concurrent parent-folder navigation
   check, so full interaction acceptance is not claimed.
+- [x] Unsupported `GetThemeFont` and `GetThemeSysFont` calls clear the
+  caller's 92-byte `LOGFONTW` output before returning `E_NOTIMPL`. Explorer
+  calls the actual freestanding `GetThemeFont` export with sentinel bytes and
+  checks the HRESULT and cleared output. QEMU reached the probe and logged
+  `Unsupported font query clears LOGFONTW output` in
+  `/private/tmp/micant-uxtheme-font-failure-output-run2/serial.log`. The full
+  input suite later stopped at the concurrent root-folder navigation test;
+  this records the focused runtime probe, not a passing full suite.
 - [ ] Add font query and remaining text behaviors, and verify buffered paint
   lifecycle; unsupported variants must continue returning documented failures.
 
