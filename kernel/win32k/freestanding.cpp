@@ -25,10 +25,17 @@ constexpr uint32_t kWmMButtonUp = 0x0208;
 constexpr uint32_t kWmKeyDown = 0x0100;
 constexpr uint32_t kWmKeyUp = 0x0101;
 constexpr uint32_t kWmChar = 0x0102;
+constexpr uint32_t kWmClose = 0x0010;
 constexpr int32_t kSwShowMinimized = 2;
 constexpr int32_t kSwMinimize = 6;
+constexpr int32_t kSwRestore = 9;
 constexpr int32_t kGwlpWndProc = -4;
 constexpr int32_t kGwlpUserData = -21;
+constexpr uint32_t kWsChild = 0x40000000u;
+constexpr uint32_t kWsBorder = 0x00800000u;
+constexpr uint32_t kWsDlgFrame = 0x00400000u;
+constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
+constexpr uint32_t kWsThickFrame = 0x00040000u;
 std::atomic_flag g_stateLock = ATOMIC_FLAG_INIT;
 
 class StateLockGuard {
@@ -68,11 +75,12 @@ struct Window {
     uint64_t icons[3]{};
     intptr_t userData{};
     int32_t x{}, y{}, width{}, height{};
+    int32_t restoreX{}, restoreY{}, restoreWidth{}, restoreHeight{};
     uint32_t style{}, extendedStyle{};
     uint16_t classAtom{};
     uint64_t ownerProcessId{};
     uint64_t zOrder{};
-    bool active{}, visible{}, iconic{};
+    bool active{}, visible{}, iconic{}, maximized{};
 };
 
 struct QueuedMessage {
@@ -93,6 +101,31 @@ uint32_t g_messageTime{};
 uint64_t g_foregroundWindow{};
 uint64_t g_nextZOrder{};
 int32_t g_mouseX{-1}, g_mouseY{-1};
+uint64_t g_captionCapture{};
+uint8_t g_pressedCaptionButton{};
+
+int32_t frameInset(const Window& window) noexcept {
+    if (window.parent || (window.style & kWsChild)) return 0;
+    if (window.style & kWsThickFrame) return 5;
+    return (window.style & (kWsBorder | kWsDlgFrame)) ? 1 : 0;
+}
+
+int32_t captionHeight(const Window& window) noexcept {
+    return (!window.parent && !(window.style & kWsChild) &&
+            (window.style & kWsCaption)) ? 28 : 0;
+}
+
+uint8_t captionButtonAt(const Window& window, int32_t localX,
+                       int32_t localY) noexcept {
+    const int32_t frame = frameInset(window);
+    const int32_t caption = captionHeight(window);
+    if (!caption || localY < frame || localY >= frame + caption) return 0;
+    const int32_t closeLeft = window.width - frame - 30;
+    if (localX >= closeLeft && localX < window.width - frame - 2) return 3;
+    if (localX >= closeLeft - 29 && localX < closeLeft - 1) return 2;
+    if (localX >= closeLeft - 58 && localX < closeLeft - 30) return 1;
+    return 0;
+}
 uint32_t g_mouseButtons{};
 MicaCompositorMetadataStore* g_compositorStore{};
 void (*g_compositorPublishCallback)() noexcept{};
@@ -444,9 +477,14 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 (window->x > INT32_MAX - window->width ||
                  window->y > INT32_MAX - window->height))
                 return NtStatus::InvalidParameter;
-            request.rect = request.operation == MICANT_WIN32K_OP_GET_CLIENT_RECT
-                ? MicaWin32kRect{0, 0, window->width, window->height}
-                : MicaWin32kRect{window->x, window->y,
+            if (request.operation == MICANT_WIN32K_OP_GET_CLIENT_RECT) {
+                const int32_t frame = frameInset(*window);
+                const int32_t caption = captionHeight(*window);
+                request.rect = {0, 0,
+                    window->width > frame * 2 ? window->width - frame * 2 : 1,
+                    window->height > frame * 2 + caption
+                        ? window->height - frame * 2 - caption : 1};
+            } else request.rect = MicaWin32kRect{window->x, window->y,
                     window->x + window->width, window->y + window->height};
             request.result = 1;
             return NtStatus::Success;
@@ -584,6 +622,83 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     g_mouseX = x;
     g_mouseY = y;
     auto* target = topmostVisibleWindow(x, y);
+    const bool leftPressed = !(previousButtons & 0x01u) && (currentButtons & 0x01u);
+    const bool leftReleased = (previousButtons & 0x01u) && !(currentButtons & 0x01u);
+    if (leftPressed && target) {
+        target->zOrder = nextZOrder();
+        if (g_foregroundWindow != target->handle) {
+            auto* previous = findWindowAny(g_foregroundWindow);
+            if (previous) (void)enqueueWindowMessage(*previous, kWmActivate, 0, 0);
+            g_foregroundWindow = target->handle;
+            (void)enqueueWindowMessage(*target, kWmActivate, 1, 0);
+            (void)enqueueWindowMessage(*target, kWmSetFocus, 0, 0);
+        }
+        const uint8_t button = captionButtonAt(*target,
+            static_cast<int32_t>(static_cast<int64_t>(x) - target->x),
+            static_cast<int32_t>(static_cast<int64_t>(y) - target->y));
+        if (button) {
+            g_captionCapture = target->handle;
+            g_pressedCaptionButton = button;
+            return true;
+        }
+        g_captionCapture = 0;
+        g_pressedCaptionButton = 0;
+    }
+
+    if (leftReleased && g_captionCapture) {
+        auto* captured = findWindowAny(g_captionCapture);
+        const uint8_t releasedButton = captured ? captionButtonAt(*captured,
+            static_cast<int32_t>(static_cast<int64_t>(x) - captured->x),
+            static_cast<int32_t>(static_cast<int64_t>(y) - captured->y)) : 0;
+        const uint8_t pressedButton = g_pressedCaptionButton;
+        g_captionCapture = 0;
+        g_pressedCaptionButton = 0;
+        if (!captured || !pressedButton || releasedButton != pressedButton) return true;
+        if (pressedButton == 1) {
+            captured->iconic = true;
+            (void)enqueueWindowMessage(*captured, kWmSize, 1, 0);
+            if (g_foregroundWindow == captured->handle) {
+                auto* next = topmostVisibleWindow();
+                g_foregroundWindow = next ? next->handle : 0;
+                if (next) {
+                    (void)enqueueWindowMessage(*next, kWmActivate, 1, 0);
+                    (void)enqueueWindowMessage(*next, kWmSetFocus, 0, 0);
+                }
+            }
+        } else if (pressedButton == 2) {
+            if (!captured->maximized) {
+                captured->restoreX = captured->x;
+                captured->restoreY = captured->y;
+                captured->restoreWidth = captured->width;
+                captured->restoreHeight = captured->height;
+                captured->x = 0;
+                captured->y = 0;
+                captured->width = MICANT_COMPOSITOR_SCREEN_WIDTH;
+                captured->height = MICANT_COMPOSITOR_SCREEN_HEIGHT - 40;
+                captured->maximized = true;
+            } else {
+                captured->x = captured->restoreX;
+                captured->y = captured->restoreY;
+                captured->width = captured->restoreWidth;
+                captured->height = captured->restoreHeight;
+                captured->maximized = false;
+            }
+            const int32_t frame = frameInset(*captured);
+            const int32_t caption = captionHeight(*captured);
+            const uint32_t clientWidth = static_cast<uint32_t>(
+                captured->width > frame * 2 ? captured->width - frame * 2 : 1);
+            const uint32_t clientHeight = static_cast<uint32_t>(
+                captured->height > frame * 2 + caption
+                    ? captured->height - frame * 2 - caption : 1);
+            const uint32_t packedSize =
+                (clientHeight & 0xFFFFu) << 16 | (clientWidth & 0xFFFFu);
+            (void)enqueueWindowMessage(*captured, kWmSize,
+                captured->maximized ? 2u : 0u, static_cast<int64_t>(packedSize));
+        } else {
+            (void)enqueueWindowMessage(*captured, kWmClose, 0, 0);
+        }
+        return true;
+    }
     if (!target) return false;
 
     uint32_t keyState = 0;
@@ -679,6 +794,10 @@ void publishCompositorSurfaces() noexcept {
         info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
         info.dirtyRight = window.width;
         info.dirtyBottom = window.height;
+        info.style = window.style;
+        for (size_t character = 0; character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
+             window.title[character]; ++character)
+            info.title[character] = window.title[character];
     }
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
 }

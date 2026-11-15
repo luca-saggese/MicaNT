@@ -32,6 +32,8 @@ typedef struct MicaCompositorSurfaceInfo {
     uint32_t flags;
     uint32_t pixelOffset;
     int32_t dirtyLeft, dirtyTop, dirtyRight, dirtyBottom;
+    uint32_t style;
+    uint16_t title[64];
 } MicaCompositorSurfaceInfo;
 
 typedef struct MicaCompositorMetadataStore {
@@ -45,6 +47,6 @@ typedef struct MicaCompositorMetadataStore {
 } MicaCompositorMetadataStore;
 
 #ifdef __cplusplus
-static_assert(sizeof(MicaCompositorSurfaceInfo) == 64);
+static_assert(sizeof(MicaCompositorSurfaceInfo) == 200);
 static_assert(sizeof(MicaCompositorMetadataStore) <= MICANT_COMPOSITOR_METADATA_STORE_SIZE);
 #endif

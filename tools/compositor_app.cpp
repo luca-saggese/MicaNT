@@ -1,4 +1,5 @@
 #include "micant/shared/compositor_surface.h"
+#include "micant/shared/font8x8.hpp"
 #include "micant/shared/user_graphics.hpp"
 #include "micant/shared/user_syscall.hpp"
 
@@ -28,6 +29,32 @@ uint32_t blend(uint32_t source, uint32_t destination) noexcept {
                            (destination & 0xFFu) * inverse + 127) / 255;
     const uint32_t outAlpha = alpha + (((destination >> 24) * inverse + 127) / 255);
     return (outAlpha << 24) | (red << 16) | (green << 8) | blue;
+}
+
+void fillRect(int64_t left, int64_t top, int64_t right, int64_t bottom,
+              uint32_t color, uint32_t width, uint32_t height) noexcept {
+    left = left < 0 ? 0 : left;
+    top = top < 0 ? 0 : top;
+    right = right > width ? width : right;
+    bottom = bottom > height ? height : bottom;
+    if (left >= right || top >= bottom) return;
+    for (int64_t y = top; y < bottom; ++y)
+        for (int64_t x = left; x < right; ++x)
+            g_frame[static_cast<size_t>(y) * width + static_cast<size_t>(x)] = color;
+}
+
+void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
+               uint32_t width, uint32_t height) noexcept {
+    if (character < 32 || character > 126) character = '?';
+    const auto* rows = micant::shared::FONT_8X8[character - 32];
+    for (int row = 0; row < 8; ++row) {
+        for (int column = 0; column < 8; ++column) {
+            if (!(rows[row] & (1u << (7 - column)))) continue;
+            const int64_t px = x + column, py = y + row;
+            if (px >= 0 && px < width && py >= 0 && py < height)
+                g_frame[static_cast<size_t>(py) * width + static_cast<size_t>(px)] = color;
+        }
+    }
 }
 
 bool compose(const MicaCompositorMetadataStore& metadata,
@@ -68,19 +95,81 @@ bool compose(const MicaCompositorMetadataStore& metadata,
 
     for (size_t index = 0; index < count; ++index) {
         const auto& surface = *ordered[index];
-        const int64_t left = surface.x < 0 ? 0 : surface.x;
-        const int64_t top = surface.y < 0 ? 0 : surface.y;
-        const int64_t right = static_cast<int64_t>(surface.x) + surface.width < width
-            ? static_cast<int64_t>(surface.x) + surface.width : width;
-        const int64_t bottom = static_cast<int64_t>(surface.y) + surface.height < height
-            ? static_cast<int64_t>(surface.y) + surface.height : height;
-        if (right <= left || bottom <= top) continue;
-        for (int64_t y = top; y < bottom; ++y) {
-            const size_t sourceY = static_cast<size_t>(y - surface.y);
+        constexpr uint32_t kWsBorder = 0x00800000u;
+        constexpr uint32_t kWsDlgFrame = 0x00400000u;
+        constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
+        constexpr uint32_t kWsThickFrame = 0x00040000u;
+        constexpr uint32_t kWsChild = 0x40000000u;
+        const bool topLevel = (surface.style & kWsChild) == 0;
+        const int64_t frame = !topLevel ? 0 :
+            ((surface.style & kWsThickFrame) ? 5 :
+             ((surface.style & (kWsBorder | kWsDlgFrame)) ? 1 : 0));
+        const int64_t caption = topLevel && (surface.style & kWsCaption) ? 28 : 0;
+        const int64_t windowLeft = surface.x;
+        const int64_t windowTop = surface.y;
+        const int64_t windowRight = windowLeft + surface.width;
+        const int64_t windowBottom = windowTop + surface.height;
+        const int64_t left = windowLeft + frame;
+        const int64_t top = windowTop + frame + caption;
+        const int64_t clientWidth = surface.width - frame * 2;
+        const int64_t clientHeight = surface.height - frame * 2 - caption;
+        if (clientWidth <= 0 || clientHeight <= 0) continue;
+
+        if (frame || caption) {
+            fillRect(windowLeft, windowTop, windowRight, windowBottom,
+                     0xFF374E6Cu, width, height);
+            if (caption) {
+                const uint32_t titleColor = 0xFF244F7Eu;
+                fillRect(windowLeft + frame, windowTop + frame,
+                         windowRight - frame, windowTop + frame + caption,
+                         titleColor, width, height);
+
+                const int64_t closeLeft = windowRight - frame - 30;
+                const int64_t buttonTop = windowTop + frame + 3;
+                const int64_t buttonBottom = windowTop + frame + caption - 3;
+                fillRect(closeLeft, buttonTop, windowRight - frame - 2,
+                         buttonBottom, 0xFFB84D58u, width, height);
+                fillRect(closeLeft - 29, buttonTop, closeLeft - 1,
+                         buttonBottom, 0xFF385C82u, width, height);
+                fillRect(closeLeft - 58, buttonTop, closeLeft - 30,
+                         buttonBottom, 0xFF385C82u, width, height);
+
+                const int64_t glyphY = windowTop + frame + (caption - 8) / 2;
+                fillRect(closeLeft - 21, glyphY + 4, closeLeft - 9,
+                         glyphY + 6, 0xFFF5F7FAu, width, height);
+                fillRect(closeLeft - 50, glyphY - 5, closeLeft - 40,
+                         glyphY + 5, 0xFFF5F7FAu, width, height);
+                fillRect(closeLeft - 48, glyphY - 3, closeLeft - 42,
+                         glyphY + 3, 0xFF385C82u, width, height);
+                for (int64_t diagonal = 0; diagonal < 9; ++diagonal) {
+                    fillRect(closeLeft + 10 + diagonal, glyphY - 4 + diagonal,
+                             closeLeft + 12 + diagonal, glyphY - 2 + diagonal,
+                             0xFFFFFFFFu, width, height);
+                    fillRect(closeLeft + 18 - diagonal, glyphY - 4 + diagonal,
+                             closeLeft + 20 - diagonal, glyphY - 2 + diagonal,
+                             0xFFFFFFFFu, width, height);
+                }
+
+                int64_t titleX = windowLeft + frame + 9;
+                const int64_t titleLimit = closeLeft - 66;
+                for (size_t character = 0; character < 63 && surface.title[character] &&
+                     titleX + 8 <= titleLimit; ++character, titleX += 8)
+                    drawGlyph(titleX, glyphY, surface.title[character],
+                              0xFFF4F6FAu, width, height);
+            }
+        }
+
+        const int64_t clipLeft = left < 0 ? 0 : left;
+        const int64_t clipTop = top < 0 ? 0 : top;
+        const int64_t right = left + clientWidth < width ? left + clientWidth : width;
+        const int64_t bottom = top + clientHeight < height ? top + clientHeight : height;
+        if (right <= clipLeft || bottom <= clipTop) continue;
+        for (int64_t y = clipTop; y < bottom; ++y) {
+            const size_t sourceY = static_cast<size_t>(y - top);
             const size_t sourceRow = surface.pixelOffset + sourceY * surface.pitch;
             const size_t destinationRow = static_cast<size_t>(y) * width;
-            for (int64_t x = left; x < right; ++x) {
-                const size_t sourceX = static_cast<size_t>(x - surface.x);
+            for (int64_t x = clipLeft; x < right; ++x) {
+                const size_t sourceX = static_cast<size_t>(x - left);
                 const size_t destination = destinationRow + static_cast<size_t>(x);
                 g_frame[destination] = blend(surfaces[sourceRow + sourceX],
                                              g_frame[destination]);
