@@ -144,6 +144,13 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-theme-uxtheme-stale-handle-run/serial.log`. The focused
   Ring 3 check passed after the baremetal build; the full input run again ended
   at the unrelated parent-folder navigation assertion.
+- [x] The Explorer process opens all 64 supported UxTheme handles, confirms
+  the 65th open fails with null, closes the complete table, then opens and
+  closes a new handle. QEMU logged `UxTheme handle exhaustion fails and
+  recovers cleanly` in
+  `/private/tmp/micant-theme-uxtheme-handle-capacity-run/serial.log`. The
+  capacity/cleanup probe passed after build; full input still fails later at
+  parent-folder navigation.
 
 ### 2. Win32 and common controls
 

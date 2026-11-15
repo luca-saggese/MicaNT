@@ -946,6 +946,21 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool staleHandleRejected = closed &&
         GetThemeColor(themeHandle, 1, 1, 3802, &staleColor) ==
             static_cast<int32_t>(0x80070006u) && staleColor == 0;
+    MicaThemeHandle capacityHandles[64]{};
+    size_t openedHandles = 0;
+    for (; openedHandles < std::size(capacityHandles); ++openedHandles) {
+        capacityHandles[openedHandles] = OpenThemeData(nullptr, L"BUTTON");
+        if (!capacityHandles[openedHandles]) break;
+    }
+    const bool capacityReached = openedHandles == std::size(capacityHandles);
+    const bool capacityFailureReported = capacityReached &&
+        OpenThemeData(nullptr, L"BUTTON") == nullptr;
+    bool capacityHandlesClosed = true;
+    for (size_t index = 0; index < openedHandles; ++index)
+        capacityHandlesClosed &= CloseThemeData(capacityHandles[index]) == 0;
+    MicaThemeHandle reusedHandle = capacityHandlesClosed
+        ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
+    const bool capacityRecovered = reusedHandle && CloseThemeData(reusedHandle) == 0;
     if (!queried || !closed) {
         restorePreviousSnapshot();
         PrintLine("[MicaNT Theme] UxTheme DLL handle/query path failed");
@@ -956,6 +971,10 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] Closed UxTheme handle rejected and output cleared");
     else
         PrintLine("[MicaNT Theme] Closed UxTheme handle remained usable");
+    if (capacityFailureReported && capacityHandlesClosed && capacityRecovered)
+        PrintLine("[MicaNT Theme] UxTheme handle exhaustion fails and recovers cleanly");
+    else
+        PrintLine("[MicaNT Theme] UxTheme handle exhaustion or cleanup mismatch");
     if (transparentQueryPassed && unsupportedBooleanFailed)
         PrintLine("[MicaNT Theme] UxTheme TMT_TRANSPARENT follows alpha and opacity");
     else
