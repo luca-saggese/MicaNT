@@ -661,20 +661,27 @@ def run_qemu(
         # generated assets on the system volume rather than embedding them in
         # User32, Win32k, the compositor, or the kernel image.
         theme_source_dir = ROOT / "System" / "Themes" / "WhiteSur"
+        theme_profile_source = ROOT / "System" / "Themes" / "active.profile"
         required_theme_files = (
             "theme.manifest",
             "LICENSES/COPYING",
             "LICENSES/AUTHORS",
             "Light/gtk.css",
+            "Light/native.style",
             "Dark/gtk.css",
+            "Dark/native.style",
         )
         missing_theme_files = [name for name in required_theme_files
                                if not (theme_source_dir / name).is_file()]
         if missing_theme_files:
             raise RuntimeError(
                 f"WhiteSur theme package is incomplete: {', '.join(missing_theme_files)}")
+        if not theme_profile_source.is_file():
+            raise RuntimeError("System theme selection profile is missing")
         shutil.copytree(theme_source_dir,
                         esp / "MicaNT" / "System" / "Themes" / "WhiteSur")
+        shutil.copy2(theme_profile_source,
+                     esp / "MicaNT" / "System" / "Themes" / "active.profile")
         icon_source_dir = ROOT / "System" / "Icons" / "WhiteSur"
         required_icon_files = ("COPYING", "AUTHORS", "ATTRIBUTIONS.md", "index.theme")
         missing_icon_files = [name for name in required_icon_files

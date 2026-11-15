@@ -93,6 +93,7 @@ def main() -> int:
     parser.add_argument("archive", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("System/Themes/WhiteSur"))
     parser.add_argument("--gresource", default="gresource")
+    parser.add_argument("--compiler", default="clang++")
     args = parser.parse_args()
 
     archive_bytes = args.archive.read_bytes()
@@ -100,6 +101,7 @@ def main() -> int:
     if actual_sha != ARCHIVE_SHA256:
         raise SystemExit(f"archive SHA-256 mismatch: expected {ARCHIVE_SHA256}, got {actual_sha}")
     args.output.mkdir(parents=True, exist_ok=True)
+    repository_root = pathlib.Path(__file__).resolve().parents[1]
 
     manifest: dict[str, object] = {
         "schemaVersion": 1,
@@ -128,43 +130,72 @@ def main() -> int:
         (args.output / "LICENSES" / "COPYING").write_bytes(license_data)
         (args.output / "LICENSES" / "AUTHORS").write_bytes(authors_data)
 
-        variants = (
-            ("Light", "Light", False),
-            ("Dark", "Dark", False),
-            ("Light-solid", "Solid/Light", True),
-            ("Dark-solid", "Solid/Dark", True),
-        )
-        for source_variant, package_path, solid in variants:
-            variant_id = package_path.replace("/", "")
-            tar_name = f"WhiteSur-{source_variant}.tar.xz"
-            packed = source_zip.read(f"{RELEASE_DIR}/{tar_name}")
-            with tarfile.open(fileobj=io.BytesIO(packed), mode="r:xz") as release:
-                resource_member = f"WhiteSur-{source_variant}/gtk-3.0/gtk.gresource"
-                member = release.getmember(resource_member)
-                if not member.isfile() or member.size > 8 * 1024 * 1024:
-                    raise ValueError(f"invalid or oversized GTK resource for {source_variant}")
-                resource_data = release.extractfile(member).read()
-            css, assets, missing_assets = extract_gresource(resource_data, args.gresource)
-            variant_dir = args.output / package_path
-            variant_dir.mkdir(parents=True, exist_ok=True)
-            (variant_dir / "gtk.css").write_bytes(css)
-            asset_hashes: dict[str, str] = {}
-            for name, data in assets.items():
-                relative = safe_relative(name)
-                destination = variant_dir.joinpath(*relative.parts)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
-                asset_hashes[name] = digest(data)
-            manifest["variants"][variant_id] = {
-                "entryCss": f"{package_path}/gtk.css",
-                "solid": solid,
-                "cssSha256": digest(css),
-                "assetRoot": package_path,
-                "assetCount": len(assets),
-                "assets": asset_hashes,
-                "missingAssetReferences": missing_assets,
-                "sourceGresourceSha256": digest(resource_data),
-                "sourceReleaseTarSha256": digest(packed),
+        with tempfile.TemporaryDirectory(prefix="micant-theme-compiler-") as temporary:
+            compiler_binary = pathlib.Path(temporary) / "compile_profile"
+            subprocess.run([
+                args.compiler, "-std=c++23", "-O2", "-I", str(repository_root / "include"),
+                str(repository_root / "tools" / "theme" / "compile_profile.cpp"),
+                "-o", str(compiler_binary),
+            ], check=True)
+
+            variants = (
+                ("Light", "Light", False),
+                ("Dark", "Dark", False),
+                ("Light-solid", "Solid/Light", True),
+                ("Dark-solid", "Solid/Dark", True),
+            )
+            for source_variant, package_path, solid in variants:
+                variant_id = package_path.replace("/", "")
+                tar_name = f"WhiteSur-{source_variant}.tar.xz"
+                packed = source_zip.read(f"{RELEASE_DIR}/{tar_name}")
+                with tarfile.open(fileobj=io.BytesIO(packed), mode="r:xz") as release:
+                    resource_member = f"WhiteSur-{source_variant}/gtk-3.0/gtk.gresource"
+                    member = release.getmember(resource_member)
+                    if not member.isfile() or member.size > 8 * 1024 * 1024:
+                        raise ValueError(f"invalid or oversized GTK resource for {source_variant}")
+                    resource_data = release.extractfile(member).read()
+                css, assets, missing_assets = extract_gresource(resource_data, args.gresource)
+                variant_dir = args.output / package_path
+                variant_dir.mkdir(parents=True, exist_ok=True)
+                css_path = variant_dir / "gtk.css"
+                style_path = variant_dir / "native.style"
+                css_path.write_bytes(css)
+                subprocess.run([str(compiler_binary), str(css_path), str(style_path)], check=True)
+                asset_hashes: dict[str, str] = {}
+                for name, data in assets.items():
+                    relative = safe_relative(name)
+                    destination = variant_dir.joinpath(*relative.parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                    asset_hashes[name] = digest(data)
+                manifest["variants"][variant_id] = {
+                    "entryCss": f"{package_path}/gtk.css",
+                    "nativeStyle": f"{package_path}/native.style",
+                    "nativeStyleSha256": digest(style_path.read_bytes()),
+                    "solid": solid,
+                    "cssSha256": digest(css),
+                    "assetRoot": package_path,
+                    "assetCount": len(assets),
+                    "assets": asset_hashes,
+                    "missingAssetReferences": missing_assets,
+                    "sourceGresourceSha256": digest(resource_data),
+                    "sourceReleaseTarSha256": digest(packed),
+                }
+
+            purple_dir = args.output / "LightPurple"
+            purple_dir.mkdir(parents=True, exist_ok=True)
+            purple_style = purple_dir / "native.style"
+            subprocess.run([
+                str(compiler_binary), str(args.output / "Light" / "gtk.css"),
+                str(purple_style), "#9a57a3",
+            ], check=True)
+            manifest["accentVariants"] = {
+                "LightPurple": {
+                    "nativeStyle": "LightPurple/native.style",
+                    "nativeStyleSha256": digest(purple_style.read_bytes()),
+                    "sourceVariant": "Light",
+                    "accent": accent_palette["purple"],
+                }
             }
 
     (args.output / "theme.manifest").write_text(

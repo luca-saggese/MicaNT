@@ -1,6 +1,7 @@
 #pragma once
 
 #include "micant/um/subsystems/theme/gtk_css.hpp"
+#include "micant/shared/theme_snapshot.h"
 
 #include <algorithm>
 #include <array>
@@ -477,6 +478,48 @@ inline bool buildNativeTheme(const CompiledCss& css, NativeTheme& output,
     }
     output = candidate;
     return true;
+}
+
+inline uint32_t packSnapshotColor(CssColor color) noexcept {
+    return (uint32_t(color.alpha) << 24) | (uint32_t(color.red) << 16) |
+           (uint32_t(color.green) << 8) | color.blue;
+}
+
+inline MicaThemeSnapshot makeThemeSnapshot(const NativeTheme& theme) noexcept {
+    MicaThemeSnapshot snapshot{};
+    snapshot.magic = MICANT_THEME_SNAPSHOT_MAGIC;
+    snapshot.version = MICANT_THEME_SNAPSHOT_VERSION;
+    snapshot.headerSize = static_cast<uint16_t>(offsetof(MicaThemeSnapshot, styles));
+    snapshot.totalSize = sizeof(snapshot);
+    snapshot.controlCount = static_cast<uint16_t>(NativeControl::Count);
+    snapshot.stateCount = static_cast<uint16_t>(NativeVisualState::Count);
+    snapshot.unsupportedRules = theme.unsupportedSimpleRules;
+    snapshot.unsupportedProperties = theme.unsupportedProperties;
+    for (size_t index = 0; index < theme.controls.size(); ++index) {
+        const auto& source = theme.controls[index];
+        auto& target = snapshot.styles[index];
+        target.foreground = packSnapshotColor(source.foreground);
+        target.background = packSnapshotColor(source.background);
+        target.border = packSnapshotColor(source.border);
+        target.borderRadius = source.borderRadius;
+        target.borderWidth = source.borderWidth;
+        target.minWidth = source.minWidth;
+        target.minHeight = source.minHeight;
+        std::copy(std::begin(source.padding), std::end(source.padding), std::begin(target.padding));
+        target.fontSize = source.fontSize;
+        target.opacity = source.opacity;
+        target.flags = (source.hasForeground ? MICANT_THEME_HAS_FOREGROUND : 0u) |
+                       (source.hasBackground ? MICANT_THEME_HAS_BACKGROUND : 0u) |
+                       (source.hasBorder ? MICANT_THEME_HAS_BORDER : 0u) |
+                       (source.hasBorderRadius ? MICANT_THEME_HAS_RADIUS : 0u) |
+                       (source.hasBorderWidth ? MICANT_THEME_HAS_BORDER_WIDTH : 0u) |
+                       (source.hasMinWidth ? MICANT_THEME_HAS_MIN_WIDTH : 0u) |
+                       (source.hasMinHeight ? MICANT_THEME_HAS_MIN_HEIGHT : 0u) |
+                       (source.hasPadding ? MICANT_THEME_HAS_PADDING : 0u) |
+                       (source.hasFontSize ? MICANT_THEME_HAS_FONT_SIZE : 0u) |
+                       (source.hasOpacity ? MICANT_THEME_HAS_OPACITY : 0u);
+    }
+    return snapshot;
 }
 
 } // namespace micant::um::theme

@@ -20,6 +20,7 @@
 #endif
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/theme_snapshot.h"
 #include "gui_common.hpp"
 #include "explorer_shell/taskbar.hpp"
 #include "explorer_shell/start_menu.hpp"
@@ -67,6 +68,8 @@ struct ShellState {
     uint32_t* desktopPixels{};
     HFONT uiFont{};
     bool fontReady{};
+    MicaThemeSnapshot visualTheme{};
+    bool visualThemeReady{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -96,6 +99,23 @@ constexpr wchar_t kStartTitle[] = L"Start";
 
 inline uint32_t rgb(uint8_t r, uint8_t green, uint8_t b) noexcept {
     return PackBGRA(r, green, b);
+}
+
+const MicaThemeStyleSnapshot* themeStyle(uint16_t control, uint16_t state = 0) noexcept {
+    if (!g.visualThemeReady || control >= MICANT_THEME_CONTROL_COUNT ||
+        state >= MICANT_THEME_STATE_COUNT) return nullptr;
+    return &g.visualTheme.styles[static_cast<size_t>(control) * MICANT_THEME_STATE_COUNT + state];
+}
+
+uint32_t themePixel(uint32_t color, uint32_t under = 0xFFFFFFFFu) noexcept {
+    const uint32_t alpha = color >> 24;
+    const uint32_t inverse = 255u - alpha;
+    const auto over = [&](uint32_t shift) noexcept {
+        const uint32_t foreground = (color >> shift) & 0xFFu;
+        const uint32_t background = (under >> shift) & 0xFFu;
+        return static_cast<uint8_t>((foreground * alpha + background * inverse + 127u) / 255u);
+    };
+    return PackBGRA(over(16), over(8), over(0));
 }
 
 CachedDesktopIcon* findCachedIcon(micant::explorer::IconId id, uint16_t size) noexcept {
@@ -192,20 +212,41 @@ void drawAppWindow(AppWindow& app) noexcept {
     if (!app.pixels) return;
     uint32_t* p = app.pixels;
     const uint32_t w = app.width, h = app.height;
-    fill(p, w, h, 0, 0, w, h, rgb(255, 255, 255));
+    const auto* windowStyle = themeStyle(14);
+    const auto* toolbarStyle = themeStyle(10);
+    const auto* entryStyle = themeStyle(1);
+    const uint32_t windowBackground = windowStyle &&
+        (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(windowStyle->background) : rgb(255, 255, 255);
+    const uint32_t toolbarBackground = toolbarStyle &&
+        (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(toolbarStyle->background, windowBackground) : rgb(242, 246, 251);
+    const uint32_t toolbarForeground = toolbarStyle &&
+        (toolbarStyle->flags & MICANT_THEME_HAS_FOREGROUND)
+        ? themePixel(toolbarStyle->foreground) : rgb(40, 59, 81);
+    const uint32_t entryBackground = entryStyle &&
+        (entryStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(entryStyle->background, windowBackground) : rgb(255, 255, 255);
+    const uint32_t entryForeground = entryStyle &&
+        (entryStyle->flags & MICANT_THEME_HAS_FOREGROUND)
+        ? themePixel(entryStyle->foreground) : rgb(35, 74, 117);
+    const uint32_t entryBorder = entryStyle &&
+        (entryStyle->flags & MICANT_THEME_HAS_BORDER)
+        ? themePixel(entryStyle->border) : rgb(191, 202, 215);
+    fill(p, w, h, 0, 0, w, h, windowBackground);
     fill(p, w, h, 0, 0, 158, h, rgb(236, 241, 247));
-    fill(p, w, h, 0, 0, w, 27, rgb(242, 246, 251));
+    fill(p, w, h, 0, 0, w, 27, toolbarBackground);
     fill(p, w, h, 0, 26, w, 1, rgb(207, 216, 228));
     fill(p, w, h, 12, 8, 8, 8, rgb(53, 121, 191));
-    text(p, w, h, 27, 8, "Address", rgb(40, 59, 81));
-    fill(p, w, h, 12, 32, w - 24, 25, rgb(255, 255, 255));
-    DrawRect(p, w, 12, 32, w - 24, 25, rgb(191, 202, 215));
+    text(p, w, h, 27, 8, "Address", toolbarForeground);
+    fill(p, w, h, 12, 32, w - 24, 25, entryBackground);
+    DrawRect(p, w, 12, 32, w - 24, 25, entryBorder);
     const char* address = app.view == View::MyComputer ? "My Computer" :
                           app.view == View::MyDocuments ? "C:\\Documents and Settings\\MicaNT\\My Documents" :
                           app.view == View::ControlPanel ? "Control Panel" :
                           app.view == View::RecycleBin ? "Recycle Bin" :
                           app.view == View::DateTime ? "Date and Time" : "Network Places";
-    text(p, w, h, 22, 40, address, rgb(35, 74, 117));
+    text(p, w, h, 22, 40, address, entryForeground);
     text(p, w, h, 174, 71, "Name", rgb(82, 98, 116));
     text(p, w, h, 370, 71, "Type", rgb(82, 98, 116));
     fill(p, w, h, 168, 88, w - 180, 1, rgb(211, 218, 226));
@@ -320,6 +361,99 @@ void redrawDesktop() noexcept {
 
     present(g.desktop);
     redrawTaskbar();
+}
+
+bool appendSystemRoot(wchar_t* path, size_t capacity, size_t& cursor) noexcept {
+    const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(
+        micant::UserSharedDataAddress);
+    size_t length = 0;
+    while (length < std::size(shared->ntSystemRoot) && shared->ntSystemRoot[length]) ++length;
+    if (length < 3 || length >= capacity || shared->ntSystemRoot[1] != u':' ||
+        shared->ntSystemRoot[2] != u'\\') return false;
+    for (; cursor < length; ++cursor)
+        path[cursor] = static_cast<wchar_t>(shared->ntSystemRoot[cursor]);
+    path[cursor] = L'\0';
+    return true;
+}
+
+bool appendWide(wchar_t* path, size_t capacity, size_t& cursor,
+                const wchar_t* suffix, size_t length) noexcept {
+    if (length > capacity || cursor > capacity - length - 1) return false;
+    for (size_t i = 0; i < length; ++i) path[cursor++] = suffix[i];
+    path[cursor] = L'\0';
+    return true;
+}
+
+bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
+                     size_t& bytesRead) noexcept {
+    bytesRead = 0;
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER length{};
+    if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 ||
+        static_cast<uint64_t>(length.QuadPart) > capacity) {
+        CloseHandle(file);
+        return false;
+    }
+    const size_t expected = static_cast<size_t>(length.QuadPart);
+    auto* destination = static_cast<uint8_t*>(buffer);
+    while (bytesRead < expected) {
+        const DWORD request = static_cast<DWORD>(expected - bytesRead > 65536
+            ? 65536 : expected - bytesRead);
+        DWORD amount = 0;
+        if (!ReadFile(file, destination + bytesRead, request, &amount, nullptr) || !amount) {
+            CloseHandle(file);
+            bytesRead = 0;
+            return false;
+        }
+        bytesRead += amount;
+    }
+    CloseHandle(file);
+    return true;
+}
+
+void loadActiveVisualTheme() noexcept {
+    wchar_t path[512]{};
+    size_t cursor = 0, profileBytes = 0;
+    char profile[96]{};
+    if (!appendSystemRoot(path, std::size(path), cursor) ||
+        !appendWide(path, std::size(path), cursor,
+                    L"\\System\\Themes\\active.profile", 29) ||
+        !readBoundedFile(path, profile, sizeof(profile) - 1, profileBytes)) return;
+    while (profileBytes && (profile[profileBytes - 1] == '\r' ||
+                            profile[profileBytes - 1] == '\n' ||
+                            profile[profileBytes - 1] == ' ' ||
+                            profile[profileBytes - 1] == '\t')) --profileBytes;
+    size_t first = 0;
+    while (first < profileBytes && (profile[first] == ' ' || profile[first] == '\t')) ++first;
+    if (first) {
+        for (size_t i = first; i < profileBytes; ++i) profile[i - first] = profile[i];
+        profileBytes -= first;
+    }
+    if (!profileBytes || profileBytes > 80) return;
+    size_t separators = 0;
+    for (size_t i = 0; i < profileBytes; ++i) {
+        const char c = profile[i];
+        if (c == '/') { ++separators; continue; }
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-')) return;
+    }
+    if (separators != 1) return;
+    cursor = 0;
+    if (!appendSystemRoot(path, std::size(path), cursor) ||
+        !appendWide(path, std::size(path), cursor, L"\\System\\Themes\\", 15)) return;
+    for (size_t i = 0; i < profileBytes; ++i) {
+        if (cursor + 1 >= std::size(path)) return;
+        path[cursor++] = profile[i] == '/' ? L'\\' : static_cast<wchar_t>(profile[i]);
+    }
+    if (!appendWide(path, std::size(path), cursor, L"\\native.style", 13)) return;
+    MicaThemeSnapshot candidate{};
+    size_t styleBytes = 0;
+    if (!readBoundedFile(path, &candidate, sizeof(candidate), styleBytes) ||
+        !MicaThemeSnapshotIsValid(&candidate, styleBytes)) return;
+    g.visualTheme = candidate;
+    g.visualThemeReady = true;
 }
 
 void loadPackagedWallpaper() noexcept {
@@ -907,6 +1041,10 @@ extern "C" void _start(const char* = nullptr) {
     if (video.width) g.screenW = video.width;
     if (video.height) g.screenH = video.height;
     if (g.screenW < 640 || g.screenH < 480) { g.screenW = 1024; g.screenH = 768; }
+    loadActiveVisualTheme();
+    PrintLine(g.visualThemeReady
+        ? "[MicaNT Theme] Native style snapshot accepted"
+        : "[MicaNT Theme] Base fallback active");
 
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);

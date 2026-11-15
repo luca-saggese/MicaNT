@@ -158,6 +158,26 @@ inline void Test_WhiteSur_RealProfilesCompileToNativeButtonStyles() {
     const auto& lightHover = light.style(NativeControl::Button, NativeVisualState::Hover);
     const auto& lightPressed = light.style(NativeControl::Button, NativeVisualState::Pressed);
     const auto& darkButton = dark.style(NativeControl::Button, NativeVisualState::Normal);
+    const auto lightSnapshot = makeThemeSnapshot(light);
+    TEST_ASSERT(lightSnapshot.magic == MICANT_THEME_SNAPSHOT_MAGIC &&
+                lightSnapshot.version == MICANT_THEME_SNAPSHOT_VERSION &&
+                lightSnapshot.totalSize == sizeof(MicaThemeSnapshot) &&
+                lightSnapshot.controlCount == MICANT_THEME_CONTROL_COUNT &&
+                lightSnapshot.stateCount == MICANT_THEME_STATE_COUNT,
+                "native style snapshot has a versioned fixed-size neutral ABI");
+    TEST_ASSERT(MicaThemeSnapshotIsValid(&lightSnapshot, sizeof(lightSnapshot)),
+                "native style snapshot passes shared ABI validation");
+    auto malformedSnapshot = lightSnapshot;
+    malformedSnapshot.styles[0].flags |= (1u << 31);
+    TEST_ASSERT(!MicaThemeSnapshotIsValid(&malformedSnapshot, sizeof(malformedSnapshot)),
+                "snapshot validation rejects unknown property flags");
+    const auto& packedButton = lightSnapshot.styles[
+        static_cast<size_t>(NativeControl::Button) * MICANT_THEME_STATE_COUNT];
+    TEST_ASSERT((packedButton.flags & (MICANT_THEME_HAS_FOREGROUND |
+                                      MICANT_THEME_HAS_BACKGROUND)) ==
+                    (MICANT_THEME_HAS_FOREGROUND | MICANT_THEME_HAS_BACKGROUND) &&
+                packedButton.background == 0xFFFFFFFFu,
+                "native snapshot preserves resolved color values and property presence");
     TEST_ASSERT(lightButton.hasBackground && lightButton.background == (CssColor{255, 255, 255, 255}) &&
                 lightHover.background == (CssColor{247, 247, 247, 255}) &&
                 lightPressed.background == (CssColor{8, 96, 242, 255}),

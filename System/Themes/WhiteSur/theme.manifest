@@ -10,6 +10,14 @@
     "red": "#ed5f5d",
     "yellow": "#f3ba4b"
   },
+  "accentVariants": {
+    "LightPurple": {
+      "accent": "#9a57a3",
+      "nativeStyle": "LightPurple/native.style",
+      "nativeStyleSha256": "2b2b63ff81625b06ea36ccb08f10377aa6294618d611a4db2df774844fb51a43",
+      "sourceVariant": "Light"
+    }
+  },
   "defaultVariant": "Light",
   "id": "WhiteSur",
   "license": "LICENSES/COPYING",
@@ -117,6 +125,8 @@
       "missingAssetReferences": [
         "assets/thumbnail-frame.png"
       ],
+      "nativeStyle": "Dark/native.style",
+      "nativeStyleSha256": "a1ac6972af1ca0664fa8f49354f53fb8630160f7ebd6c13ea7dbb18c06ef84de",
       "solid": false,
       "sourceGresourceSha256": "99240475a9d7a234fa8c84fabdef4c4b884af62d6830125e3167903b8f4905f2",
       "sourceReleaseTarSha256": "98ac7545ec5290b718875fdfbdd7f0f6b88126103d1eec259ec9fbf80be7b75f"
@@ -218,6 +228,8 @@
       "missingAssetReferences": [
         "assets/thumbnail-frame.png"
       ],
+      "nativeStyle": "Light/native.style",
+      "nativeStyleSha256": "3547f211311248e22ddb2995283da35033a3ff1169e86dcc75cddd55dcbc397e",
       "solid": false,
       "sourceGresourceSha256": "aeab157be82b641d9d062f9b0b2299c4ad8c7cb34a35201c2b5aef3083bf6703",
       "sourceReleaseTarSha256": "2635570e218afab2d34b0663287054f7b995b9f7f810e97410dcad389987d5ba"
@@ -317,6 +329,8 @@
       "missingAssetReferences": [
         "assets/thumbnail-frame.png"
       ],
+      "nativeStyle": "Solid/Dark/native.style",
+      "nativeStyleSha256": "d2d97b7e8ecdbe623e8c62bf32ea499d5102103ae73eb94777c4b1fde9e31312",
       "solid": true,
       "sourceGresourceSha256": "0000d82dbdedcf3223f3fc69b16829c0e59d1bd5a141a4120d701c0964966bad",
       "sourceReleaseTarSha256": "80d0b4428a63e3d6b11932483c7d1fff74afa21a826a2f668a50fb31fc11c40b"
@@ -418,6 +432,8 @@
       "missingAssetReferences": [
         "assets/thumbnail-frame.png"
       ],
+      "nativeStyle": "Solid/Light/native.style",
+      "nativeStyleSha256": "e37df3c207c37e8d33933586ae71a8f7ea9fa79830fd8d1378fb902112e1b058",
       "solid": true,
       "sourceGresourceSha256": "cf314a5ea4cc8814428af2a5a9d8e9e9cb4941fb5c74ef7e27144e7a4caaf920",
       "sourceReleaseTarSha256": "50ca872c44d28acfa9d43aa337981520ccc19b807dfc6b5293c7d8d9fe0f3a93"
