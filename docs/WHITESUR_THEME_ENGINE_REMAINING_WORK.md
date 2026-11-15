@@ -96,6 +96,14 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-theme-uxtheme-transparent-bool-run/serial.log`. The
   baremetal build and focused probe passed; the enclosing input run later
   stopped at the parallel parent-folder navigation assertion.
+- [x] `DrawThemeBackgroundEx` supports null options and `DTBG_CLIPRECT` by
+  delegating to the same bounded GDI renderer. Known unimplemented flags return
+  `E_NOTIMPL`; malformed size and unknown bits return `E_INVALIDARG`. Explorer
+  checks a clipped and an untouched pixel plus both error paths through the real
+  DLL export. QEMU logged `DrawThemeBackgroundEx clipping and errors verified`
+  in `/private/tmp/micant-theme-drawthemebackgroundex-errors-run/serial.log`;
+  build and focused pixel/error checks passed before the enclosing
+  parent-folder input assertion failed.
 - [x] `DrawThemeText` now draws supported one-line text through the caller's
   GDI DC and the theme foreground (inheriting WhiteSur HeaderBar foreground
   when a control omits it). Unsupported flags and text clipping return

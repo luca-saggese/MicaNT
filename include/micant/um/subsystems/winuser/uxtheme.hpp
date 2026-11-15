@@ -616,8 +616,25 @@ inline win32::HRESULT WINAPI GetThemeBackgroundRegion(HTHEME /*hTheme*/, void* /
     return detail::kNotImplemented;
 }
 
-inline win32::HRESULT WINAPI DrawThemeBackgroundEx(HTHEME /*hTheme*/, void* /*hdc*/, int32_t /*iPartId*/, int32_t /*iStateId*/, const void* /*pRect*/, const void* /*pOptions*/) noexcept {
-    return detail::kNotImplemented;
+inline win32::HRESULT WINAPI DrawThemeBackgroundEx(HTHEME hTheme, void* hdc,
+        int32_t iPartId, int32_t iStateId, const void* pRect,
+        const void* pOptions) noexcept {
+    struct Options {
+        uint32_t size;
+        uint32_t flags;
+        MicaWin32kRect clip;
+    };
+    constexpr uint32_t kDtbgClipRect = 0x00000001u;
+    constexpr uint32_t kKnownOptions = 0x0000007Fu;
+    const MicaWin32kRect* clip = nullptr;
+    if (pOptions) {
+        const auto& options = *static_cast<const Options*>(pOptions);
+        if (options.size != sizeof(Options)) return detail::kInvalidArgument;
+        if (options.flags & ~kKnownOptions) return detail::kInvalidArgument;
+        if (options.flags & ~kDtbgClipRect) return detail::kNotImplemented;
+        if (options.flags & kDtbgClipRect) clip = &options.clip;
+    }
+    return DrawThemeBackground(hTheme, hdc, iPartId, iStateId, pRect, clip);
 }
 
 inline win32::HRESULT WINAPI GetThemeBool(HTHEME hTheme, int32_t iPartId,

@@ -92,6 +92,7 @@ struct ShellState {
     bool statusBarThemePixelReported{};
     bool explorerRowsThemePixelReported{};
     bool commonControlsProgressReported{};
+    bool themeBackgroundExReported{};
     HWND themeProgressProbe{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
@@ -430,12 +431,35 @@ void drawAppWindow(AppWindow& app) noexcept {
             RECT themedToolbar{0, 0, static_cast<LONG>(w), 26};
             const bool drawSucceeded = DrawThemeBackground(theme, app.dc, 1, 1,
                                                             &themedToolbar, nullptr) == 0;
-            const bool closeSucceeded = CloseThemeData(theme) == 0;
             const uint32_t expected = (toolbarStyle &&
                 (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND))
                     ? themePixel(toolbarStyle->background, windowBackground)
                     : toolbarBackground;
+            struct ThemeBackgroundOptions { uint32_t size, flags; RECT clip; } options{
+                sizeof(ThemeBackgroundOptions), 1u, RECT{2, 2,
+                    static_cast<LONG>(w - 2), 24}};
+            constexpr uint32_t clipSentinel = 0xFF55AA33u;
+            p[1u * w + 1u] = clipSentinel;
+            const bool drawExSucceeded = DrawThemeBackgroundEx(theme, app.dc, 1, 1,
+                &themedToolbar, &options) == 0;
+            const bool clipPassed = drawExSucceeded && p[1u * w + 1u] == clipSentinel &&
+                p[4u * w + 4u] == expected;
+            ThemeBackgroundOptions unsupportedOptions = options;
+            unsupportedOptions.flags = 0x00000002u; // DTBG_DRAWSOLID is not implemented.
+            const bool unsupportedFlagFailed = DrawThemeBackgroundEx(theme, app.dc, 1, 1,
+                &themedToolbar, &unsupportedOptions) == static_cast<int32_t>(0x80004001u);
+            ThemeBackgroundOptions malformedOptions = options;
+            malformedOptions.size = 0;
+            const bool malformedSizeFailed = DrawThemeBackgroundEx(theme, app.dc, 1, 1,
+                &themedToolbar, &malformedOptions) == static_cast<int32_t>(0x80070057u);
+            p[1u * w + 1u] = toolbarBackground;
+            const bool closeSucceeded = CloseThemeData(theme) == 0;
             gdiThemeDrawn = drawSucceeded && closeSucceeded && p[4u * w + 4u] == expected;
+            if (clipPassed && unsupportedFlagFailed && malformedSizeFailed &&
+                closeSucceeded && !g.themeBackgroundExReported) {
+                PrintLine("[MicaNT Theme] DrawThemeBackgroundEx clipping and errors verified");
+                g.themeBackgroundExReported = true;
+            }
         }
     }
     if (gdiThemeDrawn && !g.themeGdiDrawReported) {
