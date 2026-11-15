@@ -1,0 +1,177 @@
+# MicaNT Native GTK Visual Styles Theme Engine
+
+**Status:** implementation specification; implementation not yet started.
+**Baseline:** repository HEAD `7443801d334936cc9a5ccf4e702668339022fe30`, inspected 2026-11-15.
+**Scope:** a bounded, native C++23 theme compiler/runtime. GTK 3 CSS is an import format; GTK, GLib, Sass, and Linux graphics runtimes are not production dependencies.
+
+## 1. Goals and non-goals
+
+The goal is to compile a documented GTK CSS subset into immutable MicaNT style data, then expose it through existing Win32 visual-style, control, window-manager, and compositor owners. WhiteSur Light and Dark are the first real input themes. Theme selection, asset failures, and optional effects must never prevent the base desktop path from rendering.
+
+This is not a GTK port, a new window manager, a second compositor, a general GTK 3 implementation, a WDDM/DWM clone, or a claim of GPU-composited effects. Compatibility means the documented Windows API subset has real behavior and explicit errors for unsupported cases. Rendering starts on the canonical software compositor; future acceleration consumes the same compiled theme and surface contracts.
+
+## 2. Repository baseline and evidence vocabulary
+
+The current worktree contains pre-existing edits in `include/micant/km/win32k/freestanding.hpp`, `include/micant/shared/{compositor_surface.h,win32k_client.h}`, `include/micant/um/subsystems/winuser/icon_handle_table.hpp`, `kernel/{init/kiinit.cpp,ps/winnt_user32_gdi32_imm32_system32_abi.cpp,ps/winnt_win32k_server.cpp,win32k/freestanding.cpp}`, `test/suites/icon_suite.hpp`, and `tools/compositor_app.cpp`. These are not part of this specification change and must be preserved. Their ownership/diff must be reviewed before integration edits.
+
+Use these terms precisely: **declared** means a type/API exists; **implemented** means it performs the documented operation with validation and cleanup; **built** means included in a successful target; **linked** means present in the production dependency image; **QEMU exercised** means the real Ring 3 path ran in QEMU with runtime evidence; **hardware verified** means tested on physical hardware. A hosted test or successful link does not imply QEMU or hardware verification.
+
+Current evidence from `KERNEL_ARCHITECTURE.md` and the 2026-11-14 integration ledger: the AMD64 modular kernel is the production path. Explorer now runs in Ring 3 and exercises Win32k windows/input and a separate Ring 3 compositor; E4 software composition is visible on canonical VirtIO-GPU 2D scanout. E5 VirGL/GPU composition remains open. The current compositor performs CPU clipping/sorting/alpha blending and has a bounded shared surface contract. This proves a useful integration seam, not a theme engine, full Win32k compatibility, or hardware acceleration. The ledger's accepted E1–E6 evidence is historical evidence and must be re-run for theme acceptance after integration.
+
+| Component | Declared | Implemented now | Built/linked | QEMU | Hardware |
+|---|---|---|---|---|---|
+| `uxtheme.hpp` | Broad API surface and export registration | Many inline functions are placeholders: static fake theme handles, constant outputs, no-op drawing, and success for unsupported work | Registered by `InitializeUxThemeSubsystemExports()` in the dynamic loader; standalone canonical UxTheme DLL target not found | No themed-control evidence found | Not verified |
+| `dwmapi.hpp`, DWM seal | Attributes, blur, frame and composition types/exports | State/API stubs exist; must audit each exported path and connect state changes to rendering | DWM seal is in the System32 implementation; theme effects are not established | No themed DWM evidence found | Not verified |
+| User32/GDI32/Comctl32 | Win32 headers and freestanding DLL sources | Multiple code paths exist: freestanding DLL sources are minimal; canonical Explorer's Ring 3 GDI/font path has real DIB text and font metrics; common controls remain partial. Treat each target/implementation separately | `explorer_runtime_boot` and native-user-mode boundary checks have prior successful builds; recheck current tree | Explorer Ring 3 windows/input, painting, teardown, software composition and TTF text were QEMU exercised; no themed controls | Not verified |
+| Win32k | Canonical window/input/surface ABI | Bounded classes/windows, hit testing, input queues, present/surface ownership and teardown are the integration owner; theme metrics/decorations are not yet a theme contract | Bare-metal target previously linked | Explorer window interaction exercised; no themed nonclient rendering | Not verified |
+| `compositor.exe` / `tools/compositor_app.cpp` | Shared surface contract | Ring 3 software composition, clipping, z-order, alpha and display-service submission; titlebar/frame/buttons are currently hardcoded raster drawing. It redraws the full frame per publication; dirty-region and optional effects are not implemented | E4 path previously linked and run | QEMU scanout and E1–E6 bounded interaction/cleanup accepted in ledger | No physical hardware evidence |
+| Explorer shell | Real app and shell modules | Real Ring 3 entry/window path exists; shell and compositor painting contain fixed colors/drawing and are not theme-driven | Seven-image closure accepted in prior checkpoint | E1–E6 bounded app window, input, close/move/resize/cleanup; 2026-11-15 font probes and text rendering accepted | Not verified |
+| Font engine | Detailed TTF/OTF implementation spec exists | Bounded Ring 3 TrueType parser/rasterizer, GDI metrics/text and DirectWrite subset now implemented; broader shaping/format support remains limited | Built in Explorer dependency closure per ledger | QEMU probes for TTF metrics, text, fallback, glyph indices, layout and shell input passed 2026-11-15 | Not verified |
+| Image/icon/cursor | Existing subsystem specifications and icon work | Reuse canonical decoders/handle tables; no theme-specific asset loader may bypass them | Varies by target | No WhiteSur-specific asset evidence | Not verified |
+| User preferences / Cm / Userenv | Existing subsystem owners | Theme persistence integration not established | Not established | Not verified | Not verified |
+
+No compositor or Explorer theme specification was found under `docs/` at baseline. Relevant references are `KERNEL_ARCHITECTURE.md`, `KERNEL_MILESTONES.md`, `KERNEL_INTEGRATION_STATUS.md`, `KERNEL_GPU_DRIVER_IMPLEMENTATION_SPEC.md`, `USERMODE_FONT_ENGINE_TRUETYPE_OPENTYPE_SPEC.md`, `USERMODE_IMAGE_CODEC_AND_WALLPAPER_SPEC.md`, `USERMODE_WINDOWS_ICON_SUBSYSTEM_IMPLEMENTATION_SPEC.md`, and `USERMODE_WINDOWS_CURSOR_SUBSYSTEM_IMPLEMENTATION_SPEC.md`. The current compositor and shell source are authoritative for code behavior; the integration ledger is evidence, not a second milestone definition.
+
+## 3. Gap analysis and dependency order
+
+There is no validated native theme model, parser/compiler, package loader, persistent per-user selection, or live theme-change contract. UxTheme contains fake handles and fabricated success. DWM types/state do not establish effect rendering. Common controls and GDI DLLs do not yet provide the broad functional drawing paths the requested controls need. Explorer has real Ring 3 windows but uses fixed colors and drawing. Win32k owns geometry and input while the compositor owns final decoration rendering; that split must become explicit in the ABI before replacing hardcoded caption visuals.
+
+Dependency chain: (1) record upstream provenance and select a minimal real WhiteSur profile; (2) implement bounded package/CSS loading, parser, native model, and Base fallback; (3) connect UxTheme handles and drawing to the model plus actual GDI primitives; (4) make Win32k publish geometry/state and compositor render theme-driven nonclient decoration; (5) drive Explorer/common-control invalidation through those APIs; (6) add settings, atomic live replacement, and persistence; (7) implement optional alpha, rounded masks, shadows and bounded blur; (8) verify missing-theme/malformed-theme recovery and real Explorer QEMU behavior. Do not start C++ runtime changes before this specification exists. Worker ownership is split across parser/model, theme assets, UxTheme/control APIs, decoration/compositor, preferences, and integration/evidence; edits to shared files and commits are serialized by the coordinator.
+
+## 4. Architecture and ownership
+
+All parsing, asset decoding, theme compilation, selection and style lookup are Ring 3. User DLLs may use only `micant/shared/` ABI declarations and established Win32/syscall interfaces; they must not include `micant/km/` or create Executive objects. The kernel does not parse CSS or image formats. `Cm`/Userenv own settings persistence when the profile path is available; `Io` owns file access; `Ob`/`Se` govern handles and access; `Ps` owns process lifetime; `Mm` owns mappings and section lifetime; `Win32k` remains authoritative for HWND validity, geometry, visibility, active/focus state, hit testing, and surface authorization; GDI32/Comctl32/UxTheme are Ring 3 clients; the existing compositor owns composition and display submission; the existing display driver owns scanout.
+
+The theme service loads and compiles packages away from the compositor paint path. It publishes `shared_ptr`-equivalent/reference-counted immutable `CompiledTheme` snapshots through a generation-tagged, atomic active-theme reference. Each paint/frame takes a stable reference. A new theme becomes active only after all required data validates; old references drain naturally. Failure leaves the prior theme or built-in Base active. No CSS parsing or blocking storage I/O occurs in a frame callback.
+
+Cross-boundary changes use fixed-size/versioned records in `micant/shared/`, with checked lengths, generation and process ownership. No kernel pointer is retained from user memory. Win32k returns authorized geometry/state snapshots or validated operations; it does not accept arbitrary theme-owned drawing commands with kernel authority.
+
+## 5. Native model and package format
+
+Compile import data into a GTK-independent model: semantic color tokens; per-control/per-part/per-state resolved properties; logical font family/size/weight; text/background/border colors; border widths/radii; padding/margins/minimum sizes; gradients and authorized image references; opacity/material; shadow parameters; animation durations; nonclient metrics; DPI scaling; and capability/fallback flags. Use fixed-point or bounded integer geometry and canonical RGBA representation. Distinguish straight and premultiplied alpha at API boundaries.
+
+Suggested package root: `System/Themes/Base/` and `System/Themes/WhiteSur/{Light,Dark,assets,theme.manifest,LICENSES}/`, adjusted to existing system volume layout. The manifest has schema/version, theme ID, variant, accent/default, entry CSS, allowed asset roots, content hashes and license/provenance references. Reject absolute paths, `..`, symlink escapes, unknown schema versions, duplicate IDs and undeclared assets. Package assets are read-only. Never execute upstream install scripts at boot.
+
+## 6. GTK 3 CSS subset and parser/compiler
+
+The initial compatibility contract is only the syntax actually used by the selected, generated WhiteSur profile plus focused fixtures. It is not all GTK CSS. Support lexical comments/strings/escapes, bounded rule sets, type/class/id selectors only if required, state pseudo-classes, descendant and child combinators if required, deterministic specificity/cascade, `@define-color`, GTK color references, restricted same-package `@import`, `rgb()`, `rgba()`, `alpha()`, `mix()`, `shade()`, `lighter()`, `darker()`, and the selected properties: `color`, `background-color`, `border`, `border-radius`, `padding`, `margin`, `min-width`, `min-height`, `box-shadow`, selected `background-image` gradients and package-relative asset URLs, and required font declarations. Unsupported at-rules, pseudo-classes, selectors, functions and properties are diagnostic errors or explicitly recorded fallback properties; they never silently claim full compatibility.
+
+Lexer/parser state is owned by a compile request. Compile into temporary bounded arenas/vectors; validate all selectors, declarations, expressions and references, then publish or discard as a whole. Numeric parsing rejects NaN/infinity, overflow, negative dimensions where prohibited, and excessive precision. Color operations use specified channel/alpha arithmetic and clamping. Asset paths are normalized under the package root; remote URLs and filesystem traversal are rejected. CSS errors include file/line/column and property/reason.
+
+Initial limits must be constants with tests and manifest/compiler diagnostics: CSS bytes, import depth, total imported bytes, rules, selectors per rule, selector token count/depth, declarations/rule, expression depth/operations, variables, assets, image dimensions/decoded bytes, total allocation and compile work. Exact limits are set from upstream profile inventory before parser code lands, not guessed here. A limit failure is `STATUS_LIMIT_EXCEEDED`/appropriate Win32 error, preserves active theme, and releases all temporary allocations.
+
+Compiler output is indexed by normalized control class, part, state, DPI bucket and property. Cache keys include content hashes, compiler schema/version, variant, accent and DPI scale. Cache invalidation is generation-based; a failed compile cannot evict current active data. Asset decode uses existing Ring 3 image decoders and validates size/format before raster use.
+
+## 7. WhiteSur import, variants, assets and licenses
+
+Fetch only the official upstream repository into a temporary development location. Record the exact commit SHA, repository URL, retrieval date, source paths, generator commands and output hashes. Inspect `README.md`, `COPYING`, installation scripts, `src/`, `release/`, `other/`, generated CSS, Sass templates and individual asset notices before selecting files. Preserve MIT text and all component-specific copyright/license notices; do not assume every bundled image/font/icon shares the repository license. Do not commit the upstream repository wholesale. Initial `git clone --depth 1` to `/private/tmp/MicaNT-WhiteSur-gtk-theme` failed on 2026-11-15 with DNS resolution failure for `github.com`; no files were imported or license assertions made about individual assets. An upstream page reported revision `e39f6341fdcdf02826d3daab68faf4204669edf3`, but this is provisional until fetched and confirmed from Git. Retry the clone before packaging.
+
+First package the generated upstream-default WhiteSur Light and Dark CSS with normal opacity, default accent, plus one real upstream alternate accent if available. Add Solid only if the selected generated CSS has a distinct supported behavior; otherwise record it as unsupported rather than aliasing it. Keep only referenced SVG/PNG assets and notices. If generation is necessary, inspect every script and invoke only development tools in a temporary work area; never run install, home-directory mutation, GTK runtime, or dependency installation without explicit need. WhiteSur-specific font families fall back through the font engine's documented chain when absent; do not bundle fonts without license review.
+
+## 8. Style resolution, states, palette, variants and accents
+
+Resolve from most specific matching rule to inherited/default values with deterministic cascade and a complete Base value for every renderer-required property. Model Normal, Hover, Pressed, Focused, Disabled, Checked, Selected, Active/Inactive as applicable. State transitions invalidate only affected windows/control regions. Disabled and focus cues remain distinguishable and semantic/accessibility state remains controlled by the control API, not the colors.
+
+Light and Dark are separate compiled palettes/assets. Auto uses configured local wall-clock day/night bounds and existing timer/time-change notifications; it must not poll continuously. Handle clock/time-zone changes and resume through existing notification mechanisms where supported; if a source is unavailable, retain current selection and report the capability gap. Accents are independent semantic tokens: WhiteSur default, blue, purple, green, red and orange. Prefer upstream generated accent variants; otherwise transform semantic tokens only, with contrast checks for text and focus indicators. Do not recolor arbitrary bitmaps.
+
+Font family/size and metrics resolve to the canonical Ring 3 font service. DPI conversion is centralized, overflow checked, and applied to logical metrics and raster cache keys. System colors and high-contrast/reduced-motion overrides have precedence according to the eventual Win32 compatibility table.
+
+## 9. UxTheme and Win32 control APIs
+
+Replace fake static handles in `include/micant/um/subsystems/winuser/uxtheme.hpp` with per-process validated handles owning a theme snapshot, class-list mapping, DPI and optional window association. Invalid/closed handles return the documented HRESULT; close releases ownership exactly once. Implement and test `OpenThemeData`, `OpenThemeDataEx` when required, `CloseThemeData`, `GetThemeColor`, `GetThemeFont`, `GetThemePartSize`, `GetThemeMargins`, `GetThemeBackgroundContentRect`, `DrawThemeBackground`, `DrawThemeText`, `DrawThemeTextEx`, `IsThemeActive`, `IsAppThemed`, `SetWindowTheme`, `GetCurrentThemeName`, `GetThemeTransitionDuration`, and `GetThemeSysColor` for the declared supported classes/parts. Unsupported parts/flags fail explicitly. Preserve ABI/calling convention and validate pointers, output sizes, rectangles and count semantics.
+
+Use canonical GDI drawing into the caller's authorized target surface; UxTheme must not own a competing renderer. GDI32 must first provide real bounded brushes, pens, font selection, compatible memory surfaces/DIBs, clipping and text raster operations needed by controls. Comctl32 owns actual common control class procedures and lifecycle. Theme changes notify/invalidate through User32/Win32k queues; do not redraw from an unrelated thread into stale DCs.
+
+Required controls, each with tested Normal/Hover/Pressed/Focused/Disabled/Checked/Selected applicability: push/default/toggle button, checkbox, radio, edit/password, combo, list, menu/context menu, tab, progress, scrollbar, slider/trackbar, toolbar, status bar and tooltip. Implement progressively along real Explorer call sites and preserve keyboard focus, accessibility state, hit regions, semantics, and explicit unsupported style behavior. Explorer must query the active theme APIs; a hardcoded Explorer-only palette is not acceptable.
+
+## 10. Nonclient decorations and Win32k integration
+
+Win32k is authoritative for caption/frame/client geometry, min/max/restore state, active state, hit-test regions and input capture. It publishes a versioned snapshot in the shared compositor ABI, including HWND token, process ownership, bounds, frame metrics, caption bounds, icon/title references or safe snapshots, active/maximized state, DPI, and theme generation. Validate all lengths/handles at publication. Theme data supplies appearance/metrics but cannot alter hit testing authority.
+
+The compositor renders caption background, title text through the font service, icon through the icon subsystem, and minimize/maximize/restore/close glyphs using the snapshot and compiled tokens. Button rectangles must coincide exactly with Win32k hit targets. Close sends the ordinary close request/message and follows normal veto/destruction semantics. Resize borders continue to hit-test with transparent/rounded visuals. Client pixels are clipped below/inside the frame. Inactive windows have separate state. DPI changes recalculate metrics and notify windows before paint.
+
+Current implementation location is split across `kernel/win32k/freestanding.cpp`, `include/micant/km/win32k/freestanding.hpp`, shared compositor contracts, and `tools/compositor_app.cpp`; avoid a new window manager or decorative overlay. Shared-file edits must be coordinated with pre-existing dirty work.
+
+## 11. DWM-like effects and compositor pipeline
+
+Implement only documented attributes with actual backing behavior in `dwmapi.hpp`/DWM seal and the existing compositor. Store per-window values with validated HWND lifetime and exact size/flag checks; `DwmGetWindowAttribute` returns stored/effective values. Unsupported backdrop/effect values return documented failure. Distinguish API compatibility from visual similarity; do not call a tint/blur effect Windows Mica/Acrylic compatibility without contract evidence.
+
+First implement alpha blending and clipping for authorized surfaces, then rounded masks and shadows, then bounded blur-behind/tint. Correct ordering: compose underlying surfaces; sample only required region; blur; apply tint/opacity; composite client; render decorations/shadow by documented stacking; present dirty bounds. Cache blurred regions keyed by scene generation/region/radius and invalidate on overlapping changes. Reduce blur quality or disable optional effects under memory/latency pressure. Track dirty rectangles; never blur the full desktop for a local change. Use fixed scratch budgets and recover to basic software composition after allocation/renderer error.
+
+VirtIO-GPU 2D scanout is a display transport and remains distinct from GPU composition. The theme model/render interface must be backend-neutral; no GPU acceleration claim before actual GPU composition submission and completion evidence.
+
+## 12. Settings, persistence and multiuser
+
+Define a versioned per-user settings record: Theme ID; Light/Dark/Auto; day/night times; accent; transparency/blur toggles and quality; animation/reduced motion; contrast mode; optional DPI override. Validate each field and apply defaults independently on corrupt/missing values. `Cm`/Userenv owns persistent user settings and profile ACLs; theme service owns in-memory effective policy. No global mutable user setting. Theme packages are system read-only; user packages, if later supported, are confined to authorized user roots and cannot override system security policy.
+
+Load Base immediately, then selected package. Persist selection only after a valid theme has become active, or use transactional settings update with rollback. A runtime change compiles first, atomically swaps, increments generation, posts bounded notifications, invalidates existing windows, and retains old snapshots until all frames/handles release. Restarting Explorer is not permitted. If profile storage is unavailable, retain in-memory settings and state that persistence is unavailable.
+
+## 13. Settings UI
+
+Use the existing Explorer/settings application ownership and common controls. Expose theme ID, Light/Dark/Auto and schedule, accent, transparency, blur quality, animation/reduced motion and contrast mode. Preview/selection must compile before Apply and offer recovery to Base if a package is invalid. UI is downstream of engine APIs; no theme selection hardcoded in Explorer startup. Until a dedicated settings surface exists, documented registry/native setting APIs are the test/control surface.
+
+## 14. Fonts, icons, cursors and wallpaper
+
+Reuse `USERMODE_FONT_ENGINE_TRUETYPE_OPENTYPE_SPEC.md`, icon and cursor subsystem specs, and `USERMODE_IMAGE_CODEC_AND_WALLPAPER_SPEC.md`. Do not parse font/image formats in kernel or duplicate managers. Resolve theme font aliases through the font manager with fallback. Use current icon/cursor handle and decode paths. Theme backgrounds/wallpaper remain owned by existing shell/wallpaper path; theme package backgrounds are optional assets with bounded decode. Every missing/corrupt optional asset falls back to Base glyph/color and does not stop the shell.
+
+## 15. Failure handling and fallback tiers
+
+Tier A: built-in immutable Base style table, always present and complete for supported windows/controls. Tier B: existing Ring 3 basic software compositor with effects disabled. Tier C: existing bootstrap display path when the full compositor is unavailable; this does not imply functional Win32 APIs. Theme manager is optional for boot. Parser/package/asset/OOM failure never replaces the current valid snapshot; on initial load use Base. Device reset or blur failure disables only optional effects and re-presents through the canonical display owner. Do not claim automatic process/service restart where no recovery supervisor exists.
+
+Required negative QEMU scenarios: remove WhiteSur from staged image; malformed entry CSS; missing referenced asset; force bounded allocation/compile failure if a supported fault injection hook exists. Explorer still starts, windows/input/focus/hit testing and presentation remain operational, no kernel panic occurs, and Base visuals appear. Restore package and show a successful subsequent load. Fault injection must be test-only and must not become a production bypass.
+
+## 16. Performance and quotas
+
+Set and document budgets for package bytes, compile time/work, rule/style count, cache bytes, decoded asset pixels, per-frame scratch, dirty area, blur radius/downsample ratio, and notification fanout. Measure frame time and allocations before/after. Theme lookup should be indexed and bounded; no parsing, disk I/O, blocking lock, unbounded allocation or full-screen blur in the present path. On budget pressure, disable animation/blur/shadows in priority order and preserve Base rendering.
+
+## 17. Security and error model
+
+Treat CSS, manifest, SVG/PNG and all paths as untrusted even in system packages. Enforce package-root canonicalization, no remote URL, no traversal, no scripts, bounded parser/decoder complexity, checked arithmetic, per-user ACLs, read-only system assets, and process-bound theme handles. Avoid sharing writable compiled data across users. Validate user pointers at syscall boundaries and hold object references across asynchronous paint. Malformed themes return parse/validation errors with diagnostics; invalid API handles return documented HRESULTs; unsupported properties are diagnostics plus defined fallback; OOM leaves current snapshot untouched.
+
+## 18. Test strategy and acceptance
+
+No theme test or QEMU result is claimed by this specification. When execution is authorized, preserve persistent build directories and test incrementally. Unit suites cover lexer/parser grammar and limits, selector specificity/cascade, color arithmetic, package path traversal, manifest/license inventory, image limits, model completeness, handle lifetime/stale handles, drawing geometry/clipping, alpha premultiplication, settings validation/atomicity, and failed-reload preservation. Use real generated WhiteSur CSS fixtures, not only hand-written trivial CSS. DLL export tests call the actual freestanding DLL implementations and verify output pixels and error codes. Boundary checks verify no private kernel includes from user DLLs.
+
+QEMU sequence uses the canonical `python3 qemu.py --headless` profile and actual `ntoskrnl_core_baremetal`, Explorer Ring 3, compositor and display service: baseline Base boot; WhiteSur Light then Dark; each target control state; titlebar hit targets including close/resize; runtime switch with Explorer alive; accents; alpha/rounded/shadow/blur on and off; theme removal; malformed CSS; missing assets; settings persistence across QEMU restart when storage is available; stable serial and scanout/QMP pixel evidence. Record command, source SHA, serial/QMP logs, screenshot/pixel evidence, backend, and precise outcome. Hardware is a separate later gate. Do not report hosted-only, compile-only, or marker-only results as end-to-end acceptance.
+
+Acceptance gates:
+
+1. Base theme renders through existing desktop after every theme failure scenario.
+2. Generated WhiteSur Light and Dark compile with an explicit supported/unsupported construct report and real assets/licenses.
+3. Native model is GTK-independent and used by renderer lookup.
+4. Real UxTheme handles/API operations and selected Win32 controls draw through canonical GDI surfaces.
+5. Explorer is visibly WhiteSur themed in Ring 3, with working controls and titlebar input alignment.
+6. Light/Dark/Auto, accents and existing-window invalidation work; runtime switch does not restart Explorer.
+7. Preferences persist per user when profile storage exists; multiuser separation is demonstrated.
+8. Optional alpha/rounding/shadow/blur work in the software compositor and failure recovers to Base/basic composition.
+9. Missing package, invalid CSS and missing asset QEMU scenarios preserve Explorer, input, focus and presentation.
+10. Actual bare-metal target link and QEMU evidence exist; hardware/GPU acceleration claims are separately evidenced.
+
+## 19. Implementation slices and file/API ownership
+
+| Slice | Files / owner | Core interfaces and invariants | Failure / test gate |
+|---|---|---|---|
+| A. Upstream inventory/package | temporary upstream checkout; new `System/Themes` packaging/build staging metadata; docs provenance | exact SHA, generated profile, restricted package roots, notices preserved | no install side effects; package manifest/asset/license audit |
+| B. Parser and compiler | new Ring 3 theme subsystem headers/source under `include/micant/um/subsystems/theme/` and `tools/theme/`; parser worker only | bounded lexer/AST, deterministic cascade, no km includes, atomic compile result | malformed/oversized/traversal fixtures and real WhiteSur compile report |
+| C. Native model/cache | same Ring 3 theme owner; shared model only if crossing ABI is essential | immutable snapshots, generation/content cache key, explicit ref lifetime | OOM/failed reload preserves active generation |
+| D. UxTheme/GDI/control contracts | `uxtheme.hpp`, `gdi32.hpp`, `user32.hpp`, `comctl32.hpp`, corresponding `tools/dlls/*` and canonical System32 implementation; API worker | real handles, ABI checks, real raster ops, correct failure semantics | actual DLL export and pixel/control state tests |
+| E. Nonclient contract | `include/micant/shared/compositor_surface.h`, `include/micant/shared/win32k_client.h`, `kernel/win32k/freestanding.cpp`, `kernel/ps/winnt_win32k_server.cpp`; Win32k/compositor workers coordinate first | geometry/hit-test single authority; validated snapshots; button rects align | existing E1–E6 interaction regressions and caption pixel evidence |
+| F. Compositor render | `tools/compositor_app.cpp` and existing shared ABI; compositor worker | software baseline always available; bounded dirty regions and alpha | QEMU screenshots/pixels, effects off/on, failure fallback |
+| G. Preferences/notifications | Cm/Userenv owner, Explorer settings UI, theme service; preferences worker | per-user access, validated versioned record, event-driven Auto, atomic swap | profile isolation/corrupt settings/reboot persistence |
+| H. Integrated acceptance | build/QEMU scripts and tests owned by integration worker; coordinator integrates | actual production graph and Explorer entry, no fake success | full matrix in §18 with artifacts and exact source SHA |
+
+Cross-cutting error handling: validate before mutation; allocate temporary state before publish; rollback partial registrations/handles/surfaces; preserve prior active theme; release references on window/process teardown; distinguish unavailable optional effect from required API failure. Shared files must not be concurrently edited. Only coordinator stages/commits after reviewing `HEAD`, worktree, staged diff, ownership, and coherent verification evidence.
+
+## 20. Roadmap and dependencies
+
+1. Finish upstream audit and package one Light/Dark/default-accent profile with notices.
+2. Build Base model plus bounded parser/compiler and real WhiteSur construct inventory; unit tests and hostile-input limits.
+3. Implement compiled style lookup/cache and handle lifetime; connect real UxTheme queries/drawing to GDI.
+4. Implement selected controls end-to-end through actual DLL exports; move Explorer chrome/control colors to UxTheme/model.
+5. Extend versioned Win32k/compositor snapshot for nonclient state; render WhiteSur titlebar/buttons and align hit tests.
+6. Add atomic runtime switch, Light/Dark/Auto/accent settings, per-user persistence and invalidation.
+7. Add software alpha, rounded masks, shadows, then bounded blur/tint with Base fallback.
+8. Run real Explorer QEMU positive and negative/fault-injection matrix; update integration ledger at meaningful verified checkpoints only.
+9. Assess hardware profile and future accelerated backend independently; do not block software completeness on an unoffered QEMU VirGL device, and do not claim GPU acceleration from 2D scanout.
+
+The immediate first visible deliverable is a real Explorer Ring 3 window whose titlebar and initial controls use generated WhiteSur Light/Dark style data through the existing window/compositor pipeline, while close, resize, focus, input, cleanup and Base fallback continue to work. This is an intermediate gate, not completion of the broader request.
