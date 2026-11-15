@@ -52,6 +52,12 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 1. UxTheme and GDI behavior
 
+- [x] `EndBufferedAnimation` no longer reports success for the unsupported
+  animation path: the real `uxtheme.dll` export returns `E_NOTIMPL`. Explorer
+  called the export in Ring 3 and logged the expected status in
+  `/private/tmp/micant-uxtheme-failure-contract-run/serial.log`; QEMU input,
+  window geometry, cleanup and stable boot passed in the same run. This closes
+  one fabricated-success case, not the full export audit.
 - [ ] Audit every exported UxTheme function against its public signature,
   result codes, handle lifetime and documented unsupported cases.
 - [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`

@@ -385,7 +385,7 @@ inline HANAnimation BeginBufferedAnimation(win32::HWND /*hwnd*/, void* /*hdcTarg
 }
 
 inline win32::HRESULT EndBufferedAnimation(HANAnimation /*hbpAnimation*/, win32::BOOL /*fUpdateTarget*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::BOOL BufferedPaintRenderAnimation(win32::HWND /*hwnd*/, void* /*hdcTarget*/) noexcept {

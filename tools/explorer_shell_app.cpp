@@ -630,6 +630,11 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
+    const int32_t unsupportedAnimation = EndBufferedAnimation(nullptr, 0);
+    if (unsupportedAnimation == static_cast<int32_t>(0x80004001u))
+        PrintLine("[MicaNT Theme] Unsupported buffered animation returns E_NOTIMPL");
+    else
+        PrintLine("[MicaNT Theme] Buffered animation failure contract mismatch");
     g.visualTheme = candidate;
     g.visualThemeReady = true;
     for (size_t i = 0; i < profileBytes; ++i) g.themeProfile[i] = profile[i];

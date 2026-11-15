@@ -60,5 +60,9 @@ __declspec(dllexport) int32_t WINAPI IsThemeBackgroundPartiallyTransparent(void*
         int32_t part, int32_t state) noexcept {
     return micant::uxtheme::IsThemeBackgroundPartiallyTransparent(theme, part, state);
 }
+__declspec(dllexport) int32_t WINAPI EndBufferedAnimation(void* animation,
+        int32_t updateTarget) noexcept {
+    return micant::uxtheme::EndBufferedAnimation(animation, updateTarget);
+}
 
 }
