@@ -1021,8 +1021,19 @@ micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
     if (!MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot)))
         return NtStatus::InvalidParameter;
     StateLockGuard lock;
+    constexpr uint32_t kWmThemeChanged = 0x031A;
+    size_t activeWindows = 0;
+    size_t freeMessageSlots = 0;
+    for (const auto& window : g_windows) activeWindows += window.active ? 1u : 0u;
+    for (const auto& message : g_messages) freeMessageSlots += message.active ? 0u : 1u;
+    if (freeMessageSlots < activeWindows) return NtStatus::InsufficientResources;
+
     g_themeSnapshot = snapshot;
     if (++g_themeGeneration == 0) ++g_themeGeneration;
+    for (const auto& window : g_windows) {
+        if (window.active && !enqueueWindowMessage(window, kWmThemeChanged, 0, 0))
+            return NtStatus::InsufficientResources;
+    }
     return NtStatus::Success;
 }
 

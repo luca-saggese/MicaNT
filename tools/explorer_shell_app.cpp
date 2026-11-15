@@ -1014,6 +1014,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         redrawDesktop();
         return 0;
     }
+    if (message == 0x031A /* WM_THEMECHANGED */) {
+        if (auto* app = appFromHwnd(hwnd)) {
+            drawAppWindow(*app);
+            present(app->hwnd);
+            return 0;
+        }
+    }
     if (hwnd == g.desktop && message == WM_KEYDOWN && wParam == VK_RETURN) {
         openView(View::MyComputer);
         return 0;
