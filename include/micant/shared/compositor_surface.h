@@ -20,7 +20,7 @@
 #define MICANT_COMPOSITOR_PIXELS_BASE (MICANT_COMPOSITOR_METADATA_BASE + 0x10000u)
 
 #define MICANT_COMPOSITOR_STORE_MAGIC 0x4D434F4Du /* MCOM */
-#define MICANT_COMPOSITOR_STORE_VERSION 3u
+#define MICANT_COMPOSITOR_STORE_VERSION 4u
 
 enum {
     MICANT_COMPOSITOR_SURFACE_ACTIVE = 0x01u,
@@ -36,7 +36,9 @@ enum {
     MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_MASK = 0xC00u,
     MICANT_COMPOSITOR_CURSOR_ACTIVE = 0x01u,
     MICANT_COMPOSITOR_CURSOR_VISIBLE = 0x02u,
-    MICANT_COMPOSITOR_DIRTY_FULL = 0x01u
+    MICANT_COMPOSITOR_DIRTY_FULL = 0x01u,
+    MICANT_COMPOSITOR_ANIMATION_ACTIVE = 0x01u,
+    MICANT_COMPOSITOR_ANIMATION_MINIMIZE = 0x02u
 };
 
 typedef struct MicaCompositorDirtyRect {
@@ -63,6 +65,9 @@ typedef struct MicaCompositorSurfaceInfo {
     uint64_t contentGeneration;
     uint32_t activeWriters;
     uint32_t style;
+    uint32_t animationFlags;
+    MicaCompositorDirtyRect animationTarget;
+    uint64_t animationGeneration;
     uint16_t title[64];
 } MicaCompositorSurfaceInfo;
 
@@ -85,6 +90,6 @@ typedef struct MicaCompositorMetadataStore {
 
 #ifdef __cplusplus
 static_assert(sizeof(MicaCompositorDirtyRect) == 16);
-static_assert(sizeof(MicaCompositorSurfaceInfo) == 208);
+static_assert(sizeof(MicaCompositorSurfaceInfo) == 240);
 static_assert(sizeof(MicaCompositorMetadataStore) <= MICANT_COMPOSITOR_METADATA_STORE_SIZE);
 #endif

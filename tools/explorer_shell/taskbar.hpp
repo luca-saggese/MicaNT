@@ -12,6 +12,14 @@ struct TaskbarButton {
     bool active;
 };
 
+struct TaskbarButtonBounds {
+    int32_t left{}, top{}, right{}, bottom{};
+};
+
+[[nodiscard]] bool GetTaskbarButtonBounds(uint32_t screenWidth,
+    uint32_t screenHeight, uint32_t taskbarHeight, size_t buttonCount,
+    size_t buttonIndex, TaskbarButtonBounds& bounds) noexcept;
+
 // Paint the XP-style taskbar into the shell's desktop surface. The taskbar
 // consumes a snapshot of top-level shell tasks and owns no window state.
 void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,

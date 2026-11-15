@@ -3913,7 +3913,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             return status(NtStatus::AccessDenied);
         __asm__ __volatile__("swapgs" : : : "memory");
         __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
-        const auto result = win32k::freestanding::waitForCompositorUpdate(first);
+        const auto result = win32k::freestanding::waitForCompositorUpdate(first, second);
         __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
         __asm__ __volatile__("swapgs" : : : "memory");
         return status(result);

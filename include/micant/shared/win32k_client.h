@@ -115,7 +115,13 @@ enum {
     MICANT_WIN32K_OP_SET_THEME_SNAPSHOT,
     MICANT_WIN32K_OP_GET_THEME_SNAPSHOT,
     MICANT_WIN32K_OP_BEGIN_WINDOW_UPDATE,
-    MICANT_WIN32K_OP_END_WINDOW_UPDATE
+    MICANT_WIN32K_OP_END_WINDOW_UPDATE,
+    MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS
+};
+
+enum {
+    MICANT_WIN32K_ANIMATION_MINIMIZE = 1u,
+    MICANT_WIN32K_ANIMATION_RESTORE = 2u
 };
 
 typedef struct MicaWin32kRequest {
@@ -213,6 +219,8 @@ MICANT_WIN32K_API int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage*);
 MICANT_WIN32K_API int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo*);
 MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot*);
 MICANT_WIN32K_API int32_t MicaWin32kGetThemeSnapshot(MicaThemeSnapshot*);
+MICANT_WIN32K_API int32_t MicaWin32kSetTaskbarButtonBounds(
+    void*, const MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kFillRect(void*, const MicaWin32kRect*, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kBlendRect(void*, const MicaWin32kRect*, uint32_t);
 

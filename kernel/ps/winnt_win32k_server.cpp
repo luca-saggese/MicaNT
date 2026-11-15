@@ -289,6 +289,16 @@ int32_t MicaWin32kSetWindowPos(void* hwnd, void* after, int32_t x,
     return request(MICANT_WIN32K_OP_SET_WINDOW_POS, value) && value.result;
 }
 
+int32_t MicaWin32kSetTaskbarButtonBounds(void* hwnd,
+                                         const MicaWin32kRect* bounds) {
+    if (!hwnd || !bounds) return 0;
+    MicaWin32kRequest value{};
+    value.operation = MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS;
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.rect = *bounds;
+    return request(value.operation, value) && value.result;
+}
+
 int32_t MicaWin32kPostMessageW(void* hwnd, uint32_t message,
                                uintptr_t wParam, intptr_t lParam) {
     MicaWin32kRequest value{};

@@ -2,6 +2,9 @@
 #include "notification_area.hpp"
 #include "../gui_common.hpp"
 
+#include <algorithm>
+#include <climits>
+
 namespace micant::explorer {
 namespace {
 
@@ -28,6 +31,31 @@ void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 }
 
 } // namespace
+
+bool GetTaskbarButtonBounds(uint32_t screenWidth, uint32_t screenHeight,
+    uint32_t taskbarHeight, size_t buttonCount, size_t buttonIndex,
+    TaskbarButtonBounds& bounds) noexcept {
+    bounds = {};
+    if (!screenWidth || !screenHeight || taskbarHeight > screenHeight ||
+        !buttonCount || buttonIndex >= buttonCount ||
+        screenWidth > static_cast<uint32_t>(INT32_MAX) ||
+        screenHeight > static_cast<uint32_t>(INT32_MAX) ||
+        buttonCount > static_cast<size_t>(INT32_MAX)) return false;
+    const int32_t taskRight = static_cast<int32_t>(screenWidth) - 126;
+    const int32_t maxTaskWidth = taskRight > 112 ? taskRight - 112 : 0;
+    const int32_t taskWidth = std::min<int32_t>(
+        maxTaskWidth / static_cast<int32_t>(buttonCount), 146);
+    if (taskWidth < 64) return false;
+    const int64_t left = 112 + static_cast<int64_t>(buttonIndex) * taskWidth;
+    const int64_t top = static_cast<int64_t>(screenHeight - taskbarHeight) + 8;
+    const int64_t right = left + taskWidth - 4;
+    const int64_t bottom = top + 25;
+    if (left < 0 || top < 0 || right > screenWidth || bottom > screenHeight)
+        return false;
+    bounds = {static_cast<int32_t>(left), static_cast<int32_t>(top),
+              static_cast<int32_t>(right), static_cast<int32_t>(bottom)};
+    return true;
+}
 
 void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
                  uint32_t taskbarHeight, const TaskbarButton* buttons,

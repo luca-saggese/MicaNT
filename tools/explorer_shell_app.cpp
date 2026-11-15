@@ -427,6 +427,15 @@ void redrawTaskbar() noexcept {
     if (!g.taskbarPixels) return;
     micant::explorer::TaskbarButton buttons[MAX_APP_WINDOWS]{};
     const size_t count = collectTaskbarButtons(buttons);
+    for (size_t i = 0; i < g.taskSwitch.count; ++i) {
+        micant::explorer::TaskbarButtonBounds bounds{};
+        if (!micant::explorer::GetTaskbarButtonBounds(g.screenW, g.screenH,
+                TASKBAR_H, g.taskSwitch.count, i, bounds)) continue;
+        const MicaWin32kRect rect{bounds.left, bounds.top,
+                                  bounds.right, bounds.bottom};
+        (void)MicaWin32kSetTaskbarButtonBounds(g.taskSwitch.entries[i].hwnd,
+                                                &rect);
+    }
     micant::explorer::DrawTaskbar(g.taskbarPixels, g.screenW, TASKBAR_H, TASKBAR_H,
                                   buttons, count, g.clockText, activeShellPalette());
     present(g.taskbar);

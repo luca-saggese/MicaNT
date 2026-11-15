@@ -34,6 +34,8 @@ constexpr uint32_t kWmClose = 0x0010;
 constexpr int32_t kSwShowMinimized = 2;
 constexpr int32_t kSwMinimize = 6;
 constexpr int32_t kSwRestore = 9;
+constexpr uint32_t kWindowAnimationMinimize = MICANT_WIN32K_ANIMATION_MINIMIZE;
+constexpr uint32_t kWindowAnimationRestore = MICANT_WIN32K_ANIMATION_RESTORE;
 constexpr int32_t kGwlpWndProc = -4;
 constexpr int32_t kGwlpUserData = -21;
 constexpr uint32_t kWsChild = 0x40000000u;
@@ -89,6 +91,10 @@ struct Window {
     int32_t x{}, y{}, width{}, height{};
     int32_t restoreX{}, restoreY{}, restoreWidth{}, restoreHeight{};
     uint32_t style{}, extendedStyle{};
+    uint32_t animationFlags{};
+    uint64_t animationGeneration{};
+    MicaWin32kRect taskbarButtonBounds{};
+    MicaWin32kRect animationTarget{};
     uint64_t contentGeneration{};
     uint32_t activeWriters{};
     struct WriterOwner { uint64_t processId{}; uint32_t count{}; };
@@ -98,6 +104,7 @@ struct Window {
     uint64_t ownerProcessId{};
     uint64_t zOrder{};
     bool active{}, visible{}, iconic{}, maximized{};
+    bool hasTaskbarButtonBounds{};
 };
 
 struct QueuedMessage {
@@ -349,6 +356,19 @@ uint8_t captionButtonAt(const Window& window, int32_t localX,
     if (localX >= closeLeft - 29 && localX < closeLeft - 1) return 2;
     if (localX >= closeLeft - 58 && localX < closeLeft - 30) return 1;
     return 0;
+}
+
+void beginWindowAnimation(Window& window, uint32_t mode) noexcept {
+    if (!window.hasTaskbarButtonBounds ||
+        (mode != kWindowAnimationMinimize && mode != kWindowAnimationRestore)) {
+        window.animationFlags = 0;
+        return;
+    }
+    window.animationFlags = MICANT_COMPOSITOR_ANIMATION_ACTIVE |
+        (mode == kWindowAnimationMinimize
+            ? MICANT_COMPOSITOR_ANIMATION_MINIMIZE : 0u);
+    window.animationTarget = window.taskbarButtonBounds;
+    if (++window.animationGeneration == 0) ++window.animationGeneration;
 }
 uint32_t g_mouseButtons{};
 void (*g_compositorPublishCallback)() noexcept{};
@@ -828,16 +848,35 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             const int32_t command = static_cast<int32_t>(request.args[1]);
             const bool wasVisible = window->visible;
             const bool wasIconic = window->iconic;
+            const bool minimize = command == kSwShowMinimized || command == kSwMinimize;
+            if (minimize && !wasIconic)
+                beginWindowAnimation(*window, kWindowAnimationMinimize);
+            else if (wasIconic && command == kSwRestore)
+                beginWindowAnimation(*window, kWindowAnimationRestore);
+            else
+                window->animationFlags = 0;
             if (wasVisible || wasIconic) markWindowBounds(*window);
             window->visible = command != 0;
-            window->iconic = command == kSwShowMinimized ||
-                             command == kSwMinimize;
+            window->iconic = minimize;
             if (window->visible) {
                 window->zOrder = nextZOrder();
                 g_foregroundWindow = window->handle;
             }
             if (window->visible) markWindowBounds(*window);
             request.result = wasVisible;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            const auto& bounds = request.rect;
+            if (bounds.left < 0 || bounds.top < 0 ||
+                bounds.right > kScreenWidth || bounds.bottom > kScreenHeight ||
+                bounds.left >= bounds.right || bounds.top >= bounds.bottom)
+                return NtStatus::InvalidParameter;
+            window->taskbarButtonBounds = bounds;
+            window->hasTaskbarButtonBounds = true;
+            request.result = 1;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_WINDOW_POS: {
@@ -1285,6 +1324,7 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         g_pressedCaptionButton = 0;
         if (!captured || !pressedButton || releasedButton != pressedButton) return true;
         if (pressedButton == 1) {
+            beginWindowAnimation(*captured, kWindowAnimationMinimize);
             captured->iconic = true;
             (void)enqueueWindowMessage(*captured, kWmSize, 1, 0);
             if (g_foregroundWindow == captured->handle) {
@@ -1484,6 +1524,11 @@ void publishCompositorSurfaces() noexcept {
         info.contentGeneration = window.contentGeneration;
         info.activeWriters = window.activeWriters;
         info.style = window.style;
+        info.animationFlags = window.animationFlags;
+        info.animationTarget = {
+            window.animationTarget.left, window.animationTarget.top,
+            window.animationTarget.right, window.animationTarget.bottom};
+        info.animationGeneration = window.animationGeneration;
         for (size_t character = 0; character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
              window.title[character]; ++character)
             info.title[character] = window.title[character];
@@ -1501,11 +1546,13 @@ void publishCompositorSurfaces() noexcept {
     (void)g_compositorWakeEvent.set();
 }
 
-micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence) noexcept {
+micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence,
+                                         uint64_t timeout100ns) noexcept {
     auto* current = ke::KeGetCurrentThread();
     auto* store = g_compositorStore;
     if (!current || !store || current->eventWaitInProgress ||
-        ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+        ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL ||
+        timeout100ns > 1000000u)
         return micant::NtStatus::InvalidDeviceState;
 
     // Reset before checking the generation. A concurrent publication either
@@ -1519,7 +1566,7 @@ micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence) noexcept {
     current->eventWaitUserMode = current->previousUserMode;
     current->eventWaitCanTerminate = current->eventWaitUserMode &&
         ke::KeGetCurrentIrql() == ke::PASSIVE_LEVEL;
-    const auto result = g_compositorWakeEvent.wait(false, false);
+    const auto result = g_compositorWakeEvent.wait(false, false, timeout100ns);
     const bool terminate = current->terminationRequested && current->eventWaitCanTerminate &&
         current->serviceTermination;
     auto terminationRoutine = current->serviceTermination;
