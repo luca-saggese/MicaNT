@@ -560,7 +560,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(taskmgr_boot PRIVATE
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
-    target_link_libraries(taskmgr_boot PRIVATE user32_boot gdi32_boot)
+    target_link_libraries(taskmgr_boot PRIVATE user32_boot gdi32_boot uxtheme_boot)
     set_target_properties(taskmgr_boot PROPERTIES
         OUTPUT_NAME "taskmgr"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"

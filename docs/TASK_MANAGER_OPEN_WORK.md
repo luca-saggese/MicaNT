@@ -9,8 +9,8 @@ Checklist breve; la specifica completa è
 - [x] D2 End task UI e chiusura finestra — QEMU self-test; handle autorizzato,
   `WM_CLOSE`/`WM_DESTROY`, paint, resize e idle.
 - [ ] U1 UI — parziale: finestre, schede, ricerca, ordinamento per intestazione,
-  selezione, Details e grafico CPU a 60 campioni attivi; resta integrazione tema
-  e copertura visiva completa.
+  selezione, Details e grafico CPU a 60 campioni attivi; UxTheme usa colori live
+  se pubblicati, con fallback verificato in QEMU.
 - [ ] P2 memoria per processo — working set corrente/picco live; commit privato
   senza accounting Mm.
 - [ ] S1/S2 hotkey e SAS — manca il percorso trusted Input/HAL → sessione,
@@ -28,4 +28,5 @@ passato il 2026-11-15: process snapshot, CPU, azione D1, controlli UI,
 paint/resize, chiusura e seriale stabile. La scheda Performance e il grafico sono
 stati renderizzati; ordinamento ascendente/discendente, selezione e rifiuto dei
 buffer corto/invalido verificati nell’ultimo run QEMU. Evidenza in
-`/private/tmp/micant-taskmgr-negative-query-retry/serial.log`.
+`/private/tmp/micant-taskmgr-theme-retry/serial.log`; UxTheme ha usato il
+fallback perché il sistema non ha pubblicato uno snapshot live per Task Manager.

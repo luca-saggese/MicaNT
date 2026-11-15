@@ -11,6 +11,8 @@
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/syscall_numbers.hpp"
 #include "micant/shared/win32k_client.h"
+#define MICANT_UXTHEME_IMPORTS
+#include "micant/shared/native_uxtheme_api.h"
 
 extern "C" void* memset(void* destination, int value, size_t count) {
     auto* bytes = static_cast<uint8_t*>(destination);
@@ -144,12 +146,34 @@ uint32_t s_renderHeight{WIN_H};
 uintptr_t s_selectedProcessId{};
 uint32_t s_sortColumn{};
 bool s_sortDescending{};
+uint32_t s_taskmgrWindowBackground{0xFF101623u};
+uint32_t s_taskmgrWindowForeground{0xFFDCF0FFu};
+bool s_taskmgrThemeLoaded{};
 char s_searchText[32]{};
 uint32_t s_searchLength{};
 bool s_searchFocused{};
 bool s_confirmEndTask{};
 bool s_endTaskWaiting{};
 char s_endTaskStatus[64]{};
+
+uint32_t ThemeColorToBgra(uint32_t colorRef) noexcept {
+    return PackBGRA(static_cast<uint8_t>(colorRef),
+                    static_cast<uint8_t>(colorRef >> 8),
+                    static_cast<uint8_t>(colorRef >> 16));
+}
+
+bool InitializeTaskmgrTheme() noexcept {
+    MicaThemeHandle theme = OpenThemeData(nullptr, L"WINDOW");
+    if (!theme) return false;
+    uint32_t background{}, foreground{};
+    const bool valid = GetThemeColor(theme, 1, 1, 3802, &background) == 0 &&
+        GetThemeColor(theme, 1, 1, 3803, &foreground) == 0;
+    (void)CloseThemeData(theme);
+    if (!valid) return false;
+    s_taskmgrWindowBackground = ThemeColorToBgra(background);
+    s_taskmgrWindowForeground = ThemeColorToBgra(foreground);
+    return true;
+}
 
 void SetEndTaskStatus(const char* message) noexcept {
     uint32_t index = 0;
@@ -695,7 +719,8 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
                s_searchLength ? PackBGRA(220, 230, 240) : PackBGRA(120, 135, 155));
 
     if (s_activePage == 1) {
-        FillRect(s_tmBuffer, width, 1, 74, width - 2, height - 99, PackBGRA(16, 22, 35));
+        FillRect(s_tmBuffer, width, 1, 74, width - 2, height - 99,
+                 s_taskmgrWindowBackground);
         DrawString(s_tmBuffer, width, 20, 100, "CPU", PackBGRA(130, 150, 180));
         DrawString(s_tmBuffer, width, 20, 130, "Memory", PackBGRA(130, 150, 180));
         if (snapshot.cpuAvailable) {
@@ -741,7 +766,8 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
             }
         }
     } else if (s_activePage == 2) {
-        FillRect(s_tmBuffer, width, 1, 74, width - 2, height - 99, PackBGRA(16, 22, 35));
+        FillRect(s_tmBuffer, width, 1, 74, width - 2, height - 99,
+                 s_taskmgrWindowBackground);
         if (s_selectedProcessId) {
             char selected[32] = "Selected PID: "; uint32_t cursor = 14;
             AppendUnsigned(selected, sizeof(selected), cursor, s_selectedProcessId);
@@ -785,7 +811,8 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
                     offset += entry->NextEntryOffset;
                 }
             }
-        } else DrawString(s_tmBuffer, width, 20, 102, "Select a process", PackBGRA(150, 165, 185));
+        } else DrawString(s_tmBuffer, width, 20, 102, "Select a process",
+                          s_taskmgrWindowForeground);
         DrawString(s_tmBuffer, width, 20, 232, s_endTaskStatus,
                    PackBGRA(240, 195, 105));
     }
@@ -821,7 +848,7 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
             if (ProcessMatchesSearch(snapshot, *entry) && y + 20 < height - 26) {
             const bool selected = entry->UniqueProcessId == s_selectedProcessId;
             const uint32_t bg = selected ? PackBGRA(38, 62, 94) :
-                ((visibleRow & 1) ? PackBGRA(14, 20, 32) : PackBGRA(16, 22, 35));
+                ((visibleRow & 1) ? PackBGRA(14, 20, 32) : s_taskmgrWindowBackground);
             FillRect(s_tmBuffer, width, 1, y, width - 2, 22, bg);
 
             DrawProcessImageName(snapshot, *entry, y + 3);
@@ -1240,6 +1267,11 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     PrintLine("Task Manager: native entry reached.");
 #endif
+    s_taskmgrThemeLoaded = InitializeTaskmgrTheme();
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    PrintLine(s_taskmgrThemeLoaded ? "Task Manager: system theme loaded."
+                                   : "Task Manager: system theme unavailable; fallback active.");
+#endif
     uint16_t csVal = 0;
 #if defined(__x86_64__)
     __asm__ __volatile__("movw %%cs, %0" : "=r"(csVal));
@@ -1308,6 +1340,13 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
         static_cast<int32_t>(WIN_W + 52), static_cast<int32_t>(WIN_H + 78), 0);
 #endif
     while (true) {
+        if (!s_taskmgrThemeLoaded && InitializeTaskmgrTheme()) {
+            s_taskmgrThemeLoaded = true;
+            (void)InvalidateRect(s_taskmgrWindow, nullptr, 1);
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+            PrintLine("Task Manager: system theme loaded.");
+#endif
+        }
         QueryProcessSnapshot(snapshot);
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
         if (!selftestControlsReported && snapshot.available) {

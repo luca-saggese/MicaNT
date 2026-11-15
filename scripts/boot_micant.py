@@ -1312,6 +1312,14 @@ def run_qemu(
                         if not time_evidence:
                             raise RuntimeError("CPL3 time probe reported neither UTC success nor explicit unavailable status")
                         if taskmgr_selftest:
+                            theme_evidence = (
+                                "Task Manager: system theme loaded." in serial_log or
+                                "Task Manager: system theme unavailable; fallback active." in serial_log
+                            )
+                            if not theme_evidence:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
                             if "Task Manager: native controls self-test failed." in serial_log:
                                 raise RuntimeError("Task Manager tab, search or selection self-test failed")
                             if "Task Manager: query failure self-test failed." in serial_log:
