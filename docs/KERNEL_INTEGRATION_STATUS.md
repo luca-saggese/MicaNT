@@ -1774,22 +1774,24 @@ return failure (zero/null handle and zero font count) instead of claiming that
 unregistered fonts were installed. This preserves the current fixed system
 font catalog contract; registration and removal are still unsupported.
 
-The DirectWrite-compatible face/collection declarations now read font metrics,
-glyph count and Unicode cmap results from the same Ring 3 FontManager. The
-collection reflects the installed logical families and available style files;
-vertical glyph metrics return `E_NOTIMPL` until `vhea`/`vmtx` are parsed.
-The header passes a freestanding cross-compiler syntax check, but no `dwrite.dll`
-target or runtime factory export is wired into the boot image yet, so this is
-not evidence of a loaded DirectWrite interface.
+The freestanding Ring 3 `dwrite.dll` target exports `DWriteCreateFactory` and
+is staged with the Explorer runtime closure. Its bounded COM factory, system
+collection, family, font and face objects use the same FontManager for real
+TTF metrics and Unicode cmap lookup. Explorer's CPL3 probe resolves Arial,
+loads a face and maps `A` and `à`; QEMU logs the successful probe. The fixed
+collection currently exposes six logical families. Text format/layout and
+design glyph metrics return `E_NOTIMPL`; vertical glyph metrics need
+`vhea`/`vmtx`. Runtime font registration and persistent settings are not
+implemented.
 
-QEMU's Explorer input verification now waits for the actual scanout pixels to
-change after the kernel window-creation event. That event can precede the
-user-mode paint, so the test polls for up to five seconds before treating an
-unchanged frame as a failure.
+QEMU's Explorer input verification waits for stable scanout pixels after the
+first CPL3 presentation before sending click/Enter. The initial scanout and
+kernel window-creation event can precede desktop paint and focus setup; the
+test now polls for a changed, stable desktop frame before input dispatch.
 
 | Command | Result |
 |---|---|
 | `python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-font-f2-build --cxx build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ --diagnostics-dir /private/tmp/micant-f5-glyph-cache` | Passed; modular kernel and Explorer dependency closure linked, TTF metrics, two-face switch, four-style enumeration and cached repeated glyph rendering probes succeeded; app DIBs rendered and composed, overlapping/move/resize/repeated cleanup checks passed, and serial remained stable for five seconds |
 | `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` (temporary verification tree `/private/tmp/micant-font-f2-verify`) | Passed; current composite outline parser/rasterizer compiled and linked into `ntoskrnl_core_baremetal` dependency closure; Explorer input, scanout and cleanup passed, serial remained stable for five seconds |
 | `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` (temporary verification tree `/private/tmp/micant-font-f2-verify`) | Passed after explicit font-registration failure semantics; user-mode boundary checks passed, Explorer input/scanout/cleanup passed and serial remained stable for five seconds |
-| `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` | Passed after the DirectWrite metric/collection and composite-parser changes; bare-metal target linked and Explorer input/scanout/cleanup passed, serial remained stable for five seconds. `dwrite.hpp` separately passed cross-compiler `-fsyntax-only`; its runtime DLL is not yet built or staged. |
+| `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-dwrite-final` | Passed; `dwrite.dll` built/staged and Explorer's CPL3 DirectWrite Arial metrics/cmap probe succeeded; Enter opened the app window, input dispatch and cleanup passed, and serial remained stable for five seconds |

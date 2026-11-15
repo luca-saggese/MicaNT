@@ -14,6 +14,7 @@
  */
 
 #include <cstdint>
+#if !defined(MICANT_DWRITE_ABI_ONLY)
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,11 +28,12 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
-#include "micant/shared/ntdef.hpp"
-#include "micant/shared/ntstatus.hpp"
-#include "micant/um/subsystems/com/ole32.hpp"
-#include "micant/um/native/ldr.hpp"
 #include "micant/um/subsystems/graphics/font_manager.hpp"
+#if !defined(MICANT_NATIVE_USERMODE)
+#include "micant/um/native/ldr.hpp"
+#endif
+#endif
+#include "micant/shared/com_base.hpp"
 
 namespace micant::dwrite {
 
@@ -207,7 +209,20 @@ inline constexpr ole32::IID IID_IDWriteFactory = {
 };
 
 inline constexpr ole32::IID IID_IDWriteFontCollection = {
-    0xa84cee02, 0x3eea, 0x43d4, { 0xa8, 0x80, 0x98, 0x21, 0x53, 0xce, 0x4b, 0x71 }
+    0xa84cee02, 0x3eea, 0x4eee, { 0xa8, 0x27, 0x87, 0xc1, 0xa0, 0x2a, 0x0f, 0xcc }
+};
+
+inline constexpr ole32::IID IID_IDWriteLocalizedStrings = {
+    0x08256209, 0x099a, 0x4b34, { 0xb8, 0x6d, 0xc2, 0x2b, 0x11, 0x0e, 0x77, 0x71 }
+};
+inline constexpr ole32::IID IID_IDWriteFontFace = {
+    0x5f49804d, 0x7024, 0x4d43, { 0xbf, 0xa9, 0xd2, 0x59, 0x84, 0xf5, 0x38, 0x49 }
+};
+inline constexpr ole32::IID IID_IDWriteFont = {
+    0xacd16696, 0x8c14, 0x4f5d, { 0x87, 0x7e, 0xfe, 0x3f, 0xc1, 0xd3, 0x27, 0x37 }
+};
+inline constexpr ole32::IID IID_IDWriteFontFamily = {
+    0xda20d8ef, 0x812a, 0x4c43, { 0x98, 0x02, 0x62, 0xec, 0x4a, 0xbd, 0x7a, 0xdd }
 };
 
 inline constexpr ole32::IID IID_IDWriteTextFormat = {
@@ -360,6 +375,8 @@ public:
 // ============================================================================
 // 3. Concrete Implementations of DirectWrite COM Objects
 // ============================================================================
+
+#if !defined(MICANT_DWRITE_ABI_ONLY)
 
 class LocalizedStringsImpl : public IDWriteLocalizedStrings {
 public:
@@ -1293,6 +1310,7 @@ inline int32_t __stdcall ScriptFreeCache(SCRIPT_CACHE* psc) {
 // ============================================================================
 
 inline void InitializeDirectWriteExports() {
+#if !defined(MICANT_NATIVE_USERMODE)
     auto& ldr = ldr::DynamicLoader::get();
 
     // DWrite.dll
@@ -1306,6 +1324,17 @@ inline void InitializeDirectWriteExports() {
     ldr.registerExport("usp10.dll", "ScriptBreak", reinterpret_cast<void*>(&ScriptBreak));
     ldr.registerExport("usp10.dll", "ScriptGetProperties", reinterpret_cast<void*>(&ScriptGetProperties));
     ldr.registerExport("usp10.dll", "ScriptFreeCache", reinterpret_cast<void*>(&ScriptFreeCache));
+#endif
 }
 
+#else
+#endif
+
 } // namespace micant::dwrite
+
+#if defined(MICANT_DWRITE_ABI_ONLY)
+extern "C" int32_t __stdcall DWriteCreateFactory(
+    micant::dwrite::DWRITE_FACTORY_TYPE factoryType,
+    const micant::ole32::IID& iid,
+    micant::ole32::IUnknown** factory);
+#endif

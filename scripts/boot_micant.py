@@ -283,6 +283,12 @@ def verify_mouse(
             startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
             irq_enabled = "[MicaNT Input] PS/2 mouse interrupt routing active" in startup_serial
             before = screen("before.ppm")
+            # The first CPL3 scanout can precede Explorer's desktop paint and
+            # focus setup. Let the real desktop surface settle before sending
+            # the click/Enter sequence below.
+            before = wait_for_changed_screen(
+                before, "desktop-ready.ppm", 1000, timeout=10.0,
+            )
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": 40}},
                 {"type": "rel", "data": {"axis": "y", "value": 20}},

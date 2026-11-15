@@ -11,8 +11,13 @@
 #include "micant/um/subsystems/imaging/native_image_allocator.hpp"
 #include "micant/um/subsystems/imaging/native_image_file.hpp"
 #include "micant/um/subsystems/imaging/wallpaper.hpp"
+#define MICANT_DWRITE_ABI_ONLY
+#include "micant/um/subsystems/graphics/dwrite.hpp"
 
 #include <windows.h>
+#ifdef GetGlyphIndices
+#undef GetGlyphIndices
+#endif
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
 #include "gui_common.hpp"
@@ -370,6 +375,45 @@ void initializeSystemFonts() noexcept {
         PrintLine("[MicaNT FontProbe] GDI metric DC/font selection failed");
     }
     PrintLine("[MicaNT FontProbe] GDI TrueType font selected for Explorer surfaces");
+}
+
+void verifyDirectWriteFonts() noexcept {
+    using namespace micant::dwrite;
+    constexpr int32_t HResultOk = 0;
+    micant::ole32::IUnknown* unknown = nullptr;
+    const int32_t factoryStatus = ::DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+        IID_IDWriteFactory, &unknown);
+    if (factoryStatus != HResultOk || !unknown) {
+        PrintLine("[MicaNT FontProbe] DirectWrite factory creation failed");
+        return;
+    }
+    auto* factory = static_cast<IDWriteFactory*>(unknown);
+    IDWriteFontCollection* collection = nullptr;
+    IDWriteFontFamily* family = nullptr;
+    IDWriteFont* font = nullptr;
+    IDWriteFontFace* face = nullptr;
+    uint32_t familyIndex = 0;
+    int32_t exists = 0;
+    uint16_t glyphs[2]{};
+    const uint32_t codePoints[2]{'A', 0x00E0};
+    DWRITE_FONT_METRICS metrics{};
+    const bool success = factory->GetSystemFontCollection(&collection, 0) == HResultOk &&
+        collection && collection->GetFontFamilyCount() == 6 &&
+        collection->FindFamilyName(L"Arial", &familyIndex, &exists) == HResultOk && exists &&
+        collection->GetFontFamily(familyIndex, &family) == HResultOk && family &&
+        family->GetFontCount() == 4 && family->GetFont(0, &font) == HResultOk && font &&
+        font->CreateFontFace(&face) == HResultOk && face &&
+        face->GetGlyphCount() > 2 &&
+        face->GetGlyphIndices(codePoints, 2, glyphs) == HResultOk &&
+        glyphs[0] && glyphs[1] && (face->GetMetrics(&metrics), metrics.designUnitsPerEm != 0);
+    if (face) face->Release();
+    if (font) font->Release();
+    if (family) family->Release();
+    if (collection) collection->Release();
+    factory->Release();
+    PrintLine(success
+        ? "[MicaNT FontProbe] DirectWrite loaded Arial TTF metrics and Unicode cmap"
+        : "[MicaNT FontProbe] DirectWrite collection/face verification failed");
 }
 
 void chooseFallbackActiveApp() noexcept {
@@ -764,6 +808,7 @@ extern "C" void _start(const char* = nullptr) {
 
     loadPackagedWallpaper();
     initializeSystemFonts();
+    verifyDirectWriteFonts();
     redrawDesktop();
     updateClock();
     uint32_t clockPollDivider = 0;

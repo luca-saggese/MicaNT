@@ -24,6 +24,8 @@ def variants() -> tuple[Variant, ...]:
                 ("MICANT_NATIVE_USERMODE",)),
         Variant("comctl32_boot", "tools/dlls/comctl32_icon.cpp",
                 ("MICANT_NATIVE_USERMODE",)),
+        Variant("dwrite_boot", "tools/dlls/dwrite.cpp",
+                ("MICANT_NATIVE_USERMODE",)),
         Variant("ws2_32_boot", "tools/dlls/ws2_32.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("dnsapi_boot", "tools/dlls/dnsapi.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("crypt32_boot", "tools/dlls/crypt32.cpp", ("MICANT_NATIVE_USERMODE",)),
