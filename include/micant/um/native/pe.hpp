@@ -1256,8 +1256,7 @@ public:
                                       uint32_t width, uint32_t height,
                                       PeCursorResource& result) const noexcept {
         result = {};
-        if (!resources_ || (!groupName.id && !groupName.isName) || !width || !height ||
-            width > 4096 || height > 4096)
+        if (!resources_ || (!groupName.id && !groupName.isName) || width > 4096 || height > 4096)
             return NtStatus::InvalidParameter;
         PeResourceData group{};
         NtStatus status = resources_->find(
@@ -1283,10 +1282,13 @@ public:
             if (p[3] || itemWidth > 256 || itemHeight > 256 || hotX >= itemWidth ||
                 hotY >= itemHeight || byteCount < 5 || !id)
                 return NtStatus::InvalidImageFormat;
-            const uint64_t scalePenalty = (itemWidth < width || itemHeight < height)
-                ? 1'000'000ull + (static_cast<uint64_t>(width - std::min(width, itemWidth)) +
-                                   height - std::min(height, itemHeight)) * 1024ull
-                : (static_cast<uint64_t>(itemWidth - width) + itemHeight - height) * 1024ull;
+            const auto dimensionPenalty = [](uint32_t actual, uint32_t wanted) noexcept {
+                if (!wanted) return uint64_t{0};
+                return actual < wanted ? 1'000'000ull + uint64_t(wanted - actual) * 1024ull
+                                       : uint64_t(actual - wanted) * 1024ull;
+            };
+            const uint64_t scalePenalty = dimensionPenalty(itemWidth, width) +
+                                          dimensionPenalty(itemHeight, height);
             if (i == 0 || scalePenalty < bestScore) { selected = i; bestScore = scalePenalty; }
         }
 

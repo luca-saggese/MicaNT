@@ -23,8 +23,6 @@
 
 #include <algorithm>
 #include <array>
-#include <mutex>
-#include <vector>
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
@@ -33,31 +31,67 @@ extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 namespace micant::um::winnt_user32_gdi32_imm32_abi {
 
 namespace {
+#if defined(BUILD_SYSTEM32_USER32_DLL)
 template <typename T> T Win32kProc(const char* name) noexcept;
 
 struct AnimatedCursor {
     void* handle{};
-    std::vector<micant::um::imaging::ImageFrame> frames{};
+    std::array<micant::um::imaging::ImageFrame,
+        micant::um::winuser::AniFileView::MaxFrames> frames{};
     std::array<micant::um::winuser::AniStep,
         micant::um::winuser::AniFileView::MaxSteps> steps{};
-    uint16_t stepCount{}, step{};
+    uint16_t frameCount{}, stepCount{}, step{};
     uint64_t deadlineMs{};
     uint16_t hotX{}, hotY{};
     std::array<uint16_t, micant::um::winuser::AniFileView::MaxFrames> frameHotX{};
     std::array<uint16_t, micant::um::winuser::AniFileView::MaxFrames> frameHotY{};
 };
+class CursorMutex {
+public:
+    void lock() noexcept {
+        while (__atomic_exchange_n(&locked_, 1u, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    void unlock() noexcept { __atomic_store_n(&locked_, 0u, __ATOMIC_RELEASE); }
+private:
+    uint32_t locked_{};
+};
+struct CursorLockGuard {
+    explicit CursorLockGuard(CursorMutex& lock) noexcept : lock_(lock) { lock_.lock(); }
+    ~CursorLockGuard() { lock_.unlock(); }
+    CursorLockGuard(const CursorLockGuard&) = delete;
+    CursorLockGuard& operator=(const CursorLockGuard&) = delete;
+private:
+    CursorMutex& lock_;
+};
 std::array<AnimatedCursor, 16> g_animatedCursors{};
-std::mutex g_animatedCursorLock{};
 struct SharedPeCursorCacheEntry {
     void* module{};
     void* cursor{};
     uint32_t width{}, height{};
     uint16_t id{}, nameLength{};
-    bool named{};
+    bool named{}, reserved{};
     std::array<char16_t, 256> name{};
 };
 std::array<SharedPeCursorCacheEntry, 255> g_sharedPeCursorCache{};
-std::mutex g_sharedPeCursorCacheLock{};
+CursorMutex g_animatedCursorLock{};
+CursorMutex g_sharedPeCursorCacheLock{};
+struct SharedCursorReservation {
+    size_t slot{g_sharedPeCursorCache.size()};
+    bool active{};
+    ~SharedCursorReservation() {
+        if (!active) return;
+        CursorLockGuard lock(g_sharedPeCursorCacheLock);
+        g_sharedPeCursorCache[slot] = {};
+    }
+    void publish(void* handle) noexcept {
+        if (!active) return;
+        CursorLockGuard lock(g_sharedPeCursorCacheLock);
+        g_sharedPeCursorCache[slot].cursor = handle;
+        g_sharedPeCursorCache[slot].reserved = false;
+        active = false;
+    }
+};
 uint64_t cursorClockMs() noexcept {
     return *reinterpret_cast<volatile const uint64_t*>(
         micant::UserSharedDataAddress + offsetof(micant::KUserSharedData, tickCountQuad));
@@ -74,10 +108,10 @@ void updateAnimatedCursor() noexcept {
     MicaWin32kCursorInfo info{};
     if (!getInfo(&info) || !info.cursorHandle) return;
     const uint64_t now = cursorClockMs();
-    std::lock_guard lock(g_animatedCursorLock);
+    CursorLockGuard lock(g_animatedCursorLock);
     for (auto& animation : g_animatedCursors) {
         if (animation.handle != reinterpret_cast<void*>(info.cursorHandle) ||
-            animation.frames.empty() || !animation.stepCount) continue;
+            !animation.frameCount || !animation.stepCount) continue;
         if (now < animation.deadlineMs) return;
         // Bound catch-up work by the parsed step count; a stalled message loop
         // skips elapsed frames without accumulating timing drift.
@@ -116,7 +150,7 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
     frameLimits.maxDecodedBytes = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS * 4u;
     frameLimits.maxIntermediateBytes = 1024u * 1024u;
     AnimatedCursor candidate{};
-    candidate.frames.reserve(view.frameCount);
+    candidate.frameCount = view.frameCount;
     for (uint16_t i = 0; i < view.frameCount; ++i) {
         winuser::CursorImage cursor{};
         if (winuser::DecodeCursorImage(view.frames[i], 0, 0, cursor, allocator, frameLimits) !=
@@ -126,7 +160,7 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
         if (!i) { candidate.hotX = cursor.hotX; candidate.hotY = cursor.hotY; }
         if (cursor.image.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
             cursor.image.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
-        candidate.frames.push_back(std::move(cursor.image));
+        candidate.frames[i] = std::move(cursor.image);
     }
     candidate.stepCount = view.stepCount;
     std::copy_n(view.steps.begin(), view.stepCount, candidate.steps.begin());
@@ -142,7 +176,7 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
     const uint64_t firstDuration = std::max<uint64_t>(1,
         (uint64_t(candidate.steps[0].durationJiffies) * 1000 + 59) / 60);
     candidate.deadlineMs = cursorClockMs() + firstDuration;
-    std::lock_guard lock(g_animatedCursorLock);
+    CursorLockGuard lock(g_animatedCursorLock);
     for (auto& slot : g_animatedCursors) {
         if (slot.handle) continue;
         slot = std::move(candidate);
@@ -193,7 +227,7 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
                    uint32_t desiredWidth, uint32_t desiredHeight,
                    bool shared) noexcept {
     using namespace micant::um;
-    if (!resourceName || !desiredWidth || !desiredHeight ||
+    if (!resourceName ||
         desiredWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
         desiredHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
     pe::PeResourceIdentifier identifier{};
@@ -213,23 +247,50 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
         if (!length || length == nameBuffer.size()) return nullptr;
         identifier = {0, std::u16string_view(nameBuffer.data(), length), true};
     }
-    std::unique_lock<std::mutex> cacheLock(g_sharedPeCursorCacheLock, std::defer_lock);
     size_t cacheSlot = g_sharedPeCursorCache.size();
     if (shared) {
-        cacheLock.lock();
-        for (size_t i = 0; i < g_sharedPeCursorCache.size(); ++i) {
-            const auto& entry = g_sharedPeCursorCache[i];
-            if (!entry.cursor) { if (cacheSlot == g_sharedPeCursorCache.size()) cacheSlot = i; continue; }
-            if (entry.module != moduleHandle || entry.width != desiredWidth ||
-                entry.height != desiredHeight || entry.named != identifier.isName) continue;
-            const bool matches = identifier.isName
-                ? entry.nameLength == identifier.name.size() &&
-                    std::equal(identifier.name.begin(), identifier.name.end(), entry.name.begin())
-                : entry.id == identifier.id;
-            if (matches) return entry.cursor;
+        for (;;) {
+            bool waitForReservedMatch = false;
+            cacheSlot = g_sharedPeCursorCache.size();
+            {
+                CursorLockGuard lock(g_sharedPeCursorCacheLock);
+                for (size_t i = 0; i < g_sharedPeCursorCache.size(); ++i) {
+                    auto& entry = g_sharedPeCursorCache[i];
+                    if (!entry.reserved && !entry.cursor) {
+                        if (cacheSlot == g_sharedPeCursorCache.size()) cacheSlot = i;
+                        continue;
+                    }
+                    if (entry.module != moduleHandle || entry.width != desiredWidth ||
+                        entry.height != desiredHeight || entry.named != identifier.isName) continue;
+                    const bool matches = identifier.isName
+                        ? entry.nameLength == identifier.name.size() &&
+                            std::equal(identifier.name.begin(), identifier.name.end(), entry.name.begin())
+                        : entry.id == identifier.id;
+                    if (matches) {
+                        if (entry.cursor) return entry.cursor;
+                        waitForReservedMatch = true;
+                        break;
+                    }
+                }
+                if (!waitForReservedMatch) {
+                    if (cacheSlot == g_sharedPeCursorCache.size()) return nullptr;
+                    auto& entry = g_sharedPeCursorCache[cacheSlot];
+                    entry.module = moduleHandle;
+                    entry.width = desiredWidth;
+                    entry.height = desiredHeight;
+                    entry.named = identifier.isName;
+                    entry.id = identifier.id;
+                    entry.nameLength = static_cast<uint16_t>(identifier.name.size());
+                    entry.reserved = true;
+                    if (identifier.isName)
+                        std::copy(identifier.name.begin(), identifier.name.end(), entry.name.begin());
+                }
+            }
+            if (!waitForReservedMatch) break;
+            __asm__ __volatile__("pause" ::: "memory");
         }
-        if (cacheSlot == g_sharedPeCursorCache.size()) return nullptr;
     }
+    SharedCursorReservation reservation{cacheSlot, shared};
     wchar_t modulePath[512]{};
     if (!loadedModulePath(moduleHandle, modulePath)) return nullptr;
     imaging::ImageLimits limits{};
@@ -248,39 +309,35 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
     pe::PeCursorResource selected{};
     if (cursors.findCursor(identifier, 0, desiredWidth, desiredHeight, selected) !=
         NtStatus::Success) return nullptr;
+    const uint32_t targetWidth = desiredWidth ? desiredWidth : selected.entry.width;
+    const uint32_t targetHeight = desiredHeight ? desiredHeight : selected.entry.height;
     imaging::ImageFrame frame{};
     if (imaging::DecodeIconResourcePayload(selected.imageBytes, frame, allocator, limits) !=
         imaging::ImageStatus::Success || frame.width != selected.entry.width ||
         frame.height != selected.entry.height || frame.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
         frame.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
     uint16_t hotX = selected.entry.hotX, hotY = selected.entry.hotY;
-    if (frame.width != desiredWidth || frame.height != desiredHeight) {
+    if (targetWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        targetHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+    if (frame.width != targetWidth || frame.height != targetHeight) {
         const uint32_t oldWidth = frame.width, oldHeight = frame.height;
         imaging::ImageFrame scaled{};
-        if (imaging::ScaleIconFrame(frame, desiredWidth, desiredHeight, scaled, allocator, limits) !=
+        if (imaging::ScaleIconFrame(frame, targetWidth, targetHeight, scaled, allocator, limits) !=
             imaging::ImageStatus::Success) return nullptr;
-        hotX = static_cast<uint16_t>(std::min<uint32_t>(desiredWidth - 1,
-            (uint32_t(hotX) * desiredWidth + oldWidth / 2) / oldWidth));
-        hotY = static_cast<uint16_t>(std::min<uint32_t>(desiredHeight - 1,
-            (uint32_t(hotY) * desiredHeight + oldHeight / 2) / oldHeight));
+        hotX = static_cast<uint16_t>(std::min<uint32_t>(targetWidth - 1,
+            (uint32_t(hotX) * targetWidth + oldWidth / 2) / oldWidth));
+        hotY = static_cast<uint16_t>(std::min<uint32_t>(targetHeight - 1,
+            (uint32_t(hotY) * targetHeight + oldHeight / 2) / oldHeight));
         frame = std::move(scaled);
     }
     void* handle = winuser::ProcessIconHandles().createCursor(std::move(frame), allocator,
         hotX, hotY, shared);
-    if (handle && shared) {
-        auto& entry = g_sharedPeCursorCache[cacheSlot];
-        entry.module = moduleHandle;
-        entry.cursor = handle;
-        entry.width = desiredWidth;
-        entry.height = desiredHeight;
-        entry.named = identifier.isName;
-        entry.id = identifier.id;
-        entry.nameLength = static_cast<uint16_t>(identifier.name.size());
-        if (identifier.isName)
-            std::copy(identifier.name.begin(), identifier.name.end(), entry.name.begin());
-    }
+    if (handle) reservation.publish(handle);
     return handle;
 }
+#else
+void updateAnimatedCursor() noexcept {}
+#endif
 
 template <typename T> T Win32kProc(const char* name) noexcept {
 #define MICA_WIN32K_PROC(exportName) if (std::strcmp(name, #exportName) == 0) return reinterpret_cast<T>(&exportName)
@@ -601,7 +658,7 @@ int32_t User32_DestroyCursor(void* cursor) noexcept {
         lease.shared()) return 1;
     const bool destroyed = micant::um::winuser::ProcessIconHandles().destroyCursor(cursor);
     if (destroyed) {
-        std::lock_guard lock(g_animatedCursorLock);
+        CursorLockGuard lock(g_animatedCursorLock);
         for (auto& animation : g_animatedCursors) {
             if (animation.handle == cursor) { animation = {}; break; }
         }
@@ -787,15 +844,18 @@ void* User32_LoadImageW(void* instance, const wchar_t* name, uint32_t type,
     if (!name || (type != 1u && type != 2u) || desiredWidth < 0 || desiredHeight < 0)
         return nullptr;
     if (!(flags & LoadFromFile)) {
-        if (type != 2u || !instance || (flags & ~(DefaultSize | Shared))) return nullptr;
+        if (type != 2u || (flags & ~(DefaultSize | Shared))) return nullptr;
+        if (!instance) {
+            if (!(flags & Shared) || reinterpret_cast<uintptr_t>(name) > UINT16_MAX)
+                return nullptr;
+            return User32_LoadCursorW(nullptr, name);
+        }
         uint32_t width = static_cast<uint32_t>(desiredWidth);
         uint32_t height = static_cast<uint32_t>(desiredHeight);
         if (flags & DefaultSize) {
             if (!width) width = 32;
             if (!height) height = 32;
         }
-        if (!width) width = 32;
-        if (!height) height = 32;
         return loadPeCursor(instance, name, width, height, (flags & Shared) != 0);
     }
     if ((flags & ~(LoadFromFile | DefaultSize)) ||

@@ -1865,10 +1865,13 @@ boundary check passed. A follow-up now connects `LoadCursorW` and resource-form
 `LoadImageW(IMAGE_CURSOR)` to the loaded module list and canonical bounded
 `PeImageView64` / `PeGroupCursorView` parser, including numeric and named group
 identifiers, hotspot scaling, and `LR_SHARED` process-local caching. QEMU was
-not rerun; the previous recorded attempt stopped before Explorer in the Ring 3
-process-syscall/ExHeap path. Still open are persistent per-user themes,
-DPI-aware theme-size selection, secure-desktop authorization, and end-to-end
-Explorer animation/context tests.
+run after these changes: the complete modular UEFI boot reached the CPL3
+compositor, Explorer passed mouse/keyboard dispatch, scanout and window cleanup,
+and serial remained stable for five seconds. This boot did not directly invoke a
+custom PE cursor resource, so that API path is linked but not yet runtime
+verified. Still open are persistent per-user themes, DPI-aware theme-size
+selection, secure-desktop authorization, and end-to-end Explorer cursor
+animation/context tests.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
@@ -1879,3 +1882,4 @@ composition remains the active presentation path.
 | `cmake --build /private/tmp/micant-cursor-qemu-build --target ntoskrnl_core_baremetal user32_boot virtio_gpu_boot compositor_boot -j4` | Passed; kernel, User32 and VirtIO-GPU targets linked; native user-mode boundary checks passed |
 | `c++ -std=c++23 -Iinclude -Itest /private/tmp/cursor_suite_test.cpp kernel/win32k/freestanding.cpp -o /private/tmp/cursor_suite_test && /private/tmp/cursor_suite_test` | Passed; CUR PNG/DIB and malformed fixtures, ANI sequence fixture and real MiniMouse CUR/ANI files, cursor handle lifecycle, Win32k state and compositor metadata checks |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-qemu-final-attempt` | Kernel and Explorer dependency closure built, but QEMU stopped before Explorer at the pre-existing Ring 3 process-syscall/ExHeap failure described above |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pe-qemu-final5` | Passed; modular UEFI boot, CPL3 compositor scanout, Explorer mouse/keyboard dispatch, window cleanup and five seconds of stable serial; custom PE cursor resource loading was not directly exercised |
