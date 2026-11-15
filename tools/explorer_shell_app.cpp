@@ -1073,7 +1073,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (hwnd == g.desktop &&
         (message == 0x001A /* WM_SETTINGCHANGE */ ||
          message == 0x031A /* WM_THEMECHANGED */)) {
-        loadActiveVisualTheme();
+        // WM_SETTINGCHANGE can announce changed persisted preferences. A
+        // WM_THEMECHANGED broadcast follows an already-published snapshot;
+        // reloading active.profile here would replace a session-only runtime
+        // selection with the stale persisted profile that caused the switch.
+        if (message == 0x001A /* WM_SETTINGCHANGE */)
+            loadActiveVisualTheme();
         for (auto& app : g.apps) {
             if (!app.open || !app.hwnd || !app.pixels) continue;
             drawAppWindow(app);
