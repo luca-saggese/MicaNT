@@ -790,7 +790,10 @@ void publishCompositorSurfaces() noexcept {
         info.zOrder = static_cast<uint32_t>(window.zOrder);
         info.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
             (window.visible ? MICANT_COMPOSITOR_SURFACE_VISIBLE : 0u) |
-            (window.iconic ? MICANT_COMPOSITOR_SURFACE_ICONIC : 0u);
+            (window.iconic ? MICANT_COMPOSITOR_SURFACE_ICONIC : 0u) |
+            (window.handle == g_foregroundWindow
+                ? MICANT_COMPOSITOR_SURFACE_FOREGROUND : 0u) |
+            (window.maximized ? MICANT_COMPOSITOR_SURFACE_MAXIMIZED : 0u);
         info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
         info.dirtyRight = window.width;
         info.dirtyBottom = window.height;

@@ -57,6 +57,36 @@ void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
     }
 }
 
+void drawIconPixel(int64_t x, int64_t y, uint32_t color,
+                   uint32_t width, uint32_t height) noexcept {
+    fillRect(x, y, x + 2, y + 2, color, width, height);
+}
+
+void drawControlIcon(uint8_t kind, bool maximized, int64_t left,
+                     int64_t top, uint32_t color,
+                     uint32_t width, uint32_t height) noexcept {
+    if (kind == 1) { // Minimize: a crisp vector bar.
+        fillRect(left + 8, top + 15, left + 18, top + 17, color, width, height);
+    } else if (kind == 2 && !maximized) { // Maximize: single outlined window.
+        fillRect(left + 7, top + 6, left + 17, top + 8, color, width, height);
+        fillRect(left + 7, top + 8, left + 9, top + 17, color, width, height);
+        fillRect(left + 15, top + 8, left + 17, top + 17, color, width, height);
+        fillRect(left + 7, top + 15, left + 17, top + 17, color, width, height);
+    } else if (kind == 2) { // Restore: two offset, overlapping window outlines.
+        fillRect(left + 9, top + 5, left + 17, top + 7, color, width, height);
+        fillRect(left + 15, top + 7, left + 17, top + 14, color, width, height);
+        fillRect(left + 6, top + 8, left + 14, top + 10, color, width, height);
+        fillRect(left + 6, top + 10, left + 8, top + 17, color, width, height);
+        fillRect(left + 12, top + 10, left + 14, top + 17, color, width, height);
+        fillRect(left + 6, top + 15, left + 14, top + 17, color, width, height);
+    } else if (kind == 3) { // Close: a hand-drawn, two-pixel diagonal cross.
+        for (int64_t step = 0; step < 10; ++step) {
+            drawIconPixel(left + 9 + step, top + 6 + step, color, width, height);
+            drawIconPixel(left + 18 - step, top + 6 + step, color, width, height);
+        }
+    }
+}
+
 bool compose(const MicaCompositorMetadataStore& metadata,
              const uint32_t* surfaces) noexcept {
     const uint32_t width = metadata.screenWidth;
@@ -116,46 +146,46 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         if (clientWidth <= 0 || clientHeight <= 0) continue;
 
         if (frame || caption) {
+            const bool foreground = (surface.flags & MICANT_COMPOSITOR_SURFACE_FOREGROUND) != 0;
+            const uint32_t frameColor = foreground ? 0xFF334B66u : 0xFF778492u;
+            const uint32_t captionColor = foreground ? 0xFF245987u : 0xFF596775u;
+            const uint32_t titleColor = foreground ? 0xFFF5F8FCu : 0xFFDCE3EAu;
+            const uint32_t buttonColor = foreground ? 0xFF376D9Au : 0xFF75818Cu;
+            const uint32_t closeColor = foreground ? 0xFFC84753u : 0xFF916A70u;
             fillRect(windowLeft, windowTop, windowRight, windowBottom,
-                     0xFF374E6Cu, width, height);
+                     frameColor, width, height);
             if (caption) {
-                const uint32_t titleColor = 0xFF244F7Eu;
                 fillRect(windowLeft + frame, windowTop + frame,
                          windowRight - frame, windowTop + frame + caption,
-                         titleColor, width, height);
+                         captionColor, width, height);
 
                 const int64_t closeLeft = windowRight - frame - 30;
                 const int64_t buttonTop = windowTop + frame + 3;
                 const int64_t buttonBottom = windowTop + frame + caption - 3;
                 fillRect(closeLeft, buttonTop, windowRight - frame - 2,
-                         buttonBottom, 0xFFB84D58u, width, height);
+                         buttonBottom, closeColor, width, height);
                 fillRect(closeLeft - 29, buttonTop, closeLeft - 1,
-                         buttonBottom, 0xFF385C82u, width, height);
+                         buttonBottom, buttonColor, width, height);
                 fillRect(closeLeft - 58, buttonTop, closeLeft - 30,
-                         buttonBottom, 0xFF385C82u, width, height);
+                         buttonBottom, buttonColor, width, height);
 
-                const int64_t glyphY = windowTop + frame + (caption - 8) / 2;
-                fillRect(closeLeft - 21, glyphY + 4, closeLeft - 9,
-                         glyphY + 6, 0xFFF5F7FAu, width, height);
-                fillRect(closeLeft - 50, glyphY - 5, closeLeft - 40,
-                         glyphY + 5, 0xFFF5F7FAu, width, height);
-                fillRect(closeLeft - 48, glyphY - 3, closeLeft - 42,
-                         glyphY + 3, 0xFF385C82u, width, height);
-                for (int64_t diagonal = 0; diagonal < 9; ++diagonal) {
-                    fillRect(closeLeft + 10 + diagonal, glyphY - 4 + diagonal,
-                             closeLeft + 12 + diagonal, glyphY - 2 + diagonal,
-                             0xFFFFFFFFu, width, height);
-                    fillRect(closeLeft + 18 - diagonal, glyphY - 4 + diagonal,
-                             closeLeft + 20 - diagonal, glyphY - 2 + diagonal,
-                             0xFFFFFFFFu, width, height);
-                }
+                const int64_t iconTop = windowTop + frame + (caption - 22) / 2;
+                const uint32_t iconColor = foreground ? 0xFFF5F8FCu : 0xFFE3E8EDu;
+                const bool maximized = (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) != 0;
+                drawControlIcon(1, false, closeLeft - 58, iconTop,
+                                iconColor, width, height);
+                drawControlIcon(2, maximized, closeLeft - 29, iconTop,
+                                iconColor, width, height);
+                drawControlIcon(3, false, closeLeft, iconTop,
+                                0xFFFFFFFFu, width, height);
 
                 int64_t titleX = windowLeft + frame + 9;
                 const int64_t titleLimit = closeLeft - 66;
+                const int64_t titleY = windowTop + frame + (caption - 8) / 2;
                 for (size_t character = 0; character < 63 && surface.title[character] &&
                      titleX + 8 <= titleLimit; ++character, titleX += 8)
-                    drawGlyph(titleX, glyphY, surface.title[character],
-                              0xFFF4F6FAu, width, height);
+                    drawGlyph(titleX, titleY, surface.title[character],
+                              titleColor, width, height);
             }
         }
 
