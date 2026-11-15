@@ -26,6 +26,7 @@ struct ProcessSnapshotEntry {
     uint32_t handleCount{};
     uintptr_t workingSetBytes{};
     uintptr_t peakWorkingSetBytes{};
+    uintptr_t privateCommitPages{};
     uint64_t userTime100ns{};
     uint64_t kernelTime100ns{};
     size_t firstThreadIndex{};

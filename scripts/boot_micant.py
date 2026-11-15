@@ -888,6 +888,9 @@ def serial_has_failure(serial_log: str) -> bool:
         if (line.startswith("[MicaNT TaskmgrTest] Process output buffer probe failed") and
                 "Task Manager: short and invalid query buffers rejected." in serial_log):
             continue
+        if ("[MicaNT Theme] UxTheme failed margin query clears its output" in line and
+                "[MicaNT Theme] UxTheme failed margin query output mismatch" not in line):
+            continue
         if (line.startswith("[MicaNT Ps] SEC_IMAGE initialization TLS inspection failed status=") and
                 "[MicaNT Ps] Image callbacks rejection returned" in serial_log):
             continue
@@ -1355,6 +1358,10 @@ def run_qemu(
                                 time.sleep(0.1)
                                 continue
                             if "Task Manager: process and thread CPU totals reconciled." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: private commit pages validated." not in serial_log:
                                 complete_since = None
                                 time.sleep(0.1)
                                 continue

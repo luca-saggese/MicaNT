@@ -11,8 +11,8 @@ Checklist breve; la specifica completa è
 - [ ] U1 UI — parziale: finestre, schede, ricerca, ordinamento per intestazione,
   selezione, Details e grafico CPU a 60 campioni attivi; UxTheme usa colori live
   se pubblicati, con fallback verificato in QEMU.
-- [ ] P2 memoria per processo — working set corrente/picco live; commit privato
-  senza accounting Mm.
+- [x] P2 memoria per processo — working set corrente/picco e commit privato
+  dai VAD Mm; fixture validata in QEMU.
 - [ ] S1/S2 hotkey e SAS — manca il percorso trusted Input/HAL → sessione,
   Winlogon e desktop sicuro.
 - [ ] P3 storage/rete/GPU — mancano provider live Io/NDIS/GPU.
@@ -26,7 +26,7 @@ Checklist breve; la specifica completa è
 build/qemu-taskmgr-isolated --memory-mib 2048 --timeout 90 --stable-seconds 3`
 passato il 2026-11-15: process snapshot, CPU, azione D1, controlli UI,
 paint/resize, chiusura e seriale stabile. La scheda Performance e il grafico sono
-stati renderizzati; ordinamento ascendente/discendente, selezione e rifiuto dei
-buffer corto/invalido verificati nell’ultimo run QEMU. Evidenza in
-`/private/tmp/micant-taskmgr-theme-retry/serial.log`; UxTheme ha usato il
+stati renderizzati; ordinamento, selezione, rifiuto dei buffer corto/invalido e
+commit privato validati. Evidenza in
+`/private/tmp/micant-taskmgr-private-commit-qemu/serial.log`; UxTheme ha usato il
 fallback perché il sistema non ha pubblicato uno snapshot live per Task Manager.

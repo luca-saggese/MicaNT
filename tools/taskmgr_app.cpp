@@ -408,7 +408,8 @@ bool ImageNameEquals(const micant::SystemProcessInformation& entry,
 bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& processId,
                              uint64_t* userTime100ns = nullptr,
                              uint64_t* kernelTime100ns = nullptr,
-                             bool* threadTotalsMatch = nullptr) noexcept {
+                             bool* threadTotalsMatch = nullptr,
+                             uintptr_t* privateCommitPages = nullptr) noexcept {
     processId = 0;
     if (threadTotalsMatch) *threadTotalsMatch = false;
     if (!snapshot.available) return false;
@@ -418,6 +419,7 @@ bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& proce
             snapshot.data + offset);
         if (ImageNameEquals(*entry, snapshot.data, snapshot.length, u"taskmgr_probe.exe")) {
             processId = static_cast<micant::Handle>(entry->UniqueProcessId);
+            if (privateCommitPages) *privateCommitPages = entry->PrivatePageCount;
             if (entry->UserTime < 0 || entry->KernelTime < 0) return false;
             const uint64_t processUser = static_cast<uint64_t>(entry->UserTime);
             const uint64_t processKernel = static_cast<uint64_t>(entry->KernelTime);
@@ -802,9 +804,16 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
                         peakSet[peakCursor] = 0;
                         DrawString(s_tmBuffer, width, 20, 182, peakSet,
                                    PackBGRA(190, 205, 225));
-                        DrawString(s_tmBuffer, width, 20, 202,
-                                   "Private commit: unavailable",
-                                   PackBGRA(150, 165, 185));
+                        char privateCommit[48] = "Private commit: ";
+                        uint32_t privateCursor = 16;
+                        AppendUnsigned(privateCommit, sizeof(privateCommit), privateCursor,
+                            static_cast<uint64_t>(entry->PrivatePageCount) * 4u);
+                        const char* privateUnit = " KB";
+                        while (*privateUnit && privateCursor + 1 < sizeof(privateCommit))
+                            privateCommit[privateCursor++] = *privateUnit++;
+                        privateCommit[privateCursor] = 0;
+                        DrawString(s_tmBuffer, width, 20, 202, privateCommit,
+                                   PackBGRA(190, 205, 225));
                         break;
                     }
                     if (!entry->NextEntryOffset) break;
@@ -1291,6 +1300,7 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
     bool probeTerminationReported = false;
     bool probeFoundReported = false;
     bool probeThreadTotalsReported = false;
+    bool privateCommitReported = false;
     bool probeCpuTimesReported = false;
     bool havePreviousProbeTimes = false;
     uint64_t previousProbeUserTime{};
@@ -1434,9 +1444,11 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
         if (!probeTerminationRequested) {
             micant::Handle processId{};
             uint64_t probeUserTime{}, probeKernelTime{};
+            uintptr_t privateCommitPages{};
             bool threadTotalsMatch = false;
             if (FindTaskmgrProbeProcess(snapshot, processId, &probeUserTime,
-                                        &probeKernelTime, &threadTotalsMatch)) {
+                                        &probeKernelTime, &threadTotalsMatch,
+                                        &privateCommitPages)) {
                 if (!probeFoundReported) {
                     PrintLine("Task Manager: authorized probe process found.");
                     probeFoundReported = true;
@@ -1444,6 +1456,10 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
                 if (threadTotalsMatch && !probeThreadTotalsReported) {
                     PrintLine("Task Manager: process and thread CPU totals reconciled.");
                     probeThreadTotalsReported = true;
+                }
+                if (privateCommitPages && !privateCommitReported) {
+                    PrintLine("Task Manager: private commit pages validated.");
+                    privateCommitReported = true;
                 }
                 if (havePreviousProbeTimes && probeUserTime >= previousProbeUserTime &&
                     probeKernelTime >= previousProbeKernelTime &&

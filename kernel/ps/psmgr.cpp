@@ -238,6 +238,7 @@ NtStatus NtQuerySystemInformation(
         record->HandleCount = snapshot[i].handleCount;
         record->WorkingSetSize = snapshot[i].workingSetBytes;
         record->PeakWorkingSetSize = snapshot[i].peakWorkingSetBytes;
+        record->PrivatePageCount = snapshot[i].privateCommitPages;
         if (snapshot[i].userTime100ns > static_cast<uint64_t>(INT64_MAX) ||
             snapshot[i].kernelTime100ns > static_cast<uint64_t>(INT64_MAX)) {
             delete[] records; delete[] snapshot; delete[] threads;

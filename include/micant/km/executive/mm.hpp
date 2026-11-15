@@ -2330,6 +2330,18 @@ public:
     [[nodiscard]] const WorkingSetList& getWorkingSet() const noexcept { return workingSet_; }
     [[nodiscard]] size_t getCommitCharge() const noexcept { return workingSet_.commitCharge; }
     [[nodiscard]] size_t getResidentPages() const noexcept { return workingSet_.residentPages; }
+    [[nodiscard]] size_t getPrivateCommitPages() const noexcept {
+        Guard lock(*this);
+        size_t pages = 0;
+        for (uintptr_t address = vadTree_.firstAddress(); address;
+             address = vadTree_.nextAddress(address)) {
+            const auto* vad = vadTree_.find(address);
+            if (!vad || vad->isSectionView) continue;
+            if (vad->commitCharge > SIZE_MAX - pages) return SIZE_MAX;
+            pages += vad->commitCharge;
+        }
+        return pages;
+    }
     [[nodiscard]] uintptr_t getDirectoryTableBase() const noexcept { return directoryTableBase_; }
     void setDirectoryTableBase(uintptr_t cr3) noexcept { directoryTableBase_ = cr3; }
 
