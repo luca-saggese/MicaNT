@@ -546,9 +546,8 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
-    # Import-free Task Manager executable; it queries the native system
-    # information syscall directly and presents through the existing surface
-    # syscall, so it can be built independently of Explorer and its DLLs.
+    # Task Manager uses native User32/GDI32 exports for its HWND and paint loop;
+    # the APIs reach the canonical Win32k server through the existing DLL path.
     add_executable(taskmgr_boot EXCLUDE_FROM_ALL tools/taskmgr_app.cpp)
     target_include_directories(taskmgr_boot PRIVATE
         "${CMAKE_SOURCE_DIR}"
@@ -561,6 +560,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(taskmgr_boot PRIVATE
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
+    target_link_libraries(taskmgr_boot PRIVATE user32_boot gdi32_boot)
     set_target_properties(taskmgr_boot PROPERTIES
         OUTPUT_NAME "taskmgr"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"

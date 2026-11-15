@@ -925,6 +925,9 @@ uintptr_t MicantBootstrapUserInterruptStackTop{};
 uintptr_t MicantBootstrapUserInterruptStackAliasBase{};
 uintptr_t MicantBootstrapUserInterruptStackAliasTop{};
 uintptr_t MicantBootstrapUserInterruptStackAliasFloor{};
+uintptr_t MicantBootstrapFixedKernelStackBase{};
+uintptr_t MicantBootstrapFixedKernelStackTop{};
+uintptr_t MicantBootstrapFixedKernelStackFloor{};
 uintptr_t MicantBootstrapSyscallStackBase{};
 uintptr_t MicantBootstrapSyscallStackTop{};
 uintptr_t MicantBootstrapSyscallStackFloor{};
@@ -1040,7 +1043,10 @@ __attribute__((naked)) void MicantBootstrapTimerInterrupt() noexcept {
         "7: cmpq MicantBootstrapUserInterruptStackAliasBase(%rip), %rax\njb 9f\n"
         "cmpq MicantBootstrapUserInterruptStackAliasTop(%rip), %rax\njae 9f\n"
         "cmpq MicantBootstrapUserInterruptStackAliasFloor(%rip), %rax\njae 6f\nud2\n"
-        "9: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
+        "9: cmpq MicantBootstrapFixedKernelStackBase(%rip), %rax\njb 0f\n"
+        "cmpq MicantBootstrapFixedKernelStackTop(%rip), %rax\njae 0f\n"
+        "cmpq MicantBootstrapFixedKernelStackFloor(%rip), %rax\njae 6f\nud2\n"
+        "0: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
         "cmpq MicantBootstrapInterruptStackFloor(%rip), %rax\njae 6f\n"
         "8: ud2\n6:\n"
         "cld\n"
@@ -1082,7 +1088,10 @@ __attribute__((naked)) void MicantBootstrapMsiInterrupt() noexcept {
         "5: cmpq MicantBootstrapSyscallStackBase(%rip), %rax\njb 7f\n"
         "cmpq MicantBootstrapSyscallStackTop(%rip), %rax\njae 7f\n"
         "cmpq MicantBootstrapSyscallStackFloor(%rip), %rax\njae 6f\nud2\n"
-        "7: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
+        "7: cmpq MicantBootstrapFixedKernelStackBase(%rip), %rax\njb 0f\n"
+        "cmpq MicantBootstrapFixedKernelStackTop(%rip), %rax\njae 0f\n"
+        "cmpq MicantBootstrapFixedKernelStackFloor(%rip), %rax\njae 6f\nud2\n"
+        "0: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
         "cmpq MicantBootstrapInterruptStackFloor(%rip), %rax\njae 6f\n8: ud2\n6:\n"
         "cld\npushq %rcx\npushq %rdx\npushq %rbx\npushq %rbp\n"
         "pushq %rsi\npushq %rdi\npushq %r8\npushq %r9\npushq %r10\npushq %r11\n"
@@ -1132,7 +1141,10 @@ __attribute__((naked)) void MicantBootstrapPs2Interrupt() noexcept {
         "5: cmpq MicantBootstrapSyscallStackBase(%rip), %rax\njb 7f\n"
         "cmpq MicantBootstrapSyscallStackTop(%rip), %rax\njae 7f\n"
         "cmpq MicantBootstrapSyscallStackFloor(%rip), %rax\njae 6f\nud2\n"
-        "7: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
+        "7: cmpq MicantBootstrapFixedKernelStackBase(%rip), %rax\njb 0f\n"
+        "cmpq MicantBootstrapFixedKernelStackTop(%rip), %rax\njae 0f\n"
+        "cmpq MicantBootstrapFixedKernelStackFloor(%rip), %rax\njae 6f\nud2\n"
+        "0: cmpq MicantBootstrapExecutionStackTop(%rip), %rax\njae 8f\n"
         "cmpq MicantBootstrapInterruptStackFloor(%rip), %rax\njae 6f\n8: ud2\n6:\n"
         "cld\n"
         "pushq %rcx\npushq %rdx\npushq %rbx\npushq %rbp\n"
@@ -1646,7 +1658,7 @@ __attribute__((naked)) void MicantSyscallProbeProgram() {
         "std\nmovl $0x80, %eax\nsyscall\ncld\n"
         "testq %rax, %rax\njnz 9f\n"
         "cmpl $1024, (%r10)\njne 9f\ncmpl $768, 4(%r10)\njne 9f\n"
-        "cmpq $0, 24(%r10)\njne 9f\n" // No physical display pointer escapes.
+        "cmpq $0, 28(%r10)\njne 9f\n" // No physical display pointer escapes.
         "cmpq $0x1234, %rdx\njne 9f\ncmpq $0x5678, %r8\njne 9f\n"
         "cmpq $0x9abc, %r9\njne 9f\ncmpq $0x1357, %rbx\njne 9f\n"
         "cmpq $0x2468, %r12\njne 9f\n"
@@ -2025,6 +2037,16 @@ void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noex
         logTrapValue("[MicaNT Hal] Unhandled exception stack1=0x", kernelStack[1]);
         logTrapValue("[MicaNT Hal] Unhandled exception stack2=0x", kernelStack[2]);
         logTrapValue("[MicaNT Hal] Unhandled exception stack3=0x", kernelStack[3]);
+        if (const auto* thread = micant::ke::KeGetCurrentThread()) {
+            logTrapValue("[MicaNT Hal] Active thread=0x",
+                         reinterpret_cast<uintptr_t>(thread));
+            logTrapValue("[MicaNT Hal] Active thread id=0x", thread->tid);
+            logTrapValue("[MicaNT Hal] Active process id=0x", thread->pid);
+            logTrapValue("[MicaNT Hal] Active stack base=0x", thread->kernelStackBase);
+            logTrapValue("[MicaNT Hal] Active stack top=0x", thread->kernelStackTop);
+            logTrapValue("[MicaNT Hal] Active execution stack top=0x",
+                         thread->kernelExecutionStackTop);
+        }
         logTrapValue("[MicaNT Hal] User interrupt stack bounds=0x", MicantBootstrapUserInterruptStackBase);
         logTrapValue("[MicaNT Hal] User interrupt stack top=0x", MicantBootstrapUserInterruptStackTop);
         logTrapValue("[MicaNT Hal] Syscall stack bounds=0x", MicantBootstrapSyscallStackBase);
@@ -2439,6 +2461,10 @@ bool bootstrapStackHasHeadroom(uintptr_t stackPointer, uintptr_t threadBase,
 
 void setBootstrapThreadEntryStack(uintptr_t stackTop, uintptr_t userTeb, bool syscallGsActive,
                                   uintptr_t stackBase, uintptr_t executionStackTop) noexcept {
+    MicantBootstrapFixedKernelStackBase = reinterpret_cast<uintptr_t>(g_kernelStack);
+    MicantBootstrapFixedKernelStackTop = MicantBootstrapFixedKernelStackBase + sizeof(g_kernelStack);
+    MicantBootstrapFixedKernelStackFloor = MicantBootstrapFixedKernelStackBase + 4096 +
+        2 * MicantAmd64ExtendedSize;
     // The fixed BSP interrupt stack is linked in the kernel image. Early
     // context metadata may still contain its low physical alias, while the
     // CPU executes through the relocated kernel virtual alias. Publish the

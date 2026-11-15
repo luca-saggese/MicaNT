@@ -237,6 +237,7 @@ NtStatus NtQuerySystemInformation(
         record->InheritedFromUniqueProcessId = static_cast<uintptr_t>(snapshot[i].parentProcessId);
         record->HandleCount = snapshot[i].handleCount;
         record->WorkingSetSize = snapshot[i].workingSetBytes;
+        record->PeakWorkingSetSize = snapshot[i].peakWorkingSetBytes;
         if (snapshot[i].userTime100ns > static_cast<uint64_t>(INT64_MAX) ||
             snapshot[i].kernelTime100ns > static_cast<uint64_t>(INT64_MAX)) {
             delete[] records; delete[] snapshot; delete[] threads;

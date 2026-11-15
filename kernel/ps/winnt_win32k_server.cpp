@@ -25,7 +25,7 @@ constexpr size_t kScreenPixels =
 // windows alive together. Reserve enough pixels for that complete shell set.
 constexpr size_t kPixelCapacity = 4u * 1024u * 1024u;
 constexpr size_t kDcCapacity = 32;
-constexpr size_t kBitmapCapacity = 16;
+constexpr size_t kBitmapCapacity = 32;
 constexpr uint64_t kHandleTag = 0x4D574B0000000000ULL;
 constexpr size_t kSurfacePixels = MICANT_COMPOSITOR_SURFACE_PIXELS;
 

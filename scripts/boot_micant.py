@@ -1309,6 +1309,12 @@ def run_qemu(
                         if not time_evidence:
                             raise RuntimeError("CPL3 time probe reported neither UTC success nor explicit unavailable status")
                         if taskmgr_selftest:
+                            if "Task Manager: native controls self-test failed." in serial_log:
+                                raise RuntimeError("Task Manager tab, search or selection self-test failed")
+                            if "Task Manager: native controls validated." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
                             if "Task Manager: process snapshot unavailable from the kernel provider." in serial_log:
                                 raise RuntimeError("Task Manager syscall returned no valid process snapshot")
                             if "Task Manager: memory availability unavailable from the kernel provider." in serial_log:

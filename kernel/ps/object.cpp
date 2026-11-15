@@ -324,6 +324,9 @@ struct ProcessObjectFactory {
             const auto residentPages = process->addressSpace_.getResidentPages();
             entry.workingSetBytes = residentPages <= SIZE_MAX / mm::PageSize4KB
                 ? residentPages * mm::PageSize4KB : SIZE_MAX;
+            const auto peakResidentPages = process->addressSpace_.getWorkingSet().peakResidentPages;
+            entry.peakWorkingSetBytes = peakResidentPages <= SIZE_MAX / mm::PageSize4KB
+                ? peakResidentPages * mm::PageSize4KB : SIZE_MAX;
         }
         return NtStatus::Success;
     }

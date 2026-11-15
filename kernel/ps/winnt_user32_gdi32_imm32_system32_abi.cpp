@@ -581,6 +581,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kSelectObject);
     MICA_WIN32K_PROC(MicaWin32kBitBlt);
     MICA_WIN32K_PROC(MicaWin32kPresentDC);
+    MICA_WIN32K_PROC(MicaWin32kPresentDCRect);
     MICA_WIN32K_PROC(MicaWin32kDeleteObject);
     MICA_WIN32K_PROC(MicaWin32kGetStockObject);
     MICA_WIN32K_PROC(MicaWin32kCreateDibSection);
@@ -1372,9 +1373,20 @@ void* User32_CreateWindowExW(
     return hwnd;
 }
 
+intptr_t User32_SendMessageW(void* hWnd, uint32_t message, uintptr_t wParam,
+                              intptr_t lParam) noexcept;
+
 int32_t User32_DestroyWindow(void* hWnd) noexcept {
     using Fn=int32_t (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kDestroyWindow");
-    const int32_t destroyed = fn ? fn(hWnd) : 0;
+    if (!fn) return 0;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    // Window procedures belong to User32 and cannot be invoked from the
+    // privileged Win32k dispatcher. Deliver the documented teardown callback
+    // while the HWND and its WndProc association are still valid.
+    (void)User32_SendMessageW(hWnd, 0x0002u, 0, 0); // WM_DESTROY
+    (void)User32_SendMessageW(hWnd, 0x0082u, 0, 0); // WM_NCDESTROY
+#endif
+    const int32_t destroyed = fn(hWnd);
 #if defined(BUILD_SYSTEM32_USER32_DLL)
     if (destroyed) {
         winuser::ProcessWindowIcons().remove(hWnd);

@@ -1,55 +1,27 @@
-# LuceOS Task Manager — checklist
+# LuceOS Task Manager — punti aperti
 
-Aggiornato: 2026-11-15. Stato essenziale dei blocchi e prossimo passo;
-requisiti completi in
+Checklist breve; la specifica completa è
 [`USERMODE_TASK_MANAGER_AND_SYSTEM_MONITOR_SPEC.md`](USERMODE_TASK_MANAGER_AND_SYSTEM_MONITOR_SPEC.md).
 
-- [x] **Snapshot, nomi, memoria globale** — Ps/Mm reali; QEMU passato, `cc5be83`.
-- [x] **D1 — Terminazione autorizzata** — handle `PROCESS_TERMINATE`, fixture
-  rimosso dallo snapshot; QEMU passato, `1eb9b54`.
-- [x] **P1a — CPU globale** — class 8, percentuale da delta; QEMU passato,
-  `1ab31da`.
-- [x] **P1b — CPU per processo/thread** — Ke conta i tick CPL3/CPL0 per thread,
-  Ps somma i tempi di processo, Task Manager calcola e mostra percentuali per
-  riga da delta bounded. QEMU passato: `process and thread CPU totals
-  reconciled`, `process CPU times validated`, D1 e seriale stabile 5 s in
-  `/private/tmp/micant-taskmgr-p1b-percent`; commit `9df2acc`.
-- [ ] **U1 — UI interattiva** — in corso: Task Manager sta passando al percorso
-  nativo User32/GDI32 → Win32k, finestra HWND, `WM_PAINT`/`WM_SIZE` e pump input.
-  Primo boot ha fallito in fase SEC_IMAGE: l'import di Win32k incontrava un
-  DIB arena statico da 16 MiB per processo; ora limitato a 4 MiB. Build/link
-  bare-metal passati. QEMU con build isolato arriva a `_start`, classe User32,
-  `WM_NCCREATE` e `WM_CREATE`, poi il timer rileva RSP kernel fuori dai limiti
-  registrati e scatta il guard. Un run successivo fallisce prima in probe syscall
-  CPL3 (`RIP=0x4000000005DB`). Risolvere e rendere stabile il boot; UI non
-  verificata. Restano resize/paint/close, resize adattivo, schede, ricerca,
-  selezione e grafico storico.
-- [ ] **D2 — End task dalla UI** — dipende da U1; selezione, conferma, errori
-  accesso/uscita e azione tramite handle.
-- [ ] **S1/S2 — Hotkey e SAS** — nessun chord globale trusted; Winlogon, sessione,
-  desktop sicuro e IPC autenticato mancanti. Implementare owner reali prima del
-  percorso Ctrl+Shift+Esc/Ctrl+Alt+Del.
-- [ ] **P2 — Memoria per processo** — globale disponibile reale; working set e
-  commit richiedono ownership/accounting Mm/Ps.
-- [ ] **P3 — Storage/rete/GPU** — nessun provider aggregato collegato al query
-  Ring 3 bare-metal; metriche unavailable finché non esistono provider reali.
-- [ ] **F1 — Sessioni/startup/servizi** — provider runtime assenti; rimuovere
-  risposte synthetic e collegare session manager/SCM/Userenv canonici.
-- [ ] **G1 — Fault, stress e overhead** — churn, buffer invalidi, access denied,
-  PID reuse, refresh concorrente, provider assenti, stall Explorer e misure.
+- [x] Snapshot, nomi e memoria globale — QEMU; `cc5be83`.
+- [x] D1 terminazione autorizzata — QEMU; `1eb9b54`.
+- [x] P1a/P1b CPU globale e per processo/thread — QEMU; `1ab31da`, `9df2acc`.
+- [x] D2 End task UI e chiusura finestra — QEMU self-test; handle autorizzato,
+  `WM_CLOSE`/`WM_DESTROY`, paint, resize e idle.
+- [ ] U1 UI — parziale: finestre, schede, ricerca, selezione e Details attivi;
+  restano ordinamento, grafici storici e copertura QEMU completa.
+- [ ] P2 memoria per processo — working set corrente/picco live; commit privato
+  senza accounting Mm.
+- [ ] S1/S2 hotkey e SAS — manca il percorso trusted Input/HAL → sessione,
+  Winlogon e desktop sicuro.
+- [ ] P3 storage/rete/GPU — mancano provider live Io/NDIS/GPU.
+- [ ] F1 sessioni/startup/servizi — mancano Session Manager/Userenv/SCM runtime.
+- [ ] G1 stress/fault/overhead — churn, errori/cleanup e misure non coperti.
 
-## Punto di ripresa
+## Verifica recente
 
-P1b è chiuso. U1 in corso: usare `--cmake-build-dir` dedicato perché il build
-directory condiviso può disattivare la macro del self-test. Un run arriva a
-`WM_CREATE` e poi fallisce il guard dello stack al timer interrupt; un altro
-fallisce prima nel probe syscall CPL3. Stabilizzare il QEMU completo, poi chiudere
-resize/paint/close. Modifiche Win32k/compositor condivise escluse dal commit
-Task Manager.
-
-Audit paralleli: S1/S2 dipendono da sessione/autenticazione reali; P2 da
-accounting Mm/Ps; P3 da provider Io/NDIS/GPU; F1 da SCM/session/Userenv reali.
-Nessun valore senza provider va visualizzato come zero o successo.
-
-Commits registro: `cc867e0`, `6278c52`, `9df2acc`. Aggiornare questa checklist a ogni
-avanzamento, risultato QEMU e cambio del blocco attivo.
+`python3 qemu.py --headless --taskmgr-selftest --cmake-build-dir
+build/qemu-taskmgr-isolated --memory-mib 2048 --timeout 90 --stable-seconds 3`
+passato il 2026-11-15: process snapshot, CPU, azione D1, controlli UI,
+paint/resize, chiusura e seriale stabile. Evidenza in
+`/private/tmp/micant-taskmgr-destroy-callback-2/serial.log`.

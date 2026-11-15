@@ -2638,7 +2638,14 @@ bool launchUserImageProcess(const char16_t* imageName,
     }
 
     Handle thread{};
-    if (processHandle == g_compositorProcessHandle || processHandle == g_explorerProcessHandle) {
+    const bool taskManagerImage = imageName &&
+        (imageName[0] == u't' || imageName[0] == u'T') &&
+        imageName[1] == u'a' && imageName[2] == u's' && imageName[3] == u'k' &&
+        imageName[4] == u'm' && imageName[5] == u'g' && imageName[6] == u'r' &&
+        imageName[7] == u'.' && imageName[8] == u'e' && imageName[9] == u'x' &&
+        imageName[10] == u'e' && imageName[11] == 0;
+    if (processHandle == g_compositorProcessHandle || processHandle == g_explorerProcessHandle ||
+        taskManagerImage) {
         uintptr_t metadataBase = MICANT_COMPOSITOR_METADATA_BASE;
         size_t metadataView = MICANT_COMPOSITOR_METADATA_STORE_SIZE;
         const uint32_t metadataProtection = processHandle == g_compositorProcessHandle
@@ -2648,7 +2655,7 @@ bool launchUserImageProcess(const char16_t* imageName,
             2, 0, metadataProtection);
         uintptr_t pixelsBase = MICANT_COMPOSITOR_PIXELS_BASE;
         size_t pixelsView = MICANT_COMPOSITOR_PIXEL_STORE_SIZE;
-        const uint32_t pixelProtection = processHandle == g_explorerProcessHandle
+        const uint32_t pixelProtection = processHandle == g_explorerProcessHandle || taskManagerImage
             ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
         if (result == NtStatus::Success)
             result = sys::NtMapViewOfSectionFromKernel(g_compositorPixelsSection,
