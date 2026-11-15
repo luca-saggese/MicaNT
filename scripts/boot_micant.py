@@ -422,7 +422,45 @@ def verify_mouse(
                     serial.count("[MicaNT Explorer] Application window destroyed by its owner") >= 2
                 )
                 if (not irq_enabled or irq_seen) and explorer_mouse_seen and explorer_key_seen and explorer_application_window_closed:
-                    wait_for_changed_screen(opened, "interactive.ppm", 10000)
+                    desktop_light = wait_for_changed_screen(opened, "interactive.ppm", 10000)
+
+                    def click_left() -> None:
+                        execute("input-send-event", {"events": [
+                            {"type": "btn", "data": {"button": "left", "down": True}},
+                        ]})
+                        time.sleep(0.1)
+                        execute("input-send-event", {"events": [
+                            {"type": "btn", "data": {"button": "left", "down": False}},
+                        ]})
+
+                    # Open Start from the taskbar, then select the right-column
+                    # Theme Appearance entry (row 5) to switch Light to Dark.
+                    execute("input-send-event", {"events": [
+                        {"type": "rel", "data": {"axis": "x", "value": 50}},
+                        {"type": "rel", "data": {"axis": "y", "value": 748}},
+                    ]})
+                    time.sleep(0.2)
+                    click_left()
+                    time.sleep(0.3)
+                    screen("theme-menu-light.ppm")
+                    execute("input-send-event", {"events": [
+                        {"type": "rel", "data": {"axis": "x", "value": 200}},
+                        {"type": "rel", "data": {"axis": "y", "value": -212}},
+                    ]})
+                    time.sleep(0.2)
+                    click_left()
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                        if "[MicaNT Theme] Runtime profile switch to Dark passed" in serial:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("Explorer did not apply the Dark theme from Start")
+                    dark_screen = wait_for_changed_screen(
+                        desktop_light, "theme-dark.ppm", 10000)
+                    if dark_screen == desktop_light:
+                        raise RuntimeError("Dark theme switch did not change scanout pixels")
                     return
                 time.sleep(0.1)
             if irq_enabled and "[MicaNT Input] PS/2 mouse IRQ byte consumed" not in serial:
@@ -993,7 +1031,7 @@ def run_qemu(
                                 verify_mouse(
                                     temp / "qmp.sock", temp, serial_path, diagnostics_dir,
                                 )
-                                print("Explorer mouse/keyboard window dispatch, scanout and window cleanup passed.", flush=True)
+                                print("Explorer input, window cleanup and Light-to-Dark theme switch passed.", flush=True)
                             result = (
                                 "timer self-test" if timer_selftest else
                                 "C++ runtime self-test" if runtime_selftest else

@@ -652,6 +652,11 @@ void selectNextThemeProfile() noexcept {
         std::memcpy(g.themeProfile, oldProfile, sizeof(oldProfile));
         return;
     }
+    PrintLine(equalProfile(next, profiles[1])
+        ? "[MicaNT Theme] Runtime profile switch to Dark passed"
+        : equalProfile(next, profiles[2])
+            ? "[MicaNT Theme] Runtime profile switch to Light Purple passed"
+            : "[MicaNT Theme] Runtime profile switch to Light passed");
     for (auto& app : g.apps) {
         if (!app.open || !app.hwnd || !app.pixels) continue;
         drawAppWindow(app);
