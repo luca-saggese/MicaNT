@@ -142,6 +142,8 @@ uint32_t s_activePage{};
 uint32_t s_renderWidth{WIN_W};
 uint32_t s_renderHeight{WIN_H};
 uintptr_t s_selectedProcessId{};
+uint32_t s_sortColumn{};
+bool s_sortDescending{};
 char s_searchText[32]{};
 uint32_t s_searchLength{};
 bool s_searchFocused{};
@@ -586,6 +588,74 @@ bool ProcessMatchesSearch(const SnapshotView& snapshot,
     return false;
 }
 
+struct ProcessRowRef {
+    const micant::SystemProcessInformation* entry{};
+    uint32_t snapshotIndex{};
+};
+
+uint32_t BuildSortedProcessRows(const SnapshotView& snapshot,
+                                ProcessRowRef* rows,
+                                uint32_t capacity) noexcept {
+    if (!snapshot.available || !rows || !capacity) return 0;
+    const uint32_t count = snapshot.processCount < capacity
+        ? snapshot.processCount : capacity;
+    uint32_t offset = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        rows[i] = {reinterpret_cast<const micant::SystemProcessInformation*>(
+                       snapshot.data + offset), i};
+        const auto* entry = rows[i].entry;
+        if (!entry->NextEntryOffset) break;
+        offset += entry->NextEntryOffset;
+    }
+    auto before = [&snapshot](const ProcessRowRef& left,
+                              const ProcessRowRef& right) noexcept {
+        const auto& a = *left.entry;
+        const auto& b = *right.entry;
+        int order = 0;
+        switch (s_sortColumn) {
+        case 1:
+            order = a.NumberOfThreads < b.NumberOfThreads ? -1 :
+                a.NumberOfThreads > b.NumberOfThreads ? 1 : 0;
+            break;
+        case 2:
+            order = a.HandleCount < b.HandleCount ? -1 :
+                a.HandleCount > b.HandleCount ? 1 : 0;
+            break;
+        case 3: {
+            const uint32_t av = left.snapshotIndex < MaxTrackedProcesses &&
+                snapshot.processCpuAvailable[left.snapshotIndex]
+                ? snapshot.processCpuPercent[left.snapshotIndex] : 0;
+            const uint32_t bv = right.snapshotIndex < MaxTrackedProcesses &&
+                snapshot.processCpuAvailable[right.snapshotIndex]
+                ? snapshot.processCpuPercent[right.snapshotIndex] : 0;
+            order = av < bv ? -1 : av > bv ? 1 : 0;
+            break;
+        }
+        case 4:
+            order = a.WorkingSetSize < b.WorkingSetSize ? -1 :
+                a.WorkingSetSize > b.WorkingSetSize ? 1 : 0;
+            break;
+        default:
+            order = a.UniqueProcessId < b.UniqueProcessId ? -1 :
+                a.UniqueProcessId > b.UniqueProcessId ? 1 : 0;
+            break;
+        }
+        if (!order) order = a.UniqueProcessId < b.UniqueProcessId ? -1 :
+            a.UniqueProcessId > b.UniqueProcessId ? 1 : 0;
+        return s_sortDescending ? order > 0 : order < 0;
+    };
+    for (uint32_t i = 1; i < count; ++i) {
+        const ProcessRowRef value = rows[i];
+        uint32_t j = i;
+        while (j && before(value, rows[j - 1])) {
+            rows[j] = rows[j - 1];
+            --j;
+        }
+        rows[j] = value;
+    }
+    return count;
+}
+
 void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
     const uint32_t width = s_renderWidth;
     const uint32_t height = s_renderHeight;
@@ -726,12 +796,14 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
         AppendUnsigned(bytes, sizeof(bytes), bytesCursor, snapshot.length);
         DrawString(s_tmBuffer, width, 250, 121, bytes, PackBGRA(175, 190, 210));
     } else {
-        uint32_t offset = 0;
+        ProcessRowRef rows[MaxTrackedProcesses]{};
+        const uint32_t rowCount = BuildSortedProcessRows(snapshot, rows,
+                                                          MaxTrackedProcesses);
         uint32_t row = 0;
         uint32_t visibleRow = 0;
         uint32_t y = 96;
-        while (row < snapshot.processCount) {
-            const auto* entry = reinterpret_cast<const micant::SystemProcessInformation*>(snapshot.data + offset);
+        while (row < rowCount) {
+            const auto* entry = rows[row].entry;
             if (ProcessMatchesSearch(snapshot, *entry) && y + 20 < height - 26) {
             const bool selected = entry->UniqueProcessId == s_selectedProcessId;
             const uint32_t bg = selected ? PackBGRA(38, 62, 94) :
@@ -779,8 +851,6 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
             y += 22;
             }
             ++row;
-            if (entry->NextEntryOffset == 0) break;
-            offset += entry->NextEntryOffset;
         }
     }
 
@@ -870,6 +940,12 @@ intptr_t TaskmgrWindowProcedure(void* hwnd, uint32_t message,
             else if (mouseX >= 232 && mouseX < 320) s_activePage = 2;
             s_searchFocused = false;
             s_confirmEndTask = false;
+        } else if (s_activePage == 0 && mouseY >= 73 && mouseY < 94) {
+            const uint32_t column = mouseX < 210 ? 0u : mouseX < 290 ? 1u :
+                mouseX < 380 ? 2u : mouseX < 455 ? 3u : 4u;
+            if (column == s_sortColumn) s_sortDescending = !s_sortDescending;
+            else { s_sortColumn = column; s_sortDescending = false; }
+            s_searchFocused = false;
         } else if (s_activePage == 0 && mouseY >= static_cast<int32_t>(s_renderHeight - 24) &&
                    mouseX >= static_cast<int32_t>(s_renderWidth - 112)) {
             if (!s_selectedProcessId || s_selectedProcessId == 4) {
@@ -905,10 +981,12 @@ intptr_t TaskmgrWindowProcedure(void* hwnd, uint32_t message,
                    mouseY < static_cast<int32_t>(WIN_H - 26) &&
                    s_liveSnapshot && s_liveSnapshot->available) {
             const uint32_t wantedRow = static_cast<uint32_t>((mouseY - 96) / 22);
-            uint32_t offset = 0, visibleRow = 0;
-            for (uint32_t i = 0; i < s_liveSnapshot->processCount; ++i) {
-                const auto* entry = reinterpret_cast<const micant::SystemProcessInformation*>(
-                    s_liveSnapshot->data + offset);
+            ProcessRowRef rows[MaxTrackedProcesses]{};
+            const uint32_t count = BuildSortedProcessRows(*s_liveSnapshot, rows,
+                                                          MaxTrackedProcesses);
+            uint32_t visibleRow = 0;
+            for (uint32_t i = 0; i < count; ++i) {
+                const auto* entry = rows[i].entry;
                 if (ProcessMatchesSearch(*s_liveSnapshot, *entry)) {
                     if (visibleRow == wantedRow) {
                         s_selectedProcessId = entry->UniqueProcessId;
@@ -917,8 +995,6 @@ intptr_t TaskmgrWindowProcedure(void* hwnd, uint32_t message,
                     }
                     ++visibleRow;
                 }
-                if (!entry->NextEntryOffset) break;
-                offset += entry->NextEntryOffset;
             }
         } else if (s_activePage == 0) {
             s_searchFocused = false;
@@ -1114,6 +1190,14 @@ bool ExerciseTaskmgrControls(const SnapshotView& snapshot) noexcept {
         offset += entry->NextEntryOffset;
     }
     if (!matchingProbeVisible) return false;
+    if (!postClick(400, 80) || !PumpTaskManagerMessages() ||
+        s_sortColumn != 3 || s_sortDescending) return false;
+    if (!postClick(400, 80) || !PumpTaskManagerMessages() || !s_sortDescending)
+        return false;
+    if (!postClick(400, 80) || !PumpTaskManagerMessages() || s_sortDescending)
+        return false;
+    if (!postClick(20, 80) || !PumpTaskManagerMessages() || s_sortColumn != 0)
+        return false;
     if (!postClick(120, 60) || !PumpTaskManagerMessages() || s_activePage != 1) return false;
     if (!postClick(20, 60) || !PumpTaskManagerMessages() || s_activePage != 0) return false;
     if (!postClick(20, 96) || !PumpTaskManagerMessages() || s_selectedProcessId != probeId)
