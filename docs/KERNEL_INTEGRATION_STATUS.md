@@ -1851,14 +1851,25 @@ pointer `0x00004100407AE070` from `ZwClose+0xE4`; that diagnostic change was
 removed after identifying the failing close path. The cursor/Explorer path was
 therefore not executed in QEMU.
 
-Open requirements: ANI frame decoding and timer-driven playback are not
-connected to the cursor API; `IDC_WAIT` and `IDC_APPSTARTING` explicitly fail
-instead of returning a static frame. RT_CURSOR/RT_GROUP_CURSOR PE resource
-loading, persistent per-user cursor themes, DPI-aware theme size selection,
-secure-desktop authorization and end-to-end Explorer cursor-context tests are
-not implemented. The compositor still recomposes and submits a complete frame
-from user mode; the driver-side dirty transfer reduces device traffic but is
-not an incremental desktop compositor.
+Cursor follow-up (2026-11-15): `LoadImageW(..., IMAGE_CURSOR, LR_LOADFROMFILE)`
+and `LoadCursorFromFileW` now recognize bounded RIFF ACON files, decode every
+embedded CUR frame, retain the ANI sequence/timing with the cursor handle, and
+advance the active frame from User32's message pump. `IDC_WAIT` and
+`IDC_APPSTARTING` now load the imported MiniMouse ANI assets. Frame decoding is
+limited to the compositor's 64x64 cursor bound; per-frame hotspots are applied
+when the sequence advances. Shared system cursor handles remain non-destroyable
+and their animation state is retained with the shared handle.
+
+The `user32_boot` target linked after this change and its native user-mode
+boundary check passed. QEMU was not rerun; the previous recorded attempt stopped
+before Explorer in the Ring 3 process-syscall/ExHeap path. Still open are
+RT_CURSOR/RT_GROUP_CURSOR integration with the canonical module/resource
+owner, persistent per-user themes, DPI-aware theme-size selection,
+secure-desktop authorization, and end-to-end Explorer animation/context tests.
+The compositor still recomposes and submits a complete frame from user mode;
+the driver-side dirty transfer reduces device traffic but is not an incremental
+desktop compositor. Device hardware cursor mode is also unimplemented; software
+composition remains the active presentation path.
 
 | Command | Result |
 |---|---|

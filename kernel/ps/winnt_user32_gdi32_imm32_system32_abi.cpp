@@ -12,6 +12,7 @@
 #include "micant/um/subsystems/imaging/native_image_allocator.hpp"
 #include "micant/um/subsystems/winuser/icon_handle_table.hpp"
 #include "micant/um/subsystems/winuser/cursor_image.hpp"
+#include "micant/um/subsystems/winuser/ani_image.hpp"
 #include "micant/shared/native_nt_api.hpp"
 #endif
 #include "micant/shared/win32k_client.h"
@@ -20,6 +21,9 @@
 #endif
 
 #include <algorithm>
+#include <array>
+#include <mutex>
+#include <vector>
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
@@ -28,6 +32,115 @@ extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 namespace micant::um::winnt_user32_gdi32_imm32_abi {
 
 namespace {
+template <typename T> T Win32kProc(const char* name) noexcept;
+
+struct AnimatedCursor {
+    void* handle{};
+    std::vector<micant::um::imaging::ImageFrame> frames{};
+    std::array<micant::um::winuser::AniStep,
+        micant::um::winuser::AniFileView::MaxSteps> steps{};
+    uint16_t stepCount{}, step{};
+    uint64_t deadlineMs{};
+    uint16_t hotX{}, hotY{};
+    std::array<uint16_t, micant::um::winuser::AniFileView::MaxFrames> frameHotX{};
+    std::array<uint16_t, micant::um::winuser::AniFileView::MaxFrames> frameHotY{};
+};
+std::array<AnimatedCursor, 16> g_animatedCursors{};
+std::mutex g_animatedCursorLock{};
+uint64_t cursorClockMs() noexcept {
+    return *reinterpret_cast<volatile const uint64_t*>(
+        micant::UserSharedDataAddress + offsetof(micant::KUserSharedData, tickCountQuad));
+}
+
+void updateAnimatedCursor() noexcept {
+    using namespace micant::um;
+    using InfoFn = int32_t (*)(MicaWin32kCursorInfo*);
+    using SetFn = void* (*)(void*, const uint32_t*, uint32_t, uint32_t,
+                            uint32_t, uint32_t, uint32_t);
+    auto getInfo = Win32kProc<InfoFn>("MicaWin32kGetCursorInfo");
+    auto setCursor = Win32kProc<SetFn>("MicaWin32kSetCursor");
+    if (!getInfo || !setCursor) return;
+    MicaWin32kCursorInfo info{};
+    if (!getInfo(&info) || !info.cursorHandle) return;
+    const uint64_t now = cursorClockMs();
+    std::lock_guard lock(g_animatedCursorLock);
+    for (auto& animation : g_animatedCursors) {
+        if (animation.handle != reinterpret_cast<void*>(info.cursorHandle) ||
+            animation.frames.empty() || !animation.stepCount) continue;
+        if (now < animation.deadlineMs) return;
+        // Bound catch-up work by the parsed step count; a stalled message loop
+        // skips elapsed frames without accumulating timing drift.
+        for (uint16_t advanced = 0; advanced < animation.stepCount &&
+             now >= animation.deadlineMs; ++advanced) {
+            animation.step = static_cast<uint16_t>((animation.step + 1) % animation.stepCount);
+            const auto& next = animation.steps[animation.step];
+            const uint64_t duration = std::max<uint64_t>(1,
+                (uint64_t(next.durationJiffies) * 1000 + 59) / 60);
+            animation.deadlineMs += duration;
+        }
+        if (now >= animation.deadlineMs) {
+            const auto& current = animation.steps[animation.step];
+            const uint64_t duration = std::max<uint64_t>(1,
+                (uint64_t(current.durationJiffies) * 1000 + 59) / 60);
+            animation.deadlineMs = now + duration;
+        }
+        const auto& step = animation.steps[animation.step];
+        const auto& frame = animation.frames[step.frameIndex];
+        (void)setCursor(animation.handle,
+            reinterpret_cast<const uint32_t*>(frame.pixels.data()), frame.width,
+            frame.height, frame.stride / 4, animation.frameHotX[step.frameIndex],
+            animation.frameHotY[step.frameIndex]);
+        return;
+    }
+}
+
+void* loadAniCursor(std::span<const uint8_t> encoded,
+                    const imaging::ImageAllocator& allocator,
+                    const imaging::ImageLimits& limits, bool shared = false) noexcept {
+    winuser::AniFileView view{};
+    if (winuser::ParseAniFile(encoded, view, limits.maxEncodedBytes) != winuser::AniStatus::Success)
+        return nullptr;
+    auto frameLimits = limits;
+    frameLimits.maxPixels = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS;
+    frameLimits.maxDecodedBytes = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS * 4u;
+    frameLimits.maxIntermediateBytes = 1024u * 1024u;
+    AnimatedCursor candidate{};
+    candidate.frames.reserve(view.frameCount);
+    for (uint16_t i = 0; i < view.frameCount; ++i) {
+        winuser::CursorImage cursor{};
+        if (winuser::DecodeCursorImage(view.frames[i], 0, 0, cursor, allocator, frameLimits) !=
+            imaging::ImageStatus::Success) return nullptr;
+        candidate.frameHotX[i] = cursor.hotX;
+        candidate.frameHotY[i] = cursor.hotY;
+        if (!i) { candidate.hotX = cursor.hotX; candidate.hotY = cursor.hotY; }
+        if (cursor.image.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+            cursor.image.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        candidate.frames.push_back(std::move(cursor.image));
+    }
+    candidate.stepCount = view.stepCount;
+    std::copy_n(view.steps.begin(), view.stepCount, candidate.steps.begin());
+    imaging::ImageFrame first{};
+    const auto& frame = candidate.frames[view.steps[0].frameIndex];
+    first.width = frame.width; first.height = frame.height; first.stride = frame.stride;
+    first.format = imaging::PixelFormat::Bgra8Premultiplied;
+    if (!first.pixels.allocate(frame.pixels.size(), allocator)) return nullptr;
+    std::memcpy(first.pixels.data(), frame.pixels.data(), frame.pixels.size());
+    candidate.handle = winuser::ProcessIconHandles().createCursor(std::move(first), allocator,
+        candidate.hotX, candidate.hotY, shared);
+    if (!candidate.handle) return nullptr;
+    const uint64_t firstDuration = std::max<uint64_t>(1,
+        (uint64_t(candidate.steps[0].durationJiffies) * 1000 + 59) / 60);
+    candidate.deadlineMs = cursorClockMs() + firstDuration;
+    std::lock_guard lock(g_animatedCursorLock);
+    for (auto& slot : g_animatedCursors) {
+        if (slot.handle) continue;
+        slot = std::move(candidate);
+        return slot.handle;
+    }
+    (void)winuser::ProcessIconHandles().destroyCursor(candidate.handle);
+    return nullptr;
+}
+
 template <typename T> T Win32kProc(const char* name) noexcept {
 #define MICA_WIN32K_PROC(exportName) if (std::strcmp(name, #exportName) == 0) return reinterpret_cast<T>(&exportName)
     MICA_WIN32K_PROC(MicaWin32kCreateWindowExW);
@@ -342,7 +455,17 @@ void* User32_CopyCursor(void* cursor) noexcept {
 }
 
 int32_t User32_DestroyCursor(void* cursor) noexcept {
-    return micant::um::winuser::ProcessIconHandles().destroyCursor(cursor) ? 1 : 0;
+    micant::um::winuser::IconHandleTable::Lease lease{};
+    if (micant::um::winuser::ProcessIconHandles().acquireCursor(cursor, lease) &&
+        lease.shared()) return 1;
+    const bool destroyed = micant::um::winuser::ProcessIconHandles().destroyCursor(cursor);
+    if (destroyed) {
+        std::lock_guard lock(g_animatedCursorLock);
+        for (auto& animation : g_animatedCursors) {
+            if (animation.handle == cursor) { animation = {}; break; }
+        }
+    }
+    return destroyed ? 1 : 0;
 }
 
 void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
@@ -354,6 +477,7 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         {32644, L"mini_mouse_ew.cur"}, {32645, L"mini_mouse_ns.cur"},
         {32646, L"mini_mouse_move.cur"}, {32648, L"mini_mouse_unavail.cur"},
         {32649, L"mini_mouse_link.cur"}, {32651, L"mini_mouse_helpsel.cur"},
+        {32514, L"mini_mouse_busy.ani"}, {32650, L"mini_mouse_working.ani"},
     };
     if (instance || !name || reinterpret_cast<uintptr_t>(name) > UINT16_MAX) return nullptr;
     const uintptr_t id = reinterpret_cast<uintptr_t>(name);
@@ -378,8 +502,15 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         imaging::ImageBuffer encoded{};
         if (imaging::ReadIconSourceFile(path, encoded, allocator, limits) !=
             imaging::ImageStatus::Success) return nullptr;
+        const auto bytes = encoded.span();
+        if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[1] == 'I' &&
+            bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'A' &&
+            bytes[9] == 'C' && bytes[10] == 'O' && bytes[11] == 'N') {
+            sharedHandles[i] = loadAniCursor(bytes, allocator, limits, true);
+            return sharedHandles[i];
+        }
         winuser::CursorImage cursor{};
-        if (winuser::DecodeCursorImage(encoded.span(), 0, 0, cursor, allocator, limits) !=
+        if (winuser::DecodeCursorImage(bytes, 0, 0, cursor, allocator, limits) !=
             imaging::ImageStatus::Success) return nullptr;
         sharedHandles[i] = winuser::ProcessIconHandles().createCursor(
             std::move(cursor.image), allocator, cursor.hotX, cursor.hotY, true);
@@ -527,8 +658,15 @@ void* User32_LoadImageW(void* /*instance*/, const wchar_t* name, uint32_t type,
         imaging::ImageBuffer encoded{};
         if (imaging::ReadIconSourceFile(name, encoded, imaging::NativeImageAllocator(), limits) !=
             imaging::ImageStatus::Success) return nullptr;
+        const auto bytes = encoded.span();
+        if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[1] == 'I' &&
+            bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'A' &&
+            bytes[9] == 'C' && bytes[10] == 'O' && bytes[11] == 'N') {
+            if (width || height) return nullptr;
+            return loadAniCursor(bytes, imaging::NativeImageAllocator(), limits);
+        }
         winuser::CursorImage cursor{};
-        if (winuser::DecodeCursorImage(encoded.span(), width, height, cursor,
+        if (winuser::DecodeCursorImage(bytes, width, height, cursor,
                 imaging::NativeImageAllocator(), limits) != imaging::ImageStatus::Success)
             return nullptr;
         uint32_t targetWidth = width ? width : cursor.image.width;
@@ -881,6 +1019,7 @@ intptr_t User32_DefWindowProcW(void* hWnd, uint32_t Msg, uintptr_t wParam, intpt
 }
 
 int32_t User32_PeekMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax, uint32_t wRemoveMsg) noexcept {
+    updateAnimatedCursor();
     if (!lpMsg) return 0;
     MicaWin32kMessage msg{};
     using Fn=int32_t (*)(MicaWin32kMessage*,void*,uint32_t,uint32_t,uint32_t);
@@ -893,6 +1032,7 @@ int32_t User32_PeekMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin,
 }
 
 int32_t User32_GetMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax) noexcept {
+    updateAnimatedCursor();
     if (!lpMsg) return -1;
     MicaWin32kMessage msg{};
     using Fn=int32_t (*)(MicaWin32kMessage*,void*,uint32_t,uint32_t);
