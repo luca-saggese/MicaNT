@@ -1899,6 +1899,9 @@ Explorer also loads the staged `mini_mouse_busy.ani` through
 `LoadCursorFromFileW`, selects it during timed message polling, restores the
 class cursor, and destroys the resulting owned handle. This exercises the
 file-specific API path independently of the `LoadImageW` ANI resize probe.
+The system-cursor cache has a slot for each mapped IDC; Explorer now loads and
+selects `IDC_APPSTARTING` from the final cache entry, covering the previously
+undersized cache and its working ANI asset.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
@@ -1920,3 +1923,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-getmessage-runtime` | Passed; Explorer selected the ANI busy cursor during four queued `GetMessageW` polls, restored the normal cursor, then passed input dispatch, scanout, cleanup and five seconds of stable serial |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pen-alias` | Passed; Explorer serial confirmed `IDC_PEN` loaded and selected from the system cursor map, followed by PE cursor and ANI probes, input dispatch, scanout, cleanup and five seconds stable serial |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-loadfromfile-ani` | Passed; Explorer serial confirmed `LoadCursorFromFileW` loaded and released the staged ANI cursor; ANI resize, PE resource selection, input dispatch, scanout, cleanup and five seconds stable serial also passed |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-appstarting-cache` | Passed; Explorer loaded and selected the last mapped system cursor (`IDC_APPSTARTING` ANI), confirming its cache slot is in bounds; ANI file load, input dispatch, scanout, cleanup and five seconds stable serial passed |

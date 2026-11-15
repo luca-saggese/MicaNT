@@ -77,7 +77,9 @@ std::array<SharedPeCursorCacheEntry, 255> g_sharedPeCursorCache{};
 CursorMutex g_animatedCursorLock{};
 CursorMutex g_sharedPeCursorCacheLock{};
 struct SystemCursorCacheEntry { void* handle{}; bool reserved{}; };
-std::array<SystemCursorCacheEntry, 14> g_systemCursorCache{};
+// Keep one cache slot for every entry in User32_LoadCursorW's system table,
+// including IDC_APPSTARTING at the end of that table.
+std::array<SystemCursorCacheEntry, 15> g_systemCursorCache{};
 CursorMutex g_systemCursorCacheLock{};
 struct SharedCursorReservation {
     size_t slot{g_sharedPeCursorCache.size()};

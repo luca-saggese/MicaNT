@@ -1266,6 +1266,19 @@ extern "C" void _start(const char* = nullptr) {
             ? "[MicaNT Cursor] ANI wait path exercised through blocking GetMessage"
             : "[MicaNT Cursor] ANI blocking GetMessage probe failed");
     }
+    HCURSOR workingCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32650));
+    if (workingCursor) {
+        SetCursor(workingCursor);
+        for (unsigned frame = 0; frame < 4; ++frame) {
+            Sleep(40);
+            MSG pending{};
+            (void)PeekMessageW(&pending, nullptr, 0, 0, PM_NOREMOVE);
+        }
+        SetCursor(windowClass.hCursor);
+        PrintLine("[MicaNT Cursor] IDC_APPSTARTING system ANI loaded and selected");
+    } else {
+        PrintLine("[MicaNT Cursor] IDC_APPSTARTING system ANI load failed");
+    }
     uint64_t lastClockUpdate = GetTickCount64();
     for (;;) {
         MSG msg{};
