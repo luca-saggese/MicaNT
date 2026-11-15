@@ -399,6 +399,10 @@ def verify_mouse(
             else:
                 raise RuntimeError("Explorer did not create its second overlapping user-mode window")
             overlapping = wait_for_changed_screen(opened, "overlapping-windows.ppm", 5000)
+            inactive_caption = pixel_at(overlapping, 280, 105)
+            active_caption = pixel_at(overlapping, 385, 132)
+            if inactive_caption == active_caption:
+                raise RuntimeError("Active and inactive caption pixels did not differ")
             # The second window starts at (222,119), size 500x320. Probe a
             # pixel inside its maximize button but away from the glyph/cursor.
             normal_caption_button = pixel_at(overlapping, 660, 129)
@@ -748,8 +752,48 @@ def verify_mouse(
                         time.sleep(0.1)
                     else:
                         raise RuntimeError("Edge resize failed after the live theme switch")
-                    wait_for_changed_screen(
+                    post_switch_resize = wait_for_changed_screen(
                         post_switch_move, "post-switch-edge-resize.ppm", 1000)
+
+                    # The current live window is at (247,139), approximately
+                    # 520x340 after the preceding caption drag and edge resize.
+                    # Capture pressed-state pixels away from the maximize glyph,
+                    # releasing outside the button so the window geometry stays put.
+                    caption_button_point = (705, 149)
+                    caption_button_center = (716, 157)
+                    move_to(*caption_button_center)
+                    set_left_button(True)
+                    time.sleep(0.2)
+                    dark_pressed = screen("caption-dark-pressed.ppm")
+                    dark_accent_pixel = pixel_at(dark_pressed, *caption_button_point)
+                    move_to(680, 157)
+                    set_left_button(False)
+
+                    move_to(50, 748)
+                    click_left()
+                    time.sleep(0.3)
+                    move_to(250, 536)
+                    click_left()
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                        if "[MicaNT Theme] Runtime profile switch to Light Purple passed" in serial:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("Explorer did not apply the Light Purple theme from Start")
+                    move_to(*caption_button_center)
+                    set_left_button(True)
+                    time.sleep(0.2)
+                    purple_pressed = screen("caption-purple-pressed.ppm")
+                    purple_accent_pixel = pixel_at(purple_pressed, *caption_button_point)
+                    move_to(680, 157)
+                    set_left_button(False)
+                    if dark_accent_pixel == purple_accent_pixel:
+                        raise RuntimeError("Light Purple accent did not change the caption button pixel")
+                    if purple_accent_pixel != bytes((0x9A, 0x57, 0xA3)):
+                        raise RuntimeError(
+                            f"Light Purple caption button pixel was {purple_accent_pixel}, expected (154, 87, 163)")
 
                     destroyed_count = serial.count(
                         "[MicaNT Explorer] Application window destroyed by its owner")

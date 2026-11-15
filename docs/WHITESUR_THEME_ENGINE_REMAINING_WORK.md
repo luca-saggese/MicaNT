@@ -117,9 +117,10 @@ the evidence named here, not just declarations or a successful compile.
 - [x] QEMU repeated caption drag and edge resize after the live Light-to-Dark
   change; both passed and the client surface remained live in the same
   interactive run above.
-- [ ] Verify inactive caption pixels and Light Purple/accent caption pixels
-  after runtime changes. These state/color combinations are not yet covered by
-  pixel assertions.
+- [x] QEMU compares inactive and active caption pixels in overlapping Light
+  windows, then cycles the live app from Dark to Light Purple and verifies the
+  pressed caption button pixel is exactly `#9A57A3` (diagnostics:
+  `/private/tmp/micant-nonclient-inactive-accent-final-run`).
 
 ### 4. Explorer theme coverage
 
