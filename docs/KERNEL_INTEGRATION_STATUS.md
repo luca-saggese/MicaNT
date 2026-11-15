@@ -1903,6 +1903,9 @@ The system-cursor cache capacity and supported-ID validation both use the
 canonical cursor table, and Explorer loads and selects `IDC_APPSTARTING` from
 its final entry, covering the previously undersized cache and its working ANI
 asset.
+The cursor-image syscall now writes its previous-handle output before changing
+the active Win32k cursor, so an invalid user output address cannot report a
+failed `SetCursor` after changing visible cursor state.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
@@ -1927,3 +1930,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-appstarting-cache` | Passed; Explorer loaded and selected the last mapped system cursor (`IDC_APPSTARTING` ANI), confirming its cache slot is in bounds; ANI file load, input dispatch, scanout, cleanup and five seconds stable serial passed |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-derived-cache` | Passed after deriving cache capacity from the system cursor table; `IDC_APPSTARTING`, ANI file load, input dispatch, scanout, cleanup and five seconds stable serial passed |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-map-validation` | Passed after deriving supported system cursor IDs from the canonical table; `IDC_APPSTARTING`, input dispatch, scanout, cleanup and five seconds stable serial passed |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-transactional-set` | Passed after moving cursor syscall output copying before active-state mutation; Explorer ANI selection, PE cursor, input dispatch, scanout, cleanup and five seconds stable serial passed |

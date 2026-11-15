@@ -4127,14 +4127,17 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         previous.operation = MICANT_WIN32K_OP_GET_CURSOR_HANDLE;
         NtStatus resultStatus = win32k::freestanding::dispatchRequest(previous, owner);
         if (resultStatus != NtStatus::Success) return status(resultStatus);
-        resultStatus = win32k::freestanding::setCursorImage(image, owner);
-        if (resultStatus != NtStatus::Success) return status(resultStatus);
         image.previousCursorHandle = previous.result;
-        publishCompositorSurfacesInCompositorSpace();
         const auto* previousField = reinterpret_cast<const uint8_t*>(first) +
             offsetof(MicaWin32kCursorImage, previousCursorHandle);
-        return status(ex::ExSafeCopyToUser(const_cast<uint8_t*>(previousField),
-            &image.previousCursorHandle, sizeof(image.previousCursorHandle)));
+        const NtStatus outputStatus = ex::ExSafeCopyToUser(
+            const_cast<uint8_t*>(previousField), &image.previousCursorHandle,
+            sizeof(image.previousCursorHandle));
+        if (outputStatus != NtStatus::Success) return status(outputStatus);
+        resultStatus = win32k::freestanding::setCursorImage(image, owner);
+        if (resultStatus != NtStatus::Success) return status(resultStatus);
+        publishCompositorSurfacesInCompositorSpace();
+        return status(NtStatus::Success);
     }
     return status(NtStatus::NotSupported);
 }
