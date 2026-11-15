@@ -33,15 +33,15 @@ the evidence named here, not just declarations or a successful compile.
   `WM_THEMECHANGED` redraws the snapshot already published by the selector.
   Previously, the latter reloaded persisted Light over the session Dark
   snapshot.
-- [x] QEMU `--verify-input` passed the Light-to-Dark titlebar pixel assertion,
-  then dragged and edge-resized the still-open window. Evidence:
-  `/private/tmp/micant-theme-nonclient-committed-2`, including
+- [x] Clean QEMU `--verify-input` at commit `708051a` passed the Light-to-Dark
+  titlebar pixel assertion, then dragged and edge-resized the still-open
+  window. Evidence: `/private/tmp/micant-theme-clean-708051a-run`, including
   `live-window-light.ppm`, `theme-dark.ppm`,
-  `post-switch-caption-drag.ppm`, and `post-switch-edge-resize.ppm`.
-  Baremetal target and native user-mode boundary checks passed. The isolated
-  build manifest identifies base commit `b27331b`; the tested Explorer source
-  contains the exact `e0112a6` fix, while the copied worktree also had unrelated
-  Task Manager edits. No clean-tree manifest proof is claimed.
+  `post-switch-caption-drag.ppm`, and `post-switch-edge-resize.ppm`. The clean
+  manifest records commit `708051ad990dadf5882e15a8cac6e4accfaf9ab6` and
+  `working_tree_dirty: false`; baremetal target and native user-mode boundary
+  checks passed. The sampled titlebar changed from `(250,250,250)` to
+  `(54,54,54)`.
 - [ ] A build of the latest uncommitted shared worktree is still pending. That
   tree contains unrelated Task Manager/kernel changes; its earlier build
   failed in `kernel/init/kiinit.cpp` (`third`/`fourth` undeclared) and
