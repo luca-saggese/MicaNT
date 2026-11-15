@@ -657,6 +657,24 @@ def run_qemu(
                 f"Mini Mouse cursor theme is incomplete: {', '.join(missing_cursor_files)}")
         shutil.copytree(cursor_source_dir,
                         esp / "MicaNT" / "System" / "Cursors" / "MiniMouse")
+        # Themes are ordinary Ring 3 data packages. Keep CSS and selected
+        # generated assets on the system volume rather than embedding them in
+        # User32, Win32k, the compositor, or the kernel image.
+        theme_source_dir = ROOT / "System" / "Themes" / "WhiteSur"
+        required_theme_files = (
+            "theme.manifest",
+            "LICENSES/COPYING",
+            "LICENSES/AUTHORS",
+            "Light/gtk.css",
+            "Dark/gtk.css",
+        )
+        missing_theme_files = [name for name in required_theme_files
+                               if not (theme_source_dir / name).is_file()]
+        if missing_theme_files:
+            raise RuntimeError(
+                f"WhiteSur theme package is incomplete: {', '.join(missing_theme_files)}")
+        shutil.copytree(theme_source_dir,
+                        esp / "MicaNT" / "System" / "Themes" / "WhiteSur")
         icon_source_dir = ROOT / "System" / "Icons" / "WhiteSur"
         required_icon_files = ("COPYING", "AUTHORS", "ATTRIBUTIONS.md", "index.theme")
         missing_icon_files = [name for name in required_icon_files

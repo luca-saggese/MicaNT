@@ -207,7 +207,7 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
         [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
         [](void*, void* address, size_t) noexcept { std::free(address); },
     };
-    std::vector<uint8_t> pe(0x400, 0);
+    std::vector<uint8_t> pe(0x600, 0);
     const auto put16 = [&](size_t offset, uint16_t value) {
         pe[offset] = static_cast<uint8_t>(value);
         pe[offset + 1] = static_cast<uint8_t>(value >> 8);
@@ -226,17 +226,19 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     put32(optional + 56, 0x2000); put32(optional + 60, 0x200);
     put32(optional + 108, 16);
     put32(optional + 112 + pe::IMAGE_DIRECTORY_ENTRY_RESOURCE * 8, 0x1000);
-    put32(optional + 116 + pe::IMAGE_DIRECTORY_ENTRY_RESOURCE * 8, 0x100);
+    put32(optional + 116 + pe::IMAGE_DIRECTORY_ENTRY_RESOURCE * 8, 0x200);
     const size_t section = 0x188;
-    put32(section + 8, 0x200); put32(section + 12, 0x1000);
-    put32(section + 16, 0x200); put32(section + 20, 0x200);
+    put32(section + 8, 0x400); put32(section + 12, 0x1000);
+    put32(section + 16, 0x400); put32(section + 20, 0x200);
     put32(section + 36, pe::IMAGE_SCN_MEM_READ);
 
-    // root: RT_GROUP_ICON (14) -> group name (101) -> language 1033 -> data
+    // root: RT_GROUP_ICON (14), RT_CURSOR (1), and RT_GROUP_CURSOR (12).
     const size_t root = 0x200;
-    put16(root + 14, 2);
-    put32(root + 16, 3); put32(root + 20, 0x80000080u);
-    put32(root + 24, 14); put32(root + 28, 0x80000020u);
+    put16(root + 14, 4);
+    put32(root + 16, 1); put32(root + 20, 0x80000130u);
+    put32(root + 24, 3); put32(root + 28, 0x80000080u);
+    put32(root + 32, 12); put32(root + 36, 0x800000d0u);
+    put32(root + 40, 14); put32(root + 44, 0x80000020u);
     put16(root + 0x20 + 14, 2); put32(root + 0x20 + 16, 101); put32(root + 0x20 + 20, 0x80000040u);
     put32(root + 0x20 + 24, 202); put32(root + 0x20 + 28, 0x80000040u);
     put16(root + 0x40 + 14, 1); put32(root + 0x40 + 16, 1033); put32(root + 0x40 + 20, 0x60);
@@ -254,12 +256,31 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     put16(0x2f0, 1); put16(0x2f2, 32); put32(0x2f4, 0);
     pe[0x30c] = 0x11; pe[0x30d] = 0x22; pe[0x30e] = 0x33; pe[0x30f] = 0xff;
 
+    put16(root + 0xd0 + 14, 1); put32(root + 0xd0 + 16, 301);
+    put32(root + 0xd0 + 20, 0x800000f0u);
+    put16(root + 0xf0 + 14, 1); put32(root + 0xf0 + 16, 1033);
+    put32(root + 0xf0 + 20, 0x110);
+    put32(root + 0x110, 0x1300); put32(root + 0x114, 14); put32(root + 0x118, 1200);
+    put16(root + 0x130 + 14, 1); put32(root + 0x130 + 16, 2);
+    put32(root + 0x130 + 20, 0x80000150u);
+    put16(root + 0x150 + 14, 1); put32(root + 0x150 + 16, 1033);
+    put32(root + 0x150 + 20, 0x170);
+    put32(root + 0x170, 0x1350); put32(root + 0x174, 52); put32(root + 0x178, 1200);
+    pe[0x500 + 2] = 2; pe[0x500 + 4] = 1;
+    pe[0x500 + 6] = pe[0x500 + 7] = 1;
+    put32(0x500 + 14, 52); put16(0x500 + 18, 2);
+    std::copy_n(pe.begin() + 0x2e4, 48, pe.begin() + 0x554);
+
     pe::PeImageView64 image;
     TEST_ASSERT(image.inspect(pe) == NtStatus::Success, "synthetic PE fixture validates");
     pe::PeResourceView resources(image);
     std::array<uint16_t, 4> iconGroupIds{};
     size_t iconGroupCount{};
-    TEST_ASSERT(resources.numericNames({14, {}, false}, iconGroupIds, iconGroupCount) == NtStatus::Success &&
+    const auto iconNameStatus = resources.numericNames({14, {}, false}, iconGroupIds, iconGroupCount);
+    if (iconNameStatus != NtStatus::Success || iconGroupCount != 2)
+        std::fprintf(stderr, "Pe cursor fixture enum type14 status=%08x count=%zu\\n",
+                     static_cast<uint32_t>(iconNameStatus), iconGroupCount);
+    TEST_ASSERT(iconNameStatus == NtStatus::Success &&
                 iconGroupCount == 2 && iconGroupIds[0] == 101 && iconGroupIds[1] == 202,
                 "PE resource enumeration preserves numeric icon group ID order");
     std::array<uint16_t, 1> tooSmallGroupBuffer{};
@@ -285,6 +306,13 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
                 peIcon.width == 1 && peIcon.pixels[0] == 0x11 && peIcon.pixels[1] == 0x22 &&
                 peIcon.pixels[2] == 0x33 && peIcon.pixels[3] == 0xff,
                 "PE group traversal decodes a file-backed RT_ICON without executing the PE");
+    pe::PeGroupCursorView cursors(resources);
+    pe::PeCursorResource cursor{};
+    TEST_ASSERT(cursors.findCursor(301, 1033, 32, 32, cursor) == NtStatus::Success,
+                "RT_GROUP_CURSOR resolves its RT_CURSOR image resource");
+    TEST_ASSERT(cursor.entry.resourceId == 2 && cursor.entry.hotX == 0 && cursor.entry.hotY == 0 &&
+                cursor.resource.bytes.size() == 52 && cursor.imageBytes.size() == 48,
+                "PE cursor resource preserves embedded hotspots and strips only its four-byte prefix");
     TEST_ASSERT(resources.find({14, {}, false}, {102, {}, false}, 1033, result) == NtStatus::NotFound,
                  "missing resource is reported without synthetic data");
     put32(root + 0x60, 0x1200);

@@ -1143,6 +1143,8 @@ private:
 
 inline constexpr uint16_t IMAGE_RESOURCE_TYPE_ICON = 3;
 inline constexpr uint16_t IMAGE_RESOURCE_TYPE_GROUP_ICON = 14;
+inline constexpr uint16_t IMAGE_RESOURCE_TYPE_CURSOR = 1;
+inline constexpr uint16_t IMAGE_RESOURCE_TYPE_GROUP_CURSOR = 12;
 
 struct PeGroupIconEntry {
     uint32_t width{};
@@ -1219,6 +1221,83 @@ public:
         if (status != NtStatus::Success) return status;
         if (icon.bytes.size() != entry.byteCount) return NtStatus::InvalidImageFormat;
         result = {entry, icon};
+        return NtStatus::Success;
+    }
+
+private:
+    const PeResourceView* resources_{};
+};
+
+struct PeGroupCursorEntry {
+    uint32_t width{}, height{};
+    uint8_t colorCount{};
+    uint16_t hotX{}, hotY{};
+    uint32_t byteCount{};
+    uint16_t resourceId{};
+};
+
+struct PeCursorResource {
+    PeGroupCursorEntry entry{};
+    PeResourceData resource{};
+    std::span<const uint8_t> imageBytes{};
+};
+
+class PeGroupCursorView {
+public:
+    explicit PeGroupCursorView(const PeResourceView& resources) noexcept : resources_(&resources) {}
+
+    [[nodiscard]] NtStatus findCursor(uint16_t groupId, uint16_t language,
+                                      uint32_t width, uint32_t height,
+                                      PeCursorResource& result) const noexcept {
+        result = {};
+        if (!resources_ || !groupId || !width || !height || width > 4096 || height > 4096)
+            return NtStatus::InvalidParameter;
+        PeResourceData group{};
+        NtStatus status = resources_->find(
+            {IMAGE_RESOURCE_TYPE_GROUP_CURSOR, {}, false}, {groupId, {}, false}, language, group);
+        if (status != NtStatus::Success) return status;
+        if (group.bytes.size() < 6 || PeResourceView::read16(group.bytes.data()) != 0 ||
+            PeResourceView::read16(group.bytes.data() + 2) != 2)
+            return NtStatus::InvalidImageFormat;
+        const uint16_t count = PeResourceView::read16(group.bytes.data() + 4);
+        if (!count || count > 1024 || group.bytes.size() != 6u + static_cast<size_t>(count) * 14u)
+            return NtStatus::InvalidImageFormat;
+
+        uint16_t selected{};
+        uint64_t bestScore = UINT64_MAX;
+        for (uint16_t i = 0; i < count; ++i) {
+            const uint8_t* p = group.bytes.data() + 6u + static_cast<size_t>(i) * 14u;
+            const uint32_t itemWidth = p[0] ? p[0] : 256;
+            const uint32_t itemHeight = p[1] ? p[1] : 256;
+            const uint16_t hotX = PeResourceView::read16(p + 4);
+            const uint16_t hotY = PeResourceView::read16(p + 6);
+            const uint32_t byteCount = PeResourceView::read32(p + 8);
+            const uint16_t id = PeResourceView::read16(p + 12);
+            if (p[3] || itemWidth > 256 || itemHeight > 256 || hotX >= itemWidth ||
+                hotY >= itemHeight || byteCount < 5 || !id)
+                return NtStatus::InvalidImageFormat;
+            const uint64_t scalePenalty = (itemWidth < width || itemHeight < height)
+                ? 1'000'000ull + (static_cast<uint64_t>(width - std::min(width, itemWidth)) +
+                                   height - std::min(height, itemHeight)) * 1024ull
+                : (static_cast<uint64_t>(itemWidth - width) + itemHeight - height) * 1024ull;
+            if (i == 0 || scalePenalty < bestScore) { selected = i; bestScore = scalePenalty; }
+        }
+
+        const uint8_t* p = group.bytes.data() + 6u + static_cast<size_t>(selected) * 14u;
+        PeGroupCursorEntry entry{
+            p[0] ? static_cast<uint32_t>(p[0]) : 256u,
+            p[1] ? static_cast<uint32_t>(p[1]) : 256u,
+            p[2], PeResourceView::read16(p + 4), PeResourceView::read16(p + 6),
+            PeResourceView::read32(p + 8), PeResourceView::read16(p + 12)};
+        PeResourceData cursor{};
+        status = resources_->find({IMAGE_RESOURCE_TYPE_CURSOR, {}, false},
+                                  {entry.resourceId, {}, false}, group.language, cursor);
+        if (status != NtStatus::Success) return status;
+        if (cursor.bytes.size() != entry.byteCount || cursor.bytes.size() < 5 ||
+            PeResourceView::read16(cursor.bytes.data()) != entry.hotX ||
+            PeResourceView::read16(cursor.bytes.data() + 2) != entry.hotY)
+            return NtStatus::InvalidImageFormat;
+        result = {entry, cursor, cursor.bytes.subspan(4)};
         return NtStatus::Success;
     }
 

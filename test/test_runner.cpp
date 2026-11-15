@@ -456,6 +456,8 @@ int main(int argc, char* argv[]) {
         RUN_TEST(Test_GtkCss_BoundedRulesAndHexColors);
         RUN_TEST(Test_GtkCss_GroupedSelectorsAndColorDefinitions);
         RUN_TEST(Test_GtkCss_FailurePreservesOutputAndReportsUnsupportedSyntax);
+        RUN_TEST(Test_NativeTheme_ColorExpressionsAndControlCascade);
+        RUN_TEST(Test_WhiteSur_RealProfilesCompileToNativeButtonStyles);
         return (g_FailedTests == 0) ? 0 : 1;
     }
     if (argc > 1 && std::string(argv[1]) == "--apps") {

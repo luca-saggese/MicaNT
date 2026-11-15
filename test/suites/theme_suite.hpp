@@ -1,6 +1,10 @@
 #pragma once
 
-#include "micant/um/subsystems/theme/gtk_css.hpp"
+#include "micant/um/subsystems/theme/native_theme.hpp"
+
+#include <fstream>
+#include <iterator>
+#include <string>
 
 inline void Test_GtkCss_BoundedRulesAndHexColors() {
     using namespace micant::um::theme;
@@ -73,4 +77,94 @@ inline void Test_GtkCss_FailurePreservesOutputAndReportsUnsupportedSyntax() {
                 "malformed declarations report a source offset");
     TEST_ASSERT(compileGtkCss("", compiled) == CssStatus::EmptyInput,
                 "empty input is not treated as a valid theme");
+}
+
+inline void Test_NativeTheme_ColorExpressionsAndControlCascade() {
+    using namespace micant::um::theme;
+    constexpr std::string_view css =
+        "@define-color accent #0860f2;"
+        "button { color: #242424; background-color: white; border: 1px solid; "
+        "border-radius: 6px; padding: 0 8px; min-height: 24px; }"
+        "button:hover { background-color: #f7f7f7; }"
+        "button:active { color: white; background-color: @accent; border-color: @accent; }"
+        "button:disabled { color: rgba(36, 36, 36, 0.45); }";
+    CompiledCss parsed{};
+    NativeTheme theme{};
+    TEST_ASSERT(compileGtkCss(css, parsed) == CssStatus::Success && buildNativeTheme(parsed, theme),
+                "GTK declarations compile to a GTK-independent native theme table");
+    const auto& normal = theme.style(NativeControl::Button, NativeVisualState::Normal);
+    const auto& hover = theme.style(NativeControl::Button, NativeVisualState::Hover);
+    const auto& pressed = theme.style(NativeControl::Button, NativeVisualState::Pressed);
+    const auto& disabled = theme.style(NativeControl::Button, NativeVisualState::Disabled);
+    TEST_ASSERT(normal.hasBackground && normal.background == (CssColor{255, 255, 255, 255}) &&
+                normal.hasBorderWidth && normal.borderWidth == 1 && normal.hasBorderRadius &&
+                normal.borderRadius == 6 && normal.padding[1] == 8 && normal.minHeight == 24,
+                "normal button style resolves colors and dimensions");
+    TEST_ASSERT(hover.background == (CssColor{247, 247, 247, 255}),
+                "hover style overrides only properties declared for that state");
+    TEST_ASSERT(pressed.background == (CssColor{8, 96, 242, 255}) &&
+                pressed.foreground == (CssColor{255, 255, 255, 255}),
+                "pressed style resolves a GTK color token");
+    TEST_ASSERT(disabled.foreground == (CssColor{36, 36, 36, 115}) &&
+                disabled.background == normal.background,
+                "disabled alpha color resolves while unspecified state values inherit normal");
+
+    CssColor color{};
+    TEST_ASSERT(resolveCssColor("mix(white, @accent, 0.75)", parsed, {}, color) &&
+                color == (CssColor{70, 136, 245, 255}),
+                "nested mix expression follows GTK factor ordering");
+    TEST_ASSERT(resolveCssColor("alpha(rgba(10, 20, 30, 0.5), 0.4)", parsed, {}, color) &&
+                color.alpha == 51,
+                "alpha expression multiplies input opacity");
+    TEST_ASSERT(resolveCssColor("shade(#808080, 0.5)", parsed, {}, color) &&
+                color == (CssColor{64, 64, 64, 255}),
+                "GTK shade scales HSL lightness");
+    TEST_ASSERT(resolveCssColor("lighter(#808080)", parsed, {}, color) &&
+                color.red > 128 && color.green == color.red && color.blue == color.red,
+                "GTK lighter expression raises HSL lightness");
+    TEST_ASSERT(resolveCssColor("darker(#808080)", parsed, {}, color) &&
+                color.red < 128 && color.green == color.red && color.blue == color.red,
+                "GTK darker expression lowers HSL lightness");
+}
+
+inline void Test_WhiteSur_RealProfilesCompileToNativeButtonStyles() {
+    using namespace micant::um::theme;
+    auto compileProfile = [](const char* path, NativeTheme& theme,
+                             CssAccentOverride accent = {}) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return false;
+        std::string cssText((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        CompiledCss css{};
+        return compileGtkCss(cssText, css) == CssStatus::Success &&
+               buildNativeTheme(css, theme, {36, 36, 36, 255}, accent);
+    };
+    NativeTheme light{}, dark{}, purple{}, green{};
+    TEST_ASSERT(compileProfile("System/Themes/WhiteSur/Light/gtk.css", light),
+                "packaged WhiteSur Light stylesheet parses and resolves");
+    TEST_ASSERT(compileProfile("System/Themes/WhiteSur/Dark/gtk.css", dark),
+                "packaged WhiteSur Dark stylesheet parses and resolves");
+    const CssAccentOverride purpleAccent{{8, 96, 242, 255}, {154, 87, 163, 255}, true};
+    const CssAccentOverride greenAccent{{8, 96, 242, 255}, {121, 183, 87, 255}, true};
+    TEST_ASSERT(compileProfile("System/Themes/WhiteSur/Light/gtk.css", purple, purpleAccent) &&
+                compileProfile("System/Themes/WhiteSur/Light/gtk.css", green, greenAccent),
+                "semantic accent overrides compile without rewriting the source theme");
+    const auto& lightButton = light.style(NativeControl::Button, NativeVisualState::Normal);
+    const auto& lightHover = light.style(NativeControl::Button, NativeVisualState::Hover);
+    const auto& lightPressed = light.style(NativeControl::Button, NativeVisualState::Pressed);
+    const auto& darkButton = dark.style(NativeControl::Button, NativeVisualState::Normal);
+    TEST_ASSERT(lightButton.hasBackground && lightButton.background == (CssColor{255, 255, 255, 255}) &&
+                lightHover.background == (CssColor{247, 247, 247, 255}) &&
+                lightPressed.background == (CssColor{8, 96, 242, 255}),
+                "WhiteSur Light button states resolve to the generated upstream palette");
+    TEST_ASSERT(darkButton.hasBackground && darkButton.background == (CssColor{101, 101, 101, 255}) &&
+                dark.style(NativeControl::Button, NativeVisualState::Pressed).background ==
+                    (CssColor{8, 96, 242, 255}),
+                "WhiteSur Dark button states resolve independently from the Light palette");
+    TEST_ASSERT(purple.style(NativeControl::Button, NativeVisualState::Pressed).background ==
+                    (CssColor{154, 87, 163, 255}) &&
+                green.style(NativeControl::Button, NativeVisualState::Pressed).background ==
+                    (CssColor{121, 183, 87, 255}) &&
+                green.style(NativeControl::Button, NativeVisualState::Pressed).foreground ==
+                    (CssColor{0, 0, 0, 255}),
+                "WhiteSur semantic accents adapt with readable foreground contrast");
 }
