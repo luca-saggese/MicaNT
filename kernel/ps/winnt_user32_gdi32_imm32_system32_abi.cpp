@@ -101,6 +101,10 @@ size_t g_cursorThemeOverrideCount{};
 bool g_cursorThemeMapLoaded{};
 CursorMutex g_cursorThemeMapLock{};
 
+void setThreadLastError(uint32_t error) noexcept {
+    __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+}
+
 bool validSystemCursorId(uintptr_t id) noexcept {
     constexpr uintptr_t ids[]{32512, 32513, 32514, 32515, 32516, 32631,
         32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650, 32651};
@@ -382,22 +386,25 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
     using namespace micant::um;
     if (!resourceName ||
         desiredWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        desiredHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        desiredHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) {
+        setThreadLastError(87); // ERROR_INVALID_PARAMETER
+        return nullptr;
+    }
     pe::PeResourceIdentifier identifier{};
     std::array<char16_t, 256> nameBuffer{};
     const uintptr_t rawName = reinterpret_cast<uintptr_t>(resourceName);
     if (rawName <= UINT16_MAX) {
-        if (!rawName) return nullptr;
+        if (!rawName) { setThreadLastError(1814); return nullptr; }
         identifier = {static_cast<uint16_t>(rawName), {}, false};
     } else {
         size_t length{};
         while (length < nameBuffer.size() && resourceName[length]) {
             const uint32_t value = static_cast<uint32_t>(resourceName[length]);
-            if (value > UINT16_MAX) return nullptr;
+            if (value > UINT16_MAX) { setThreadLastError(87); return nullptr; }
             nameBuffer[length] = static_cast<char16_t>(value);
             ++length;
         }
-        if (!length || length == nameBuffer.size()) return nullptr;
+        if (!length || length == nameBuffer.size()) { setThreadLastError(1814); return nullptr; }
         identifier = {0, std::u16string_view(nameBuffer.data(), length), true};
     }
     size_t cacheSlot = g_sharedPeCursorCache.size();
@@ -445,7 +452,7 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
     }
     SharedCursorReservation reservation{cacheSlot, shared};
     wchar_t modulePath[512]{};
-    if (!loadedModulePath(moduleHandle, modulePath)) return nullptr;
+    if (!loadedModulePath(moduleHandle, modulePath)) { setThreadLastError(1814); return nullptr; }
     imaging::ImageLimits limits{};
     limits.maxEncodedBytes = 64ull * 1024 * 1024;
     limits.maxPixels = 16ull * 1024 * 1024;
@@ -454,29 +461,40 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
     imaging::ImageBuffer encoded{};
     const auto allocator = imaging::NativeImageAllocator();
     if (imaging::ReadIconSourceFile(modulePath, encoded, allocator, limits) !=
-        imaging::ImageStatus::Success) return nullptr;
+        imaging::ImageStatus::Success) { setThreadLastError(2); return nullptr; }
     pe::PeImageView64 image{};
-    if (image.inspect(encoded.span()) != NtStatus::Success) return nullptr;
+    if (image.inspect(encoded.span()) != NtStatus::Success) { setThreadLastError(193); return nullptr; }
     pe::PeResourceView resources(image);
     pe::PeGroupCursorView cursors(resources);
     pe::PeCursorResource selected{};
-    if (cursors.findCursor(identifier, 0, desiredWidth, desiredHeight, selected) !=
-        NtStatus::Success) return nullptr;
+    const NtStatus resourceStatus =
+        cursors.findCursor(identifier, 0, desiredWidth, desiredHeight, selected);
+    if (resourceStatus != NtStatus::Success) {
+        setThreadLastError(resourceStatus == NtStatus::NotFound ? 1814 :
+            resourceStatus == NtStatus::InvalidParameter ? 87 : 13);
+        return nullptr;
+    }
     const uint32_t targetWidth = desiredWidth ? desiredWidth : selected.entry.width;
     const uint32_t targetHeight = desiredHeight ? desiredHeight : selected.entry.height;
     imaging::ImageFrame frame{};
     if (imaging::DecodeIconResourcePayload(selected.imageBytes, frame, allocator, limits) !=
         imaging::ImageStatus::Success || frame.width != selected.entry.width ||
         frame.height != selected.entry.height || frame.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        frame.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        frame.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) {
+        setThreadLastError(13); // ERROR_INVALID_DATA
+        return nullptr;
+    }
     uint16_t hotX = selected.entry.hotX, hotY = selected.entry.hotY;
     if (targetWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        targetHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        targetHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) {
+        setThreadLastError(87);
+        return nullptr;
+    }
     if (frame.width != targetWidth || frame.height != targetHeight) {
         const uint32_t oldWidth = frame.width, oldHeight = frame.height;
         imaging::ImageFrame scaled{};
         if (imaging::ScaleIconFrame(frame, targetWidth, targetHeight, scaled, allocator, limits) !=
-            imaging::ImageStatus::Success) return nullptr;
+            imaging::ImageStatus::Success) { setThreadLastError(13); return nullptr; }
         hotX = static_cast<uint16_t>(std::min<uint32_t>(targetWidth - 1,
             (uint32_t(hotX) * targetWidth + oldWidth / 2) / oldWidth));
         hotY = static_cast<uint16_t>(std::min<uint32_t>(targetHeight - 1,

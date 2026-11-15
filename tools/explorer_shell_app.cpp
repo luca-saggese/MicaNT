@@ -1118,6 +1118,15 @@ extern "C" void _start(const char* = nullptr) {
     PrintLine(windowClass.hCursor
         ? "[MicaNT Cursor] Explorer class arrow loaded"
         : "[MicaNT Cursor] Explorer class arrow load failed");
+    HCURSOR moduleCursor = LoadCursorW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
+    if (moduleCursor) {
+        SetCursor(moduleCursor);
+        SetCursor(windowClass.hCursor);
+        PrintLine("[MicaNT Cursor] PE group cursor resource loaded and selected");
+    } else {
+        PrintThemeWin32Error("[MicaNT Cursor] PE group cursor resource load failed",
+                             GetLastError());
+    }
     wchar_t animatedCursorPath[512]{};
     size_t animatedPathCursor = 0;
     constexpr wchar_t kBusyCursorPath[] =

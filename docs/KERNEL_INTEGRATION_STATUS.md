@@ -1872,12 +1872,13 @@ boundary check passed. A follow-up now connects `LoadCursorW` and resource-form
 identifiers, hotspot scaling, and `LR_SHARED` process-local caching. QEMU was
 run after these changes: the complete modular UEFI boot reached the CPL3
 compositor, Explorer passed mouse/keyboard dispatch, scanout and window cleanup,
-and serial remained stable for five seconds. This boot did not directly invoke a
-custom PE cursor resource, so that API path is linked but not yet runtime
-verified. Still open are persistent per-user themes, DPI-aware theme-size
-selection, secure-desktop authorization, and custom PE cursor-resource runtime
-coverage. Explorer now directly exercises ANI animation load, 24x24 scaling,
+and serial remained stable for five seconds. Explorer directly exercises ANI
+animation load, 24x24 scaling,
 SetCursor/message-pump progression, restore, and handle release during startup.
+It also embeds a generated PE RT_GROUP_CURSOR/RT_CURSOR pair and now loads and
+selects that image through `LoadCursorW` in the actual Explorer process. Still
+open are persistent per-user themes, DPI-aware theme-size selection and
+secure-desktop authorization.
 The replaceable MiniMouse package now carries a bounded `cursor.map` from
 stock cursor IDs to CUR/ANI basenames; malformed entries fall back to the
 built-in map, and a missing selected asset falls back to its stock asset. This
@@ -1898,3 +1899,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-arrow-probe-final` | Passed; Explorer serial reported `class arrow loaded` through `LoadCursorW(IDC_ARROW)`, then input/scanout/window cleanup passed and serial remained stable five seconds |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-resize` | Passed modular boot and Explorer input/scanout/cleanup; ANI resize path compiled and linked but was not directly invoked by Explorer |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-runtime` | Passed; Explorer serial confirmed ANI load, 24x24 resize and release, followed by mouse/keyboard dispatch, scanout, cleanup and five seconds of stable serial |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pe-resource-success` | Passed; Explorer serial confirmed an embedded PE group cursor loaded and selected through `LoadCursorW`, then ANI load/resize/release, input dispatch, scanout, cleanup and five seconds of stable serial |

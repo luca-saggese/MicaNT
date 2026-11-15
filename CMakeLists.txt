@@ -15,6 +15,11 @@ if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
 endif()
 
+if (MICANT_ENABLE_BAREMETAL)
+    enable_language(RC)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
+
 # Canonical Include Root (all headers addressed via micant/<layer>/<header>.hpp)
 include_directories(
     include
@@ -468,8 +473,27 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
 
+    set(_explorer_cursor_resource_dir "${CMAKE_CURRENT_BINARY_DIR}/explorer-cursor-resources")
+    set(_explorer_cursor_resource_rc "${_explorer_cursor_resource_dir}/cursor_resources.rc")
+    set(_explorer_cursor_group "${_explorer_cursor_resource_dir}/cursor_group.bin")
+    set(_explorer_cursor_payload "${_explorer_cursor_resource_dir}/cursor_payload.bin")
+    add_custom_command(
+        OUTPUT "${_explorer_cursor_resource_rc}" "${_explorer_cursor_group}"
+               "${_explorer_cursor_payload}"
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/generate_cursor_resource.py"
+                "${CMAKE_SOURCE_DIR}/System/Cursors/MiniMouse/mini_mouse_arrow.cur"
+                "${_explorer_cursor_group}" "${_explorer_cursor_payload}"
+                "${_explorer_cursor_resource_rc}"
+        DEPENDS tools/generate_cursor_resource.py
+                System/Cursors/MiniMouse/mini_mouse_arrow.cur
+        VERBATIM
+        COMMENT "Preparing Explorer PE group-cursor resource fixture")
+    set_source_files_properties("${_explorer_cursor_resource_rc}" PROPERTIES GENERATED TRUE)
+
     add_executable(explorer_boot EXCLUDE_FROM_ALL
         tools/explorer_shell_app.cpp
+        "${_explorer_cursor_resource_rc}"
         tools/explorer_shell/desktop.cpp
         tools/explorer_shell/taskbar.cpp
         tools/explorer_shell/start_menu.cpp
