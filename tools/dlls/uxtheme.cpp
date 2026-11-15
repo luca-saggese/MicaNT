@@ -64,5 +64,8 @@ __declspec(dllexport) int32_t WINAPI EndBufferedAnimation(void* animation,
         int32_t updateTarget) noexcept {
     return micant::uxtheme::EndBufferedAnimation(animation, updateTarget);
 }
+__declspec(dllexport) int32_t WINAPI BufferedPaintStopAllAnimations(void* hwnd) noexcept {
+    return micant::uxtheme::BufferedPaintStopAllAnimations(hwnd);
+}
 
 }

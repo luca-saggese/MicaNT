@@ -58,6 +58,15 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-uxtheme-failure-contract-run/serial.log`; QEMU input,
   window geometry, cleanup and stable boot passed in the same run. This closes
   one fabricated-success case, not the full export audit.
+- [x] `BufferedPaintStopAllAnimations` now returns `E_NOTIMPL` and is exported
+  by the actual freestanding DLL. `GetThemeMargins` clears its output on
+  failure; `OpenThemeData`/`IsThemeActive` require a fresh valid Win32k
+  snapshot; transparency includes style opacity. Explorer's QEMU probe logged
+  correct margin-output and unsupported-animation statuses at
+  `/private/tmp/micant-uxtheme-query-failure-contract-run-2/serial.log`.
+  That run built/linked the baremetal target and real DLL but timed out in the
+  pre-desktop animated-cursor sleep path before the interactive suite; those
+  extra query changes are not fully QEMU verified yet.
 - [ ] Audit every exported UxTheme function against its public signature,
   result codes, handle lifetime and documented unsupported cases.
 - [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`

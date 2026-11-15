@@ -39,9 +39,16 @@ MICANT_UXTHEME_API int32_t WINAPI GetThemeMargins(MicaThemeHandle, void*, int32_
 MICANT_UXTHEME_API int32_t WINAPI GetThemeInt(MicaThemeHandle, int32_t, int32_t, int32_t, int32_t*);
 MICANT_UXTHEME_API int32_t WINAPI DrawThemeBackground(MicaThemeHandle, void*, int32_t, int32_t,
                                                       const void*, const void*);
+MICANT_UXTHEME_API int32_t WINAPI GetThemeBackgroundContentRect(MicaThemeHandle, void*,
+                                                                int32_t, int32_t,
+                                                                const void*, void*);
+MICANT_UXTHEME_API int32_t WINAPI GetThemeBackgroundExtent(MicaThemeHandle, void*,
+                                                           int32_t, int32_t,
+                                                           const void*, void*);
 MICANT_UXTHEME_API int32_t WINAPI IsThemeActive(void);
 MICANT_UXTHEME_API int32_t WINAPI IsAppThemed(void);
 MICANT_UXTHEME_API int32_t WINAPI EndBufferedAnimation(void*, int32_t);
+MICANT_UXTHEME_API int32_t WINAPI BufferedPaintStopAllAnimations(void*);
 
 #ifdef __cplusplus
 }

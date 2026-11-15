@@ -138,8 +138,7 @@ inline bool PublishActiveThemeSnapshot(const MicaThemeSnapshot& snapshot) noexce
 
 inline HTHEME OpenThemeData(win32::HWND /*hwnd*/, LPCWSTR pszClassList) noexcept {
     MicaThemeSnapshot current{};
-    if (MicaWin32kGetThemeSnapshot(&current)) detail::publish(current);
-    if (!MicaThemeSnapshotIsValid(&detail::activeSnapshot, sizeof(detail::activeSnapshot))) return nullptr;
+    if (!MicaWin32kGetThemeSnapshot(&current) || !detail::publish(current)) return nullptr;
     uint8_t control{};
     if (!detail::classControl(pszClassList, control)) return nullptr;
     for (size_t i = 0; i < detail::handles.size(); ++i) {
@@ -211,8 +210,14 @@ inline win32::HRESULT GetThemeBackgroundContentRect(HTHEME hTheme, void* /*hdc*/
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
     const auto* style = detail::style(*handle, iStateId);
-    if (!style || !(style->flags & MICANT_THEME_HAS_PADDING)) return detail::kNotFound;
     const auto& bounds = *static_cast<const MicaWin32kRect*>(pBoundingRect);
+    if (!style) return detail::kNotFound;
+    if (bounds.right < bounds.left || bounds.bottom < bounds.top)
+        return detail::kInvalidArgument;
+    if (!(style->flags & MICANT_THEME_HAS_PADDING)) {
+        *static_cast<MicaWin32kRect*>(pContentRect) = bounds;
+        return 0;
+    }
     const int64_t left = int64_t(bounds.left) + style->padding[3];
     const int64_t top = int64_t(bounds.top) + style->padding[0];
     const int64_t right = int64_t(bounds.right) - style->padding[1];
@@ -393,7 +398,7 @@ inline win32::BOOL BufferedPaintRenderAnimation(win32::HWND /*hwnd*/, void* /*hd
 }
 
 inline win32::HRESULT BufferedPaintStopAllAnimations(win32::HWND /*hwnd*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT GetThemeBackgroundExtent(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, const void* pContentRect, void* pExtentRect) noexcept {
@@ -402,8 +407,14 @@ inline win32::HRESULT GetThemeBackgroundExtent(HTHEME hTheme, void* /*hdc*/, int
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
     const auto* style = detail::style(*handle, iStateId);
-    if (!style || !(style->flags & MICANT_THEME_HAS_PADDING)) return detail::kNotFound;
     const auto& content = *static_cast<const MicaWin32kRect*>(pContentRect);
+    if (!style) return detail::kNotFound;
+    if (content.right < content.left || content.bottom < content.top)
+        return detail::kInvalidArgument;
+    if (!(style->flags & MICANT_THEME_HAS_PADDING)) {
+        *static_cast<MicaWin32kRect*>(pExtentRect) = content;
+        return 0;
+    }
     const int64_t left = int64_t(content.left) - style->padding[3];
     const int64_t top = int64_t(content.top) - style->padding[0];
     const int64_t right = int64_t(content.right) + style->padding[1];
@@ -435,8 +446,7 @@ struct MARGINS {
 
 inline win32::BOOL IsThemeActive() noexcept {
     MicaThemeSnapshot current{};
-    if (MicaWin32kGetThemeSnapshot(&current)) detail::publish(current);
-    return MicaThemeSnapshotIsValid(&detail::activeSnapshot, sizeof(detail::activeSnapshot))
+    return MicaWin32kGetThemeSnapshot(&current) && detail::publish(current)
         ? win32::TRUE : win32::FALSE;
 }
 
@@ -446,6 +456,7 @@ inline win32::BOOL IsAppThemed() noexcept {
 
 inline win32::HRESULT GetThemeMargins(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, int iPropId, const void* /*prc*/, MARGINS* pMargins) noexcept {
     if (!pMargins) return detail::kInvalidArgument;
+    *pMargins = {0, 0, 0, 0};
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
@@ -485,8 +496,11 @@ inline win32::BOOL IsThemeBackgroundPartiallyTransparent(HTHEME hTheme, int iPar
     auto* handle = detail::lookup(hTheme);
     if (!handle || iPartId != 1) return win32::FALSE;
     const auto* style = detail::style(*handle, iStateId);
-    return style && (style->flags & MICANT_THEME_HAS_BACKGROUND) &&
-           (style->background >> 24) < 255u ? win32::TRUE : win32::FALSE;
+    if (!style || !(style->flags & MICANT_THEME_HAS_BACKGROUND)) return win32::FALSE;
+    uint32_t alpha = style->background >> 24;
+    if (style->flags & MICANT_THEME_HAS_OPACITY)
+        alpha = (alpha * style->opacity + 127u) / 255u;
+    return alpha < 255u ? win32::TRUE : win32::FALSE;
 }
 
 inline win32::BOOL IsThemePartDefined(HTHEME hTheme, int iPartId, int iStateId) noexcept {

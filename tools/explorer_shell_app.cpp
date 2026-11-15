@@ -623,6 +623,9 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool queried = themeHandle && (button.flags & MICANT_THEME_HAS_BACKGROUND) &&
         GetThemeColor(themeHandle, 1, 1, 3802, &queriedColor) == 0 &&
         queriedColor == expectedColor;
+    MicaThemeMargins rejectedMargins{1, 2, 3, 4};
+    const int32_t unsupportedMargin = themeHandle ? GetThemeMargins(themeHandle,
+        nullptr, 1, 1, 0x7FFFFFFF, nullptr, &rejectedMargins) : 0;
     const bool closed = themeHandle && CloseThemeData(themeHandle) == 0;
     if (!queried || !closed) {
         restorePreviousSnapshot();
@@ -630,8 +633,21 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
+    if (unsupportedMargin == static_cast<int32_t>(0x80070490u) &&
+        rejectedMargins.cxLeftWidth == 0 && rejectedMargins.cxRightWidth == 0 &&
+        rejectedMargins.cyTopHeight == 0 && rejectedMargins.cyBottomHeight == 0)
+        PrintLine("[MicaNT Theme] UxTheme failed margin query clears its output");
+    else
+        PrintLine("[MicaNT Theme] UxTheme failed margin query output mismatch");
+    PrintThemeWin32Error("[MicaNT Theme] margin HRESULT", static_cast<uint32_t>(unsupportedMargin));
+    PrintThemeWin32Error("[MicaNT Theme] margin left", static_cast<uint32_t>(rejectedMargins.cxLeftWidth));
+    PrintThemeWin32Error("[MicaNT Theme] margin right", static_cast<uint32_t>(rejectedMargins.cxRightWidth));
+    PrintThemeWin32Error("[MicaNT Theme] margin top", static_cast<uint32_t>(rejectedMargins.cyTopHeight));
+    PrintThemeWin32Error("[MicaNT Theme] margin bottom", static_cast<uint32_t>(rejectedMargins.cyBottomHeight));
     const int32_t unsupportedAnimation = EndBufferedAnimation(nullptr, 0);
-    if (unsupportedAnimation == static_cast<int32_t>(0x80004001u))
+    const int32_t unsupportedStop = BufferedPaintStopAllAnimations(nullptr);
+    if (unsupportedAnimation == static_cast<int32_t>(0x80004001u) &&
+        unsupportedStop == static_cast<int32_t>(0x80004001u))
         PrintLine("[MicaNT Theme] Unsupported buffered animation returns E_NOTIMPL");
     else
         PrintLine("[MicaNT Theme] Buffered animation failure contract mismatch");
