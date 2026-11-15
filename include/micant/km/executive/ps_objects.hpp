@@ -20,6 +20,8 @@ struct ProcessSnapshotEntry {
     uint32_t handleCount{};
     uintptr_t workingSetBytes{};
     size_t firstThreadIndex{};
+    char16_t imageName[128]{};
+    uint16_t imageNameLength{};
 };
 bool deferProcessObjectDelete(ob::ObjectHeader* header) noexcept;
 bool deferThreadObjectDelete(ob::ObjectHeader* header) noexcept;

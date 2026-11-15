@@ -1931,3 +1931,24 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-derived-cache` | Passed after deriving cache capacity from the system cursor table; `IDC_APPSTARTING`, ANI file load, input dispatch, scanout, cleanup and five seconds stable serial passed |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-map-validation` | Passed after deriving supported system cursor IDs from the canonical table; `IDC_APPSTARTING`, input dispatch, scanout, cleanup and five seconds stable serial passed |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-transactional-set` | Passed after moving cursor syscall output copying before active-state mutation; Explorer ANI selection, PE cursor, input dispatch, scanout, cleanup and five seconds stable serial passed |
+
+## Native Task Manager process and memory snapshot slice (2026-11-15)
+
+The Ring 3 `taskmgr.exe` now queries the canonical Ps process registry through
+`NtQuerySystemInformation(SystemProcessInformation)`. The returned records
+contain real process and thread IDs, parent IDs, thread and handle counts,
+working-set bytes, and bounded executable basenames where Ps has captured an
+image name. `SystemPerformanceInformation` exports `AvailablePages` from Mm's
+zeroed, free, and standby PFN lists. Other performance fields, process CPU
+times, private commit, session/user identity, I/O counters, and full paths are
+not yet provided and the UI reports unsupported measurements as unavailable.
+SEC_IMAGE PFN initialization writes through the HAL physical-page aperture,
+avoiding writes through read-only identity aliases.
+
+| Command | Result |
+|---|---|
+| `python3 qemu.py --headless --taskmgr-selftest --diagnostics-dir /private/tmp/micant-taskmgr-block-b-final` | Passed; real Ring 3 `taskmgr.exe` validated its own returned image basename, received a live process snapshot and Mm-backed available-page count, and QEMU serial remained stable for five seconds |
+
+This slice does not yet implement process actions, CPU accounting, navigable
+Win32 UI, secure keyboard launch, services, users, startup apps, or system
+independence from Explorer.

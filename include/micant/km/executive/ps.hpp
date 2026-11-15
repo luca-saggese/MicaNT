@@ -57,6 +57,9 @@ public:
     [[nodiscard]] uintptr_t getDirectoryTableBase() const noexcept { return root_.pfn << mm::PageShift4KB; }
     [[nodiscard]] Handle processId() const noexcept { return processId_; }
     [[nodiscard]] Handle inheritedFromProcessId() const noexcept { return inheritedFromProcessId_; }
+    [[nodiscard]] std::u16string_view processImageName() const noexcept {
+        return {processImageName_, processImageNameLength_};
+    }
     [[nodiscard]] uintptr_t userPebAddress() const noexcept { return userPeb_; }
     [[nodiscard]] bool nativeImagesFinalized() const noexcept { return imagesFinalized_; }
     [[nodiscard]] std::span<const pe::PeImageView64::TlsLayout> userTlsLayouts() const noexcept {
@@ -83,6 +86,7 @@ private:
     friend struct detail::ProcessObjectFactory;
     friend struct detail::ThreadReaper;
     friend class EThread;
+    void captureProcessImageName(std::string_view name) noexcept;
     void onThreadTermination(NtStatus exitStatus) noexcept;
     NtStatus requestTermination(NtStatus exitStatus, ke::KThread* callingThread,
                                 bool terminateProcess = true) noexcept;
@@ -92,6 +96,9 @@ private:
     hal::amd64::ProcessPagingRoot root_{};
     Handle processId_{0};
     Handle inheritedFromProcessId_{0};
+    // Bounded basename captured from the selected executable image.
+    char16_t processImageName_[128]{};
+    uint16_t processImageNameLength_{0};
     // Weak CID registry link; removal precedes final Ob deletion.
     EProcess* cidNext_{nullptr};
     bool cidRegistered_{false};

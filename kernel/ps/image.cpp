@@ -1353,8 +1353,26 @@ NtStatus EProcess::loadNativeImage(std::string_view name, std::span<const uint8_
     if (copiedPath) owned.path = std::move(copiedPath);
     if (newInputs) ownedImageInputs_ = std::move(newInputs);
     if (newImages) images_ = std::move(newImages);
+    if (imageSet->size() == 1) captureProcessImageName(name);
     nativeImagePaths_[imageSet->size() - 1] = fullPath;
     return NtStatus::Success;
+}
+
+void EProcess::captureProcessImageName(std::string_view name) noexcept {
+    if (processImageNameLength_ || name.empty()) return;
+    size_t basenameOffset = 0;
+    for (size_t i = 0; i < name.size(); ++i)
+        if (name[i] == '/' || name[i] == '\\') basenameOffset = i + 1;
+    name.remove_prefix(basenameOffset);
+    const size_t length = name.size() < std::size(processImageName_)
+        ? name.size() : std::size(processImageName_) - 1;
+    for (size_t i = 0; i < length; ++i) {
+        const auto byte = static_cast<unsigned char>(name[i]);
+        if (byte > 0x7f) return;
+        processImageName_[i] = static_cast<char16_t>(byte);
+    }
+    processImageName_[length] = u'\0';
+    processImageNameLength_ = static_cast<uint16_t>(length);
 }
 
 NtStatus EProcess::setNativeProcessParameters(std::u16string_view imagePath,
@@ -1759,6 +1777,7 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         traceImageInitializationFailure("main image mapping", status);
         return status;
     }
+    captureProcessImageName(moduleName);
 
     char16_t ntdllPathStorage[256]{};
     size_t ntdllPathLength{};

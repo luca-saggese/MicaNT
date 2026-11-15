@@ -1011,7 +1011,19 @@ def run_qemu(
                         if taskmgr_selftest:
                             if "Task Manager: process snapshot unavailable from the kernel provider." in serial_log:
                                 raise RuntimeError("Task Manager syscall returned no valid process snapshot")
+                            if "Task Manager: memory availability unavailable from the kernel provider." in serial_log:
+                                raise RuntimeError("Task Manager syscall returned no valid memory availability snapshot")
+                            if "Task Manager: native process image name unavailable." in serial_log:
+                                raise RuntimeError("Task Manager process snapshot omitted its real image name")
                             if "Task Manager: kernel process snapshot received." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: memory availability snapshot received." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: native process image name validated." not in serial_log:
                                 complete_since = None
                                 time.sleep(0.1)
                                 continue

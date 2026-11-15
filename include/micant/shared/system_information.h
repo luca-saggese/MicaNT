@@ -31,6 +31,17 @@ struct SystemThreadInformation {
     uint32_t Padding2;
 };
 
+// Windows 10/11 AMD64 SYSTEM_PERFORMANCE_INFORMATION is 344 bytes. This
+// mode-neutral view names the one field currently backed by canonical Mm
+// accounting; callers must treat the opaque tail as unavailable.
+struct SystemPerformanceInformation {
+    uint8_t ReservedBeforeAvailablePages[44];
+    uint32_t AvailablePages;
+    uint8_t ReservedAfterAvailablePages[296];
+};
+static_assert(offsetof(SystemPerformanceInformation, AvailablePages) == 44);
+static_assert(sizeof(SystemPerformanceInformation) == 344);
+
 struct SystemProcessInformation {
     uint32_t NextEntryOffset;
     uint32_t NumberOfThreads;

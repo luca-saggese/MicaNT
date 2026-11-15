@@ -23,6 +23,7 @@
 #include "micant/km/executive/mm.hpp"
 #if defined(MICANT_FREESTANDING)
 #include "micant/km/executive/io_file.hpp"
+#include "micant/km/hal/amd64_bootstrap.hpp"
 #include "micant/um/native/pe.hpp"
 #include <span>
 #include <cstring>
@@ -485,8 +486,16 @@ public:
             if (!pfn) { delete backing; status_ = NtStatus::NoMemory; return; }
             backing->pfns[backing->pageCount++] = pfn;
             if (!db.zeroAllocatedPage(pfn)) { delete backing; status_ = NtStatus::Unsuccessful; return; }
-            auto* destination = reinterpret_cast<uint8_t*>(pfn << mm::PageShift4KB);
-            std::memcpy(destination, mapped.get() + page * mm::PageSize4KB, mm::PageSize4KB);
+            // PFN pages may lie in firmware ranges whose identity map is
+            // read-only. Copy through the HAL's supervisor physical aperture
+            // so section initialization does not depend on an identity alias.
+            auto* destination = hal::amd64::mapBootstrapPhysicalPage(
+                pfn << mm::PageShift4KB);
+            if (!destination) { delete backing; status_ = NtStatus::Unsuccessful; return; }
+            const auto* source = mapped.get() + page * mm::PageSize4KB;
+            for (size_t byte = 0; byte < mm::PageSize4KB; ++byte)
+                destination[byte] = source[byte];
+            hal::amd64::releaseBootstrapPhysicalPage();
         }
         if (file.publishControl) {
             void* selected{};

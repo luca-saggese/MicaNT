@@ -297,6 +297,10 @@ struct ProcessObjectFactory {
             auto& entry = output[index++];
             entry.processId = process->processId_;
             entry.parentProcessId = process->inheritedFromProcessId_;
+            entry.imageNameLength = process->processImageNameLength_;
+            if (entry.imageNameLength)
+                std::memcpy(entry.imageName, process->processImageName_,
+                            entry.imageNameLength * sizeof(char16_t));
             entry.firstThreadIndex = threadIndex;
             entry.threadCount = 0;
             for (auto* thread = process->threads_; thread; thread = thread->processNext) {

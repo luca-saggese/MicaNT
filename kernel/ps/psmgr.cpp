@@ -4,6 +4,7 @@
 #include "micant/km/executive/po.hpp"
 #endif
 #include "micant/km/executive/ps_objects.hpp"
+#include "micant/km/executive/perf_taskmgr.hpp"
 #include "micant/km/executive/probe.hpp"
 #include "micant/shared/system_information.h"
 #include <cstring>
@@ -57,7 +58,9 @@ NtStatus NtQuerySystemInformation(
     uint32_t* returnLength
 ) {
     constexpr uint32_t systemProcessInformationClass = 5;
-    if (systemInformationClass != systemProcessInformationClass)
+    constexpr uint32_t systemPerformanceInformationClass = 2;
+    if (systemInformationClass != systemProcessInformationClass &&
+        systemInformationClass != systemPerformanceInformationClass)
         return NtStatus::InvalidInfoClass;
 
     TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] NtQuerySystemInformation class accepted\r\n");
@@ -65,6 +68,43 @@ NtStatus NtQuerySystemInformation(
     auto* current = ke::KeGetCurrentThread();
     const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
     NtStatus status = NtStatus::Success;
+
+    if (systemInformationClass == systemPerformanceInformationClass) {
+        constexpr uint32_t required = sizeof(SystemPerformanceInformation);
+        if (returnLength) {
+            status = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
+            if (status != NtStatus::Success) return status;
+            status = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+            if (status != NtStatus::Success) return status;
+        }
+        if (systemInformationLength < required) return NtStatus::InfoLengthMismatch;
+        if (!systemInformation) return NtStatus::AccessViolation;
+        status = ex::ProbeForWrite(systemInformation, required,
+                                   alignof(SystemPerformanceInformation), mode);
+        if (status != NtStatus::Success) return status;
+
+        const auto snapshot = km::perf::QuerySystemMemorySnapshot();
+        constexpr uint32_t requiredAvailability =
+            km::perf::MemorySnapshotAvailableZeroed |
+            km::perf::MemorySnapshotAvailableFree |
+            km::perf::MemorySnapshotAvailableStandby;
+        if ((snapshot.availability & requiredAvailability) != requiredAvailability)
+            return NtStatus::NotSupported;
+        const uint64_t zeroedPages = snapshot.zeroedBytes / mm::PageSize4KB;
+        const uint64_t freePages = snapshot.freeBytes / mm::PageSize4KB;
+        const uint64_t standbyPages = snapshot.standbyBytes / mm::PageSize4KB;
+        if (zeroedPages > UINT32_MAX || freePages > UINT32_MAX - zeroedPages ||
+            standbyPages > UINT32_MAX - zeroedPages - freePages)
+            return NtStatus::NotSupported;
+        const uint32_t availablePages = static_cast<uint32_t>(zeroedPages + freePages + standbyPages);
+        SystemPerformanceInformation information{};
+        information.AvailablePages = availablePages;
+        // The public structure contains many counters with no canonical
+        // accounting owner yet. They remain zeroed; only AvailablePages is
+        // currently exported as measured data.
+        return ex::ExSafeCopyToUser(systemInformation, &information, required, mode);
+    }
+
     if (returnLength)
         status = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
     if (status != NtStatus::Success)
@@ -109,8 +149,16 @@ NtStatus NtQuerySystemInformation(
     size_t requiredSize = 0;
     for (size_t i = 0; i < capturedCount; ++i) {
         const size_t threadBytes = static_cast<size_t>(snapshot[i].threadCount) * sizeof(SystemThreadInformation);
-        const size_t recordBytes = sizeof(SystemProcessInformation) + threadBytes;
-        if (recordBytes < threadBytes || recordBytes > UINT32_MAX ||
+        const size_t nameBytes = snapshot[i].imageNameLength
+            ? (static_cast<size_t>(snapshot[i].imageNameLength) + 1) * sizeof(char16_t) : 0;
+        const size_t unalignedBytes = sizeof(SystemProcessInformation) + threadBytes + nameBytes;
+        if (unalignedBytes < threadBytes || unalignedBytes < nameBytes ||
+            unalignedBytes > SIZE_MAX - (alignof(uintptr_t) - 1)) {
+            delete[] snapshot; delete[] threadIds;
+            return NtStatus::InfoLengthMismatch;
+        }
+        const size_t recordBytes = (unalignedBytes + alignof(uintptr_t) - 1) & ~(alignof(uintptr_t) - 1);
+        if (recordBytes > UINT32_MAX ||
             requiredSize > UINT32_MAX - recordBytes) {
             delete[] snapshot; delete[] threadIds;
             return NtStatus::InfoLengthMismatch;
@@ -138,9 +186,17 @@ NtStatus NtQuerySystemInformation(
     auto* records = required ? new (std::nothrow_t{}) uint8_t[required] : nullptr;
     if (required && !records) { delete[] snapshot; delete[] threadIds; return NtStatus::NoMemory; }
     size_t recordOffset = 0;
+    const uintptr_t outputBase = reinterpret_cast<uintptr_t>(systemInformation);
+    if (required && outputBase > UINTPTR_MAX - required) {
+        delete[] records; delete[] snapshot; delete[] threadIds;
+        return NtStatus::AccessViolation;
+    }
     for (size_t i = 0; i < capturedCount; ++i) {
         const size_t threadBytes = static_cast<size_t>(snapshot[i].threadCount) * sizeof(SystemThreadInformation);
-        const size_t recordBytes = sizeof(SystemProcessInformation) + threadBytes;
+        const size_t nameBytes = snapshot[i].imageNameLength
+            ? (static_cast<size_t>(snapshot[i].imageNameLength) + 1) * sizeof(char16_t) : 0;
+        const size_t unalignedBytes = sizeof(SystemProcessInformation) + threadBytes + nameBytes;
+        const size_t recordBytes = (unalignedBytes + alignof(uintptr_t) - 1) & ~(alignof(uintptr_t) - 1);
         auto* record = reinterpret_cast<SystemProcessInformation*>(records + recordOffset);
         std::memset(record, 0, recordBytes);
         record->NextEntryOffset = i + 1 < capturedCount ? static_cast<uint32_t>(recordBytes) : 0;
@@ -149,8 +205,16 @@ NtStatus NtQuerySystemInformation(
         record->InheritedFromUniqueProcessId = static_cast<uintptr_t>(snapshot[i].parentProcessId);
         record->HandleCount = snapshot[i].handleCount;
         record->WorkingSetSize = snapshot[i].workingSetBytes;
-        // Image name, session, CPU times, and private/peak working set data
-        // are not exported until their metadata/accounting owners provide them.
+        if (snapshot[i].imageNameLength) {
+            const size_t imageNameOffset = sizeof(SystemProcessInformation) + threadBytes;
+            record->ImageName.Length = static_cast<uint16_t>(snapshot[i].imageNameLength * sizeof(char16_t));
+            record->ImageName.MaximumLength = static_cast<uint16_t>(record->ImageName.Length + sizeof(char16_t));
+            record->ImageName.Buffer = outputBase + recordOffset + imageNameOffset;
+            std::memcpy(records + recordOffset + imageNameOffset, snapshot[i].imageName,
+                        record->ImageName.Length);
+        }
+        // Session, CPU times, and private/peak working set data are not
+        // exported until their metadata/accounting owners provide them.
         auto* outputThreads = reinterpret_cast<SystemThreadInformation*>(
             reinterpret_cast<uint8_t*>(record) + sizeof(SystemProcessInformation));
         for (size_t t = 0; t < snapshot[i].threadCount; ++t) {

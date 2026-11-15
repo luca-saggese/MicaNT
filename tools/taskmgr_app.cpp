@@ -9,6 +9,12 @@
 #include "gui_common.hpp"
 #include "micant/shared/system_information.h"
 
+extern "C" void* memset(void* destination, int value, size_t count) noexcept {
+    auto* bytes = static_cast<uint8_t*>(destination);
+    for (size_t i = 0; i < count; ++i) bytes[i] = static_cast<uint8_t>(value);
+    return destination;
+}
+
 namespace {
 
 using namespace micant_gui;
@@ -16,6 +22,7 @@ using namespace micant_gui;
 constexpr uint32_t WIN_W = 580;
 constexpr uint32_t WIN_H = 380;
 constexpr uint32_t SystemProcessInformationClass = 5;
+constexpr uint32_t SystemPerformanceInformationClass = 2;
 constexpr uint64_t NtQuerySystemInformationService = 0x36;
 constexpr uint32_t StatusSuccess = 0x00000000U;
 constexpr uint32_t StatusInfoLengthMismatch = 0xC0000004U;
@@ -28,10 +35,50 @@ struct SnapshotView {
     uint32_t length{0};
     uint32_t processCount{0};
     uint32_t status{StatusInfoLengthMismatch};
+    uint32_t availablePages{0};
+    bool taskmgrImageNameFound{false};
     bool available{false};
+    bool memoryAvailable{false};
 };
 
+bool QueryAvailablePages(SnapshotView& result) noexcept {
+    result.memoryAvailable = false;
+    micant::SystemPerformanceInformation information{};
+    uint32_t returnLength = 0;
+    const auto status = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        NtQuerySystemInformationService,
+        SystemPerformanceInformationClass,
+        reinterpret_cast<uint64_t>(&information),
+        sizeof(information),
+        reinterpret_cast<uint64_t>(&returnLength)));
+    if (status != StatusSuccess || returnLength != sizeof(information)) return false;
+    result.availablePages = information.AvailablePages;
+    result.memoryAvailable = true;
+    return true;
+}
+
+bool IsTaskmgrImageName(const micant::SystemProcessInformation& entry,
+                        const uint8_t* snapshot, uint32_t snapshotLength) noexcept {
+    constexpr char16_t expected[] = u"taskmgr.exe";
+    if (!entry.ImageName.Buffer || entry.ImageName.Length != (sizeof(expected) - sizeof(char16_t)) ||
+        (entry.ImageName.Length & 1U) != 0) return false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(snapshot);
+    const uintptr_t buffer = entry.ImageName.Buffer;
+    if (buffer < base || buffer - base > snapshotLength ||
+        entry.ImageName.Length > snapshotLength - (buffer - base) ||
+        (buffer & (alignof(char16_t) - 1))) return false;
+    const auto* name = reinterpret_cast<const char16_t*>(buffer);
+    for (uint32_t i = 0; i < sizeof(expected) / sizeof(expected[0]) - 1; ++i) {
+        char16_t actual = name[i];
+        if (actual >= u'A' && actual <= u'Z') actual += u'a' - u'A';
+        if (actual != expected[i]) return false;
+    }
+    return true;
+}
+
 uint32_t QueryProcessSnapshot(SnapshotView& result) noexcept {
+    result.available = false;
+    result.taskmgrImageNameFound = false;
     uint32_t capacity = 4096;
     uint32_t returnLength = 0;
     uint32_t status = StatusInfoLengthMismatch;
@@ -54,6 +101,7 @@ uint32_t QueryProcessSnapshot(SnapshotView& result) noexcept {
             uint32_t count = 0;
             bool valid = true;
             bool terminated = false;
+            bool taskmgrImageNameFound = false;
             constexpr uint32_t processPrefixSize = sizeof(micant::SystemProcessInformation);
             for (uint32_t visited = 0; visited < MaxSnapshotBytes / processPrefixSize; ++visited) {
                 if (offset > returnLength || returnLength - offset < processPrefixSize) {
@@ -69,6 +117,8 @@ uint32_t QueryProcessSnapshot(SnapshotView& result) noexcept {
                     valid = false;
                     break;
                 }
+                taskmgrImageNameFound = taskmgrImageNameFound ||
+                    IsTaskmgrImageName(*entry, s_processSnapshot, returnLength);
                 ++count;
                 if (entry->NextEntryOffset == 0) {
                     terminated = true;
@@ -91,6 +141,7 @@ uint32_t QueryProcessSnapshot(SnapshotView& result) noexcept {
             result.data = s_processSnapshot;
             result.length = returnLength;
             result.processCount = count;
+            result.taskmgrImageNameFound = taskmgrImageNameFound;
             result.status = status;
             result.available = true;
             return status;
@@ -125,6 +176,33 @@ void AppendHex32(char* out, uint32_t outSize, uint32_t& cursor, uint32_t value) 
     if (cursor + 8 >= outSize) return;
     for (int shift = 28; shift >= 0; shift -= 4) out[cursor++] = digits[(value >> shift) & 0xFU];
     out[cursor] = '\0';
+}
+
+void DrawProcessImageName(const SnapshotView& snapshot,
+                          const micant::SystemProcessInformation& entry,
+                          uint32_t y) noexcept {
+    constexpr uint32_t NameCapacity = 96;
+    char name[NameCapacity]{};
+    if (!entry.ImageName.Buffer || !entry.ImageName.Length ||
+        (entry.ImageName.Length & 1U) != 0 || entry.ImageName.Length / 2 >= NameCapacity) {
+        DrawString(s_tmBuffer, WIN_W, 12, y, "Image name unavailable", PackBGRA(215, 225, 240));
+        return;
+    }
+    const uintptr_t buffer = entry.ImageName.Buffer;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(snapshot.data);
+    if (buffer < base || buffer - base > snapshot.length ||
+        entry.ImageName.Length > snapshot.length - (buffer - base)) {
+        DrawString(s_tmBuffer, WIN_W, 12, y, "Image name unavailable", PackBGRA(215, 225, 240));
+        return;
+    }
+    const auto* imageName = reinterpret_cast<const char16_t*>(buffer);
+    const uint32_t length = entry.ImageName.Length / sizeof(char16_t);
+    for (uint32_t i = 0; i < length; ++i) {
+        const char16_t character = imageName[i];
+        name[i] = character >= 0x20 && character <= 0x7e ? static_cast<char>(character) : '?';
+    }
+    name[length] = '\0';
+    DrawString(s_tmBuffer, WIN_W, 12, y, name, PackBGRA(215, 225, 240));
 }
 
 void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
@@ -164,7 +242,7 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
             const uint32_t bg = (row & 1) ? PackBGRA(14, 20, 32) : PackBGRA(16, 22, 35);
             FillRect(s_tmBuffer, WIN_W, 1, y, WIN_W - 2, 22, bg);
 
-            DrawString(s_tmBuffer, WIN_W, 12, y + 3, "Image name unavailable", PackBGRA(215, 225, 240));
+            DrawProcessImageName(snapshot, *entry, y + 3);
             char pidText[24] = "PID ";
             uint32_t pidCursor = 4;
             AppendUnsigned(pidText, sizeof(pidText), pidCursor, entry->UniqueProcessId);
@@ -198,7 +276,18 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
     } else {
         DrawString(s_tmBuffer, WIN_W, 12, WIN_H - 16, "Processes: unavailable", PackBGRA(240, 195, 105));
     }
-    DrawString(s_tmBuffer, WIN_W, 205, WIN_H - 16, "CPU / memory metrics: unavailable", PackBGRA(160, 180, 200));
+    DrawString(s_tmBuffer, WIN_W, 205, WIN_H - 16, "CPU: unavailable", PackBGRA(160, 180, 200));
+    if (snapshot.memoryAvailable) {
+        char memoryText[48] = "Available memory: ";
+        uint32_t cursor = 18;
+        AppendUnsigned(memoryText, sizeof(memoryText), cursor, snapshot.availablePages);
+        const char* suffix = " pages";
+        while (*suffix && cursor + 1 < sizeof(memoryText)) memoryText[cursor++] = *suffix++;
+        memoryText[cursor] = '\0';
+        DrawString(s_tmBuffer, WIN_W, 330, WIN_H - 16, memoryText, PackBGRA(0, 210, 255));
+    } else {
+        DrawString(s_tmBuffer, WIN_W, 330, WIN_H - 16, "Memory: unavailable", PackBGRA(160, 180, 200));
+    }
     PresentWindow(s_tmBuffer, WIN_W, WIN_H);
 }
 
@@ -213,8 +302,11 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
 
     SnapshotView snapshot{};
     bool reported = false;
+    bool memoryReported = false;
+    bool imageNameReported = false;
     while (true) {
         QueryProcessSnapshot(snapshot);
+        const bool memoryAvailable = QueryAvailablePages(snapshot);
         if (!reported) {
             if (snapshot.available) {
                 PrintLine("Task Manager: kernel process snapshot received.");
@@ -226,6 +318,18 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
                 PrintLine(statusLine);
             }
             reported = true;
+        }
+        if (!memoryReported) {
+            PrintLine(memoryAvailable
+                ? "Task Manager: memory availability snapshot received."
+                : "Task Manager: memory availability unavailable from the kernel provider.");
+            memoryReported = true;
+        }
+        if (!imageNameReported) {
+            PrintLine(snapshot.taskmgrImageNameFound
+                ? "Task Manager: native process image name validated."
+                : "Task Manager: native process image name unavailable.");
+            imageNameReported = true;
         }
         RenderTaskManagerWindow(snapshot);
 
