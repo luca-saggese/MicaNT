@@ -42,11 +42,13 @@ the evidence named here, not just declarations or a successful compile.
   `working_tree_dirty: false`; baremetal target and native user-mode boundary
   checks passed. The sampled titlebar changed from `(250,250,250)` to
   `(54,54,54)`.
-- [ ] A build of the latest uncommitted shared worktree is still pending. That
-  tree contains unrelated Task Manager/kernel changes; its earlier build
-  failed in `kernel/init/kiinit.cpp` (`third`/`fourth` undeclared) and
-  `kernel/ps/psmgr.cpp` (exceptions disabled and missing
-  `ob::ObjectNamespace`).
+- [x] The shared worktree build completed for the baremetal kernel, Explorer,
+  compositor and required DLLs using `python3 qemu.py --headless` with the
+  persistent `build/qemu-cmake-mingw` tree. That full input run reached
+  Explorer and its theme pixel probes, then failed at the concurrent parent-
+  folder navigation assertion; its final interaction/stability gate did not
+  pass. The detailed per-feature evidence below distinguishes the successful
+  runtime probes from this incomplete full-run result.
 
 ## Remaining acceptance work
 
