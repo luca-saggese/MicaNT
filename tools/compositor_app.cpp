@@ -167,7 +167,9 @@ bool compose(const MicaCompositorMetadataStore& metadata,
             uint32_t closeColor = foreground ? 0xFFC84753u : 0xFF916A70u;
             if (themedCaptionBackground) {
                 captionColor = headerbarStyle.background | 0xFF000000u;
-                frameColor = captionColor;
+                frameColor = (headerbarStyle.flags & MICANT_THEME_HAS_BORDER)
+                    ? headerbarStyle.border | 0xFF000000u
+                    : (foreground ? 0xFF9B9B9Bu : 0xFFB0B0B0u);
                 buttonColor = captionColor;
                 closeColor = captionColor;
             }
@@ -191,14 +193,16 @@ bool compose(const MicaCompositorMetadataStore& metadata,
                          buttonBottom, buttonColor, width, height);
 
                 const int64_t iconTop = windowTop + frame + (caption - 22) / 2;
-                const uint32_t iconColor = foreground ? 0xFFF5F8FCu : 0xFFE3E8EDu;
+                const uint32_t iconColor = themedCaptionForeground ? titleColor :
+                    (foreground ? 0xFFF5F8FCu : 0xFFE3E8EDu);
                 const bool maximized = (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) != 0;
                 drawControlIcon(1, false, closeLeft - 58, iconTop,
                                 iconColor, width, height);
                 drawControlIcon(2, maximized, closeLeft - 29, iconTop,
                                 iconColor, width, height);
                 drawControlIcon(3, false, closeLeft, iconTop,
-                                0xFFFFFFFFu, width, height);
+                                themedCaptionForeground ? titleColor : 0xFFFFFFFFu,
+                                width, height);
 
                 int64_t titleX = windowLeft + frame + 9;
                 const int64_t titleLimit = closeLeft - 66;

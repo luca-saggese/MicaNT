@@ -806,6 +806,8 @@ bool presentFrame(void*, const uint32_t* pixels, uint32_t width, uint32_t height
         : Rect{static_cast<uint32_t>(left + dirtyLeft),
                static_cast<uint32_t>(top + dirtyTop), static_cast<uint32_t>(dirtyRight - dirtyLeft),
                static_cast<uint32_t>(dirtyBottom - dirtyTop)};
+    transfer.offset = (static_cast<uint64_t>(transfer.rect.y) * g_device.pitch +
+                       transfer.rect.x) * sizeof(uint32_t);
     transfer.resourceId = kResourceId;
     if (!sendNoData(&transfer, sizeof(transfer))) {
         g_device.frameNeedsFullTransfer = true;
