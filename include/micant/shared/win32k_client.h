@@ -119,7 +119,8 @@ enum {
     MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS,
     MICANT_WIN32K_OP_GET_CAPTURE,
     MICANT_WIN32K_OP_SET_CAPTURE,
-    MICANT_WIN32K_OP_RELEASE_CAPTURE
+    MICANT_WIN32K_OP_RELEASE_CAPTURE,
+    MICANT_WIN32K_OP_GET_FOCUS
 };
 
 enum {
@@ -194,6 +195,7 @@ MICANT_WIN32K_API int32_t MicaWin32kIsWindowVisible(void*);
 MICANT_WIN32K_API int32_t MicaWin32kIsIconic(void*);
 MICANT_WIN32K_API void* MicaWin32kGetForegroundWindow(void);
 MICANT_WIN32K_API void* MicaWin32kSetFocus(void*);
+MICANT_WIN32K_API void* MicaWin32kGetFocus(void);
 MICANT_WIN32K_API void* MicaWin32kGetCapture(void);
 MICANT_WIN32K_API void* MicaWin32kSetCapture(void*);
 MICANT_WIN32K_API int32_t MicaWin32kReleaseCapture(void);

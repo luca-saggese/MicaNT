@@ -1661,7 +1661,7 @@ inline win32::HWND SetFocus(win32::HWND hWnd) noexcept {
 }
 
 inline win32::HWND GetFocus() noexcept {
-    return reinterpret_cast<win32::HWND>(MicaWin32kGetForegroundWindow());
+    return reinterpret_cast<win32::HWND>(MicaWin32kGetFocus());
 }
 
 inline win32::BOOL EnableWindow(win32::HWND /*hWnd*/, win32::BOOL /*bEnable*/) noexcept {

@@ -85,6 +85,7 @@ struct ButtonState {
     uint32_t state{};
     uint32_t style{};
     bool armed{};
+    bool spaceArmed{};
     wchar_t text[128]{};
 };
 std::array<ButtonState, 64> g_buttons{};
@@ -648,6 +649,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kIsIconic);
     MICA_WIN32K_PROC(MicaWin32kGetForegroundWindow);
     MICA_WIN32K_PROC(MicaWin32kSetFocus);
+    MICA_WIN32K_PROC(MicaWin32kGetFocus);
     MICA_WIN32K_PROC(MicaWin32kGetCapture);
     MICA_WIN32K_PROC(MicaWin32kSetCapture);
     MICA_WIN32K_PROC(MicaWin32kReleaseCapture);
@@ -1970,6 +1972,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             break;
         case kWmKillFocus:
             button->state &= ~(kButtonFocused | kButtonPressed);
+            button->spaceArmed = false;
             if (button->armed) {
                 button->armed = false;
                 releaseMouse = true;
@@ -1979,6 +1982,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             if (wParam) button->state &= ~kButtonDisabled;
             else {
                 button->state = (button->state | kButtonDisabled) & ~kButtonPressed;
+                button->spaceArmed = false;
                 if (button->armed) {
                     button->armed = false;
                     releaseMouse = true;
@@ -2023,13 +2027,20 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             button->state &= ~kButtonPressed;
             break;
         case kWmKeyDown:
-            if (wParam == kVkSpace && !(button->state & kButtonDisabled))
+            if (wParam == kVkSpace && (button->state & kButtonFocused) &&
+                !(button->state & kButtonDisabled) && !button->spaceArmed) {
+                button->spaceArmed = true;
                 button->state |= kButtonPressed;
+            }
             break;
         case kWmKeyUp:
-            click = wParam == kVkSpace && (button->state & kButtonPressed) &&
+            click = wParam == kVkSpace && button->spaceArmed &&
+                    (button->state & kButtonFocused) &&
                     !(button->state & kButtonDisabled);
-            if (wParam == kVkSpace) button->state &= ~kButtonPressed;
+            if (wParam == kVkSpace) {
+                button->spaceArmed = false;
+                if (!button->armed) button->state &= ~kButtonPressed;
+            }
             break;
         case 0x031Au: // WM_THEMECHANGED
         case 0x001Au: // WM_SETTINGCHANGE
@@ -2269,6 +2280,12 @@ void* User32_SetFocus(void* hWnd) noexcept {
     using Fn=void* (*)(void*);
     auto fn=Win32kProc<Fn>("MicaWin32kSetFocus");
     return fn ? fn(hWnd) : nullptr;
+}
+
+void* User32_GetFocus() noexcept {
+    using Fn=void* (*)(void);
+    auto fn=Win32kProc<Fn>("MicaWin32kGetFocus");
+    return fn ? fn() : nullptr;
 }
 
 void* User32_GetCapture() noexcept {
@@ -3150,6 +3167,9 @@ __declspec(dllexport) void* GetForegroundWindow(void) {
 }
 __declspec(dllexport) void* SetFocus(void* hWnd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetFocus(hWnd);
+}
+__declspec(dllexport) void* GetFocus(void) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetFocus();
 }
 __declspec(dllexport) void* GetCapture(void) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetCapture();

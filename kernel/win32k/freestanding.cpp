@@ -132,6 +132,8 @@ uint16_t g_nextAtom{1};
 uint32_t g_nextGeneration{1};
 uint32_t g_messageTime{};
 uint64_t g_foregroundWindow{};
+uint64_t g_focusedWindow{};
+uint64_t g_focusedWindowOwner{};
 uint64_t g_nextZOrder{};
 int32_t g_mouseX{-1}, g_mouseY{-1};
 bool g_mousePositionValid{};
@@ -423,6 +425,23 @@ Window* findWindowAny(uint64_t handle) noexcept {
     return nullptr;
 }
 
+Window* rootWindow(Window* window) noexcept {
+    for (size_t depth = 0; window && window->parent && depth < kWindowCapacity; ++depth) {
+        auto* parent = findWindowAny(window->parent);
+        if (!parent || parent->ownerProcessId != window->ownerProcessId) break;
+        window = parent;
+    }
+    return window;
+}
+
+bool belongsToWindow(const Window* window, uint64_t ancestorHandle) noexcept {
+    for (size_t depth = 0; window && depth < kWindowCapacity; ++depth) {
+        if (window->handle == ancestorHandle) return true;
+        window = findWindowAny(window->parent);
+    }
+    return false;
+}
+
 uint64_t makeHandle(size_t index) noexcept {
     uint64_t generation = g_nextGeneration++;
     if (generation == 0 || generation > 0x00FFFFFFu) {
@@ -486,6 +505,15 @@ Window* topmostVisibleWindow() noexcept {
     return topmost;
 }
 
+Window* topmostVisibleTopLevelWindow() noexcept {
+    Window* topmost{};
+    for (auto& window : g_windows) {
+        if (!window.active || !window.visible || window.iconic || window.parent) continue;
+        if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
+    }
+    return topmost;
+}
+
 int32_t hitTestWindow(const Window& window, int32_t x, int32_t y) noexcept {
     constexpr int32_t HTCLIENT = 1, HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11;
     constexpr int32_t HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14;
@@ -518,6 +546,37 @@ bool enqueueWindowMessage(const Window& window, uint32_t message,
         .message = message, .time = ++g_messageTime,
         .x = x, .y = y,
         .ownerProcessId = window.ownerProcessId, .active = true});
+}
+
+bool setFocusedWindow(Window* window) noexcept {
+    if (!window || !window->active || !window->visible || window->iconic) return false;
+    const uint64_t previousHandle = g_focusedWindow;
+    if (previousHandle == window->handle) return true;
+    auto* previous = findWindowAny(previousHandle);
+    if (previous && !enqueueWindowMessage(*previous, 0x0008u, window->handle, 0))
+        return false;
+    if (!enqueueWindowMessage(*window, kWmSetFocus, previousHandle, 0)) return false;
+    if (previous) markWindowBounds(*previous);
+    markWindowBounds(*window);
+    g_focusedWindow = window->handle;
+    g_focusedWindowOwner = window->ownerProcessId;
+    return true;
+}
+
+bool activateWindow(Window* target) noexcept {
+    auto* root = rootWindow(target);
+    if (!root || !root->active || !root->visible || root->iconic) return false;
+    if (g_foregroundWindow != root->handle) {
+        auto* previous = findWindowAny(g_foregroundWindow);
+        if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
+            return false;
+        if (!enqueueWindowMessage(*root, kWmActivate, 1, 0)) return false;
+        if (previous) markWindowBounds(*previous);
+        markWindowBounds(*root);
+        g_foregroundWindow = root->handle;
+    }
+    root->zOrder = nextZOrder();
+    return setFocusedWindow(target);
 }
 
 bool hasQueuedWindowMessage(const Window& window, uint32_t message) noexcept {
@@ -750,7 +809,7 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         window.visible = (window.style & 0x10000000u) != 0;
         copyText(window.title, request.title);
         request.result = window.handle;
-        if (window.visible) g_foregroundWindow = window.handle;
+        if (window.visible && !window.parent) (void)activateWindow(&window);
         markWindowBounds(window);
         return NtStatus::Success;
     }
@@ -824,7 +883,14 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_DESTROY_WINDOW: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
+            auto* oldFocus = findWindowAny(g_focusedWindow);
+            const bool wasFocus = belongsToWindow(oldFocus, window->handle);
             const bool wasForeground = g_foregroundWindow == window->handle;
+            if (wasFocus) {
+                (void)enqueueWindowMessage(*oldFocus, 0x0008u, 0, 0);
+                g_focusedWindow = 0;
+                g_focusedWindowOwner = 0;
+            }
             markWindowBounds(*window);
             if (g_pointerGesture.window == window->handle) g_pointerGesture = {};
             if (g_captionCapture == window->handle) {
@@ -836,13 +902,15 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 g_mouseCaptureOwner = 0;
             }
             window->active = false;
+            if (wasFocus && !wasForeground) {
+                if (auto* parent = rootWindow(findWindowAny(window->parent));
+                    parent && parent->visible && !parent->iconic)
+                    (void)setFocusedWindow(parent);
+            }
             if (wasForeground) {
                 g_foregroundWindow = 0;
-                if (auto* next = topmostVisibleWindow()) {
-                    g_foregroundWindow = next->handle;
-                    markWindowBounds(*next);
-                    (void)enqueueWindowMessage(*next, kWmActivate, 1, 0);
-                    (void)enqueueWindowMessage(*next, kWmSetFocus, 0, 0);
+                if (auto* next = topmostVisibleTopLevelWindow()) {
+                    (void)activateWindow(next);
                 }
             }
             request.result = 1;
@@ -864,9 +932,25 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (wasVisible || wasIconic) markWindowBounds(*window);
             window->visible = command != 0;
             window->iconic = minimize;
-            if (window->visible) {
+            if (window->visible && !window->iconic) {
                 window->zOrder = nextZOrder();
-                g_foregroundWindow = window->handle;
+                if (!window->parent) (void)activateWindow(window);
+            } else if (belongsToWindow(findWindowAny(g_focusedWindow), window->handle)) {
+                if (auto* focus = findWindowAny(g_focusedWindow))
+                    (void)enqueueWindowMessage(*focus, 0x0008u, 0, 0);
+                g_focusedWindow = 0;
+                g_focusedWindowOwner = 0;
+                if (window->parent) {
+                    if (auto* parent = rootWindow(window->parent
+                            ? findWindowAny(window->parent) : nullptr);
+                        parent && parent->visible && !parent->iconic)
+                        (void)setFocusedWindow(parent);
+                }
+                if (g_foregroundWindow == window->handle) {
+                    g_foregroundWindow = 0;
+                    if (auto* next = topmostVisibleTopLevelWindow())
+                        (void)activateWindow(next);
+                }
             }
             if (window->visible) markWindowBounds(*window);
             request.result = wasVisible;
@@ -922,7 +1006,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             window->height = static_cast<int32_t>(height);
             if (request.args[6] == 0) {
                 window->zOrder = nextZOrder();
-                g_foregroundWindow = window->handle;
+                if (!window->parent) g_foregroundWindow = window->handle;
             }
             if (window->x != oldX || window->y != oldY) {
                 const uint32_t packedPosition =
@@ -1034,23 +1118,18 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             if (!window->visible || window->iconic) return NtStatus::InvalidParameter;
-            const uint64_t previousHandle = g_foregroundWindow;
-            if (previousHandle != window->handle) {
-                auto* previous = findWindowAny(previousHandle);
-                if (previous) markWindowBounds(*previous);
-                markWindowBounds(*window);
-                if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
-                    return NtStatus::InsufficientResources;
-                g_foregroundWindow = window->handle;
-                if (!enqueueWindowMessage(*window, kWmActivate, 1, 0) ||
-                    !enqueueWindowMessage(*window, kWmSetFocus, 0, 0))
-                    return NtStatus::InsufficientResources;
-            }
-            if (previousHandle == window->handle) markWindowBounds(*window);
-            window->zOrder = nextZOrder();
+            auto* root = rootWindow(window);
+            if (!root || root->handle != g_foregroundWindow)
+                return NtStatus::InvalidParameter;
+            const uint64_t previousHandle = g_focusedWindow;
+            if (!setFocusedWindow(window)) return NtStatus::InsufficientResources;
             request.result = previousHandle;
             return NtStatus::Success;
         }
+        case MICANT_WIN32K_OP_GET_FOCUS:
+            request.result = g_focusedWindowOwner == ownerProcessId
+                ? g_focusedWindow : 0;
+            return NtStatus::Success;
         case MICANT_WIN32K_OP_GET_CAPTURE:
             request.result = g_mouseCaptureOwner == ownerProcessId
                 ? g_mouseCaptureWindow : 0;
@@ -1223,6 +1302,14 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
             window = {};
         }
+        if (g_focusedWindowOwner == ownerProcessId) {
+            g_focusedWindow = 0;
+            g_focusedWindowOwner = 0;
+        }
+        if (!g_foregroundWindow) {
+            if (auto* next = topmostVisibleTopLevelWindow())
+                (void)activateWindow(next);
+        }
         for (auto& window : g_windows) {
             if (!window.active) continue;
             for (auto& writerOwner : window.writerOwners) {
@@ -1325,17 +1412,9 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         g_pointerGesture = {};
     }
     if (leftPressed && target) {
-        if (auto* previous = findWindowAny(g_foregroundWindow))
-            markWindowBounds(*previous);
+        (void)activateWindow(target);
         markWindowBounds(*target);
         target->zOrder = nextZOrder();
-        if (g_foregroundWindow != target->handle) {
-            auto* previous = findWindowAny(g_foregroundWindow);
-            if (previous) (void)enqueueWindowMessage(*previous, kWmActivate, 0, 0);
-            g_foregroundWindow = target->handle;
-            (void)enqueueWindowMessage(*target, kWmActivate, 1, 0);
-            (void)enqueueWindowMessage(*target, kWmSetFocus, 0, 0);
-        }
         const uint8_t button = captionButtonAt(*target,
             static_cast<int32_t>(static_cast<int64_t>(x) - target->x),
             static_cast<int32_t>(static_cast<int64_t>(y) - target->y));
@@ -1365,13 +1444,9 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
             captured->iconic = true;
             (void)enqueueWindowMessage(*captured, kWmSize, 1, 0);
             if (g_foregroundWindow == captured->handle) {
-                auto* next = topmostVisibleWindow();
-                g_foregroundWindow = next ? next->handle : 0;
-                if (next) {
-                    markWindowBounds(*next);
-                    (void)enqueueWindowMessage(*next, kWmActivate, 1, 0);
-                    (void)enqueueWindowMessage(*next, kWmSetFocus, 0, 0);
-                }
+                g_foregroundWindow = 0;
+                if (auto* next = topmostVisibleTopLevelWindow())
+                    (void)activateWindow(next);
             }
         } else if (pressedButton == 2) {
             if (!captured->maximized) {
@@ -1447,15 +1522,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         const uint32_t mask = buttonMasks[index];
         if ((previousButtons & mask) == (currentButtons & mask)) continue;
         if (currentButtons & mask) {
+            if (!activateWindow(routeTarget)) return false;
             routeTarget->zOrder = nextZOrder();
-            if (g_foregroundWindow != routeTarget->handle) {
-                auto* previous = findWindowAny(g_foregroundWindow);
-                if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
-                    return false;
-                g_foregroundWindow = routeTarget->handle;
-                if (!enqueueWindowMessage(*routeTarget, kWmActivate, 1, 0) ||
-                    !enqueueWindowMessage(*routeTarget, kWmSetFocus, 0, 0)) return false;
-            }
             if (!enqueueWindowMessage(*routeTarget, downMessages[index], keyState,
                                       packedPoint, x, y)) return false;
             buttonDelivered = true;
@@ -1471,7 +1539,9 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
 
 bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
     StateLockGuard lock;
-    auto* target = findWindowAny(g_foregroundWindow);
+    auto* target = findWindow(g_focusedWindow, g_focusedWindowOwner);
+    if (!target || !target->visible || target->iconic)
+        target = findWindowAny(g_foregroundWindow);
     if (!target || !target->visible || target->iconic || !event.virtualKey) return false;
     const bool down = (event.flags & 0x01u) != 0;
     const uint64_t lParam = (static_cast<uint64_t>(event.sequence & 0xFFu) << 16) |

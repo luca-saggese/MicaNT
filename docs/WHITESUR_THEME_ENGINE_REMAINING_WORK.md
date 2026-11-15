@@ -220,6 +220,15 @@ the evidence named here, not just declarations or a successful compile.
   and notification counts in
   `/private/tmp/micant-theme-button-capture-verified`. Capture ownership is
   process-scoped; Win32 per-thread capture routing remains unsupported.
+- [x] Production User32 `SetFocus`/`GetFocus` now track a focused HWND
+  separately from the foreground top-level window. Win32k sends focus change
+  messages, routes keyboard input to the focused control, and restores the
+  parent/top-level focus when a focused child is hidden or destroyed. BUTTON
+  arms Space only while focused and emits one click on keyup. Explorer verified
+  the child focus API round trip; QEMU checked Space pressed pixels, one
+  `BN_CLICKED`, and no activation after moving focus away in
+  `/private/tmp/micant-theme-button-focus-run-2`. Focus ownership is
+  process-scoped, so per-thread focus and Tab traversal remain open.
 - [x] The production BUTTON WndProc handles `WM_SETTEXT`, `WM_GETTEXT`, and
   `WM_GETTEXTLENGTH` against its owned 128-WCHAR label. Updates are copied only
   when they fit, then invalidate the control; reads honor the caller's
@@ -232,9 +241,9 @@ the evidence named here, not just declarations or a successful compile.
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
   WhiteSur snapshot. This focused probe passed; the enclosing `--verify-input`
   run still stops at the concurrent parent-folder navigation assertion.
-- [ ] Verify normal, hover, pressed, checked, focused and disabled states,
-  dimensions, clipping, keyboard focus and complete mouse input/thread capture
-  behavior across all controls in QEMU.
+- [ ] Verify normal, hover, pressed, checked and disabled states, dimensions,
+  clipping, Tab traversal and complete mouse input/thread capture behavior
+  across all controls in QEMU.
 - [ ] Preserve explicit application colors/styles where the Win32 contract
   gives them precedence; verify all failure paths instead of reporting success.
 

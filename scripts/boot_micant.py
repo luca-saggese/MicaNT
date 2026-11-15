@@ -276,6 +276,14 @@ def verify_mouse(
                 ]})
                 time.sleep(0.1)
 
+            def send_key(key: str, down: bool) -> None:
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": down, "key": {"type": "qcode", "data": key},
+                    },
+                }]})
+                time.sleep(0.15)
+
             def screen(name: str) -> bytes:
                 path = temp / name
                 execute("screendump", {"filename": str(path)})
@@ -408,8 +416,11 @@ def verify_mouse(
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
                 if ("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
-                        "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial):
+                        "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial and
+                        "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial):
                     break
+                if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
+                    raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
                 if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
                     raise RuntimeError("Production User32 BUTTON state or notification failed")
                 if "[MicaNT Theme] BUTTON text message mismatch" in serial:
@@ -473,6 +484,42 @@ def verify_mouse(
                 time.sleep(0.05)
             else:
                 raise RuntimeError("BUTTON release inside its bounds did not deliver one click")
+            keyboard_baseline = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(notification)
+            move_to(590, 320)
+            button_keyboard_hover = screen("theme-button-keyboard-hover.ppm")
+            send_key("spc", True)
+            button_space_pressed = screen("theme-button-space-pressed.ppm")
+            if button_region_changed(button_keyboard_hover, button_space_pressed) < 4:
+                raise RuntimeError("Focused BUTTON Space keydown did not render pressed state")
+            send_key("spc", False)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(notification) == keyboard_baseline + 1:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Focused BUTTON Space keyup did not deliver one click")
+
+            # Move focus to the parent window, then ensure Space no longer
+            # activates the child control.
+            move_to(400, 360)
+            set_left_button(True)
+            set_left_button(False)
+            time.sleep(0.2)
+            move_to(590, 320)
+            button_unfocused_hover = screen("theme-button-unfocused-hover.ppm")
+            if button_region_changed(button_keyboard_hover, button_unfocused_hover) < 4:
+                raise RuntimeError("BUTTON focus indicator did not clear after focus moved")
+            unfocused_baseline = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(notification)
+            send_key("spc", True)
+            send_key("spc", False)
+            time.sleep(0.3)
+            serial = serial_path.read_text(encoding="utf-8", errors="replace")
+            if serial.count(notification) != unfocused_baseline:
+                raise RuntimeError("Unfocused BUTTON activated from Space key input")
             # The first Explorer window is placed at (190,90); exercise its
             # first drive row and the parent button before opening another view.
             def click_at(x: int, y: int) -> None:

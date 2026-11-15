@@ -471,6 +471,12 @@ void* MicaWin32kSetFocus(void* hwnd) {
         ? reinterpret_cast<void*>(value.result) : nullptr;
 }
 
+void* MicaWin32kGetFocus(void) {
+    MicaWin32kRequest value{};
+    return request(MICANT_WIN32K_OP_GET_FOCUS, value)
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
 void* MicaWin32kGetCapture(void) {
     MicaWin32kRequest value{};
     return request(MICANT_WIN32K_OP_GET_CAPTURE, value)

@@ -1699,6 +1699,15 @@ void openView(View view) noexcept {
         if (g.themeButtonProbe) {
             ShowWindow(g.themeButtonProbe, SW_SHOW);
             UpdateWindow(g.themeButtonProbe);
+            const HWND focusBeforeButton = GetFocus();
+            const bool focusApiPassed = focusBeforeButton &&
+                SetFocus(g.themeButtonProbe) == focusBeforeButton &&
+                GetFocus() == g.themeButtonProbe &&
+                SetFocus(focusBeforeButton) == g.themeButtonProbe &&
+                GetFocus() == focusBeforeButton;
+            PrintLine(focusApiPassed
+                ? "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified"
+                : "[MicaNT Theme] User32 child focus round trip mismatch");
             constexpr UINT kBmGetState = 0x00F2u;
             constexpr UINT kBmClick = 0x00F5u;
             constexpr UINT kWmSetText = 0x000Cu;
