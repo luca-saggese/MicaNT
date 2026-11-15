@@ -424,6 +424,20 @@ bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& proce
     return false;
 }
 
+bool ValidateTaskmgrQueryFailures() noexcept {
+    uint32_t requiredLength = 0;
+    const uint32_t shortStatus = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        NtQuerySystemInformationService, SystemProcessInformationClass,
+        reinterpret_cast<uint64_t>(s_processSnapshot), 1,
+        reinterpret_cast<uint64_t>(&requiredLength)));
+    if (shortStatus != StatusInfoLengthMismatch || requiredLength <= 1 ||
+        requiredLength > MaxSnapshotBytes) return false;
+    const uint32_t badBufferStatus = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        NtQuerySystemInformationService, SystemProcessInformationClass,
+        0x1000u, requiredLength, reinterpret_cast<uint64_t>(&requiredLength)));
+    return badBufferStatus == 0xC0000005u;
+}
+
 bool TaskmgrProbeProcessExists(const SnapshotView& snapshot) noexcept {
     micant::Handle processId{};
     return FindTaskmgrProbeProcess(snapshot, processId);
@@ -1157,6 +1171,11 @@ bool PumpTaskManagerMessages() noexcept {
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
 bool ExerciseTaskmgrControls(const SnapshotView& snapshot) noexcept {
     if (!snapshot.available || !s_taskmgrWindow) return false;
+    if (!ValidateTaskmgrQueryFailures()) {
+        PrintLine("Task Manager: query failure self-test failed.");
+        return false;
+    }
+    PrintLine("Task Manager: short and invalid query buffers rejected.");
     micant::Handle probeId{};
     if (!FindTaskmgrProbeProcess(snapshot, probeId)) return false;
     auto postClick = [](int32_t x, int32_t y) noexcept {

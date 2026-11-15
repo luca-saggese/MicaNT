@@ -17,7 +17,8 @@ Checklist breve; la specifica completa è
   Winlogon e desktop sicuro.
 - [ ] P3 storage/rete/GPU — mancano provider live Io/NDIS/GPU.
 - [ ] F1 sessioni/startup/servizi — mancano Session Manager/Userenv/SCM runtime.
-- [ ] G1 stress/fault/overhead — churn, errori/cleanup e misure non coperti.
+- [ ] G1 stress/fault/overhead — QEMU copre buffer corto/invalido e cleanup
+  della fixture; restano churn/PID reuse e misure di overhead.
 
 ## Verifica recente
 
@@ -25,6 +26,6 @@ Checklist breve; la specifica completa è
 build/qemu-taskmgr-isolated --memory-mib 2048 --timeout 90 --stable-seconds 3`
 passato il 2026-11-15: process snapshot, CPU, azione D1, controlli UI,
 paint/resize, chiusura e seriale stabile. La scheda Performance e il grafico sono
-stati renderizzati; ordinamento ascendente/discendente e selezione sono stati
-verificati nell’ultimo run QEMU. Evidenza in
-`/private/tmp/micant-taskmgr-sorting-retry/serial.log`.
+stati renderizzati; ordinamento ascendente/discendente, selezione e rifiuto dei
+buffer corto/invalido verificati nell’ultimo run QEMU. Evidenza in
+`/private/tmp/micant-taskmgr-negative-query-retry/serial.log`.

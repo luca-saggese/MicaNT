@@ -885,6 +885,9 @@ def serial_has_failure(serial_log: str) -> bool:
         # expected negative test result, not a kernel bootstrap failure.
         if line.startswith("[MicaNT Ps] SEC_IMAGE initialization import binding failed status="):
             continue
+        if (line.startswith("[MicaNT TaskmgrTest] Process output buffer probe failed") and
+                "Task Manager: short and invalid query buffers rejected." in serial_log):
+            continue
         if (line.startswith("[MicaNT Ps] SEC_IMAGE initialization TLS inspection failed status=") and
                 "[MicaNT Ps] Image callbacks rejection returned" in serial_log):
             continue
@@ -1311,6 +1314,12 @@ def run_qemu(
                         if taskmgr_selftest:
                             if "Task Manager: native controls self-test failed." in serial_log:
                                 raise RuntimeError("Task Manager tab, search or selection self-test failed")
+                            if "Task Manager: query failure self-test failed." in serial_log:
+                                raise RuntimeError("Task Manager malformed-buffer queries were not rejected")
+                            if "Task Manager: short and invalid query buffers rejected." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
                             if "Task Manager: native controls validated." not in serial_log:
                                 complete_since = None
                                 time.sleep(0.1)
