@@ -79,6 +79,10 @@ the evidence named here, not just declarations or a successful compile.
   carry safe per-window icon pixels through the compositor surface protocol.
   The compositor currently has no callable font service or process-safe icon
   snapshot; process-local HICON values must not be sent in shared metadata.
+  Reusing `FontManager` directly requires NTDLL file/VM syscalls. A local
+  experiment linked its NTDLL dependency and built, but QEMU trapped with
+  `#UD` in the compositor after the first app window was created; keep the
+  current 8x8 fallback until the compositor's import/syscall path is resolved.
 - [x] QEMU verified caption drag; close, minimize, maximize/restore; all four
   edges and all four corners; and minimum-size clamping with a 160x100 client
   surface. Diagnostic run: `/private/tmp/micant-theme-qemu-nonclient-full`.
