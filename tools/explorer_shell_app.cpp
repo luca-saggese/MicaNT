@@ -31,6 +31,8 @@
 #include "explorer_shell/notification_area.hpp"
 #include "explorer_shell/task_switcher.hpp"
 
+extern "C" __declspec(dllimport) int32_t InitCommonControlsEx(const void*) noexcept;
+
 namespace {
 
 using namespace micant_gui;
@@ -89,6 +91,8 @@ struct ShellState {
     bool trayThemePixelReported{};
     bool statusBarThemePixelReported{};
     bool explorerRowsThemePixelReported{};
+    bool commonControlsProgressReported{};
+    HWND themeProgressProbe{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -929,6 +933,79 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     g.themeProfile[profileBytes] = '\0';
 }
 
+void createThemeProgressProbe() noexcept {
+    struct InitCommonControlsExArgs { uint32_t size, classes; } args{
+        sizeof(InitCommonControlsExArgs), 0x00000020u};
+    if (!InitCommonControlsEx(&args)) {
+        PrintLine("[MicaNT Theme] comctl32 progress class registration failed");
+        return;
+    }
+    constexpr uint32_t kSetRange32 = 0x0406u;
+    constexpr uint32_t kSetPosition = 0x0402u;
+    constexpr uint32_t kGetPosition = 0x0408u;
+    g.themeProgressProbe = CreateWindowExW(0, L"msctls_progress32", L"",
+        WS_POPUP | WS_VISIBLE, 800, 60, 180, 20,
+        nullptr, nullptr, nullptr, nullptr);
+    if (!g.themeProgressProbe) {
+        PrintLine("[MicaNT Theme] comctl32 progress window creation failed");
+        return;
+    }
+    (void)SendMessageW(g.themeProgressProbe, kSetRange32, 0, 100);
+    (void)SendMessageW(g.themeProgressProbe, kSetPosition, 50, 0);
+    UpdateWindow(g.themeProgressProbe);
+    const bool positionPassed =
+        SendMessageW(g.themeProgressProbe, kGetPosition, 0, 0) == 50;
+    HDC source = GetDC(g.themeProgressProbe);
+    HDC target = CreateCompatibleDC(nullptr);
+    void* dibBits = nullptr;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = 180;
+    info.bmiHeader.biHeight = -20;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    HBITMAP bitmap = target
+        ? CreateDIBSection(target, &info, DIB_RGB_COLORS, &dibBits, nullptr, 0) : nullptr;
+    void* previousBitmap = target && bitmap ? SelectObject(target, bitmap) : nullptr;
+    const bool copied = source && target && bitmap && dibBits &&
+        BitBlt(target, 0, 0, 180, 20, source, 0, 0, SRCCOPY);
+    const auto* pixels = static_cast<const uint32_t*>(dibBits);
+    const auto* trough = themeStyle(7, 0);
+    const auto* fill = themeStyle(7, 6);
+    const uint32_t expectedTrough = trough &&
+        (trough->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(trough->background, 0xFF000000u) : 0xFF000000u;
+    const uint32_t expectedFill = fill &&
+        (fill->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(fill->background, 0xFF000000u) : 0xFF000000u;
+    const bool pixelsPassed = copied && trough && fill &&
+        (trough->flags & MICANT_THEME_HAS_BACKGROUND) &&
+        (fill->flags & MICANT_THEME_HAS_BACKGROUND) &&
+        pixels[10u * 180u + 20u] == expectedFill &&
+        pixels[10u * 180u + 150u] == expectedTrough;
+    if (source) (void)ReleaseDC(g.themeProgressProbe, source);
+    if (target && previousBitmap) (void)SelectObject(target, previousBitmap);
+    if (target) (void)DeleteDC(target);
+    if (bitmap) (void)DeleteObject(bitmap);
+    if (positionPassed && pixelsPassed) {
+        PrintLine("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels");
+        g.commonControlsProgressReported = true;
+    } else {
+        PrintThemeWin32Error("[MicaNT Theme] Progress position", positionPassed);
+        PrintThemeWin32Error("[MicaNT Theme] Progress DIB copy", copied);
+        PrintThemeWin32Error("[MicaNT Theme] Progress style flags",
+            (trough ? trough->flags : 0u) | (fill ? fill->flags << 16 : 0u));
+        if (copied && pixels) {
+            PrintThemeWin32Error("[MicaNT Theme] Progress fill pixel", pixels[10u * 180u + 20u]);
+            PrintThemeWin32Error("[MicaNT Theme] Progress trough pixel", pixels[10u * 180u + 150u]);
+        }
+        PrintThemeWin32Error("[MicaNT Theme] Progress expected fill", expectedFill);
+        PrintThemeWin32Error("[MicaNT Theme] Progress expected trough", expectedTrough);
+        PrintLine("[MicaNT Theme] Production comctl32 progress range or pixel check failed");
+    }
+}
+
 void selectNextThemeProfile() noexcept {
     constexpr const char* profiles[] = {
         "WhiteSur/Light", "WhiteSur/Dark", "WhiteSur/LightPurple"
@@ -1730,6 +1807,7 @@ extern "C" void _start(const char* = nullptr) {
         WS_POPUP | WS_VISIBLE, 0, taskbarY, static_cast<int32_t>(g.screenW), TASKBAR_H,
         nullptr, nullptr, nullptr, nullptr);
     if (!g.taskbar) for (;;) __asm__ __volatile__("pause");
+    createThemeProgressProbe();
     g.taskbarDc = CreateCompatibleDC(nullptr);
     void* taskbarBits = nullptr;
     BITMAPINFO taskbarInfo{};

@@ -444,7 +444,8 @@ if (MICANT_ENABLE_BAREMETAL)
         tools/dlls/comctl32.cpp tools/dlls/comctl32_icon.cpp
         tools/dlls/native_stack_probe.cpp kernel/ex/freestanding_memory.cpp)
     target_include_directories(comctl32_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
-    target_compile_definitions(comctl32_boot PRIVATE MICANT_NATIVE_USERMODE)
+    target_compile_definitions(comctl32_boot PRIVATE
+        MICANT_NATIVE_USERMODE MICANT_WIN32K_IMPORTS)
     target_compile_options(comctl32_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
@@ -453,7 +454,8 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(comctl32_boot PRIVATE
         -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
     )
-    target_link_libraries(comctl32_boot PRIVATE gdi32_boot user32_boot ntdll_boot)
+    target_link_libraries(comctl32_boot PRIVATE
+        gdi32_boot user32_boot uxtheme_boot ntdll_boot win32k_boot)
     set_target_properties(comctl32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "comctl32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -541,7 +543,8 @@ if (MICANT_ENABLE_BAREMETAL)
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
     target_compile_definitions(explorer_boot PRIVATE MICANT_UXTHEME_IMPORTS)
-    target_link_libraries(explorer_boot PRIVATE user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot)
+    target_link_libraries(explorer_boot PRIVATE
+        user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot comctl32_boot)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"

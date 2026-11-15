@@ -133,6 +133,27 @@ inline void Test_NativeTheme_ColorExpressionsAndControlCascade() {
                 "GTK shade raises lightness without losing saturated hue");
 }
 
+inline void Test_NativeTheme_WhiteSurProgressDescendantsMapToProgressStates() {
+    using namespace micant::um::theme;
+    constexpr std::string_view css =
+        "progressbar trough { background-color: rgba(0, 0, 0, 0.12); }"
+        "progressbar progress { background-color: #0860F2; border-radius: 6px; }";
+    CompiledCss parsed{};
+    NativeTheme theme{};
+    TEST_ASSERT(compileGtkCss(css, parsed) == CssStatus::Success &&
+                buildNativeTheme(parsed, theme),
+                "the bounded WhiteSur Progress selector pair compiles");
+    const auto& trough = theme.style(NativeControl::Progress, NativeVisualState::Normal);
+    const auto& fill = theme.style(NativeControl::Progress, NativeVisualState::Selected);
+    TEST_ASSERT(trough.hasBackground &&
+                trough.background == (CssColor{0, 0, 0, 31}),
+                "progressbar trough background maps to the normal state");
+    TEST_ASSERT(fill.hasBackground &&
+                fill.background == (CssColor{8, 96, 242, 255}) &&
+                fill.hasBorderRadius && fill.borderRadius == 6,
+                "progressbar progress background and radius map to selected state");
+}
+
 inline void Test_WhiteSur_RealProfilesCompileToNativeButtonStyles() {
     using namespace micant::um::theme;
     auto compileProfile = [](const char* path, NativeTheme& theme,

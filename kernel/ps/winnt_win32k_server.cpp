@@ -609,43 +609,40 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
 int32_t MicaWin32kFillRect(void* dc, const MicaWin32kRect* rectangle,
                            uint32_t colorRef) {
     auto* context = findContext(dc);
-    if (!context || !context->memory || !context->bitmap || !rectangle ||
+    if (!context || !rectangle ||
         rectangle->right <= rectangle->left || rectangle->bottom <= rectangle->top)
         return 0;
-    const uint32_t bitmapIndex = context->bitmap - 1;
-    if (bitmapIndex >= kBitmapCapacity) return 0;
-    auto& bitmap = g_bitmaps[bitmapIndex];
-    if (!bitmap.active || !bitmap.width || !bitmap.height) return 0;
+    uint32_t width{}, height{};
+    uint32_t* pixels = pixelsFor(*context, width, height);
+    if (!pixels || !width || !height) return 0;
     const int64_t left = std::max<int64_t>(0, rectangle->left);
     const int64_t top = std::max<int64_t>(0, rectangle->top);
-    const int64_t right = std::min<int64_t>(bitmap.width, rectangle->right);
-    const int64_t bottom = std::min<int64_t>(bitmap.height, rectangle->bottom);
+    const int64_t right = std::min<int64_t>(width, rectangle->right);
+    const int64_t bottom = std::min<int64_t>(height, rectangle->bottom);
     if (right <= left || bottom <= top) return 1;
     const uint32_t red = colorRef & 0xFFu;
     const uint32_t green = (colorRef >> 8) & 0xFFu;
     const uint32_t blue = (colorRef >> 16) & 0xFFu;
     const uint32_t pixel = 0xFF000000u | (red << 16) | (green << 8) | blue;
-    auto* pixels = g_pixelArena + bitmap.pixelOffset;
     for (int64_t y = top; y < bottom; ++y)
-        std::fill(pixels + static_cast<size_t>(y) * bitmap.width + left,
-                  pixels + static_cast<size_t>(y) * bitmap.width + right, pixel);
+        std::fill(pixels + static_cast<size_t>(y) * width + left,
+                  pixels + static_cast<size_t>(y) * width + right, pixel);
     return 1;
 }
 
 int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
                             uint32_t argb) {
     auto* context = findContext(dc);
-    if (!context || !context->memory || !context->bitmap || !rectangle ||
+    if (!context || !rectangle ||
         rectangle->right <= rectangle->left || rectangle->bottom <= rectangle->top)
         return 0;
-    const uint32_t bitmapIndex = context->bitmap - 1;
-    if (bitmapIndex >= kBitmapCapacity) return 0;
-    auto& bitmap = g_bitmaps[bitmapIndex];
-    if (!bitmap.active || !bitmap.width || !bitmap.height) return 0;
+    uint32_t width{}, height{};
+    uint32_t* pixels = pixelsFor(*context, width, height);
+    if (!pixels || !width || !height) return 0;
     const int64_t left = std::max<int64_t>(0, rectangle->left);
     const int64_t top = std::max<int64_t>(0, rectangle->top);
-    const int64_t right = std::min<int64_t>(bitmap.width, rectangle->right);
-    const int64_t bottom = std::min<int64_t>(bitmap.height, rectangle->bottom);
+    const int64_t right = std::min<int64_t>(width, rectangle->right);
+    const int64_t bottom = std::min<int64_t>(height, rectangle->bottom);
     if (right <= left || bottom <= top) return 1;
     const uint32_t alpha = argb >> 24;
     if (!alpha) return 1;
@@ -653,10 +650,9 @@ int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
     const uint32_t red = (argb >> 16) & 0xFFu;
     const uint32_t green = (argb >> 8) & 0xFFu;
     const uint32_t blue = argb & 0xFFu;
-    auto* pixels = g_pixelArena + bitmap.pixelOffset;
     for (int64_t y = top; y < bottom; ++y) {
         for (int64_t x = left; x < right; ++x) {
-            uint32_t& destination = pixels[static_cast<size_t>(y) * bitmap.width + x];
+            uint32_t& destination = pixels[static_cast<size_t>(y) * width + x];
             const uint32_t dstRed = (destination >> 16) & 0xFFu;
             const uint32_t dstGreen = (destination >> 8) & 0xFFu;
             const uint32_t dstBlue = destination & 0xFFu;

@@ -1725,6 +1725,13 @@ public:
             wnd->rcWindow.bottom = wnd->rcWindow.top + cy;
         }
         updateClientGeometry(*wnd);
+        if ((wnd->rcClient.width() != oldW || wnd->rcClient.height() != oldH) &&
+            wnd->hdc) {
+            if (wnd->clientBitmap) m_gdiEngine.deleteObject(wnd->clientBitmap);
+            m_gdiEngine.releaseDC(wnd->hdc);
+            wnd->clientBitmap = nullptr;
+            wnd->hdc = nullptr;
+        }
 
         if (uFlags & SWP_SHOWWINDOW) {
             wnd->isVisible = true;
@@ -1790,9 +1797,10 @@ public:
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         auto it=m_windows.find(hwnd);
         if (it != m_windows.end() && it->second->hdc == dc) {
-            if (it->second->clientBitmap) m_gdiEngine.deleteObject(it->second->clientBitmap);
-            it->second->clientBitmap=nullptr;
-            it->second->hdc=nullptr;
+            // The window surface is persistent content state. Releasing a
+            // paint DC must not discard it before the compositor snapshots
+            // the presented pixels or the next WM_PAINT can update it.
+            return TRUE_VAL;
         }
         return m_gdiEngine.releaseDC(dc);
     }

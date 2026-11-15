@@ -352,6 +352,17 @@ def verify_mouse(
                     "Explorer desktop was already visible at the initial scanout.",
                     flush=True,
                 )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if "[MicaNT Theme] Production comctl32 progress control initialized" in startup_serial:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Explorer did not initialize the production comctl32 progress control")
+            progress_screen = screen("theme-progress-control.ppm")
+            if pixel_at(progress_screen, 820, 70) == pixel_at(progress_screen, 960, 70):
+                raise RuntimeError("Progress control fill and background pixels were indistinguishable")
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": 40}},
                 {"type": "rel", "data": {"axis": "y", "value": 20}},

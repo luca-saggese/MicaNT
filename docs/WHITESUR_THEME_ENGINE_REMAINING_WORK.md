@@ -109,8 +109,24 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 2. Win32 and common controls
 
+- [x] The production comctl32.dll registers msctls_progress32 through the
+  real User32 DLL and renders the range fill through uxtheme.dll and GDI;
+  explicit PBM_SETBARCOLOR / PBM_SETBKCOLOR values override theme colors,
+  and failed theme draws use the Base GDI colors. The bounded parser maps
+  WhiteSur progressbar trough/progress descendants into the native normal and
+  selected slots. Explorer creates the actual DLL control, sets a 0–100 range
+  and 50 position, copies its rendered surface to a DIB, and compares both
+  sample pixels with the active snapshot colors in QEMU. The build and focused
+  Ring 3/DIB assertions passed. The full --verify-input run stopped afterward
+  at the parallel filesystem parent-folder navigation assertion, so the
+  remaining interaction suite did not pass in this run.
 - [ ] Connect actual production DLL renderers for buttons, checkboxes, radio
-  buttons, textboxes, menus, tabs, scrollbars and progress bars to UxTheme/GDI.
+  buttons, textboxes, menus, tabs and scrollbars to UxTheme/GDI.
+- [x] Implement PBM range, position, step and color messages; render the real
+  production progress class through UxTheme/GDI with explicit-color precedence
+  and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
+  WhiteSur snapshot. This focused probe passed; the enclosing `--verify-input`
+  run still stops at the concurrent parent-folder navigation assertion.
 - [ ] Verify normal, hover, pressed, checked, focused and disabled states,
   dimensions, clipping, keyboard/mouse input and theme changes in QEMU.
 - [ ] Preserve explicit application colors/styles where the Win32 contract
@@ -242,8 +258,10 @@ following describes current code, not all CSS that WhiteSur ships:
   However native style compilation currently classifies only a bare supported
   node or `node:pseudo` for Button, Edit/entry, CheckBox, Radio, ComboBox,
   Menu/MenuItem, Tab, Progress, ScrollBar, Slider/scale, ToolBar, StatusBar,
-  ToolTip, HeaderBar and Window. Complex selectors, classes, IDs, attributes,
-  and the additional structural/state pseudos parse but are counted as
+  ToolTip, HeaderBar and Window. The two WhiteSur Progress selectors
+  `progressbar trough` and `progressbar progress` map to Progress normal and
+  selected states. Other complex selectors, classes, IDs, attributes, and the
+  additional structural/state pseudos parse but are counted as
   `unsupportedSimpleRules`; they do not participate in style matching.
 - Parsed at-rules are limited to `@define-color name value;` and
   `@keyframes name { ... }`. Keyframe bodies are skipped and counted in

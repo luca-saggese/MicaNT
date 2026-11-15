@@ -294,6 +294,20 @@ inline bool classifySimpleSelector(const CssSelector& selector, NativeControl& c
                                    NativeVisualState& state) noexcept {
     const std::string_view raw(selector.raw.data(), selector.rawLength);
     if (raw.empty()) return false;
+    // WhiteSur defines the progress trough and completed segment as two
+    // descendants of progressbar. Map this one bounded relation onto the
+    // native Progress normal/selected slots; arbitrary descendant selectors
+    // remain explicitly unsupported.
+    if (equalAscii(raw, "progressbar trough")) {
+        control = NativeControl::Progress;
+        state = NativeVisualState::Normal;
+        return true;
+    }
+    if (equalAscii(raw, "progressbar progress")) {
+        control = NativeControl::Progress;
+        state = NativeVisualState::Selected;
+        return true;
+    }
     for (char c : raw) if (isSpace(c) || c == '.' || c == '#' || c == '>' || c == '+' ||
                             c == '~' || c == '[' || c == ']' || c == '(' || c == '*') return false;
     size_t split = raw.find(':');
