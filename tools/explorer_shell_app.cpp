@@ -78,6 +78,7 @@ struct ShellState {
     bool themeTextDrawReported{};
     bool taskbarThemePixelReported{};
     bool trayThemePixelReported{};
+    bool statusBarThemePixelReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -247,6 +248,7 @@ void drawAppWindow(AppWindow& app) noexcept {
     const auto* windowStyle = themeStyle(14);
     const auto* toolbarStyle = themeStyle(10);
     const auto* entryStyle = themeStyle(1);
+    const auto* statusBarStyle = themeStyle(11);
     const uint32_t windowBackground = windowStyle &&
         (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND)
         ? themePixel(windowStyle->background) : rgb(255, 255, 255);
@@ -272,6 +274,12 @@ void drawAppWindow(AppWindow& app) noexcept {
         (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
         ? toolbarBackground : rgb(236, 241, 247);
     const uint32_t secondaryForeground = toolbarForeground;
+    const uint32_t statusBarBackground = statusBarStyle &&
+        (statusBarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(statusBarStyle->background, windowBackground) : windowBackground;
+    const uint32_t statusBarForeground = statusBarStyle &&
+        (statusBarStyle->flags & MICANT_THEME_HAS_FOREGROUND)
+        ? themePixel(statusBarStyle->foreground) : secondaryForeground;
     fill(p, w, h, 0, 0, w, h, windowBackground);
     fill(p, w, h, 0, 0, 158, h, sidebarBackground);
     fill(p, w, h, 0, 0, w, 27, toolbarBackground);
@@ -432,9 +440,14 @@ void drawAppWindow(AppWindow& app) noexcept {
             text(p, w, h, 370, y + 4, app.view == View::MyComputer ? "Disk drive" : "System folder", rgb(100, 108, 118));
         }
     }
-    fill(p, w, h, 0, h - 24, w, 24, rgb(244, 246, 249));
+    fill(p, w, h, 0, h - 24, w, 24, statusBarBackground);
+    if (!g.statusBarThemePixelReported && w > 10 && h > 24 &&
+        p[static_cast<size_t>(h - 12) * w + 10] == statusBarBackground) {
+        PrintLine("[MicaNT Theme] Explorer status bar uses StatusBar theme pixel");
+        g.statusBarThemePixelReported = true;
+    }
     fill(p, w, h, 0, h - 25, w, 1, separator);
-    text(p, w, h, 12, h - 17, "3 objects", secondaryForeground);
+    text(p, w, h, 12, h - 17, "3 objects", statusBarForeground);
 }
 
 void present(HWND hwnd) noexcept {

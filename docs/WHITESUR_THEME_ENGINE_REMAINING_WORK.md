@@ -160,6 +160,13 @@ the evidence named here, not just declarations or a successful compile.
   pixel` in `/private/tmp/micant-theme-notification-icons-run/serial.log`.
   The full input run again stopped at the concurrent root-folder navigation
   test after reaching both theme pixel probes.
+- [x] The app-window status strip now resolves `StatusBar` background and
+  foreground from the theme snapshot, with window-surface/text fallbacks. A
+  pixel assertion checks the live DIB, and QEMU logged `Explorer status bar
+  uses StatusBar theme pixel` in
+  `/private/tmp/micant-theme-statusbar-run/serial.log`. As above, this run
+  passed the theme probe but the full input suite later failed the unrelated
+  root-folder navigation check.
 - [ ] Route remaining fixed-color shell surfaces and text through the active
   theme model or UxTheme/GDI.
 - [ ] Capture and compare QEMU pixels for Explorer chrome, titlebar, toolbar,
