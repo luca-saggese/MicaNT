@@ -42,6 +42,21 @@ struct SystemPerformanceInformation {
 static_assert(offsetof(SystemPerformanceInformation, AvailablePages) == 44);
 static_assert(sizeof(SystemPerformanceInformation) == 344);
 
+// SystemProcessorPerformanceInformation (class 8), AMD64. The two reserved
+// LARGE_INTEGER slots and trailing ULONG preserve the public native layout;
+// only the first three time fields are currently accounted by Ke.
+struct SystemProcessorPerformanceInformation {
+    int64_t IdleTime;
+    int64_t KernelTime;
+    int64_t UserTime;
+    int64_t Reserved1[2];
+    uint32_t Reserved2;
+    uint32_t Padding;
+};
+static_assert(sizeof(SystemProcessorPerformanceInformation) == 48);
+static_assert(offsetof(SystemProcessorPerformanceInformation, KernelTime) == 8);
+static_assert(offsetof(SystemProcessorPerformanceInformation, UserTime) == 16);
+
 struct SystemProcessInformation {
     uint32_t NextEntryOffset;
     uint32_t NumberOfThreads;

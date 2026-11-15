@@ -965,7 +965,7 @@ void MicantBootstrapInterruptExit(uint64_t* hardwareFrame, uint64_t* savedRegist
     }
 }
 
-void MicantBootstrapTimerDispatch() noexcept {
+void MicantBootstrapTimerDispatch(uint64_t savedCs) noexcept {
     MicantTimerTicks = MicantTimerTicks + 1;
     // This clock-source count is monotonic across scheduler/test counters,
     // which intentionally reset while validating interrupt behavior.
@@ -978,6 +978,7 @@ void MicantBootstrapTimerDispatch() noexcept {
         MicantTimerDispatchFailed = true;
     }
 #if defined(MICANT_FREESTANDING) && defined(MICANT_BAREMETAL)
+    micant::ke::KeAccountClockInterruptTime((savedCs & 3) == 3);
     micant::ke::clock_timer::onClockInterrupt();
 #endif
     if (!MicantTimerPreemptionEnabled) return;
@@ -1058,7 +1059,7 @@ __attribute__((naked)) void MicantBootstrapTimerInterrupt() noexcept {
         "xsave64 (%r13)\njmp 2f\n"
         "1: fxsave64 64(%rsp)\n"
         "2: movq 128(%r12), %rcx\ncallq MicantBootstrapEnterInterrupt\n"
-        "movq %rax, 40(%rsp)\ncallq MicantBootstrapTimerDispatch\n"
+        "movq %rax, 40(%rsp)\nmovq 128(%r12), %rcx\ncallq MicantBootstrapTimerDispatch\n"
         "leaq 120(%r12), %rcx\nmovq %r12, %rdx\nleaq 64(%rsp), %r8\n"
         "callq MicantBootstrapInterruptExit\n"
         "movq 40(%rsp), %rcx\ncallq MicantBootstrapLeaveInterrupt\n"

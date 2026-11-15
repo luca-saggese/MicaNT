@@ -40,4 +40,19 @@ static_assert(sizeof(MemorySnapshot) == 64);
 // commit, pool, CPU, device, or per-process values are inferred here.
 [[nodiscard]] MemorySnapshot QuerySystemMemorySnapshot() noexcept;
 
+inline constexpr uint32_t ProcessorPerformanceAvailableNone = 0;
+inline constexpr uint32_t ProcessorPerformanceAvailableTimes = 1u << 0;
+struct ProcessorPerformanceSnapshot {
+    uint32_t version{1};
+    uint32_t size{40};
+    uint32_t availability{ProcessorPerformanceAvailableNone};
+    uint32_t processorCount{};
+    uint64_t idleTime100ns{};
+    uint64_t kernelTime100ns{};
+    uint64_t userTime100ns{};
+};
+static_assert(sizeof(ProcessorPerformanceSnapshot) == 40);
+// Reports tick-sampled BSP times while the canonical scheduler clock runs.
+[[nodiscard]] ProcessorPerformanceSnapshot QueryProcessorPerformanceSnapshot() noexcept;
+
 } // namespace micant::km::perf

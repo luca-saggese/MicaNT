@@ -59,8 +59,10 @@ NtStatus NtQuerySystemInformation(
 ) {
     constexpr uint32_t systemProcessInformationClass = 5;
     constexpr uint32_t systemPerformanceInformationClass = 2;
+    constexpr uint32_t systemProcessorPerformanceInformationClass = 8;
     if (systemInformationClass != systemProcessInformationClass &&
-        systemInformationClass != systemPerformanceInformationClass)
+        systemInformationClass != systemPerformanceInformationClass &&
+        systemInformationClass != systemProcessorPerformanceInformationClass)
         return NtStatus::InvalidInfoClass;
 
     TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] NtQuerySystemInformation class accepted\r\n");
@@ -68,6 +70,35 @@ NtStatus NtQuerySystemInformation(
     auto* current = ke::KeGetCurrentThread();
     const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
     NtStatus status = NtStatus::Success;
+
+    if (systemInformationClass == systemProcessorPerformanceInformationClass) {
+        const auto snapshot = km::perf::QueryProcessorPerformanceSnapshot();
+        if ((snapshot.availability & km::perf::ProcessorPerformanceAvailableTimes) == 0 ||
+            snapshot.processorCount != 1)
+            return NtStatus::NotSupported;
+        constexpr uint32_t recordSize = sizeof(SystemProcessorPerformanceInformation);
+        const uint32_t required = recordSize;
+        if (returnLength) {
+            status = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
+            if (status != NtStatus::Success) return status;
+            status = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+            if (status != NtStatus::Success) return status;
+        }
+        if (systemInformationLength < required) return NtStatus::InfoLengthMismatch;
+        if (!systemInformation) return NtStatus::AccessViolation;
+        status = ex::ProbeForWrite(systemInformation, required,
+            alignof(SystemProcessorPerformanceInformation), mode);
+        if (status != NtStatus::Success) return status;
+        if (snapshot.idleTime100ns > static_cast<uint64_t>(INT64_MAX) ||
+            snapshot.kernelTime100ns > static_cast<uint64_t>(INT64_MAX) ||
+            snapshot.userTime100ns > static_cast<uint64_t>(INT64_MAX))
+            return NtStatus::NotSupported;
+        SystemProcessorPerformanceInformation information{};
+        information.IdleTime = static_cast<int64_t>(snapshot.idleTime100ns);
+        information.KernelTime = static_cast<int64_t>(snapshot.kernelTime100ns);
+        information.UserTime = static_cast<int64_t>(snapshot.userTime100ns);
+        return ex::ExSafeCopyToUser(systemInformation, &information, required, mode);
+    }
 
     if (systemInformationClass == systemPerformanceInformationClass) {
         constexpr uint32_t required = sizeof(SystemPerformanceInformation);

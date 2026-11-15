@@ -2,6 +2,8 @@
 #include "micant/km/core/syscalls.hpp"
 #include "micant/km/executive/probe.hpp"
 
+#include <limits>
+
 namespace micant::ke {
 
 bool KeQuerySystemTime100ns(uint64_t& systemTime100ns) noexcept {
@@ -33,6 +35,52 @@ bool KeQueryPerformanceCounterValue(uint64_t& counter,
     (void)counter;
     (void)frequency;
     return false;
+#endif
+}
+
+bool KeQueryProcessorPerformanceSnapshot(ProcessorPerformanceSnapshot& snapshot) noexcept {
+    snapshot = {};
+#if defined(MICANT_BAREMETAL) && defined(MICANT_FREESTANDING) && \
+    (defined(_M_X64) || defined(__x86_64__))
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const bool available = hal::amd64::bootstrapSchedulerClockActive() &&
+        g_CurrentCpu.processorPerformanceTimeAvailable;
+    if (available) {
+        snapshot.idleTime100ns = g_CurrentCpu.processorIdleTime100ns;
+        snapshot.kernelTime100ns = g_CurrentCpu.processorKernelTime100ns;
+        snapshot.userTime100ns = g_CurrentCpu.processorUserTime100ns;
+        // The current canonical bare-metal scheduler brings up only the BSP.
+        snapshot.processorCount = 1;
+        snapshot.available = true;
+    }
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return snapshot.available;
+#else
+    return false;
+#endif
+}
+
+void KeAccountClockInterruptTime(bool interruptedUserMode) noexcept {
+#if defined(MICANT_BAREMETAL) && defined(MICANT_FREESTANDING) && \
+    (defined(_M_X64) || defined(__x86_64__))
+    constexpr uint64_t tickDuration100ns = 100'000; // Canonical 100 Hz clock tick.
+    auto& cpu = g_CurrentCpu;
+    if (!cpu.currentThread) return;
+    auto& modeTime = interruptedUserMode ? cpu.processorUserTime100ns
+                                         : cpu.processorKernelTime100ns;
+    const bool idleTick = !interruptedUserMode && cpu.currentThread == cpu.idleThread;
+    if (modeTime > std::numeric_limits<uint64_t>::max() - tickDuration100ns ||
+        (idleTick && cpu.processorIdleTime100ns >
+            std::numeric_limits<uint64_t>::max() - tickDuration100ns)) {
+        cpu.processorPerformanceTimeAvailable = false;
+        return;
+    }
+    modeTime += tickDuration100ns;
+    if (idleTick) cpu.processorIdleTime100ns += tickDuration100ns;
+    cpu.processorPerformanceTimeAvailable = true;
+#else
+    (void)interruptedUserMode;
 #endif
 }
 

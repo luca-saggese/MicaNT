@@ -1,6 +1,7 @@
 #include "micant/km/executive/perf_taskmgr.hpp"
 
 #include "micant/km/executive/mm.hpp"
+#include "micant/km/core/ke.hpp"
 
 #include <limits>
 
@@ -40,6 +41,18 @@ MemorySnapshot QuerySystemMemorySnapshot() noexcept {
                             MemorySnapshotAvailableStandby |
                             MemorySnapshotAvailableModified;
     return snapshot;
+}
+
+ProcessorPerformanceSnapshot QueryProcessorPerformanceSnapshot() noexcept {
+    ProcessorPerformanceSnapshot result{};
+    ke::ProcessorPerformanceSnapshot captured{};
+    if (!ke::KeQueryProcessorPerformanceSnapshot(captured)) return result;
+    result.processorCount = captured.processorCount;
+    result.idleTime100ns = captured.idleTime100ns;
+    result.kernelTime100ns = captured.kernelTime100ns;
+    result.userTime100ns = captured.userTime100ns;
+    result.availability = ProcessorPerformanceAvailableTimes;
+    return result;
 }
 
 } // namespace micant::km::perf

@@ -63,6 +63,10 @@ struct ProcessorControlBlock {
     uint64_t dpcCount{0};
     uint64_t apcCount{0};
     uint64_t contextSwitches{0};
+    uint64_t processorKernelTime100ns{0};
+    uint64_t processorUserTime100ns{0};
+    uint64_t processorIdleTime100ns{0};
+    bool processorPerformanceTimeAvailable{false};
 #if defined(MICANT_FREESTANDING)
     uintptr_t currentCr3{0};
 #else
@@ -180,6 +184,19 @@ inline void KeLowerIrql(KIRQL newIrql) noexcept {
 [[nodiscard]] bool KeQueryUptime100ns(uint64_t& uptime100ns) noexcept;
 [[nodiscard]] bool KeQueryPerformanceCounterValue(
     uint64_t& counter, uint64_t& frequency) noexcept;
+
+struct ProcessorPerformanceSnapshot {
+    uint64_t idleTime100ns{};
+    uint64_t kernelTime100ns{};
+    uint64_t userTime100ns{};
+    uint32_t processorCount{};
+    bool available{};
+};
+// The current bare-metal scheduler supports the BSP only. These counters use
+// the actual 100 Hz clock interrupt and are unavailable before it is active.
+[[nodiscard]] bool KeQueryProcessorPerformanceSnapshot(
+    ProcessorPerformanceSnapshot& snapshot) noexcept;
+void KeAccountClockInterruptTime(bool interruptedUserMode) noexcept;
 
 [[nodiscard]] inline KThread* KeGetCurrentThread() noexcept {
     return g_CurrentCpu.currentThread;

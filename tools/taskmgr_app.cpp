@@ -25,12 +25,23 @@ constexpr uint32_t WIN_W = 580;
 constexpr uint32_t WIN_H = 380;
 constexpr uint32_t SystemProcessInformationClass = 5;
 constexpr uint32_t SystemPerformanceInformationClass = 2;
+constexpr uint32_t SystemProcessorPerformanceInformationClass = 8;
 constexpr uint64_t NtQuerySystemInformationService = 0x36;
 constexpr uint32_t StatusSuccess = 0x00000000U;
 constexpr uint32_t StatusInfoLengthMismatch = 0xC0000004U;
 constexpr uint32_t MaxSnapshotBytes = 64 * 1024;
 alignas(4096) uint32_t s_tmBuffer[WIN_W * WIN_H];
 alignas(16) uint8_t s_processSnapshot[MaxSnapshotBytes];
+constexpr uint32_t MaxProcessorRecords = 64;
+alignas(16) micant::SystemProcessorPerformanceInformation s_processorSnapshot[MaxProcessorRecords];
+
+struct ProcessorTimes {
+    uint64_t idleTime100ns{};
+    uint64_t kernelTime100ns{};
+    uint64_t userTime100ns{};
+    uint32_t processorCount{};
+    bool available{};
+};
 
 struct SnapshotView {
     const uint8_t* data{nullptr};
@@ -38,10 +49,79 @@ struct SnapshotView {
     uint32_t processCount{0};
     uint32_t status{StatusInfoLengthMismatch};
     uint32_t availablePages{0};
+    uint32_t cpuPercent{0};
     bool taskmgrImageNameFound{false};
     bool available{false};
     bool memoryAvailable{false};
+    bool cpuAvailable{false};
 };
+
+bool QueryProcessorTimes(ProcessorTimes& result) noexcept {
+    result = {};
+    uint32_t returnLength = 0;
+    const auto status = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        NtQuerySystemInformationService,
+        SystemProcessorPerformanceInformationClass,
+        reinterpret_cast<uint64_t>(s_processorSnapshot),
+        sizeof(s_processorSnapshot),
+        reinterpret_cast<uint64_t>(&returnLength)));
+    if (status != StatusSuccess || !returnLength ||
+        returnLength > sizeof(s_processorSnapshot) ||
+        returnLength % sizeof(micant::SystemProcessorPerformanceInformation) != 0)
+        return false;
+    const uint32_t count = returnLength / sizeof(micant::SystemProcessorPerformanceInformation);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& item = s_processorSnapshot[i];
+        if (item.IdleTime < 0 || item.KernelTime < 0 || item.UserTime < 0) return false;
+        const uint64_t idle = static_cast<uint64_t>(item.IdleTime);
+        const uint64_t kernel = static_cast<uint64_t>(item.KernelTime);
+        const uint64_t user = static_cast<uint64_t>(item.UserTime);
+        if (idle > UINT64_MAX - result.idleTime100ns ||
+            kernel > UINT64_MAX - result.kernelTime100ns ||
+            user > UINT64_MAX - result.userTime100ns)
+            return false;
+        result.idleTime100ns += idle;
+        result.kernelTime100ns += kernel;
+        result.userTime100ns += user;
+    }
+    result.processorCount = count;
+    result.available = true;
+    return true;
+}
+
+bool ComputeCpuPercent(const ProcessorTimes& previous, const ProcessorTimes& current,
+                       uint32_t& percent) noexcept {
+    percent = 0;
+    if (!previous.available || !current.available ||
+        previous.processorCount != current.processorCount ||
+        current.idleTime100ns < previous.idleTime100ns ||
+        current.kernelTime100ns < previous.kernelTime100ns ||
+        current.userTime100ns < previous.userTime100ns)
+        return false;
+    const uint64_t idleDelta = current.idleTime100ns - previous.idleTime100ns;
+    const uint64_t kernelDelta = current.kernelTime100ns - previous.kernelTime100ns;
+    const uint64_t userDelta = current.userTime100ns - previous.userTime100ns;
+    if (idleDelta > kernelDelta || kernelDelta > UINT64_MAX - userDelta) return false;
+    const uint64_t total = kernelDelta + userDelta;
+    if (!total || kernelDelta - idleDelta > UINT64_MAX - userDelta) return false;
+    const uint64_t busy = kernelDelta - idleDelta + userDelta;
+    if (busy > total) return false;
+
+    // Compute floor(100 * busy / total) by bounded repeated addition, avoiding
+    // overflow in the multiplication even after long uptime.
+    uint64_t remainder = 0;
+    uint32_t value = 0;
+    for (uint32_t i = 0; i < 100; ++i) {
+        if (remainder >= total - busy) {
+            remainder -= total - busy;
+            ++value;
+        } else {
+            remainder += busy;
+        }
+    }
+    percent = value;
+    return true;
+}
 
 bool QueryAvailablePages(SnapshotView& result) noexcept {
     result.memoryAvailable = false;
@@ -346,7 +426,16 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
     } else {
         DrawString(s_tmBuffer, WIN_W, 12, WIN_H - 16, "Processes: unavailable", PackBGRA(240, 195, 105));
     }
-    DrawString(s_tmBuffer, WIN_W, 205, WIN_H - 16, "CPU: unavailable", PackBGRA(160, 180, 200));
+    if (snapshot.cpuAvailable) {
+        char cpuText[32] = "CPU: ";
+        uint32_t cursor = 5;
+        AppendUnsigned(cpuText, sizeof(cpuText), cursor, snapshot.cpuPercent);
+        cpuText[cursor++] = '%';
+        cpuText[cursor] = '\0';
+        DrawString(s_tmBuffer, WIN_W, 205, WIN_H - 16, cpuText, PackBGRA(0, 210, 255));
+    } else {
+        DrawString(s_tmBuffer, WIN_W, 205, WIN_H - 16, "CPU: unavailable", PackBGRA(160, 180, 200));
+    }
     if (snapshot.memoryAvailable) {
         char memoryText[48] = "Available memory: ";
         uint32_t cursor = 18;
@@ -374,6 +463,10 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
     bool reported = false;
     bool memoryReported = false;
     bool imageNameReported = false;
+    ProcessorTimes previousCpu{};
+    bool havePreviousCpu = false;
+    bool cpuSampleReported = false;
+    bool cpuUnavailableReported = false;
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     bool probeTerminationRequested = false;
     bool probeTerminationReported = false;
@@ -381,6 +474,29 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
     while (true) {
         QueryProcessSnapshot(snapshot);
         const bool memoryAvailable = QueryAvailablePages(snapshot);
+        ProcessorTimes currentCpu{};
+        if (QueryProcessorTimes(currentCpu)) {
+            snapshot.cpuAvailable = false;
+            if (havePreviousCpu) {
+                uint32_t cpuPercent{};
+                if (ComputeCpuPercent(previousCpu, currentCpu, cpuPercent)) {
+                    snapshot.cpuPercent = cpuPercent;
+                    snapshot.cpuAvailable = true;
+                    if (!cpuSampleReported) {
+                        PrintLine("Task Manager: CPU processor snapshot validated.");
+                        cpuSampleReported = true;
+                    }
+                }
+            }
+            previousCpu = currentCpu;
+            havePreviousCpu = true;
+        } else {
+            snapshot.cpuAvailable = false;
+            if (!cpuUnavailableReported) {
+                PrintLine("Task Manager: CPU processor snapshot unavailable.");
+                cpuUnavailableReported = true;
+            }
+        }
         if (!reported) {
             if (snapshot.available) {
                 PrintLine("Task Manager: kernel process snapshot received.");
