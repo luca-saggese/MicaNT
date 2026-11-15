@@ -3905,6 +3905,19 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
                                            &info, sizeof(info)));
     }
+    if (number == 0x83) {
+        const auto* thread = ke::KeGetCurrentThread();
+        if (!thread || !thread->owningProcess || !thread->kernelStackTop)
+            return status(NtStatus::NotImplemented);
+        if (!g_compositorProcessId || thread->owningProcess->processId() != g_compositorProcessId)
+            return status(NtStatus::AccessDenied);
+        __asm__ __volatile__("swapgs" : : : "memory");
+        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        const auto result = win32k::freestanding::waitForCompositorUpdate(first);
+        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        __asm__ __volatile__("swapgs" : : : "memory");
+        return status(result);
+    }
     if (number == 0x81) {
         const auto* presenter = ke::KeGetCurrentProcess();
         if (g_compositorProcessId && (!presenter ||

@@ -1,5 +1,6 @@
 #include "micant/km/win32k/freestanding.hpp"
 #include "micant/shared/compositor_surface.h"
+#include "micant/km/core/sync_baremetal.hpp"
 #include <algorithm>
 #include <atomic>
 #include <climits>
@@ -42,6 +43,7 @@ constexpr uint32_t kWsThickFrame = 0x00040000u;
 constexpr int32_t kScreenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
 constexpr int32_t kScreenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
 std::atomic_flag g_stateLock = ATOMIC_FLAG_INIT;
+sync::detail::BootstrapEvent g_compositorWakeEvent{true, false};
 
 class StateLockGuard {
 public:
@@ -1085,14 +1087,17 @@ void bindCompositorStore(MicaCompositorMetadataStore* store,
 }
 
 void publishCompositorSurfaces() noexcept {
-    StateLockGuard lock;
     auto* store = g_compositorStore;
     if (!store) return;
+    {
+    StateLockGuard lock;
+    store = g_compositorStore;
+    if (!store) return;
+    __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_ACQ_REL);
     if (store->themeGeneration != g_themeGeneration) {
         store->theme = g_themeSnapshot;
         store->themeGeneration = g_themeGeneration;
     }
-    __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
     auto& cursor = store->cursor;
     cursor = {};
     cursor.x = g_mousePositionValid ? g_mouseX : 0;
@@ -1151,6 +1156,38 @@ void publishCompositorSurfaces() noexcept {
             info.title[character] = window.title[character];
     }
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
+    }
+    (void)g_compositorWakeEvent.set();
+}
+
+micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence) noexcept {
+    auto* current = ke::KeGetCurrentThread();
+    auto* store = g_compositorStore;
+    if (!current || !store || current->eventWaitInProgress ||
+        ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+        return micant::NtStatus::InvalidDeviceState;
+
+    // Reset before checking the generation. A concurrent publication either
+    // changes the observed generation or leaves the event set for this wait.
+    (void)g_compositorWakeEvent.reset();
+    const uint64_t sequence = __atomic_load_n(&store->frameSequence, __ATOMIC_ACQUIRE);
+    if (!(sequence & 1u) && sequence != observedSequence)
+        return micant::NtStatus::Success;
+
+    current->eventWaitInProgress = true;
+    current->eventWaitUserMode = current->previousUserMode;
+    current->eventWaitCanTerminate = current->eventWaitUserMode &&
+        ke::KeGetCurrentIrql() == ke::PASSIVE_LEVEL;
+    const auto result = g_compositorWakeEvent.wait(false, false);
+    const bool terminate = current->terminationRequested && current->eventWaitCanTerminate &&
+        current->serviceTermination;
+    auto terminationRoutine = current->serviceTermination;
+    void* terminationContext = current->terminationContext;
+    current->eventWaitInProgress = false;
+    current->eventWaitUserMode = false;
+    current->eventWaitCanTerminate = false;
+    if (terminate) terminationRoutine(terminationContext);
+    return result;
 }
 
 micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,

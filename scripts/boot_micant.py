@@ -334,9 +334,24 @@ def verify_mouse(
             # The first CPL3 scanout can precede Explorer's desktop paint and
             # focus setup. Let the real desktop surface settle before sending
             # the click/Enter sequence below.
-            before = wait_for_changed_screen(
-                before, "desktop-ready.ppm", 1000, timeout=10.0,
-            )
+            try:
+                before = wait_for_changed_screen(
+                    before, "desktop-ready.ppm", 1000, timeout=10.0,
+                )
+            except RuntimeError as error:
+                cpl3_path = temp / "cpl3-surface.ppm"
+                with cpl3_path.open("rb") as image:
+                    if (image.readline() != b"P6\n" or
+                            image.readline() != b"1024 768\n" or
+                            image.readline() != b"255\n"):
+                        raise RuntimeError("Unexpected initial CPL3 screenshot format") from error
+                    initial_cpl3 = image.read()
+                if changed_pixels(initial_cpl3, before) < 1000:
+                    raise error
+                print(
+                    "Explorer desktop was already visible at the initial scanout.",
+                    flush=True,
+                )
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": 40}},
                 {"type": "rel", "data": {"axis": "y", "value": 20}},

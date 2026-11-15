@@ -348,6 +348,9 @@ extern "C" void _start() noexcept {
     bool metadataObserved = false;
     bool invalidHeaderReported = false;
     bool firstPresentationReported = false;
+    const auto waitForUpdate = [&](uint64_t observed) noexcept {
+        (void)micant::sys::invokeUserService(0x83, observed);
+    };
     for (;;) {
         const uint64_t sequence = __atomic_load_n(&metadata->frameSequence,
                                                    __ATOMIC_ACQUIRE);
@@ -358,12 +361,12 @@ extern "C" void _start() noexcept {
                 print(invalid, sizeof(invalid) - 1);
                 invalidHeaderReported = true;
             }
-            __asm__ __volatile__("pause");
+            waitForUpdate(sequence);
             continue;
         }
         if (!sequence || (sequence & 1u) ||
             sequence == previous) {
-            __asm__ __volatile__("pause");
+            waitForUpdate(sequence);
             continue;
         }
         if (!metadataObserved) {
@@ -371,14 +374,14 @@ extern "C" void _start() noexcept {
             print(observed, sizeof(observed) - 1);
             metadataObserved = true;
         }
-        if (compose(*metadata, pixels) &&
-            __atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {
+        const bool composed = compose(*metadata, pixels);
+        if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {
             previous = sequence;
-            if (!firstPresentationReported) {
+            if (composed && !firstPresentationReported) {
                 constexpr char presented[] = "[MicaNT Compositor] First shared frame presented\r\n";
                 print(presented, sizeof(presented) - 1);
                 firstPresentationReported = true;
             }
-        } else __asm__ __volatile__("pause");
+        }
     }
 }
