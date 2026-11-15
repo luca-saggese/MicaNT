@@ -77,6 +77,7 @@ struct ShellState {
     bool themeGdiEditDrawReported{};
     bool themeTextDrawReported{};
     bool taskbarThemePixelReported{};
+    bool trayThemePixelReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -474,6 +475,14 @@ void redrawTaskbar() noexcept {
         if (g.taskbarPixels[5u * g.screenW + 4u] == palette.selected) {
             PrintLine("[MicaNT Theme] Taskbar Start surface uses active theme pixel");
             g.taskbarThemePixelReported = true;
+        }
+    }
+    if (!g.trayThemePixelReported && g.taskbarPixels) {
+        const auto palette = activeShellPalette();
+        const size_t trayIconPixel = 17u * g.screenW + (g.screenW - 122u + 12u);
+        if (g.taskbarPixels[trayIconPixel] == palette.accentForeground) {
+            PrintLine("[MicaNT Theme] Notification icons use accent foreground pixel");
+            g.trayThemePixelReported = true;
         }
     }
     present(g.taskbar);

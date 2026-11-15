@@ -154,6 +154,12 @@ the evidence named here, not just declarations or a successful compile.
   pixel` in `/private/tmp/micant-theme-taskbar-start-run/serial.log`.
   Build/link and the theme pixel probe passed; the broader input suite later
   stopped at the concurrent root-folder navigation test.
+- [x] Volume and network glyphs in the notification area now use the active
+  accent foreground instead of fixed off-white pixels. Explorer checks a real
+  tray DIB pixel, and QEMU logged `Notification icons use accent foreground
+  pixel` in `/private/tmp/micant-theme-notification-icons-run/serial.log`.
+  The full input run again stopped at the concurrent root-folder navigation
+  test after reaching both theme pixel probes.
 - [ ] Route remaining fixed-color shell surfaces and text through the active
   theme model or UxTheme/GDI.
 - [ ] Capture and compare QEMU pixels for Explorer chrome, titlebar, toolbar,

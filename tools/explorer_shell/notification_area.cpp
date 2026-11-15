@@ -35,12 +35,12 @@ void DrawNotificationArea(uint32_t* pixels, uint32_t width, uint32_t height,
     fill(pixels, width, height, left, 7, 1, static_cast<int32_t>(height) - 9, palette.separator);
 
     // System sound indicator.
-    fill(pixels, width, height, left + 12, 17, 5, 8, 0xFFEFF5FC);
-    fill(pixels, width, height, left + 17, 14, 4, 14, 0xFFEFF5FC);
+    fill(pixels, width, height, left + 12, 17, 5, 8, palette.accentForeground);
+    fill(pixels, width, height, left + 17, 14, 4, 14, palette.accentForeground);
     // Network indicator.
-    fill(pixels, width, height, left + 34, 24, 4, 4, 0xFFF7F7F7);
-    fill(pixels, width, height, left + 33, 20, 6, 3, 0xFFF7F7F7);
-    fill(pixels, width, height, left + 31, 16, 10, 3, 0xFFF7F7F7);
+    fill(pixels, width, height, left + 34, 24, 4, 4, palette.accentForeground);
+    fill(pixels, width, height, left + 33, 20, 6, 3, palette.accentForeground);
+    fill(pixels, width, height, left + 31, 16, 10, 3, palette.accentForeground);
     text(pixels, width, height, left + 50, 16, clockText ? clockText : "--:--",
          palette.accentForeground);
 }
