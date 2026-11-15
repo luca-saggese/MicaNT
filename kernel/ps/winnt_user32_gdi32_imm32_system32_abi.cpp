@@ -100,6 +100,9 @@ constexpr uint32_t kWmNcCreate = 0x0081u;
 constexpr uint32_t kWmDestroy = 0x0002u;
 constexpr uint32_t kWmNcDestroy = 0x0082u;
 constexpr uint32_t kWmPaint = 0x000Fu;
+constexpr uint32_t kWmSetText = 0x000Cu;
+constexpr uint32_t kWmGetText = 0x000Du;
+constexpr uint32_t kWmGetTextLength = 0x000Eu;
 constexpr uint32_t kWmEnable = 0x000Au;
 constexpr uint32_t kWmSetFocus = 0x0007u;
 constexpr uint32_t kWmKillFocus = 0x0008u;
@@ -1815,6 +1818,48 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             return 1;
         }
         return 0;
+    }
+
+    if (message == kWmSetText) {
+        wchar_t replacement[128]{};
+        const auto* source = reinterpret_cast<const wchar_t*>(lParam);
+        size_t length{};
+        if (source) {
+            while (length < std::size(replacement) - 1 && source[length]) {
+                replacement[length] = source[length];
+                ++length;
+            }
+            if (source[length]) return 0;
+        }
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* button = findButton(hwnd);
+            if (!button) return 0;
+            std::memcpy(button->text, replacement, sizeof(replacement));
+        }
+        invalidateButton(hwnd);
+        return 1;
+    }
+    if (message == kWmGetTextLength) {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* button = findButton(hwnd);
+        if (!button) return 0;
+        size_t length{};
+        while (length < std::size(button->text) && button->text[length]) ++length;
+        return static_cast<intptr_t>(length);
+    }
+    if (message == kWmGetText) {
+        if (!lParam || !wParam) return 0;
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* button = findButton(hwnd);
+        if (!button) return 0;
+        size_t length{};
+        while (length < std::size(button->text) && button->text[length]) ++length;
+        const size_t copied = std::min(length, static_cast<size_t>(wParam - 1));
+        auto* destination = reinterpret_cast<wchar_t*>(lParam);
+        if (copied) std::memcpy(destination, button->text, copied * sizeof(wchar_t));
+        destination[copied] = L'\0';
+        return static_cast<intptr_t>(copied);
     }
 
     if (message == kBmGetState) {

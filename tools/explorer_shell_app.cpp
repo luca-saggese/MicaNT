@@ -1701,8 +1701,39 @@ void openView(View view) noexcept {
             UpdateWindow(g.themeButtonProbe);
             constexpr UINT kBmGetState = 0x00F2u;
             constexpr UINT kBmClick = 0x00F5u;
+            constexpr UINT kWmSetText = 0x000Cu;
+            constexpr UINT kWmGetText = 0x000Du;
+            constexpr UINT kWmGetTextLength = 0x000Eu;
             const bool initialState = SendMessageW(g.themeButtonProbe,
                 kBmGetState, 0, 0) == 0;
+            constexpr wchar_t kReplacementText[] = L"WhiteSur button";
+            const bool textSet = SendMessageW(g.themeButtonProbe, kWmSetText, 0,
+                reinterpret_cast<LPARAM>(kReplacementText)) != 0;
+            wchar_t textReadback[32]{};
+            const intptr_t textLength = SendMessageW(g.themeButtonProbe,
+                kWmGetTextLength, 0, 0);
+            const intptr_t textCopied = SendMessageW(g.themeButtonProbe,
+                kWmGetText, std::size(textReadback),
+                reinterpret_cast<LPARAM>(textReadback));
+            bool textMatches = textCopied == 15 && textLength == 15;
+            for (size_t i = 0; i < 15 && textMatches; ++i)
+                textMatches = textReadback[i] == kReplacementText[i];
+            textMatches &= textReadback[15] == L'\0';
+            wchar_t oversizedText[129]{};
+            for (size_t i = 0; i < 128; ++i) oversizedText[i] = L'X';
+            const bool oversizedRejected = SendMessageW(g.themeButtonProbe,
+                kWmSetText, 0, reinterpret_cast<LPARAM>(oversizedText)) == 0 &&
+                SendMessageW(g.themeButtonProbe, kWmGetTextLength, 0, 0) == 15;
+            constexpr wchar_t kOriginalText[] = L"Theme button";
+            const bool textRestored = SendMessageW(g.themeButtonProbe, kWmSetText, 0,
+                reinterpret_cast<LPARAM>(kOriginalText)) != 0 &&
+                SendMessageW(g.themeButtonProbe, kWmGetTextLength, 0, 0) == 12;
+            const bool buttonTextMessagesPassed = textSet && textMatches &&
+                oversizedRejected && textRestored;
+            UpdateWindow(g.themeButtonProbe);
+            PrintLine(buttonTextMessagesPassed
+                ? "[MicaNT Theme] BUTTON text messages update, read back and reject overflow"
+                : "[MicaNT Theme] BUTTON text message mismatch");
             (void)SendMessageW(g.themeButtonProbe, kBmClick, 0, 0);
             if (initialState && g.themeButtonProbeReported)
                 PrintLine("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered");

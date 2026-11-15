@@ -407,10 +407,13 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial:
+                if ("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
+                        "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial):
                     break
                 if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
                     raise RuntimeError("Production User32 BUTTON state or notification failed")
+                if "[MicaNT Theme] BUTTON text message mismatch" in serial:
+                    raise RuntimeError("Production User32 BUTTON text messages failed")
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")

@@ -213,6 +213,13 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-theme-user32-button-final`. Disabled/focus keyboard
   transitions and cancellation after dragging outside still need dedicated
   input probes; Win32k has no mouse-capture path yet.
+- [x] The production BUTTON WndProc handles `WM_SETTEXT`, `WM_GETTEXT`, and
+  `WM_GETTEXTLENGTH` against its owned 128-WCHAR label. Updates are copied only
+  when they fit, then invalidate the control; reads honor the caller's
+  capacity and terminate the result. Explorer changed/read back an alternate
+  label and confirmed an overlong update leaves the old label intact. The full
+  QEMU input suite, including button hover/press pixels and Light-to-Dark, passed
+  at `/private/tmp/micant-theme-button-text-final-2`.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
