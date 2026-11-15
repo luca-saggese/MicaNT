@@ -233,6 +233,41 @@ def verify_mouse(
                     if "return" in response:
                         return
 
+            def move_to(x: int, y: int) -> None:
+                # Clamp the relative PS/2 pointer to the origin, then move in
+                # bounded deltas to avoid packet truncation.
+                events = []
+                def append_motion(axis: str, distance: int) -> None:
+                    while distance:
+                        step = max(-64, min(64, distance))
+                        events.append({"type": "rel", "data": {
+                            "axis": axis, "value": step,
+                        }})
+                        distance -= step
+                append_motion("x", -1200)
+                append_motion("y", -1200)
+                append_motion("x", x)
+                append_motion("y", y)
+                for event in events:
+                    execute("input-send-event", {"events": [event]})
+                    time.sleep(0.02)
+                time.sleep(0.2)
+
+            def move_by(dx: int, dy: int) -> None:
+                if abs(dx) > 64 or abs(dy) > 64:
+                    raise ValueError("Pointer drag deltas must fit one PS/2 packet")
+                execute("input-send-event", {"events": [
+                    {"type": "rel", "data": {"axis": "x", "value": dx}},
+                    {"type": "rel", "data": {"axis": "y", "value": dy}},
+                ]})
+                time.sleep(0.2)
+
+            def set_left_button(down: bool) -> None:
+                execute("input-send-event", {"events": [
+                    {"type": "btn", "data": {"button": "left", "down": down}},
+                ]})
+                time.sleep(0.1)
+
             def screen(name: str) -> bytes:
                 path = temp / name
                 execute("screendump", {"filename": str(path)})
@@ -336,6 +371,46 @@ def verify_mouse(
             else:
                 raise RuntimeError("Explorer did not create its second overlapping user-mode window")
             overlapping = wait_for_changed_screen(opened, "overlapping-windows.ppm", 5000)
+            move_to(350, 140)
+            moved_marker_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT Explorer] Application window move notification received")
+            set_left_button(True)
+            move_by(40, 30)
+            set_left_button(False)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(
+                    "[MicaNT Explorer] Application window move notification received"
+                ) > moved_marker_count:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Caption drag did not deliver WM_MOVE to Explorer")
+            caption_dragged = wait_for_changed_screen(
+                overlapping, "caption-dragged-window.ppm", 1000)
+
+            move_to(760, 466)
+            resized_marker_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT Explorer] Application window surface resized")
+            set_left_button(True)
+            move_by(40, 35)
+            set_left_button(False)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(
+                    "[MicaNT Explorer] Application window surface resized"
+                ) > resized_marker_count:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Bottom-right resize did not rebuild the Explorer surface")
+            edge_resized = wait_for_changed_screen(
+                caption_dragged, "edge-resized-window.ppm", 1000)
+
             for down in (True, False):
                 execute("input-send-event", {"events": [{
                     "type": "key", "data": {
@@ -344,7 +419,7 @@ def verify_mouse(
                     },
                 }]})
             moved_resized = wait_for_changed_screen(
-                overlapping, "moved-resized-window.ppm", 1000)
+                edge_resized, "moved-resized-window.ppm", 1000)
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": -344}},
                 {"type": "rel", "data": {"axis": "y", "value": -296}},
@@ -425,35 +500,8 @@ def verify_mouse(
                     desktop_light = wait_for_changed_screen(opened, "interactive.ppm", 10000)
 
                     def click_left() -> None:
-                        execute("input-send-event", {"events": [
-                            {"type": "btn", "data": {"button": "left", "down": True}},
-                        ]})
-                        time.sleep(0.1)
-                        execute("input-send-event", {"events": [
-                            {"type": "btn", "data": {"button": "left", "down": False}},
-                        ]})
-
-                    def move_to(x: int, y: int) -> None:
-                        # Relative QMP mouse motion preserves the cursor position
-                        # left by earlier tests. Clamp it to the origin first so
-                        # each UI target is deterministic. Keep individual
-                        # PS/2 deltas small; large QMP relative values can be
-                        # truncated by the emulated mouse packet format.
-                        events = []
-                        def append_motion(axis: str, distance: int) -> None:
-                            while distance:
-                                step = max(-64, min(64, distance))
-                                events.append({"type": "rel", "data": {
-                                    "axis": axis, "value": step,
-                                }})
-                                distance -= step
-
-                        append_motion("x", -1200)
-                        append_motion("y", -1200)
-                        append_motion("x", x)
-                        append_motion("y", y)
-                        execute("input-send-event", {"events": events})
-                        time.sleep(0.2)
+                        set_left_button(True)
+                        set_left_button(False)
 
                     # Open Start from the taskbar, then select the right-column
                     # Theme Appearance entry (row 5) to switch Light to Dark.
@@ -471,10 +519,10 @@ def verify_mouse(
                         time.sleep(0.1)
                     else:
                         raise RuntimeError("Explorer did not apply the Dark theme from Start")
-                    dark_screen = wait_for_changed_screen(
-                        desktop_light, "theme-dark.ppm", 10000)
-                    if dark_screen == desktop_light:
-                        raise RuntimeError("Dark theme switch did not change scanout pixels")
+                    time.sleep(0.5)
+                    dark_screen = screen("theme-dark.ppm")
+                    if changed_pixels(desktop_light, dark_screen) == 0:
+                        raise RuntimeError("Runtime theme switch produced no scanout change")
                     return
                 time.sleep(0.1)
             if irq_enabled and "[MicaNT Input] PS/2 mouse IRQ byte consumed" not in serial:
@@ -769,6 +817,10 @@ def run_qemu(
             if not taskmgr_image.is_file():
                 raise RuntimeError("Task Manager image was not built for the QEMU system volume")
             shutil.copyfile(taskmgr_image, system32_dir / taskmgr_image.name)
+            taskmgr_probe_image = ROOT / "build" / "taskmgr_probe.exe"
+            if not taskmgr_probe_image.is_file():
+                raise RuntimeError("Task Manager action probe was not built for the QEMU system volume")
+            shutil.copyfile(taskmgr_probe_image, system32_dir / taskmgr_probe_image.name)
         compositor_image = ROOT / "build" / "compositor.exe"
         if not compositor_image.is_file():
             raise RuntimeError("Ring 3 compositor image was not built for the QEMU system volume")
@@ -1015,6 +1067,8 @@ def run_qemu(
                                 raise RuntimeError("Task Manager syscall returned no valid memory availability snapshot")
                             if "Task Manager: native process image name unavailable." in serial_log:
                                 raise RuntimeError("Task Manager process snapshot omitted its real image name")
+                            if "Task Manager: authorized process termination denied." in serial_log:
+                                raise RuntimeError("Task Manager could not terminate the authorized QEMU probe process")
                             if "Task Manager: kernel process snapshot received." not in serial_log:
                                 complete_since = None
                                 time.sleep(0.1)
@@ -1024,6 +1078,10 @@ def run_qemu(
                                 time.sleep(0.1)
                                 continue
                             if "Task Manager: native process image name validated." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: authorized process termination verified." not in serial_log:
                                 complete_since = None
                                 time.sleep(0.1)
                                 continue

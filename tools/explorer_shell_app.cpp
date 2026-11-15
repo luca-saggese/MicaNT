@@ -652,11 +652,6 @@ void selectNextThemeProfile() noexcept {
         std::memcpy(g.themeProfile, oldProfile, sizeof(oldProfile));
         return;
     }
-    PrintLine(equalProfile(next, profiles[1])
-        ? "[MicaNT Theme] Runtime profile switch to Dark passed"
-        : equalProfile(next, profiles[2])
-            ? "[MicaNT Theme] Runtime profile switch to Light Purple passed"
-            : "[MicaNT Theme] Runtime profile switch to Light passed");
     for (auto& app : g.apps) {
         if (!app.open || !app.hwnd || !app.pixels) continue;
         drawAppWindow(app);
@@ -669,6 +664,11 @@ void selectNextThemeProfile() noexcept {
                                         activeShellPalette());
         present(g.startMenu);
     }
+    PrintLine(equalProfile(next, profiles[1])
+        ? "[MicaNT Theme] Runtime profile switch to Dark passed"
+        : equalProfile(next, profiles[2])
+            ? "[MicaNT Theme] Runtime profile switch to Light Purple passed"
+            : "[MicaNT Theme] Runtime profile switch to Light passed");
 }
 
 void loadPackagedWallpaper() noexcept {
@@ -1232,6 +1232,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                         if (oldBitmap) DeleteObject(oldBitmap);
                         drawAppWindow(*app);
                         present(app->hwnd);
+                        PrintLine("[MicaNT Explorer] Application window surface resized");
                     } else if (bitmap) {
                         DeleteObject(bitmap);
                     }
@@ -1239,6 +1240,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             }
             redrawTaskbar();
         }
+        return 0;
+    }
+    if (message == WM_MOVE && appFromHwnd(hwnd)) {
+        PrintLine("[MicaNT Explorer] Application window move notification received");
         return 0;
     }
     if (message == WM_ACTIVATE) {

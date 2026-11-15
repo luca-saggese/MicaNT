@@ -97,6 +97,15 @@ struct QueuedMessage {
     bool active{};
 };
 
+enum class PointerGestureMode : uint8_t { None, Move, Resize };
+struct PointerGesture {
+    uint64_t window{};
+    int32_t hitTest{};
+    int32_t startX{}, startY{};
+    int32_t windowX{}, windowY{}, windowWidth{}, windowHeight{};
+    PointerGestureMode mode{PointerGestureMode::None};
+};
+
 WindowClass g_classes[kClassCapacity]{};
 Window g_windows[kWindowCapacity]{};
 QueuedMessage g_messages[kMessageCapacity]{};
@@ -136,6 +145,7 @@ void resetCursorImage() noexcept {
 }
 uint64_t g_captionCapture{};
 uint8_t g_pressedCaptionButton{};
+PointerGesture g_pointerGesture{};
 uint64_t g_cursorHitWindow{};
 int32_t g_cursorHitTest{};
 MicaCompositorMetadataStore* g_compositorStore{};
@@ -307,6 +317,121 @@ bool enqueueWindowMessage(const Window& window, uint32_t message,
         .ownerProcessId = window.ownerProcessId, .active = true});
 }
 
+size_t freeMessageSlots() noexcept {
+    size_t count = 0;
+    for (const auto& message : g_messages) if (!message.active) ++count;
+    return count;
+}
+
+void beginPointerGesture(const Window& window, int32_t hitTest,
+                         int32_t x, int32_t y) noexcept {
+    constexpr int32_t HTCAPTION = 2;
+    constexpr int32_t HTLEFT = 10, HTRIGHT = 11, HTTOP = 12;
+    constexpr int32_t HTTOPLEFT = 13, HTTOPRIGHT = 14, HTBOTTOM = 15;
+    constexpr int32_t HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+    const bool resize = hitTest >= HTLEFT && hitTest <= HTBOTTOMRIGHT;
+    if (hitTest != HTCAPTION && !resize) return;
+    g_pointerGesture = PointerGesture{
+        .window = window.handle,
+        .hitTest = hitTest,
+        .startX = x,
+        .startY = y,
+        .windowX = window.x,
+        .windowY = window.y,
+        .windowWidth = window.width,
+        .windowHeight = window.height,
+        .mode = resize ? PointerGestureMode::Resize : PointerGestureMode::Move,
+    };
+}
+
+bool updatePointerGesture(int32_t x, int32_t y) noexcept {
+    auto* window = findWindowAny(g_pointerGesture.window);
+    if (!window || !window->active || !window->visible || window->iconic ||
+        g_pointerGesture.mode == PointerGestureMode::None) {
+        g_pointerGesture = {};
+        return false;
+    }
+    const auto& gesture = g_pointerGesture;
+    const int64_t dx = static_cast<int64_t>(x) - gesture.startX;
+    const int64_t dy = static_cast<int64_t>(y) - gesture.startY;
+    int64_t left = gesture.windowX;
+    int64_t top = gesture.windowY;
+    int64_t width = gesture.windowWidth;
+    int64_t height = gesture.windowHeight;
+    if (gesture.mode == PointerGestureMode::Move) {
+        left += dx;
+        top += dy;
+        constexpr int64_t visibleCaption = 48;
+        left = std::clamp<int64_t>(left, -width + visibleCaption,
+                                  static_cast<int64_t>(kScreenWidth) - visibleCaption);
+        top = std::clamp<int64_t>(top, 0,
+                                 static_cast<int64_t>(kScreenHeight) - 28);
+    } else {
+        constexpr int32_t HTLEFT = 10, HTRIGHT = 11, HTTOP = 12;
+        constexpr int32_t HTTOPLEFT = 13, HTTOPRIGHT = 14, HTBOTTOM = 15;
+        constexpr int32_t HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+        constexpr int64_t minWidth = 160, minHeight = 100, maxExtent = 16384;
+        const bool moveLeft = gesture.hitTest == HTLEFT ||
+            gesture.hitTest == HTTOPLEFT || gesture.hitTest == HTBOTTOMLEFT;
+        const bool moveRight = gesture.hitTest == HTRIGHT ||
+            gesture.hitTest == HTTOPRIGHT || gesture.hitTest == HTBOTTOMRIGHT;
+        const bool moveTop = gesture.hitTest == HTTOP ||
+            gesture.hitTest == HTTOPLEFT || gesture.hitTest == HTTOPRIGHT;
+        const bool moveBottom = gesture.hitTest == HTBOTTOM ||
+            gesture.hitTest == HTBOTTOMLEFT || gesture.hitTest == HTBOTTOMRIGHT;
+        if (moveLeft) {
+            width = std::clamp<int64_t>(gesture.windowWidth - dx, minWidth, maxExtent);
+            left = static_cast<int64_t>(gesture.windowX) + gesture.windowWidth - width;
+        } else if (moveRight) {
+            width = std::clamp<int64_t>(gesture.windowWidth + dx, minWidth, maxExtent);
+        }
+        if (moveTop) {
+            height = std::clamp<int64_t>(gesture.windowHeight - dy, minHeight, maxExtent);
+            top = static_cast<int64_t>(gesture.windowY) + gesture.windowHeight - height;
+        } else if (moveBottom) {
+            height = std::clamp<int64_t>(gesture.windowHeight + dy, minHeight, maxExtent);
+        }
+        if (left < INT32_MIN || left > INT32_MAX || top < INT32_MIN ||
+            top > INT32_MAX || left + width > INT32_MAX || top + height > INT32_MAX)
+            return false;
+    }
+    const int32_t newX = static_cast<int32_t>(left);
+    const int32_t newY = static_cast<int32_t>(top);
+    const int32_t newWidth = static_cast<int32_t>(width);
+    const int32_t newHeight = static_cast<int32_t>(height);
+    const bool moved = newX != window->x || newY != window->y;
+    const bool sized = newWidth != window->width || newHeight != window->height;
+    if (!moved && !sized) return true;
+    const size_t requiredMessages = static_cast<size_t>(moved) +
+                                    static_cast<size_t>(sized);
+    if (freeMessageSlots() < requiredMessages) return false;
+
+    window->x = newX;
+    window->y = newY;
+    window->width = newWidth;
+    window->height = newHeight;
+    if (moved) {
+        const uint32_t packedPosition =
+            (static_cast<uint32_t>(newY) & 0xFFFFu) << 16 |
+            (static_cast<uint32_t>(newX) & 0xFFFFu);
+        (void)enqueueWindowMessage(*window, kWmMove, 0,
+                                   static_cast<int64_t>(packedPosition));
+    }
+    if (sized) {
+        const int32_t frame = frameInset(*window);
+        const int32_t caption = captionHeight(*window);
+        const uint32_t clientWidth = static_cast<uint32_t>(
+            std::max(1, newWidth - frame * 2));
+        const uint32_t clientHeight = static_cast<uint32_t>(
+            std::max(1, newHeight - frame * 2 - caption));
+        const uint32_t packedSize = (clientHeight & 0xFFFFu) << 16 |
+                                    (clientWidth & 0xFFFFu);
+        (void)enqueueWindowMessage(*window, kWmSize, 0,
+                                   static_cast<int64_t>(packedSize));
+    }
+    return true;
+}
+
 bool messageMatches(const QueuedMessage& message,
                     const MicaWin32kRequest& request,
                     uint64_t ownerProcessId) noexcept {
@@ -426,6 +551,11 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             const bool wasForeground = g_foregroundWindow == window->handle;
+            if (g_pointerGesture.window == window->handle) g_pointerGesture = {};
+            if (g_captionCapture == window->handle) {
+                g_captionCapture = 0;
+                g_pressedCaptionButton = 0;
+            }
             window->active = false;
             if (wasForeground) {
                 g_foregroundWindow = 0;
@@ -732,6 +862,18 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
             window = {};
         }
+        if (g_pointerGesture.window) {
+            const auto* gestureWindow = findWindowAny(g_pointerGesture.window);
+            if (!gestureWindow || gestureWindow->ownerProcessId == ownerProcessId)
+                g_pointerGesture = {};
+        }
+        if (g_captionCapture) {
+            const auto* captureWindow = findWindowAny(g_captionCapture);
+            if (!captureWindow || captureWindow->ownerProcessId == ownerProcessId) {
+                g_captionCapture = 0;
+                g_pressedCaptionButton = 0;
+            }
+        }
         for (auto& windowClass : g_classes)
             if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
         if (g_cursorClipOwner == ownerProcessId) {
@@ -776,6 +918,18 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     }
     const bool leftPressed = !(previousButtons & 0x01u) && (currentButtons & 0x01u);
     const bool leftReleased = (previousButtons & 0x01u) && !(currentButtons & 0x01u);
+    if (g_pointerGesture.mode != PointerGestureMode::None) {
+        if (currentButtons & 0x01u) {
+            if (moved) (void)updatePointerGesture(x, y);
+            return true;
+        }
+        if (leftReleased) {
+            (void)updatePointerGesture(x, y);
+            g_pointerGesture = {};
+            return true;
+        }
+        g_pointerGesture = {};
+    }
     if (leftPressed && target) {
         target->zOrder = nextZOrder();
         if (g_foregroundWindow != target->handle) {
@@ -795,6 +949,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         }
         g_captionCapture = 0;
         g_pressedCaptionButton = 0;
+        beginPointerGesture(*target, hitTest, x, y);
+        if (g_pointerGesture.mode != PointerGestureMode::None) return true;
     }
 
     if (leftReleased && g_captionCapture) {
