@@ -897,11 +897,12 @@ intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
         : User32_DefWindowProcW(lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam);
 #if defined(BUILD_SYSTEM32_USER32_DLL)
     if (lpMsg->message == 0x0020u && result == 0) {
+        void* cursor{};
         if (auto* window = findRegisteredWindowClass(lpMsg->hwnd);
-            window && window->icons && window->icons->cursor) {
-            (void)User32_SetCursor(window->icons->cursor);
-            return 1;
-        }
+            window && window->icons) cursor = window->icons->cursor;
+        if (!cursor) cursor = User32_LoadCursorW(nullptr,
+            reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(32512)));
+        if (cursor) { (void)User32_SetCursor(cursor); return 1; }
     }
 #endif
     return result;

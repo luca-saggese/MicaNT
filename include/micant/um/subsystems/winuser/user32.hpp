@@ -1708,7 +1708,7 @@ inline win32::BOOL GetProcessDefaultLayout(win32::DWORD* pdwDefaultLayout) noexc
 }
 
 inline void* LoadCursorFromFileW(win32::LPCWSTR /*lpFileName*/) noexcept {
-    return reinterpret_cast<void*>(0x00010001);
+    return nullptr;
 }
 
 inline win32::BOOL SetCaretBlinkTime(win32::UINT /*uMSeconds*/) noexcept {
@@ -2043,7 +2043,7 @@ inline win32::BOOL InsertMenuA(HMENU /*hMenu*/, UINT /*uPosition*/, UINT /*uFlag
 }
 
 inline HCURSOR LoadCursorA(HINSTANCE /*hInstance*/, const char* /*lpCursorName*/) noexcept {
-    return reinterpret_cast<HCURSOR>(0x10001);
+    return nullptr;
 }
 
 inline HICON LoadIconA(HINSTANCE /*hInstance*/, const char* /*lpIconName*/) noexcept {
@@ -2051,7 +2051,7 @@ inline HICON LoadIconA(HINSTANCE /*hInstance*/, const char* /*lpIconName*/) noex
 }
 
 inline win32::HANDLE LoadImageA(HINSTANCE /*hInst*/, const char* /*name*/, UINT /*type*/, int /*cx*/, int /*cy*/, UINT /*fuLoad*/) noexcept {
-    return reinterpret_cast<win32::HANDLE>(0x30001);
+    return nullptr;
 }
 
 inline int MessageBoxIndirectW(const void* /*lpmbp*/) noexcept {
@@ -2408,7 +2408,7 @@ inline win32::BOOL WINAPI ShutdownBlockReasonDestroy(win32::HWND /*hWnd*/) noexc
 }
 
 inline HCURSOR WINAPI CreateCursor(void* /*hInst*/, int /*xHotSpot*/, int /*yHotSpot*/, int /*nWidth*/, int /*nHeight*/, const void* /*pvANDPlane*/, const void* /*pvXORPlane*/) noexcept {
-    return reinterpret_cast<HCURSOR>(0x3001);
+    return nullptr;
 }
 
 inline int WINAPI ToUnicode(uint32_t wVirtKey, uint32_t /*wScanCode*/, const uint8_t* /*lpKeyState*/, wchar_t* pwszBuff, int cchBuff, uint32_t /*wFlags*/) noexcept {
@@ -2495,7 +2495,7 @@ inline win32::BOOL WINAPI SetWindowDisplayAffinity(win32::HWND /*hWnd*/, win32::
 inline void* CopyImage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
 inline BOOL DefFrameProcW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline BOOL CharToOemBuffW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
-inline BOOL ClipCursor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
+inline BOOL ClipCursor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 0; }
 inline BOOL SendMessageA(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline BOOL EnumWindows(WNDENUMPROC lpEnumFunc, LPARAM lParam) noexcept {
     if (!lpEnumFunc) return win32::FALSE;
@@ -2524,10 +2524,10 @@ inline void* GetMessageExtraInfo(void* /*a*/ = nullptr, void* /*b*/ = nullptr, v
 inline BOOL EnableScrollBar(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline void* GetMessagePos(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
 inline void* GetKeyNameTextW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
-inline BOOL SetCursorPos(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
+inline BOOL SetCursorPos(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 0; }
 inline BOOL SetRect(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline BOOL IsRectEmpty(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr) noexcept { return 1; }
-inline void* GetCursor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
+inline void* GetCursor(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return nullptr; }
 inline BOOL WaitMessage(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline BOOL TranslateMDISysAccel(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline void* GetClipboardFormatNameW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
@@ -2539,7 +2539,7 @@ inline BOOL AllowSetForegroundWindow(void* /*a*/ = nullptr, void* /*b*/ = nullpt
 inline BOOL IsWindowUnicode(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr) noexcept { return 1; }
 inline BOOL DefMDIChildProcW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline void* GetSystemMenu(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
-inline void* GetCursorInfo(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
+inline void* GetCursorInfo(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return nullptr; }
 inline BOOL CharUpperBuffW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline BOOL SetClassLongPtrW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return 1; }
 inline void* GetClassLongPtrW(void* /*a*/ = nullptr, void* /*b*/ = nullptr, void* /*c*/ = nullptr, void* /*d*/ = nullptr, void* /*e*/ = nullptr, void* /*f*/ = nullptr, void* /*g*/ = nullptr) noexcept { return reinterpret_cast<void*>(0x8800); }
