@@ -18,6 +18,7 @@ constexpr uint32_t kWmSize = 0x0005;
 constexpr uint32_t kWmNcCreate = 0x0081;
 constexpr uint32_t kWmActivate = 0x0006;
 constexpr uint32_t kWmSetFocus = 0x0007;
+constexpr uint32_t kWmPaint = 0x000F;
 constexpr uint32_t kWmMouseMove = 0x0200;
 constexpr uint32_t kWmLButtonDown = 0x0201;
 constexpr uint32_t kWmLButtonUp = 0x0202;
@@ -385,6 +386,18 @@ uint64_t makeHandle(size_t index) noexcept {
 }
 
 bool enqueue(const QueuedMessage& message) noexcept {
+    // WM_PAINT is an invalidation notification, not a work item that needs one
+    // queue entry per caller. BeginPaint computes the current invalid region,
+    // so a single pending message covers every invalidation up to dispatch.
+    if (message.message == kWmPaint) {
+        for (auto& slot : g_messages) {
+            if (!slot.active || slot.message != kWmPaint ||
+                slot.hwnd != message.hwnd ||
+                slot.ownerProcessId != message.ownerProcessId) continue;
+            slot.time = message.time;
+            return true;
+        }
+    }
     for (auto& slot : g_messages) {
         if (!slot.active) {
             slot = message;
@@ -458,6 +471,32 @@ bool enqueueWindowMessage(const Window& window, uint32_t message,
         .message = message, .time = ++g_messageTime,
         .x = x, .y = y,
         .ownerProcessId = window.ownerProcessId, .active = true});
+}
+
+bool hasQueuedWindowMessage(const Window& window, uint32_t message) noexcept {
+    for (const auto& queued : g_messages) {
+        if (queued.active && queued.hwnd == window.handle &&
+            queued.ownerProcessId == window.ownerProcessId &&
+            queued.message == message) return true;
+    }
+    return false;
+}
+
+bool enqueueLatestWindowMessage(const Window& window, uint32_t message,
+                                uint64_t wParam, int64_t lParam,
+                                int32_t x = 0, int32_t y = 0) noexcept {
+    for (auto& queued : g_messages) {
+        if (!queued.active || queued.hwnd != window.handle ||
+            queued.ownerProcessId != window.ownerProcessId ||
+            queued.message != message) continue;
+        queued.wParam = wParam;
+        queued.lParam = lParam;
+        queued.time = ++g_messageTime;
+        queued.x = x;
+        queued.y = y;
+        return true;
+    }
+    return enqueueWindowMessage(window, message, wParam, lParam, x, y);
 }
 
 size_t freeMessageSlots() noexcept {
@@ -548,8 +587,9 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
     const bool moved = newX != window->x || newY != window->y;
     const bool sized = newWidth != window->width || newHeight != window->height;
     if (!moved && !sized) return true;
-    const size_t requiredMessages = static_cast<size_t>(moved) +
-                                    static_cast<size_t>(sized);
+    const size_t requiredMessages =
+        static_cast<size_t>(moved && !hasQueuedWindowMessage(*window, kWmMove)) +
+        static_cast<size_t>(sized && !hasQueuedWindowMessage(*window, kWmSize));
     if (freeMessageSlots() < requiredMessages) return false;
 
     markWindowBounds(*window);
@@ -561,8 +601,8 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
         const uint32_t packedPosition =
             (static_cast<uint32_t>(newY) & 0xFFFFu) << 16 |
             (static_cast<uint32_t>(newX) & 0xFFFFu);
-        (void)enqueueWindowMessage(*window, kWmMove, 0,
-                                   static_cast<int64_t>(packedPosition));
+        (void)enqueueLatestWindowMessage(*window, kWmMove, 0,
+                                         static_cast<int64_t>(packedPosition));
     }
     if (sized) {
         const int32_t frame = frameInset(*window);
@@ -573,8 +613,8 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
             std::max(1, newHeight - frame * 2 - caption));
         const uint32_t packedSize = (clientHeight & 0xFFFFu) << 16 |
                                     (clientWidth & 0xFFFFu);
-        (void)enqueueWindowMessage(*window, kWmSize, 0,
-                                   static_cast<int64_t>(packedSize));
+        (void)enqueueLatestWindowMessage(*window, kWmSize, 0,
+                                         static_cast<int64_t>(packedSize));
     }
     markWindowBounds(*window);
     return true;
@@ -1271,8 +1311,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
     const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
-    if (moved && !enqueueWindowMessage(*target, kWmMouseMove, keyState,
-                                      packedPoint, x, y))
+    if (moved && !enqueueLatestWindowMessage(*target, kWmMouseMove,
+                                             keyState, packedPoint, x, y))
         return false;
 
     constexpr uint32_t buttonMasks[] = {0x01u, 0x02u, 0x04u};
