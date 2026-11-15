@@ -238,16 +238,15 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     put32(root + 16, 1); put32(root + 20, 0x80000130u);
     put32(root + 24, 3); put32(root + 28, 0x80000080u);
     put32(root + 32, 12); put32(root + 36, 0x800000d0u);
-    put32(root + 40, 14); put32(root + 44, 0x80000020u);
-    put16(root + 0x20 + 14, 2); put32(root + 0x20 + 16, 101); put32(root + 0x20 + 20, 0x80000040u);
-    put32(root + 0x20 + 24, 202); put32(root + 0x20 + 28, 0x80000040u);
-    put16(root + 0x40 + 14, 1); put32(root + 0x40 + 16, 1033); put32(root + 0x40 + 20, 0x60);
-    put32(root + 0x60, 0x10c0); put32(root + 0x64, 4); put32(root + 0x68, 1200);
+    put32(root + 40, 14); put32(root + 44, 0x80000030u);
+    put16(root + 0x30 + 14, 2); put32(root + 0x30 + 16, 101); put32(root + 0x30 + 20, 0x80000050u);
+    put32(root + 0x30 + 24, 202); put32(root + 0x30 + 28, 0x80000050u);
+    put16(root + 0x50 + 14, 1); put32(root + 0x50 + 16, 1033); put32(root + 0x50 + 20, 0x1a0);
     pe[0x2c0] = 0xde; pe[0x2c1] = 0xad; pe[0x2c2] = 0xbe; pe[0x2c3] = 0xef;
     put16(root + 0x80 + 14, 1); put32(root + 0x80 + 16, 1); put32(root + 0x80 + 20, 0x800000a0u);
     put16(root + 0xa0 + 14, 1); put32(root + 0xa0 + 16, 1033); put32(root + 0xa0 + 20, 0xc0);
     put32(root + 0xc0, 0x10e4); put32(root + 0xc4, 48);
-    put32(root + 0x60, 0x10d0); put32(root + 0x64, 20);
+    put32(root + 0x1a0, 0x10d0); put32(root + 0x1a4, 20);
     pe[0x2d0] = 0; pe[0x2d2] = 1; pe[0x2d4] = 1;
     pe[0x2d6] = 1; pe[0x2d7] = 1; pe[0x2da] = 1; pe[0x2dc] = 32;
     pe[0x2de] = 48; pe[0x2e2] = 1;
@@ -277,9 +276,6 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     std::array<uint16_t, 4> iconGroupIds{};
     size_t iconGroupCount{};
     const auto iconNameStatus = resources.numericNames({14, {}, false}, iconGroupIds, iconGroupCount);
-    if (iconNameStatus != NtStatus::Success || iconGroupCount != 2)
-        std::fprintf(stderr, "Pe cursor fixture enum type14 status=%08x count=%zu\\n",
-                     static_cast<uint32_t>(iconNameStatus), iconGroupCount);
     TEST_ASSERT(iconNameStatus == NtStatus::Success &&
                 iconGroupCount == 2 && iconGroupIds[0] == 101 && iconGroupIds[1] == 202,
                 "PE resource enumeration preserves numeric icon group ID order");
@@ -315,7 +311,7 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
                 "PE cursor resource preserves embedded hotspots and strips only its four-byte prefix");
     TEST_ASSERT(resources.find({14, {}, false}, {102, {}, false}, 1033, result) == NtStatus::NotFound,
                  "missing resource is reported without synthetic data");
-    put32(root + 0x60, 0x1200);
+    put32(root + 0x70, 0x1200);
     pe::PeImageView64 tailImage;
     TEST_ASSERT(tailImage.inspect(pe) == NtStatus::Success, "PE remains structurally valid with bad resource RVA");
     pe::PeResourceView tailResources(tailImage);
