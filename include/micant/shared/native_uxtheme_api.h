@@ -39,6 +39,7 @@ MICANT_UXTHEME_API int32_t WINAPI GetThemeMargins(MicaThemeHandle, void*, int32_
 MICANT_UXTHEME_API int32_t WINAPI GetThemeFont(MicaThemeHandle, void*, int32_t, int32_t,
                                                int32_t, void*);
 MICANT_UXTHEME_API int32_t WINAPI GetThemeInt(MicaThemeHandle, int32_t, int32_t, int32_t, int32_t*);
+MICANT_UXTHEME_API int32_t WINAPI GetThemeBool(MicaThemeHandle, int32_t, int32_t, int32_t, int32_t*);
 MICANT_UXTHEME_API int32_t WINAPI DrawThemeBackground(MicaThemeHandle, void*, int32_t, int32_t,
                                                       const void*, const void*);
 MICANT_UXTHEME_API int32_t WINAPI DrawThemeText(MicaThemeHandle, void*, int32_t, int32_t,

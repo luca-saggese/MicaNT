@@ -888,6 +888,17 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool queried = themeHandle && (button.flags & MICANT_THEME_HAS_BACKGROUND) &&
         GetThemeColor(themeHandle, 1, 1, 3802, &queriedColor) == 0 &&
         queriedColor == expectedColor;
+    uint32_t buttonAlpha = button.background >> 24;
+    if (button.flags & MICANT_THEME_HAS_OPACITY)
+        buttonAlpha = (buttonAlpha * button.opacity + 127u) / 255u;
+    int32_t transparent = static_cast<int32_t>(0xA5A5A5A5u);
+    const bool transparentQueryPassed = themeHandle &&
+        GetThemeBool(themeHandle, 1, 1, 2203, &transparent) == 0 &&
+        transparent == (buttonAlpha < 255u ? 1 : 0);
+    int32_t unsupportedBoolean = 1;
+    const bool unsupportedBooleanFailed = themeHandle &&
+        GetThemeBool(themeHandle, 1, 1, 0x7FFFFFFF, &unsupportedBoolean) ==
+            static_cast<int32_t>(0x80004001u) && unsupportedBoolean == 0;
     uint8_t themeFontOutput[92];
     std::memset(themeFontOutput, 0xA5, sizeof(themeFontOutput));
     const int32_t unsupportedFont = themeHandle
@@ -905,6 +916,10 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
+    if (transparentQueryPassed && unsupportedBooleanFailed)
+        PrintLine("[MicaNT Theme] UxTheme TMT_TRANSPARENT follows alpha and opacity");
+    else
+        PrintLine("[MicaNT Theme] UxTheme transparent boolean query mismatch");
     if (unsupportedFont == static_cast<int32_t>(0x80004001u) && themeFontOutputCleared)
         PrintLine("[MicaNT Theme] Unsupported font query clears LOGFONTW output");
     else

@@ -88,6 +88,14 @@ the evidence named here, not just declarations or a successful compile.
 - [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`
   and GDI32 imports in QEMU, including invalid/stale handles, clipping,
   rounded fills, alpha and allocation/dispatch failures.
+- [x] `GetThemeBool(TMT_TRANSPARENT)` now reports effective background
+  transparency from CSS alpha and theme opacity; other boolean properties and
+  parts still return `E_NOTIMPL` after clearing the output. Explorer queried
+  the real DLL for the active button style and an unsupported property. QEMU
+  logged `UxTheme TMT_TRANSPARENT follows alpha and opacity` in
+  `/private/tmp/micant-theme-uxtheme-transparent-bool-run/serial.log`. The
+  baremetal build and focused probe passed; the enclosing input run later
+  stopped at the parallel parent-folder navigation assertion.
 - [x] `DrawThemeText` now draws supported one-line text through the caller's
   GDI DC and the theme foreground (inheriting WhiteSur HeaderBar foreground
   when a control omits it). Unsupported flags and text clipping return

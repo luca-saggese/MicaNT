@@ -620,9 +620,23 @@ inline win32::HRESULT WINAPI DrawThemeBackgroundEx(HTHEME /*hTheme*/, void* /*hd
     return detail::kNotImplemented;
 }
 
-inline win32::HRESULT WINAPI GetThemeBool(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, win32::BOOL* pfVal) noexcept {
-    if (pfVal) *pfVal = win32::FALSE;
-    return detail::kNotImplemented;
+inline win32::HRESULT WINAPI GetThemeBool(HTHEME hTheme, int32_t iPartId,
+        int32_t iStateId, int32_t iPropId, win32::BOOL* pfVal) noexcept {
+    if (!pfVal) return detail::kInvalidArgument;
+    *pfVal = win32::FALSE;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    constexpr int32_t kTmtTransparent = 2203;
+    if (iPropId != kTmtTransparent) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style || !(style->flags & MICANT_THEME_HAS_BACKGROUND))
+        return detail::kNotFound;
+    uint32_t alpha = style->background >> 24;
+    if (style->flags & MICANT_THEME_HAS_OPACITY)
+        alpha = (alpha * style->opacity + 127u) / 255u;
+    *pfVal = alpha < 255u ? win32::TRUE : win32::FALSE;
+    return 0;
 }
 
 inline win32::HRESULT WINAPI GetThemePropertyOrigin(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, int32_t* pOrigin) noexcept {
