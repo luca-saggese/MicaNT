@@ -257,7 +257,8 @@ private:
         }
         if (rasterRequired) {
             size_t fallbackLength{};
-            if (loadFile(asset_.unicodeFallbackFile, fallbackBytes_, fallbackLength)) {
+            if (!sameFilename(asset_.fileName, asset_.unicodeFallbackFile) &&
+                loadFile(asset_.unicodeFallbackFile, fallbackBytes_, fallbackLength)) {
                 if (!fallback_.parse(fallbackBytes_, fallbackLength)) release(fallbackBytes_);
             }
             workspaceSize_ = truetype::FaceView::rasterWorkspaceBytes();
@@ -291,6 +292,14 @@ private:
     static constexpr uint32_t GlyphMaskSize = 64;
     static constexpr size_t GlyphCacheCapacity = 32;
     static constexpr uint32_t MaxFontBytes = 16 * 1024 * 1024;
+
+    [[nodiscard]] static bool sameFilename(const char16_t* left,
+                                           const char16_t* right) noexcept {
+        if (!left || !right) return left == right;
+        size_t i = 0;
+        while (left[i] && left[i] == right[i]) ++i;
+        return left[i] == right[i];
+    }
     struct GlyphCacheEntry {
         const truetype::FaceView* face{};
         uint16_t glyph{};

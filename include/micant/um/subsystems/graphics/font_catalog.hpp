@@ -48,6 +48,10 @@ namespace detail {
     const bool heavy = request.weight >= 700;
     const bool semi = request.weight >= 600 && request.weight < 700;
     const bool italic = request.italic;
+    const bool fallbackHeavy = heavy || semi;
+    const char16_t* fallbackFile = italic
+        ? (fallbackHeavy ? u"DejaVuSans-BoldItalic.ttf" : u"DejaVuSans-Italic.ttf")
+        : (fallbackHeavy ? u"DejaVuSans-Bold.ttf" : u"DejaVuSans-Regular.ttf");
     const char16_t* file = nullptr;
     bool italicAvailable = false;
     bool known = true;
@@ -82,7 +86,7 @@ namespace detail {
         file = heavy ? u"DejaVuSans-BoldItalic.ttf" : u"DejaVuSans-Italic.ttf";
         italicAvailable = true;
     }
-    return {file, u"DejaVuSans-Regular.ttf", family, request.pointSize,
+    return {file, fallbackFile, family, request.pointSize,
             request.dpi ? request.dpi : static_cast<uint16_t>(96), italicAvailable, !known};
 }
 

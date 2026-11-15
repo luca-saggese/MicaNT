@@ -1769,7 +1769,10 @@ components remain unsupported. Hint instructions are bounds-checked but not
 executed. Runtime font registration, persistent settings and DirectWrite
 face/collection behavior remain open. UTF-8 precomposed Italian accents and a
 bounded set of combining marks are rendered as base-plus-mark runs; combining
-marks add no advance and are positioned above or below the base glyph.
+marks add no advance and are positioned above or below the base glyph. Unicode
+fallback now follows the requested regular/bold/italic style when those DejaVu
+faces exist, and avoids loading a duplicate fallback when it is the primary
+face.
 
 The inline GDI compatibility declarations for runtime font registration now
 return failure (zero/null handle and zero font count) instead of claiming that
@@ -1798,3 +1801,4 @@ test now polls for a changed, stable desktop frame before input dispatch.
 | `MICANT_CXX=/Users/lvx/Dev/MicaNT/build/llvm-mingw-20260616-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang++ python3 qemu.py --headless` (temporary verification tree `/private/tmp/micant-font-f2-verify`) | Passed after explicit font-registration failure semantics; user-mode boundary checks passed, Explorer input/scanout/cleanup passed and serial remained stable for five seconds |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-dwrite-final` | Passed; `dwrite.dll` built/staged and Explorer's CPL3 DirectWrite Arial metrics/cmap probe succeeded; Enter opened the app window, input dispatch and cleanup passed, and serial remained stable for five seconds |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-combining-qemu` | Passed; Explorer's decomposed `e` + acute layout matched precomposed `é` advance, TTF rendering used the combining sequence, DirectWrite probe passed, and input/scanout/cleanup completed |
+| `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-fallback-weight-qemu` | Passed after style-matched DejaVu fallback selection; DirectWrite, Explorer input, scanout and cleanup probes passed |
