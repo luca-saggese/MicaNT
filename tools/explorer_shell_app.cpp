@@ -120,6 +120,28 @@ uint32_t themePixel(uint32_t color, uint32_t under = 0xFFFFFFFFu) noexcept {
     return PackBGRA(over(16), over(8), over(0));
 }
 
+micant::explorer::ThemePalette activeShellPalette() noexcept {
+    const auto color = [](uint16_t control, uint32_t flag, uint32_t fallback) noexcept {
+        const auto* style = themeStyle(control);
+        if (!style || !(style->flags & flag)) return fallback;
+        return themePixel(flag == MICANT_THEME_HAS_BACKGROUND ? style->background :
+                          flag == MICANT_THEME_HAS_FOREGROUND ? style->foreground : style->border);
+    };
+    const uint32_t accent = color(13, MICANT_THEME_HAS_BACKGROUND, rgb(36, 91, 174));
+    const uint32_t accentForeground = color(13, MICANT_THEME_HAS_FOREGROUND, rgb(255, 255, 255));
+    const uint32_t toolbarForeground = color(10, MICANT_THEME_HAS_FOREGROUND, rgb(242, 246, 251));
+    return {
+        color(14, MICANT_THEME_HAS_BACKGROUND, rgb(243, 243, 243)),
+        color(10, MICANT_THEME_HAS_BACKGROUND, rgb(220, 231, 244)),
+        color(14, MICANT_THEME_HAS_FOREGROUND, rgb(30, 30, 30)),
+        toolbarForeground,
+        color(10, MICANT_THEME_HAS_BORDER, rgb(91, 154, 227)),
+        accent,
+        accentForeground,
+        color(0, MICANT_THEME_HAS_BACKGROUND, rgb(28, 79, 145)),
+    };
+}
+
 CachedDesktopIcon* findCachedIcon(micant::explorer::IconId id, uint16_t size) noexcept {
     for (size_t i = 0; i < g.iconCacheCount; ++i)
         if (g.iconCache[i].id == id && g.iconCache[i].requestedSize == size &&
@@ -351,7 +373,7 @@ void redrawTaskbar() noexcept {
     micant::explorer::TaskbarButton buttons[MAX_APP_WINDOWS]{};
     const size_t count = collectTaskbarButtons(buttons);
     micant::explorer::DrawTaskbar(g.taskbarPixels, g.screenW, TASKBAR_H, TASKBAR_H,
-                                  buttons, count, g.clockText);
+                                  buttons, count, g.clockText, activeShellPalette());
     present(g.taskbar);
 }
 
@@ -884,7 +906,8 @@ void openView(View view) noexcept {
 void toggleStart() noexcept {
     g.startOpen = !g.startOpen;
     if (g.startOpen) {
-        micant::explorer::DrawStartMenu(g.menuPixels, MENU_W, MENU_H, "MicaNT User");
+        micant::explorer::DrawStartMenu(g.menuPixels, MENU_W, MENU_H, "MicaNT User",
+                                        activeShellPalette());
         ShowWindow(g.startMenu, SW_SHOW);
         present(g.startMenu);
     } else {

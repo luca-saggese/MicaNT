@@ -7,12 +7,6 @@ namespace {
 
 using micant_gui::PackBGRA;
 
-constexpr uint32_t kBlue = 0xFF245BAE;
-constexpr uint32_t kBlueEdge = 0xFF5B9AE3;
-constexpr uint32_t kBlueShadow = 0xFF1E468E;
-constexpr uint32_t kTaskBlue = 0xFF3D76C7;
-constexpr uint32_t kTaskActive = 0xFF1C4F91;
-
 void fill(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t y,
           int32_t rectWidth, int32_t rectHeight, uint32_t color) noexcept {
     if (!pixels || rectWidth <= 0 || rectHeight <= 0) return;
@@ -37,13 +31,14 @@ void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 
 void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
                  uint32_t taskbarHeight, const TaskbarButton* buttons,
-                 size_t buttonCount, const char* clockText) noexcept {
+                 size_t buttonCount, const char* clockText,
+                 const ThemePalette& palette) noexcept {
     if (!pixels || screenWidth == 0 || screenHeight == 0 || taskbarHeight < 32 ||
         taskbarHeight > screenHeight) return;
     const int32_t barY = static_cast<int32_t>(screenHeight - taskbarHeight);
-    fill(pixels, screenWidth, screenHeight, 0, barY, screenWidth, taskbarHeight, kBlue);
-    fill(pixels, screenWidth, screenHeight, 0, barY, screenWidth, 3, kBlueEdge);
-    fill(pixels, screenWidth, screenHeight, 0, barY + 4, screenWidth, 1, kBlueShadow);
+    fill(pixels, screenWidth, screenHeight, 0, barY, screenWidth, taskbarHeight, palette.accent);
+    fill(pixels, screenWidth, screenHeight, 0, barY, screenWidth, 3, palette.separator);
+    fill(pixels, screenWidth, screenHeight, 0, barY + 4, screenWidth, 1, palette.surfaceAlt);
 
     // Start button: a compact four pane mark and label.
     fill(pixels, screenWidth, screenHeight, 0, barY + 3, 102, taskbarHeight - 3, 0xFF2D9331);
@@ -53,7 +48,7 @@ void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
     fill(pixels, screenWidth, screenHeight, 24, barY + 11, 8, 8, 0xFF4BA541);
     fill(pixels, screenWidth, screenHeight, 15, barY + 20, 8, 8, 0xFF357DCA);
     fill(pixels, screenWidth, screenHeight, 24, barY + 20, 8, 8, 0xFFFAC532);
-    text(pixels, screenWidth, screenHeight, 42, barY + 15, "start", 0xFFFFFFFF);
+    text(pixels, screenWidth, screenHeight, 42, barY + 15, "start", palette.accentForeground);
 
     const int32_t taskRight = static_cast<int32_t>(screenWidth) - 126;
     const int32_t maxTaskWidth = taskRight > 112 ? (taskRight - 112) : 0;
@@ -63,8 +58,8 @@ void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
     int32_t taskX = 112;
     for (size_t i = 0; buttons && i < buttonCount && taskWidth >= 64; ++i) {
         fill(pixels, screenWidth, screenHeight, taskX, barY + 8, taskWidth - 4, 25,
-             buttons[i].active ? kTaskActive : kTaskBlue);
-        fill(pixels, screenWidth, screenHeight, taskX + 1, barY + 9, taskWidth - 6, 1, 0xFF74A6E1);
+             buttons[i].active ? palette.selected : palette.surfaceAlt);
+        fill(pixels, screenWidth, screenHeight, taskX + 1, barY + 9, taskWidth - 6, 1, palette.separator);
         fill(pixels, screenWidth, screenHeight, taskX + 5, barY + 14, 13, 13,
              buttons[i].iconColor ? buttons[i].iconColor : PackBGRA(70, 130, 190));
         const int32_t textX = taskX + 24;
@@ -76,11 +71,11 @@ void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
             clipped[length] = buttons[i].title[length];
             ++length;
         }
-        text(pixels, screenWidth, screenHeight, textX, barY + 16, clipped, 0xFFFFFFFF);
+        text(pixels, screenWidth, screenHeight, textX, barY + 16, clipped, palette.secondaryForeground);
         taskX += taskWidth;
     }
 
-    DrawNotificationArea(pixels, screenWidth, taskbarHeight, clockText);
+    DrawNotificationArea(pixels, screenWidth, taskbarHeight, clockText, palette);
 }
 
 } // namespace micant::explorer

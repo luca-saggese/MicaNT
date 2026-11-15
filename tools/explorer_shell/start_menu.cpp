@@ -28,23 +28,23 @@ void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 } // namespace
 
 void DrawStartMenu(uint32_t* pixels, uint32_t width, uint32_t height,
-                   const char* accountName) noexcept {
+                   const char* accountName, const ThemePalette& palette) noexcept {
     if (!pixels || width < 250 || height < 180) return;
-    fill(pixels, width, height, 0, 0, width, height, 0xFFF3F3F3);
-    fill(pixels, width, height, 0, 0, width, 50, 0xFF1F59A6);
+    fill(pixels, width, height, 0, 0, width, height, palette.surface);
+    fill(pixels, width, height, 0, 0, width, 50, palette.accent);
     fill(pixels, width, height, 8, 8, 34, 34, 0xFFEBF6FA);
     fill(pixels, width, height, 12, 12, 12, 12, 0xFFE44130);
     fill(pixels, width, height, 25, 12, 12, 12, 0xFF4DA441);
     fill(pixels, width, height, 12, 25, 12, 12, 0xFF377CCE);
     fill(pixels, width, height, 25, 25, 12, 12, 0xFFF2C02A);
-    text(pixels, width, height, 53, 19, accountName ? accountName : "MicaNT User", 0xFFFFFFFF);
+    text(pixels, width, height, 53, 19, accountName ? accountName : "MicaNT User", palette.accentForeground);
 
     const int32_t divider = static_cast<int32_t>(width) * 3 / 5;
     const int32_t footerHeight = 42;
     const int32_t bodyHeight = static_cast<int32_t>(height) - 50 - footerHeight;
-    fill(pixels, width, height, 0, 50, divider, bodyHeight, 0xFFFFFFFF);
+    fill(pixels, width, height, 0, 50, divider, bodyHeight, palette.surface);
     fill(pixels, width, height, divider, 50, static_cast<int32_t>(width) - divider,
-         bodyHeight, 0xFFDCE7F4);
+         bodyHeight, palette.surfaceAlt);
 
     static constexpr const char* left[] = {
         "Internet", "E-mail", "----------------", "My Documents", "My Pictures",
@@ -53,8 +53,8 @@ void DrawStartMenu(uint32_t* pixels, uint32_t width, uint32_t height,
     };
     for (size_t i = 0; i < sizeof(left) / sizeof(left[0]); ++i) {
         const int32_t y = 63 + static_cast<int32_t>(i) * 23;
-        if (left[i][0] == '-') fill(pixels, width, height, 12, y + 8, divider - 24, 1, 0xFFD7D7D7);
-        else text(pixels, width, height, 18, y, left[i], 0xFF1E1E1E);
+        if (left[i][0] == '-') fill(pixels, width, height, 12, y + 8, divider - 24, 1, palette.separator);
+        else text(pixels, width, height, 18, y, left[i], palette.foreground);
     }
     static constexpr const char* right[] = {
         "Recent Documents", "My Pictures", "My Music", "My Computer", "Control Panel",
@@ -63,13 +63,13 @@ void DrawStartMenu(uint32_t* pixels, uint32_t width, uint32_t height,
     };
     for (size_t i = 0; i < sizeof(right) / sizeof(right[0]); ++i)
         text(pixels, width, height, divider + 11, 69 + static_cast<int32_t>(i) * 25,
-             right[i], 0xFF1D4174);
+             right[i], palette.secondaryForeground);
 
     fill(pixels, width, height, 0, static_cast<int32_t>(height) - footerHeight,
-         width, footerHeight, 0xFF1F59A6);
-    text(pixels, width, height, 18, static_cast<int32_t>(height) - 25, "Log Off", 0xFFFFFFFF);
+         width, footerHeight, palette.accent);
+    text(pixels, width, height, 18, static_cast<int32_t>(height) - 25, "Log Off", palette.accentForeground);
     text(pixels, width, height, divider + 9, static_cast<int32_t>(height) - 25,
-         "Turn Off Computer", 0xFFFFFFFF);
+         "Turn Off Computer", palette.accentForeground);
 }
 
 StartMenuAction HitTestStartMenu(int32_t x, int32_t y,

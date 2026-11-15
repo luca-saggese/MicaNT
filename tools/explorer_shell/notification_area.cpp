@@ -21,18 +21,18 @@ void fill(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 }
 
 void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t y,
-          const char* value) noexcept {
-    micant_gui::DrawStringClipped(pixels, width, height, x, y, value, 0xFFFFFFFFu);
+          const char* value, uint32_t color) noexcept {
+    micant_gui::DrawStringClipped(pixels, width, height, x, y, value, color);
 }
 
 } // namespace
 
 void DrawNotificationArea(uint32_t* pixels, uint32_t width, uint32_t height,
-                          const char* clockText) noexcept {
+                          const char* clockText, const ThemePalette& palette) noexcept {
     if (!pixels || width < 122 || height < 32) return;
     const int32_t left = static_cast<int32_t>(width) - 122;
-    fill(pixels, width, height, left, 5, 122, static_cast<int32_t>(height) - 5, 0xFF1D4F97);
-    fill(pixels, width, height, left, 7, 1, static_cast<int32_t>(height) - 9, 0xFF193E7A);
+    fill(pixels, width, height, left, 5, 122, static_cast<int32_t>(height) - 5, palette.accent);
+    fill(pixels, width, height, left, 7, 1, static_cast<int32_t>(height) - 9, palette.separator);
 
     // System sound indicator.
     fill(pixels, width, height, left + 12, 17, 5, 8, 0xFFEFF5FC);
@@ -41,7 +41,8 @@ void DrawNotificationArea(uint32_t* pixels, uint32_t width, uint32_t height,
     fill(pixels, width, height, left + 34, 24, 4, 4, 0xFFF7F7F7);
     fill(pixels, width, height, left + 33, 20, 6, 3, 0xFFF7F7F7);
     fill(pixels, width, height, left + 31, 16, 10, 3, 0xFFF7F7F7);
-    text(pixels, width, height, left + 50, 16, clockText ? clockText : "--:--");
+    text(pixels, width, height, left + 50, 16, clockText ? clockText : "--:--",
+         palette.accentForeground);
 }
 
 NotificationAction HitTestNotificationArea(int32_t x, uint32_t width) noexcept {
