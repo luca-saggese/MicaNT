@@ -1,6 +1,6 @@
 # LuceOS Task Manager — punti aperti e continuità
 
-Aggiornato: 2026-11-15
+Aggiornato: 2026-11-15 (avvio chiusura completa)
 Documento operativo: registra implementazione, verifiche, dipendenze e prossimo
 intervento. La roadmap normativa resta
 [`USERMODE_TASK_MANAGER_AND_SYSTEM_MONITOR_SPEC.md`](USERMODE_TASK_MANAGER_AND_SYSTEM_MONITOR_SPEC.md);
@@ -45,9 +45,9 @@ state incluse.
 | U1 | Finestra Win32 interattiva, resize, navigazione Processes/Performance/Details, ricerca, ordinamento, selezione e refresh timer con cache. | Win32k/User32/GDI/theme/compositor + UI | Audit parallelo: primo slice è registrare classe, creare finestra, gestire `WM_PAINT`/`WM_SIZE` e ciclo `GetMessage`/`DispatchMessage`. `tools/dlls/user32.cpp` espone stub nativi, mentre l'API inline `include/micant/um/subsystems/winuser/user32.hpp` usa un manager hosted; il percorso Ring 3 deve invece collegarsi a Win32k/compositor. File primari: `tools/taskmgr_app.cpp`, `tools/dlls/user32.cpp`; coordinare prima le modifiche concorrenti ai file Win32k/compositor. |
 | S1 | Hotkey Ctrl+Shift+Esc nel percorso input attendibile, con key-up/modificatori e soppressione repeat; avvio singolo per sessione anche senza Explorer. | HAL/input + session manager/Winlogon | QMP inietta press/release e verifica una sola istanza Ring 3 nel desktop/sessione interattiva. |
 | S2 | Ctrl+Alt+Del come SAS verso desktop sicuro Winlogon e scelta Gestione attività. | Winlogon/session/auth + secure desktop | QMP verifica passaggio desktop e avvio con token autorizzato; fail-closed se manca infrastruttura di autenticazione. Non simulare autenticazione. Dipende dall'infrastruttura sessione/S1. |
-| P2 | Memoria: distinguere disponibile, working set, commit privato/sistema e limite; completare i campi per-proc solo con accounting Mm/Ps coerente. | Mm/Ps + UI | Valori confrontati con contatori owner e pressione memoria QEMU; ciò che non è contabilizzato appare unavailable. |
-| P3 | Storage, rete e GPU: bytes/operazioni/errori/latency solo da provider reali. | Io/storage, TCPIP, GPU/compositor | Scenari di I/O e rete QEMU; GPU unavailable finché il driver non espone metriche reali. Nessuno zero sintetico. |
-| F1 | Pagine sessioni utenti, startup e servizi e relativi controlli autorizzati. | Session Manager/Userenv/SCM + Se + UI | Enumerazione e mutazioni collegate a provider canonici; assenza provider dichiarata, niente righe di esempio. |
+| P2 | Memoria: distinguere disponibile, working set, commit privato/sistema e limite; completare i campi per-proc solo con accounting Mm/Ps coerente. | Mm/Ps + UI | Audit: memoria globale disponibile già proviene dal PFN DB e dal class 2. Working set/commit per processo restano senza accounting Ps/Mm; active PFN non ha associazione ownership per address space. Implementare presso gli owner Mm/Ps; nessuno zero placeholder. |
+| P3 | Storage, rete e GPU: bytes/operazioni/errori/latency solo da provider reali. | Io/storage, TCPIP, GPU/compositor | Audit: nessun provider aggregato è collegato al query Ring 3 bare-metal. NDIS adapter stats non garantiscono un adapter registrato; IO completion e VirtIO GPU non hanno ancora snapshot pubblico. Le metriche restano unavailable fino al provider e al test di traffico. |
+| F1 | Pagine sessioni utenti, startup e servizi e relativi controlli autorizzati. | Session Manager/Userenv/SCM + Se + UI | Audit: non esiste session owner runtime; Smss/services sono demo/statici, startup provider assente, Advapi32 PE exports inventano handle e successo. Prima collegare SCM vero e session lifecycle, rimuovendo le risposte finte; poi enumerazione e mutazioni autorizzate. |
 | G1 | Stress, fault injection e overhead integrati: churn durante snapshot, buffer insufficiente/non valido, access denied, PID reuse, close durante refresh, provider assenti, stall Explorer. | Integratore + owner | Test bare-metal QEMU con log seriali/QMP/screenshot e misure ripetibili; update evidence ledger al confine d'integrazione. |
 
 ## Regole di parallelizzazione e commit
@@ -66,7 +66,10 @@ state incluse.
 
 ## Sessione corrente — punto di ripresa
 
-1. P1b è in worktree: l'ISR Ke usa il CS salvato per attribuire il tick al
+1. Obiettivo attivo: chiudere tutti i blocchi elencati, in sequenza di
+   dipendenza e in parallelo su owner/file disgiunti; ogni chiusura richiede
+   QEMU, commit selettivo e aggiornamento di questo registro.
+2. P1b è in worktree: l'ISR Ke usa il CS salvato per attribuire il tick al
    thread corrente; Ps somma i tempi dei thread nei record di processo e
    thread; Task Manager verifica crescita monotona dello snapshot del proprio
    processo. Build/link dei target bare-metal completata. `qemu.py` è fallito
@@ -74,18 +77,32 @@ state incluse.
    `/private/tmp/micant-taskmgr-process-times3/serial.log`. Analizzare il
    blocco boot/UI o rendere raggiungibile il self-test senza abbassare i
    criteri; quindi ripetere QEMU e committare solo con evidenza del provider.
-2. Il marker Task Manager assente impedisce di concludere se i valori Ke/Ps
+3. Il marker Task Manager assente impedisce di concludere se i valori Ke/Ps
    crescono; `totalCyclesExecuted` dello scheduler hosted resta inappropriato.
-3. Per U1, integrare il percorso nativo User32→Win32k/compositor, poi finestra
+4. Per U1, integrare il percorso nativo User32→Win32k/compositor, poi finestra
    e message loop; serializzare le modifiche con gli owner già attivi. D2
    dipende da selezione riga e riusa il percorso D1.
-4. Restano UI navigabile, hotkey/SAS,
+5. Audit paralleli S1/S2, P2/P3 e F1/G1 completati in sola lettura. Non esiste un
+   hotkey globale trusted; Winlogon/logon UI falliscono chiusi senza sessione,
+   desktop sicuro e IPC LSASS autenticato. La classe input mantiene eventi
+   make/break, ma il router modificatori disponibile è solo hosted. S1/S2
+   dipendono quindi da veri owner kernel/sessione, non da un adapter hosted.
+   Sui provider, memory-global è reale; per-process commit/working set,
+   storage/network/GPU richiedono owner ancora assenti. Per F1, SCM PE exports
+   e broker contengono risposte synthetic e session/startup non hanno provider.
+   Non esporre tali valori finché gli owner canonici non vengono implementati.
+6. Restano UI navigabile, hotkey/SAS,
    sessioni/startup/servizi e integrazione/stress. Il percorso tasti attuale
    è solo PS/2 bootstrap diretto al foreground: non traccia i modificatori per
    chord globali; `winlogon.exe` e `logonui.exe` non sono avviati e le app
    dichiarano non supportati IPC autenticato e desktop sicuro. Dopo D1,
    proseguire per dipendenza e mantenere questo documento aggiornato a ogni
    cambio di blocco/verifica.
+
+La chiusura completa ha dipendenze di piattaforma oltre alla UI: sessione e
+autenticazione reali per S2/F1; accounting Mm/Ps per P2; provider IO/NDIS/GPU
+collegati a un'interfaccia di query per P3. Ogni dipendenza è parte del lavoro,
+non una licenza per dichiarare supportato un valore privo di owner.
 
 ## Non ancora dichiarato supportato
 
