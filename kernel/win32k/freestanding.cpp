@@ -251,6 +251,31 @@ void markCursorBounds(int32_t x, int32_t y) noexcept {
                    top + g_activeCursorHeight);
 }
 
+void markCaptionButtonBounds(const Window& window, uint8_t button) noexcept {
+    if (button < 1 || button > 3 || !window.active || !window.visible ||
+        window.iconic) return;
+    const int64_t frame = frameInset(window);
+    const int64_t caption = captionHeight(window);
+    if (!caption) return;
+    const int64_t closeLeft = static_cast<int64_t>(window.width) - frame - 30;
+    int64_t left{}, right{};
+    if (button == 1) {
+        left = closeLeft - 58;
+        right = closeLeft - 30;
+    } else if (button == 2) {
+        left = closeLeft - 29;
+        right = closeLeft - 1;
+    } else {
+        left = closeLeft;
+        right = static_cast<int64_t>(window.width) - frame - 2;
+    }
+    const int64_t top = window.y + frame + 3;
+    const int64_t bottom = window.y + frame + caption - 3;
+    if (left >= right || top >= bottom) return;
+    markDamageRect(static_cast<int64_t>(window.x) + left, top,
+                   static_cast<int64_t>(window.x) + right, bottom);
+}
+
 void markWindowClientDamage(Window& window, int64_t left, int64_t top,
                             int64_t right, int64_t bottom) noexcept {
     const int64_t frame = frameInset(window);
@@ -318,7 +343,7 @@ uint8_t captionButtonAt(const Window& window, int32_t localX,
                        int32_t localY) noexcept {
     const int32_t frame = frameInset(window);
     const int32_t caption = captionHeight(window);
-    if (!caption || localY < frame || localY >= frame + caption) return 0;
+    if (!caption || localY < frame + 3 || localY >= frame + caption - 3) return 0;
     const int32_t closeLeft = window.width - frame - 30;
     if (localX >= closeLeft && localX < window.width - frame - 2) return 3;
     if (localX >= closeLeft - 29 && localX < closeLeft - 1) return 2;
@@ -1186,10 +1211,16 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const int32_t hitTest = target ? hitTestWindow(*target, x, y) : 0;
     const uint64_t oldCursorHitWindow = g_cursorHitWindow;
     const int32_t oldCursorHitTest = g_cursorHitTest;
+    auto* oldHover = findWindowAny(oldCursorHitWindow);
+    const uint8_t oldHoveredButton = oldHover && oldMouseValid
+        ? captionButtonAt(*oldHover, oldMouseX - oldHover->x,
+                          oldMouseY - oldHover->y) : 0;
+    const uint8_t newHoveredButton = target
+        ? captionButtonAt(*target, x - target->x, y - target->y) : 0;
     if (oldCursorHitWindow != (target ? target->handle : 0) ||
-        oldCursorHitTest != hitTest) {
-        if (auto* oldHover = findWindowAny(oldCursorHitWindow)) markWindowBounds(*oldHover);
-        if (target) markWindowBounds(*target);
+        oldCursorHitTest != hitTest || oldHoveredButton != newHoveredButton) {
+        if (oldHover) markCaptionButtonBounds(*oldHover, oldHoveredButton);
+        if (target) markCaptionButtonBounds(*target, newHoveredButton);
     }
     if (!target) {
         g_cursorHitWindow = 0;
