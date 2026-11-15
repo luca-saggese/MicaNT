@@ -73,6 +73,7 @@ struct ShellState {
     MicaThemeSnapshot visualTheme{};
     bool visualThemeReady{};
     char themeProfile[96]{};
+    bool themeGdiDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -268,6 +269,27 @@ void drawAppWindow(AppWindow& app) noexcept {
     fill(p, w, h, 0, 0, w, h, windowBackground);
     fill(p, w, h, 0, 0, 158, h, sidebarBackground);
     fill(p, w, h, 0, 0, w, 27, toolbarBackground);
+    bool gdiThemeDrawn = false;
+    if (g.visualThemeReady && w > 0 && h > 26) {
+        const MicaThemeHandle theme = IsThemeActive() ? OpenThemeData(nullptr, L"TOOLBAR") : nullptr;
+        if (theme) {
+            RECT themedToolbar{0, 0, static_cast<LONG>(w), 26};
+            const bool drawSucceeded = DrawThemeBackground(theme, app.dc, 1, 1,
+                                                            &themedToolbar, nullptr) == 0;
+            const bool closeSucceeded = CloseThemeData(theme) == 0;
+            const uint32_t expected = (toolbarStyle &&
+                (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND))
+                    ? themePixel(toolbarStyle->background, windowBackground)
+                    : toolbarBackground;
+            gdiThemeDrawn = drawSucceeded && closeSucceeded && p[4u * w + 4u] == expected;
+        }
+    }
+    if (gdiThemeDrawn && !g.themeGdiDrawReported) {
+        PrintLine("[MicaNT Theme] UxTheme GDI toolbar draw and pixel check passed");
+        g.themeGdiDrawReported = true;
+    }
+    if (!gdiThemeDrawn)
+        fill(p, w, h, 0, 0, w, 27, toolbarBackground);
     fill(p, w, h, 0, 26, w, 1, separator);
     fill(p, w, h, 12, 8, 8, 8, entryForeground);
     text(p, w, h, 27, 8, "Address", toolbarForeground);
