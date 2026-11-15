@@ -53,9 +53,12 @@ void fillRect(int64_t left, int64_t top, int64_t right, int64_t bottom,
     right = right > g_composeClip.right ? g_composeClip.right : right;
     bottom = bottom > g_composeClip.bottom ? g_composeClip.bottom : bottom;
     if (left >= right || top >= bottom) return;
-    for (int64_t y = top; y < bottom; ++y)
-        for (int64_t x = left; x < right; ++x)
-            g_frame[static_cast<size_t>(y) * width + static_cast<size_t>(x)] = color;
+    const size_t rowWidth = static_cast<size_t>(right - left);
+    for (int64_t y = top; y < bottom; ++y) {
+        auto* row = g_frame + static_cast<size_t>(y) * width +
+            static_cast<size_t>(left);
+        for (size_t x = 0; x < rowWidth; ++x) row[x] = color;
+    }
 }
 
 void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
@@ -304,12 +307,23 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         for (int64_t y = clipTop; y < bottom; ++y) {
             const size_t sourceY = static_cast<size_t>(y - top);
             const size_t sourceRow = surface.pixelOffset + sourceY * surface.pitch;
-            const size_t destinationRow = static_cast<size_t>(y) * width;
-            for (int64_t x = clipLeft; x < right; ++x) {
-                const size_t sourceX = static_cast<size_t>(x - left);
-                const size_t destination = destinationRow + static_cast<size_t>(x);
-                g_frame[destination] = blend(surfaces[sourceRow + sourceX],
-                                             g_frame[destination]);
+            const size_t sourceX = static_cast<size_t>(clipLeft - left);
+            const size_t pixelCount = static_cast<size_t>(right - clipLeft);
+            const uint32_t* source = surfaces + sourceRow + sourceX;
+            uint32_t* destination = g_frame + static_cast<size_t>(y) * width +
+                static_cast<size_t>(clipLeft);
+            size_t x = 0;
+            while (x < pixelCount) {
+                if ((source[x] >> 24) == 255u) {
+                    const size_t runStart = x++;
+                    while (x < pixelCount && (source[x] >> 24) == 255u) ++x;
+                    for (size_t copy = runStart; copy < x; ++copy)
+                        destination[copy] = source[copy];
+                } else {
+                    const uint32_t alpha = source[x] >> 24;
+                    if (alpha) destination[x] = blend(source[x], destination[x]);
+                    ++x;
+                }
             }
         }
     }
