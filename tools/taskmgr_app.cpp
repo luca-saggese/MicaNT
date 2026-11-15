@@ -92,6 +92,10 @@ alignas(4096) uint32_t s_tmBuffer[MaxRenderWidth * MaxRenderHeight];
 alignas(16) uint8_t s_processSnapshot[MaxSnapshotBytes];
 constexpr uint32_t MaxProcessorRecords = 64;
 alignas(16) micant::SystemProcessorPerformanceInformation s_processorSnapshot[MaxProcessorRecords];
+constexpr uint32_t CpuHistoryCapacity = 60;
+uint8_t s_cpuHistory[CpuHistoryCapacity]{};
+uint32_t s_cpuHistoryNext{};
+uint32_t s_cpuHistoryCount{};
 
 struct ProcessCpuSample {
     uintptr_t processId{};
@@ -621,6 +625,37 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
             AppendUnsigned(value, sizeof(value), cursor, snapshot.availablePages);
             DrawString(s_tmBuffer, width, 150, 130, value, PackBGRA(0, 210, 255));
         } else DrawString(s_tmBuffer, width, 150, 130, "Unavailable", PackBGRA(150, 165, 185));
+        const uint32_t graphX = 20, graphY = 178;
+        const uint32_t graphWidth = width > 40 ? width - 40 : 0;
+        const uint32_t graphHeight = height > 245 ? height - 245 : 0;
+        if (graphWidth && graphHeight) {
+            FillRect(s_tmBuffer, width, graphX, graphY, graphWidth, graphHeight,
+                     PackBGRA(10, 17, 28));
+            for (uint32_t level = 1; level < 4; ++level) {
+                const uint32_t y = graphY + graphHeight * level / 4;
+                DrawRect(s_tmBuffer, width, graphX, y, graphWidth, 1,
+                         PackBGRA(35, 48, 68));
+            }
+            DrawString(s_tmBuffer, width, graphX, graphY - 16,
+                       "CPU history (last 60 samples)", PackBGRA(130, 150, 180));
+            DrawRect(s_tmBuffer, width, graphX, graphY, graphWidth, graphHeight,
+                     PackBGRA(55, 70, 92));
+            if (s_cpuHistoryCount) {
+                const uint32_t visible = s_cpuHistoryCount < graphWidth
+                    ? s_cpuHistoryCount : graphWidth;
+                const uint32_t first = (s_cpuHistoryNext + CpuHistoryCapacity - visible)
+                    % CpuHistoryCapacity;
+                for (uint32_t column = 0; column < visible; ++column) {
+                    const uint32_t sample = s_cpuHistory[(first + column) % CpuHistoryCapacity];
+                    const uint32_t barHeight = sample >= 100
+                        ? graphHeight - 2 : (graphHeight - 2) * sample / 100;
+                    if (!barHeight) continue;
+                    const uint32_t x = graphX + graphWidth - visible + column;
+                    FillRect(s_tmBuffer, width, x, graphY + graphHeight - 1 - barHeight,
+                             1, barHeight, PackBGRA(0, 190, 230));
+                }
+            }
+        }
     } else if (s_activePage == 2) {
         FillRect(s_tmBuffer, width, 1, 74, width - 2, height - 99, PackBGRA(16, 22, 35));
         if (s_selectedProcessId) {
@@ -1208,6 +1243,10 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
                 if (ComputeCpuPercent(previousCpu, currentCpu, cpuPercent)) {
                     snapshot.cpuPercent = cpuPercent;
                     snapshot.cpuAvailable = true;
+                    s_cpuHistory[s_cpuHistoryNext] = static_cast<uint8_t>(
+                        cpuPercent > 100 ? 100 : cpuPercent);
+                    s_cpuHistoryNext = (s_cpuHistoryNext + 1) % CpuHistoryCapacity;
+                    if (s_cpuHistoryCount < CpuHistoryCapacity) ++s_cpuHistoryCount;
                     if (!cpuSampleReported) {
                         PrintLine("Task Manager: CPU processor snapshot validated.");
                         cpuSampleReported = true;

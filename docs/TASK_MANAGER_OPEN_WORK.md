@@ -9,7 +9,8 @@ Checklist breve; la specifica completa è
 - [x] D2 End task UI e chiusura finestra — QEMU self-test; handle autorizzato,
   `WM_CLOSE`/`WM_DESTROY`, paint, resize e idle.
 - [ ] U1 UI — parziale: finestre, schede, ricerca, selezione e Details attivi;
-  restano ordinamento, grafici storici e copertura QEMU completa.
+  Performance ora ha grafico CPU circolare (60 campioni); restano ordinamento e
+  copertura QEMU completa.
 - [ ] P2 memoria per processo — working set corrente/picco live; commit privato
   senza accounting Mm.
 - [ ] S1/S2 hotkey e SAS — manca il percorso trusted Input/HAL → sessione,
@@ -23,5 +24,6 @@ Checklist breve; la specifica completa è
 `python3 qemu.py --headless --taskmgr-selftest --cmake-build-dir
 build/qemu-taskmgr-isolated --memory-mib 2048 --timeout 90 --stable-seconds 3`
 passato il 2026-11-15: process snapshot, CPU, azione D1, controlli UI,
-paint/resize, chiusura e seriale stabile. Evidenza in
-`/private/tmp/micant-taskmgr-destroy-callback-2/serial.log`.
+paint/resize, chiusura e seriale stabile. La scheda Performance e il grafico sono
+stati renderizzati. Evidenza in
+`/private/tmp/micant-taskmgr-cpu-history/serial.log`.
