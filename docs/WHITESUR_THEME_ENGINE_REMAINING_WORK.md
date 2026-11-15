@@ -84,8 +84,15 @@ the evidence named here, not just declarations or a successful compile.
   name and ordinal. Full QEMU reached both app windows and passed UxTheme/GDI
   pixel probes, then failed the existing maximize caption hit-target assertion;
   therefore the interactive regression remains unverified.
-- [ ] Audit every exported UxTheme function against its public signature,
-  result codes, handle lifetime and documented unsupported cases.
+- [x] Audited every freestanding UxTheme export wrapper against the local
+  public/ReactOS declarations, including ordinal 47; no parameter-count or
+  calling-convention mismatch was found. Bounded implementations and explicit
+  `E_NOTIMPL`/null/false paths are listed in `uxtheme.hpp`. `GetThemeSysColor`
+  currently supports no system-color ids (`CLR_INVALID`), and
+  `GetThemePartSize` supports only `TS_MIN`; other variants remain unsupported.
+  The real import/export probe and the integrated QEMU run passed. The audit
+  also found that the process-local handle table has no lock, so concurrent
+  calls still need synchronization if UxTheme is used from multiple threads.
 - [x] The QEMU import-path matrix covers invalid/stale handles, clipped and
   rounded drawing, alpha, handle-capacity exhaustion/cleanup and GDI dispatch
   failure. These probes all passed in the integrated run
@@ -183,12 +190,19 @@ the evidence named here, not just declarations or a successful compile.
   theme snapshot normal/hover/pressed/inactive colors, opacity and borders.
 - [ ] Replace generic 8x8 caption title glyphs with the shared font service and
   carry safe per-window icon pixels through the compositor surface protocol.
-  The compositor currently has no callable font service or process-safe icon
-  snapshot; process-local HICON values must not be sent in shared metadata.
-  Reusing `FontManager` directly requires NTDLL file/VM syscalls. A local
-  experiment linked its NTDLL dependency and built, but QEMU trapped with
-  `#UD` in the compositor after the first app window was created; keep the
-  current 8x8 fallback until the compositor's import/syscall path is resolved.
+  The compositor is deliberately freestanding (`-nostdlib`) and import-free;
+  `FontManager` loads font files through NTDLL file and VM calls, so it cannot
+  be linked directly until the compositor has an explicit import/syscall and
+  font-loading path. A local experiment linked that dependency and built, but
+  QEMU trapped with `#UD` after the first app window was created; the available
+  PE/map evidence does not identify the trapping instruction. User32 already
+  validates and leases process-local HICON handles, but Win32k retains only an
+  opaque token and the compositor surface protocol has no icon pixels. Closing
+  this item requires a bounded, copied BGRA snapshot keyed by window/type with
+  dimensions, stride, generation, replacement rollback and destruction
+  invalidation; raw HICON values or process pointers must never enter shared
+  metadata. Keep the 8x8 fallback until both transport paths are implemented
+  and have QEMU pixel evidence.
 - [x] Win32k clamps resize against client-area minima, accounting for the
   active frame and caption metrics on all four edges/corners; the minimum
   outer size therefore preserves a 160x100 client. The QEMU input test now
