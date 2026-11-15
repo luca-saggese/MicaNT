@@ -233,11 +233,18 @@ void drawAppWindow(AppWindow& app) noexcept {
     const uint32_t entryBorder = entryStyle &&
         (entryStyle->flags & MICANT_THEME_HAS_BORDER)
         ? themePixel(entryStyle->border) : rgb(191, 202, 215);
+    const uint32_t separator = toolbarStyle &&
+        (toolbarStyle->flags & MICANT_THEME_HAS_BORDER)
+        ? themePixel(toolbarStyle->border) : entryBorder;
+    const uint32_t sidebarBackground = toolbarStyle &&
+        (toolbarStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? toolbarBackground : rgb(236, 241, 247);
+    const uint32_t secondaryForeground = toolbarForeground;
     fill(p, w, h, 0, 0, w, h, windowBackground);
-    fill(p, w, h, 0, 0, 158, h, rgb(236, 241, 247));
+    fill(p, w, h, 0, 0, 158, h, sidebarBackground);
     fill(p, w, h, 0, 0, w, 27, toolbarBackground);
-    fill(p, w, h, 0, 26, w, 1, rgb(207, 216, 228));
-    fill(p, w, h, 12, 8, 8, 8, rgb(53, 121, 191));
+    fill(p, w, h, 0, 26, w, 1, separator);
+    fill(p, w, h, 12, 8, 8, 8, entryForeground);
     text(p, w, h, 27, 8, "Address", toolbarForeground);
     fill(p, w, h, 12, 32, w - 24, 25, entryBackground);
     DrawRect(p, w, 12, 32, w - 24, 25, entryBorder);
@@ -247,9 +254,9 @@ void drawAppWindow(AppWindow& app) noexcept {
                           app.view == View::RecycleBin ? "Recycle Bin" :
                           app.view == View::DateTime ? "Date and Time" : "Network Places";
     text(p, w, h, 22, 40, address, entryForeground);
-    text(p, w, h, 174, 71, "Name", rgb(82, 98, 116));
-    text(p, w, h, 370, 71, "Type", rgb(82, 98, 116));
-    fill(p, w, h, 168, 88, w - 180, 1, rgb(211, 218, 226));
+    text(p, w, h, 174, 71, "Name", secondaryForeground);
+    text(p, w, h, 370, 71, "Type", secondaryForeground);
+    fill(p, w, h, 168, 88, w - 180, 1, separator);
 
     const char* rowsComputer[] = {"Local Disk (C:)", "Data Volume (D:)", "Linux Root (E:)"};
     const char* rowsDocuments[] = {"My Pictures", "My Music", "Readme.txt"};
@@ -315,8 +322,8 @@ void drawAppWindow(AppWindow& app) noexcept {
         }
     }
     fill(p, w, h, 0, h - 24, w, 24, rgb(244, 246, 249));
-    fill(p, w, h, 0, h - 25, w, 1, rgb(212, 219, 228));
-    text(p, w, h, 12, h - 17, "3 objects", rgb(90, 98, 108));
+    fill(p, w, h, 0, h - 25, w, 1, separator);
+    text(p, w, h, 12, h - 17, "3 objects", secondaryForeground);
 }
 
 void present(HWND hwnd) noexcept {
