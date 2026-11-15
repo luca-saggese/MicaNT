@@ -419,7 +419,8 @@ def verify_mouse(
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
                 if ("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
                         "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial and
-                        "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial):
+                        "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
+                        "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial):
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
                     raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
@@ -427,9 +428,35 @@ def verify_mouse(
                     raise RuntimeError("Production User32 BUTTON state or notification failed")
                 if "[MicaNT Theme] BUTTON text message mismatch" in serial:
                     raise RuntimeError("Production User32 BUTTON text messages failed")
+                if "[MicaNT Theme] User32 checkbox state/notification mismatch" in serial or \
+                        "[MicaNT Theme] User32 checkbox creation failed" in serial:
+                    raise RuntimeError("Production User32 checkbox state or notification failed")
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")
+            checkbox_normal = screen("theme-checkbox-unchecked.ppm")
+            move_to(590, 364)
+            checkbox_hover = screen("theme-checkbox-hover.ppm")
+            set_left_button(True)
+            time.sleep(0.2)
+            checkbox_pressed = screen("theme-checkbox-pressed.ppm")
+            set_left_button(False)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if "[MicaNT Theme] Physical checkbox input toggled checked state" in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Physical checkbox input did not toggle its checked state")
+            checkbox_checked = screen("theme-checkbox-checked.ppm")
+            def checkbox_region_changed(left: bytes, right: bytes) -> int:
+                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
+                           for y in range(350, 378) for x in range(530, 680))
+            if checkbox_region_changed(checkbox_normal, checkbox_hover) < 2 or \
+                    checkbox_region_changed(checkbox_hover, checkbox_pressed) < 2 or \
+                    checkbox_region_changed(checkbox_normal, checkbox_checked) < 2:
+                raise RuntimeError("User32 checkbox state did not change its rendered pixels")
             button_normal = screen("theme-button-normal.ppm")
             move_to(590, 320)
             button_hover = screen("theme-button-hover.ppm")

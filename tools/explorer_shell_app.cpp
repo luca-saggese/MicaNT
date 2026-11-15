@@ -103,6 +103,9 @@ struct ShellState {
     bool bufferedPaintReported{};
     HWND themeButtonProbe{};
     bool themeButtonProbeReported{};
+    HWND themeCheckProbe{};
+    uint32_t themeCheckNotifications{};
+    bool themeCheckInputReported{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -1826,6 +1829,42 @@ void openView(View view) noexcept {
                 PrintLine("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered");
             else
                 PrintLine("[MicaNT Theme] Production User32 BUTTON state/notification mismatch");
+            constexpr uintptr_t kThemeCheckId = 0x772u;
+            constexpr uintptr_t kThemeManualCheckId = 0x773u;
+            constexpr UINT kBmGetCheck = 0x00F0u;
+            constexpr UINT kBmSetCheck = 0x00F1u;
+            constexpr UINT kBsAutoCheckBox = 0x0003u;
+            constexpr UINT kBsCheckBox = 0x0002u;
+            g.themeCheckProbe = CreateWindowExW(0, L"BUTTON", L"Auto checkbox",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | kBsAutoCheckBox, 530, 350, 150, 28,
+                app->hwnd, reinterpret_cast<HMENU>(kThemeCheckId), nullptr, nullptr);
+            HWND manualCheck = CreateWindowExW(0, L"BUTTON", L"Manual checkbox",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | kBsCheckBox, 530, 382, 150, 28,
+                app->hwnd, reinterpret_cast<HMENU>(kThemeManualCheckId), nullptr, nullptr);
+            if (g.themeCheckProbe && manualCheck) {
+                ShowWindow(g.themeCheckProbe, SW_SHOW);
+                ShowWindow(manualCheck, SW_SHOW);
+                UpdateWindow(g.themeCheckProbe);
+                UpdateWindow(manualCheck);
+                const bool unchecked = SendMessageW(g.themeCheckProbe, kBmGetCheck, 0, 0) == 0;
+                (void)SendMessageW(g.themeCheckProbe, kBmClick, 0, 0);
+                const bool checked = SendMessageW(g.themeCheckProbe, kBmGetCheck, 0, 0) == 1;
+                (void)SendMessageW(g.themeCheckProbe, kBmClick, 0, 0);
+                const bool reset = SendMessageW(g.themeCheckProbe, kBmGetCheck, 0, 0) == 0;
+                (void)SendMessageW(manualCheck, kBmClick, 0, 0);
+                const bool manualStable = SendMessageW(manualCheck, kBmGetCheck, 0, 0) == 0;
+                (void)SendMessageW(manualCheck, kBmSetCheck, 1, 0);
+                const bool manualSet = SendMessageW(manualCheck, kBmGetCheck, 0, 0) == 1;
+                (void)SendMessageW(manualCheck, kBmSetCheck, 0, 0);
+                UpdateWindow(g.themeCheckProbe);
+                UpdateWindow(manualCheck);
+                const bool notified = g.themeCheckNotifications == 3;
+                PrintLine(unchecked && checked && reset && manualStable && manualSet && notified
+                    ? "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified"
+                    : "[MicaNT Theme] User32 checkbox state/notification mismatch");
+            } else {
+                PrintLine("[MicaNT Theme] User32 checkbox creation failed");
+            }
         } else {
             PrintLine("[MicaNT Theme] Production User32 BUTTON creation failed");
         }
@@ -1878,6 +1917,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         LOWORD(wParam) == 0x771u && HIWORD(wParam) == BN_CLICKED) {
         g.themeButtonProbeReported = true;
         PrintLine("[MicaNT Theme] BUTTON capture probe notification delivered");
+        return 0;
+    }
+    if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
+        (LOWORD(wParam) == 0x772u || LOWORD(wParam) == 0x773u)) {
+        ++g.themeCheckNotifications;
+        if (LOWORD(wParam) == 0x772u && !g.themeCheckInputReported &&
+            SendMessageW(g.themeCheckProbe, 0x00F0u, 0, 0) == 1) {
+            g.themeCheckInputReported = true;
+            PrintLine("[MicaNT Theme] Physical checkbox input toggled checked state");
+        }
         return 0;
     }
     if (hwnd == g.desktop &&

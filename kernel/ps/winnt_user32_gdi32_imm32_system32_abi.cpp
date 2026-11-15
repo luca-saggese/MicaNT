@@ -86,6 +86,7 @@ struct ButtonState {
     uint32_t style{};
     bool armed{};
     bool spaceArmed{};
+    uint32_t checkState{};
     wchar_t text[128]{};
 };
 std::array<ButtonState, 64> g_buttons{};
@@ -100,6 +101,11 @@ constexpr uint32_t kWsDisabled = 0x08000000u;
 constexpr uint32_t kBsTypeMask = 0x0Fu;
 constexpr uint32_t kBsPushButton = 0u;
 constexpr uint32_t kBsDefPushButton = 1u;
+constexpr uint32_t kBsCheckBox = 2u;
+constexpr uint32_t kBsAutoCheckBox = 3u;
+constexpr uint32_t kBsRadioButton = 4u;
+constexpr uint32_t kBs3State = 5u;
+constexpr uint32_t kBsAuto3State = 6u;
 constexpr uint32_t kWmNcCreate = 0x0081u;
 constexpr uint32_t kWmDestroy = 0x0002u;
 constexpr uint32_t kWmNcDestroy = 0x0082u;
@@ -123,6 +129,7 @@ constexpr uint32_t kBmSetState = 0x00F3u;
 constexpr uint32_t kBmSetStyle = 0x00F4u;
 constexpr uint32_t kBmClick = 0x00F5u;
 constexpr uint32_t kBmGetCheck = 0x00F0u;
+constexpr uint32_t kBmSetCheck = 0x00F1u;
 constexpr uint32_t kBnClicked = 0u;
 constexpr uint32_t kMkLButton = 0x0001u;
 constexpr uint32_t kVkSpace = 0x20u;
@@ -138,6 +145,16 @@ constexpr uint32_t kColorButtonHot = 0xFFE5EEF9u;
 constexpr uint32_t kColorButtonPressed = 0xFFD7E4F2u;
 constexpr uint32_t kColorButtonDisabled = 0xFFE8E8E8u;
 constexpr uint32_t kColorBorder = 0xFF8A8A8Au;
+bool isSupportedButtonType(uint32_t type) noexcept {
+    return type <= kBs3State || type == kBsAuto3State;
+}
+bool isCheckableButtonType(uint32_t type) noexcept {
+    return type == kBsCheckBox || type == kBsAutoCheckBox ||
+        type == kBsRadioButton || type == kBs3State || type == kBsAuto3State;
+}
+bool isAutoCheckButtonType(uint32_t type) noexcept {
+    return type == kBsAutoCheckBox || type == kBsAuto3State;
+}
 struct ButtonLock {
     void lock() noexcept {
         while (__atomic_exchange_n(&locked, 1u, __ATOMIC_ACQUIRE))
@@ -1453,7 +1470,7 @@ void* User32_CreateWindowExW(
     }
     if (buttonClass) {
         const uint32_t type = dwStyle & kBsTypeMask;
-        if (type != kBsPushButton && type != kBsDefPushButton) {
+        if (!isSupportedButtonType(type)) {
             setThreadLastError(87); // ERROR_INVALID_PARAMETER: unsupported BS_* type.
             return nullptr;
         }
@@ -1763,26 +1780,65 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
         return false;
     }
 
-    const WinNtRect bounds{0, 0, width, height};
-    const int32_t themeState = (button.state & kButtonDisabled) ? 4 :
+    const uint32_t type = button.style & kBsTypeMask;
+    const bool radio = type == kBsRadioButton;
+    const bool checkable = isCheckableButtonType(type);
+    const int32_t part = checkable ? (radio ? 2 : 3) : 1;
+    const int32_t baseState = (button.state & kButtonDisabled) ? 4 :
         (button.state & kButtonPressed) ? 3 :
         (button.state & kButtonHot) ? 2 :
         (button.state & kButtonDefault) ? 5 : 1;
+    const int32_t themeState = checkable
+        ? static_cast<int32_t>((button.checkState == 2 ? 8 :
+            button.checkState == 1 ? 4 : 0) + baseState) : baseState;
+    const int32_t glyphSize = std::min<int32_t>(13, std::max<int32_t>(9, height - 8));
+    const int32_t glyphY = std::max<int32_t>(0, (height - glyphSize) / 2);
+    const WinNtRect glyph{4, glyphY, 4 + glyphSize, glyphY + glyphSize};
+    const WinNtRect bounds = checkable ? glyph : WinNtRect{0, 0, width, height};
     void* theme = OpenThemeData(hwnd, L"BUTTON");
     bool backgroundDrawn = theme &&
-        DrawThemeBackground(theme, memoryDc, 1, themeState, &bounds, nullptr) == 0;
-    if (!backgroundDrawn) drawButtonFallback(memoryDc, width, height, button);
+        DrawThemeBackground(theme, memoryDc, part, themeState, &bounds, nullptr) == 0;
+    if (!backgroundDrawn && !checkable) drawButtonFallback(memoryDc, width, height, button);
+    if (checkable && !backgroundDrawn) {
+        const uint32_t face = (button.state & kButtonDisabled)
+            ? kColorButtonDisabled : 0xFFFFFFFFu;
+        (void)fillButtonRect(memoryDc, glyph, face);
+        (void)fillButtonRect(memoryDc, {glyph.left, glyph.top, glyph.right, glyph.top + 1}, kColorBorder);
+        (void)fillButtonRect(memoryDc, {glyph.left, glyph.bottom - 1, glyph.right, glyph.bottom}, kColorBorder);
+        (void)fillButtonRect(memoryDc, {glyph.left, glyph.top, glyph.left + 1, glyph.bottom}, kColorBorder);
+        (void)fillButtonRect(memoryDc, {glyph.right - 1, glyph.top, glyph.right, glyph.bottom}, kColorBorder);
+    }
 
     uint32_t textColor = (button.state & kButtonDisabled)
         ? 0xFF777777u : kColorWindowText;
     if (theme) {
         uint32_t themedColor{};
-        if (GetThemeColor(theme, 1, themeState, 3803, &themedColor) == 0)
+        if (GetThemeColor(theme, part, themeState, 3803, &themedColor) == 0)
             textColor = themedColor;
     }
+    if (checkable && button.checkState != 0) {
+        const uint32_t mark = (button.state & kButtonDisabled) ? 0xFF777777u : textColor;
+        const int32_t cx = (glyph.left + glyph.right) / 2;
+        const int32_t cy = (glyph.top + glyph.bottom) / 2;
+        if (radio) {
+            for (int32_t row = -2; row <= 2; ++row) {
+                const int32_t half = row == 0 ? 2 : 1;
+                (void)fillButtonRect(memoryDc, {cx - half, cy + row, cx + half + 1, cy + row + 1}, mark);
+            }
+        } else if (button.checkState == 2) {
+            (void)fillButtonRect(memoryDc, {glyph.left + 3, cy - 1, glyph.right - 3, cy + 2}, mark);
+        } else {
+            (void)fillButtonRect(memoryDc, {glyph.left + 2, cy, glyph.left + 5, cy + 2}, mark);
+            (void)fillButtonRect(memoryDc, {glyph.left + 4, cy + 1, glyph.left + 7, cy + 3}, mark);
+            (void)fillButtonRect(memoryDc, {glyph.left + 6, cy - 2, glyph.left + 8, cy + 2}, mark);
+        }
+    }
+    const WinNtRect textBounds = checkable
+        ? WinNtRect{glyph.right + 5, 0, width, height} : bounds;
     bool textDrawn = theme &&
-        DrawThemeText(theme, memoryDc, 1, themeState, button.text, -1,
-            kDtCenter | kDtVCenter | kDtSingleLine | kDtNoPrefix, 0, &bounds) == 0;
+        DrawThemeText(theme, memoryDc, part, themeState, button.text, -1,
+            (checkable ? 0u : kDtCenter) | kDtVCenter | kDtSingleLine | kDtNoPrefix,
+            0, &textBounds) == 0;
     if (!textDrawn && button.text[0]) {
         ButtonTextExtent extent{};
         size_t textLength{};
@@ -1793,7 +1849,8 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
             extent.cx >= 0 && extent.cy > 0) {
             (void)SetBkMode(memoryDc, 1);
             (void)SetTextColor(memoryDc, colorRef(textColor));
-            const int32_t x = std::max(0, (width - extent.cx) / 2);
+            const int32_t textWidth = textBounds.right - textBounds.left;
+            const int32_t x = textBounds.left + (checkable ? 0 : std::max(0, (textWidth - extent.cx) / 2));
             const int32_t y = std::max(0, (height - extent.cy) / 2);
             (void)TextOutW(memoryDc, x, y, button.text,
                            static_cast<int32_t>(textLength));
@@ -1815,7 +1872,8 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
                               uintptr_t wParam, intptr_t lParam) noexcept {
     if (message == kWmNcCreate) {
         const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
-        if (!create || (static_cast<uint32_t>(create->style) & kBsTypeMask) > kBsDefPushButton)
+        if (!create || !isSupportedButtonType(
+                static_cast<uint32_t>(create->style) & kBsTypeMask))
             return 0;
         ButtonState initial{};
         initial.hwnd = hwnd;
@@ -1885,11 +1943,34 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
     }
 
     if (message == kBmGetState) {
-        const uint32_t state = buttonStateFor(hwnd);
-        return ((state & kButtonPressed) ? 0x0004 : 0) |
-               ((state & kButtonFocused) ? 0x0008 : 0);
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* button = findButton(hwnd);
+        if (!button) return 0;
+        return (button->checkState == 2 ? 0x0003 : button->checkState ? 0x0001 : 0) |
+               ((button->state & kButtonPressed) ? 0x0004 : 0) |
+               ((button->state & kButtonFocused) ? 0x0008 : 0);
     }
-    if (message == kBmGetCheck) return 0; // Push buttons are never checked.
+    if (message == kBmGetCheck) {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* button = findButton(hwnd);
+        return button && isCheckableButtonType(button->style & kBsTypeMask)
+            ? static_cast<intptr_t>(button->checkState) : 0;
+    }
+    if (message == kBmSetCheck) {
+        bool changed = false;
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* button = findButton(hwnd);
+            if (!button || !isCheckableButtonType(button->style & kBsTypeMask)) return 0;
+            const uint32_t type = button->style & kBsTypeMask;
+            uint32_t value = wParam == 1 ? 1u : 0u;
+            if ((type == kBs3State || type == kBsAuto3State) && wParam == 2) value = 2;
+            changed = button->checkState != value;
+            button->checkState = value;
+        }
+        if (changed) invalidateButton(hwnd);
+        return 0;
+    }
     if (message == kBmSetState) {
         {
             ButtonLockGuard guard(g_buttonLock);
@@ -1903,7 +1984,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
     }
     if (message == kBmSetStyle) {
         const uint32_t type = static_cast<uint32_t>(wParam) & kBsTypeMask;
-        if (type != kBsPushButton && type != kBsDefPushButton) return 0;
+        if (!isSupportedButtonType(type)) return 0;
         {
             ButtonLockGuard guard(g_buttonLock);
             auto* button = findButton(hwnd);
@@ -1911,6 +1992,9 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             button->style = (button->style & ~kBsTypeMask) | type;
             if (type == kBsDefPushButton) button->state |= kButtonDefault;
             else button->state &= ~kButtonDefault;
+            if (!isCheckableButtonType(type)) button->checkState = 0;
+            else if (type != kBs3State && type != kBsAuto3State && button->checkState == 2)
+                button->checkState = 0;
         }
         if (lParam) invalidateButton(hwnd);
         return 0;
@@ -1921,6 +2005,11 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             auto* button = findButton(hwnd);
             if (!button || (button->state & kButtonDisabled)) return 0;
             button->state |= kButtonPressed;
+            const uint32_t type = button->style & kBsTypeMask;
+            if (isAutoCheckButtonType(type)) {
+                button->checkState = type == kBsAuto3State
+                    ? (button->checkState + 1u) % 3u : (button->checkState == 0 ? 1u : 0u);
+            }
         }
         invalidateButton(hwnd);
         notifyButtonClicked(hwnd);
@@ -1966,6 +2055,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         auto* button = findButton(hwnd);
         if (!button) return 0;
         const uint32_t oldState = button->state;
+        const uint32_t oldCheckState = button->checkState;
         switch (message) {
         case kWmSetFocus:
             button->state |= kButtonFocused;
@@ -2047,7 +2137,13 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             repaint = true;
             break;
         }
-        repaint |= oldState != button->state;
+        if (click && isAutoCheckButtonType(button->style & kBsTypeMask)) {
+            const uint32_t type = button->style & kBsTypeMask;
+            button->checkState = type == kBsAuto3State
+                ? (button->checkState + 1u) % 3u
+                : (button->checkState == 0 ? 1u : 0u);
+        }
+        repaint |= oldState != button->state || oldCheckState != button->checkState;
     }
     if (acquireMouse) (void)User32_SetCapture(hwnd);
     if (releaseMouse) (void)User32_ReleaseCapture();

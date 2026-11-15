@@ -206,9 +206,11 @@ inline uint8_t stateIndex(uint8_t control, int state) noexcept {
             case 2: return 1;
             case 3: return 2;
             case 4: return 4;
-            case 5: case 6: return 5;
+            case 5: case 6: case 9: case 10: return 5;
             case 7: return 2;
             case 8: return 4;
+            case 11: return 2;
+            case 12: return 4;
             default: return 0xFF;
         }
     }
@@ -222,10 +224,21 @@ inline uint8_t stateIndex(uint8_t control, int state) noexcept {
         default: return 0xFF;
     }
 }
-inline const MicaThemeStyleSnapshot* style(const ThemeHandle& handle, int state) noexcept {
-    const uint8_t stateSlot = stateIndex(handle.control, state);
+inline bool controlForPart(const ThemeHandle& handle, int part, uint8_t& control) noexcept {
+    control = handle.control;
+    if (handle.control != 0) return part == 1;
+    if (part == 1) return true; // BP_PUSHBUTTON
+    if (part == 2) { control = 3; return true; } // BP_RADIOBUTTON
+    if (part == 3) { control = 2; return true; } // BP_CHECKBOX
+    return false;
+}
+inline const MicaThemeStyleSnapshot* style(const ThemeHandle& handle, int state,
+                                           int part = 1) noexcept {
+    uint8_t control{};
+    if (!controlForPart(handle, part, control)) return nullptr;
+    const uint8_t stateSlot = stateIndex(control, state);
     if (stateSlot >= MICANT_THEME_STATE_COUNT) return nullptr;
-    const size_t index = static_cast<size_t>(handle.control) * MICANT_THEME_STATE_COUNT + stateSlot;
+    const size_t index = static_cast<size_t>(control) * MICANT_THEME_STATE_COUNT + stateSlot;
     return index < MICANT_THEME_STYLE_COUNT ? &handle.snapshot.styles[index] : nullptr;
 }
 }
@@ -266,8 +279,9 @@ inline win32::HRESULT GetThemeColor(HTHEME hTheme, int iPartId, int iStateId, in
     *pColor = 0;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style) return detail::kNotFound;
     uint32_t color{};
     if (iPropId == 3803 && (style->flags & MICANT_THEME_HAS_FOREGROUND)) color = style->foreground;
@@ -286,9 +300,10 @@ inline win32::HRESULT GetThemeFont(HTHEME hTheme, void* /*hdc*/, int iPartId,
     if (!pFont) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
     if (iPropId != 210) return detail::kNotImplemented; // TMT_FONT
-    const auto* fontStyle = detail::style(*handle, iStateId);
+    const auto* fontStyle = detail::style(*handle, iStateId, iPartId);
     if (!fontStyle) return detail::kNotFound;
     constexpr uint32_t fontFlags = MICANT_THEME_HAS_FONT_SIZE |
         MICANT_THEME_HAS_FONT_WEIGHT | MICANT_THEME_HAS_FONT_STYLE |
@@ -335,8 +350,9 @@ inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId
     if (eSize != 0) return detail::kNotImplemented; // TS_MIN only
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style) return detail::kNotFound;
     int32_t width = (style->flags & MICANT_THEME_HAS_MIN_WIDTH) ? style->minWidth : 0;
     int32_t height = (style->flags & MICANT_THEME_HAS_MIN_HEIGHT) ? style->minHeight : 0;
@@ -358,8 +374,9 @@ inline win32::HRESULT GetThemeBackgroundContentRect(HTHEME hTheme, void* /*hdc*/
     if (!pBoundingRect) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style) return detail::kNotFound;
     if (bounds.right < bounds.left || bounds.bottom < bounds.top)
         return detail::kInvalidArgument;
@@ -385,8 +402,9 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
     if (!hdc || !pRect) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style || !(style->flags & (MICANT_THEME_HAS_BACKGROUND | MICANT_THEME_HAS_BORDER)))
         return detail::kNotFound;
     const uint32_t radius = (style->flags & MICANT_THEME_HAS_RADIUS)
@@ -560,8 +578,9 @@ inline win32::HRESULT GetThemeBackgroundExtent(HTHEME hTheme, void* /*hdc*/, int
     if (!pContentRect) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style) return detail::kNotFound;
     if (content.right < content.left || content.bottom < content.top)
         return detail::kInvalidArgument;
@@ -690,9 +709,10 @@ inline win32::HRESULT GetThemeMargins(HTHEME hTheme, void* /*hdc*/, int iPartId,
     *pMargins = {0, 0, 0, 0};
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
     if (iPropId != 3602) return detail::kNotFound; // TMT_CONTENTMARGINS
-    const auto* style = detail::style(*handle, iStateId);
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style || !(style->flags & MICANT_THEME_HAS_PADDING)) return detail::kNotFound;
     pMargins->cyTopHeight = style->padding[0];
     pMargins->cxRightWidth = style->padding[1];
@@ -706,8 +726,9 @@ inline win32::HRESULT GetThemeInt(HTHEME hTheme, int iPartId, int iStateId, int 
     *piVal = 0;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style) return detail::kNotFound;
     if (iPropId == 2403 && (style->flags & MICANT_THEME_HAS_BORDER_WIDTH)) {
         *piVal = style->borderWidth; // TMT_BORDERSIZE
@@ -726,8 +747,9 @@ inline win32::HRESULT DrawThemeText(HTHEME hTheme, void* hdc, int iPartId,
     if (!hdc || !text || !rect || charCount < -1) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
-    const auto* themedStyle = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
+    const auto* themedStyle = detail::style(*handle, iStateId, iPartId);
     if (!themedStyle) return detail::kNotFound;
     const auto* textStyle = themedStyle;
     if (!(textStyle->flags & MICANT_THEME_HAS_FOREGROUND)) {
@@ -806,8 +828,9 @@ inline win32::HRESULT DrawThemeText(HTHEME hTheme, void* hdc, int iPartId,
 
 inline win32::BOOL IsThemeBackgroundPartiallyTransparent(HTHEME hTheme, int iPartId, int iStateId) noexcept {
     auto* handle = detail::lookup(hTheme);
-    if (!handle || iPartId != 1) return win32::FALSE;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!handle || !detail::controlForPart(*handle, iPartId, control)) return win32::FALSE;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style || !(style->flags & MICANT_THEME_HAS_BACKGROUND)) return win32::FALSE;
     uint32_t alpha = style->background >> 24;
     if (style->flags & MICANT_THEME_HAS_OPACITY)
@@ -817,8 +840,9 @@ inline win32::BOOL IsThemeBackgroundPartiallyTransparent(HTHEME hTheme, int iPar
 
 inline win32::BOOL IsThemePartDefined(HTHEME hTheme, int iPartId, int iStateId) noexcept {
     auto* handle = detail::lookup(hTheme);
-    if (!handle || iPartId != 1) return win32::FALSE;
-    const auto* style = detail::style(*handle, iStateId);
+    uint8_t control{};
+    if (!handle || !detail::controlForPart(*handle, iPartId, control)) return win32::FALSE;
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     return style && style->flags ? win32::TRUE : win32::FALSE;
 }
 
@@ -854,10 +878,11 @@ inline win32::HRESULT WINAPI GetThemeBool(HTHEME hTheme, int32_t iPartId,
     *pfVal = win32::FALSE;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
     constexpr int32_t kTmtTransparent = 2203;
     if (iPropId != kTmtTransparent) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style || !(style->flags & MICANT_THEME_HAS_BACKGROUND))
         return detail::kNotFound;
     uint32_t alpha = style->background >> 24;
@@ -879,11 +904,12 @@ inline win32::HRESULT WINAPI GetThemeEnumValue(HTHEME hTheme, int32_t iPartId,
     *piVal = 0;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
-    if (iPartId != 1) return detail::kNotImplemented;
+    uint8_t control{};
+    if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
     constexpr int32_t kTmtBackgroundType = 4001;
     constexpr int32_t kBackgroundTypeBorderFill = 1;
     if (iPropId != kTmtBackgroundType) return detail::kNotImplemented;
-    const auto* style = detail::style(*handle, iStateId);
+    const auto* style = detail::style(*handle, iStateId, iPartId);
     if (!style || !(style->flags & (MICANT_THEME_HAS_BACKGROUND |
                                    MICANT_THEME_HAS_BORDER)))
         return detail::kNotFound;

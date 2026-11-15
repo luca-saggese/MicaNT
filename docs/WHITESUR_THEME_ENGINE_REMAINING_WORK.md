@@ -255,6 +255,19 @@ the evidence named here, not just declarations or a successful compile.
   label and confirmed an overlong update leaves the old label intact. The full
   QEMU input suite, including button hover/press pixels and Light-to-Dark, passed
   at `/private/tmp/micant-theme-button-text-final-2`.
+- [x] Production User32 BUTTON now accepts `BS_CHECKBOX`, `BS_AUTOCHECKBOX`,
+  `BS_3STATE`, `BS_AUTO3STATE` and manual `BS_RADIOBUTTON`, tracks check state
+  through `BM_GETCHECK`/`BM_SETCHECK` and `BM_GETSTATE`, and draws glyphs and
+  labels through the real BUTTON checkbox/radio UxTheme parts with a GDI
+  fallback. Automatic checkbox/three-state activation toggles only on an
+  enabled click; manual styles retain state and still notify once. Explorer
+  verified automatic/manual checkbox transitions, programmatic state set,
+  notification count and physical mouse activation in QEMU. QMP screenshots
+  passed pixel comparisons for unchecked, hover, pressed and checked states at
+  `/private/tmp/micant-theme-checkbox-radio-block1-escalated`. The full
+  `qemu.py` run later stopped at the preexisting push-button pressed-pixel
+  assertion, so complete input-suite success is not claimed. Auto-radio group
+  exclusivity and explicit three-state/radio pixel probes remain open.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
