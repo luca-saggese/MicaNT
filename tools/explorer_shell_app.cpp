@@ -1790,6 +1790,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (message == WM_COMMAND && reinterpret_cast<HWND>(lParam) == g.themeButtonProbe &&
         LOWORD(wParam) == 0x771u && HIWORD(wParam) == BN_CLICKED) {
         g.themeButtonProbeReported = true;
+        PrintLine("[MicaNT Theme] BUTTON capture probe notification delivered");
         return 0;
     }
     if (hwnd == g.desktop &&

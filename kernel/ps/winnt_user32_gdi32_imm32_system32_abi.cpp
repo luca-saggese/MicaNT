@@ -38,6 +38,8 @@ void* User32_BeginPaint(void*, WinNtPaintStruct*) noexcept;
 int32_t User32_EndPaint(void*, const WinNtPaintStruct*) noexcept;
 intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 void* User32_SetFocus(void*) noexcept;
+void* User32_SetCapture(void*) noexcept;
+int32_t User32_ReleaseCapture() noexcept;
 intptr_t User32_DefWindowProcW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 #endif
 
@@ -82,6 +84,7 @@ struct ButtonState {
     uintptr_t id{};
     uint32_t state{};
     uint32_t style{};
+    bool armed{};
     wchar_t text[128]{};
 };
 std::array<ButtonState, 64> g_buttons{};
@@ -112,6 +115,7 @@ constexpr uint32_t kWmLButtonUp = 0x0202u;
 constexpr uint32_t kWmKeyDown = 0x0100u;
 constexpr uint32_t kWmKeyUp = 0x0101u;
 constexpr uint32_t kWmMouseLeave = 0x02A3u;
+constexpr uint32_t kWmCaptureChanged = 0x0215u;
 constexpr uint32_t kWmCommand = 0x0111u;
 constexpr uint32_t kBmGetState = 0x00F2u;
 constexpr uint32_t kBmSetState = 0x00F3u;
@@ -644,6 +648,9 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kIsIconic);
     MICA_WIN32K_PROC(MicaWin32kGetForegroundWindow);
     MICA_WIN32K_PROC(MicaWin32kSetFocus);
+    MICA_WIN32K_PROC(MicaWin32kGetCapture);
+    MICA_WIN32K_PROC(MicaWin32kSetCapture);
+    MICA_WIN32K_PROC(MicaWin32kReleaseCapture);
     MICA_WIN32K_PROC(MicaWin32kGetCursorPos);
     MICA_WIN32K_PROC(MicaWin32kGetClipCursor);
     MICA_WIN32K_PROC(MicaWin32kSetCursorPos);
@@ -1638,11 +1645,24 @@ void leaveHotButton(void* except) noexcept {
         if (!g_hotButton || g_hotButton == except) return;
         previous = g_hotButton;
         if (auto* button = findButton(previous)) {
-            button->state &= ~(kButtonHot | kButtonPressed);
+            button->state &= ~kButtonHot;
+            if (!button->armed) button->state &= ~kButtonPressed;
         }
         g_hotButton = nullptr;
     }
     invalidateButton(previous);
+}
+
+bool buttonPointInside(void* hwnd, intptr_t lParam) noexcept {
+    using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
+    const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
+    MicaWin32kRect client{};
+    if (!getRect || !getRect(hwnd, &client)) return false;
+    const auto packed = static_cast<uintptr_t>(lParam);
+    const int32_t x = static_cast<int16_t>(packed & 0xFFFFu);
+    const int32_t y = static_cast<int16_t>((packed >> 16) & 0xFFFFu);
+    return x >= client.left && y >= client.top &&
+        x < client.right && y < client.bottom;
 }
 
 void notifyButtonClicked(void* hwnd) noexcept {
@@ -1912,25 +1932,32 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
 
     if (message == kWmNcDestroy || message == kWmDestroy) {
         bool wasHot = false;
+        bool wasArmed = false;
         {
             ButtonLockGuard guard(g_buttonLock);
             auto* button = findButton(hwnd);
             if (button) {
                 wasHot = g_hotButton == hwnd;
+                wasArmed = button->armed;
                 *button = {};
             }
             if (wasHot) g_hotButton = nullptr;
         }
+        if (wasArmed) (void)User32_ReleaseCapture();
         if (message == kWmNcDestroy) return 0;
         return 0;
     }
 
     bool repaint = false;
     bool click = false;
+    bool acquireMouse = false;
+    bool releaseMouse = false;
+    const bool pointInside = (message == kWmMouseMove || message == kWmLButtonUp)
+        ? buttonPointInside(hwnd, lParam) : true;
     if (message == kWmMouseMove) leaveHotButton(hwnd);
     if (message == kWmSetFocus || message == kWmKillFocus ||
         message == kWmEnable || message == kWmMouseMove ||
-        message == kWmMouseLeave || message == kWmLButtonDown ||
+        message == kWmMouseLeave || message == kWmCaptureChanged || message == kWmLButtonDown ||
         message == kWmLButtonUp || message == kWmKeyDown || message == kWmKeyUp ||
         message == 0x031Au || message == 0x001Au) {
         ButtonLockGuard guard(g_buttonLock);
@@ -1943,30 +1970,56 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             break;
         case kWmKillFocus:
             button->state &= ~(kButtonFocused | kButtonPressed);
+            if (button->armed) {
+                button->armed = false;
+                releaseMouse = true;
+            }
             break;
         case kWmEnable:
             if (wParam) button->state &= ~kButtonDisabled;
-            else button->state = (button->state | kButtonDisabled) & ~kButtonPressed;
+            else {
+                button->state = (button->state | kButtonDisabled) & ~kButtonPressed;
+                if (button->armed) {
+                    button->armed = false;
+                    releaseMouse = true;
+                }
+            }
             break;
         case kWmMouseMove:
-            g_hotButton = hwnd;
-            button->state |= kButtonHot;
-            if ((wParam & kMkLButton) && (button->state & kButtonPressed))
-                button->state |= kButtonPressed;
+            if (pointInside) {
+                g_hotButton = hwnd;
+                button->state |= kButtonHot;
+            } else {
+                button->state &= ~kButtonHot;
+                if (g_hotButton == hwnd) g_hotButton = nullptr;
+            }
+            if (button->armed && (wParam & kMkLButton)) {
+                if (pointInside) button->state |= kButtonPressed;
+                else button->state &= ~kButtonPressed;
+            }
             break;
         case kWmMouseLeave:
-            button->state &= ~(kButtonHot | kButtonPressed);
+            button->state &= ~kButtonHot;
+            if (!button->armed) button->state &= ~kButtonPressed;
             if (g_hotButton == hwnd) g_hotButton = nullptr;
+            break;
+        case kWmCaptureChanged:
+            button->armed = false;
+            button->state &= ~kButtonPressed;
             break;
         case kWmLButtonDown:
             if (!(button->state & kButtonDisabled)) {
                 button->state |= kButtonHot | kButtonPressed | kButtonFocused;
+                button->armed = true;
+                acquireMouse = true;
                 g_hotButton = hwnd;
             }
             break;
         case kWmLButtonUp:
-            click = (button->state & kButtonPressed) &&
+            click = button->armed && pointInside &&
                     !(button->state & kButtonDisabled);
+            releaseMouse = button->armed;
+            button->armed = false;
             button->state &= ~kButtonPressed;
             break;
         case kWmKeyDown:
@@ -1985,6 +2038,8 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         }
         repaint |= oldState != button->state;
     }
+    if (acquireMouse) (void)User32_SetCapture(hwnd);
+    if (releaseMouse) (void)User32_ReleaseCapture();
     if (message == kWmLButtonDown) (void)User32_SetFocus(hwnd);
     if (repaint) invalidateButton(hwnd);
     if (message == kWmPaint) {
@@ -2214,6 +2269,24 @@ void* User32_SetFocus(void* hWnd) noexcept {
     using Fn=void* (*)(void*);
     auto fn=Win32kProc<Fn>("MicaWin32kSetFocus");
     return fn ? fn(hWnd) : nullptr;
+}
+
+void* User32_GetCapture() noexcept {
+    using Fn=void* (*)(void);
+    auto fn=Win32kProc<Fn>("MicaWin32kGetCapture");
+    return fn ? fn() : nullptr;
+}
+
+void* User32_SetCapture(void* hWnd) noexcept {
+    using Fn=void* (*)(void*);
+    auto fn=Win32kProc<Fn>("MicaWin32kSetCapture");
+    return fn ? fn(hWnd) : nullptr;
+}
+
+int32_t User32_ReleaseCapture() noexcept {
+    using Fn=int32_t (*)(void);
+    auto fn=Win32kProc<Fn>("MicaWin32kReleaseCapture");
+    return fn ? fn() : 0;
 }
 
 int32_t User32_AdjustWindowRectEx(WinNtRect* lpRect, uint32_t /*dwStyle*/, int32_t /*bMenu*/, uint32_t /*dwExStyle*/) noexcept {
@@ -3077,6 +3150,15 @@ __declspec(dllexport) void* GetForegroundWindow(void) {
 }
 __declspec(dllexport) void* SetFocus(void* hWnd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetFocus(hWnd);
+}
+__declspec(dllexport) void* GetCapture(void) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetCapture();
+}
+__declspec(dllexport) void* SetCapture(void* hWnd) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetCapture(hWnd);
+}
+__declspec(dllexport) int32_t ReleaseCapture(void) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_ReleaseCapture();
 }
 __declspec(dllexport) int32_t AdjustWindowRectEx(micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* lpRect, uint32_t dwStyle, int32_t bMenu, uint32_t dwExStyle) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_AdjustWindowRectEx(lpRect, dwStyle, bMenu, dwExStyle);

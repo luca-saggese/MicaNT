@@ -471,6 +471,25 @@ void* MicaWin32kSetFocus(void* hwnd) {
         ? reinterpret_cast<void*>(value.result) : nullptr;
 }
 
+void* MicaWin32kGetCapture(void) {
+    MicaWin32kRequest value{};
+    return request(MICANT_WIN32K_OP_GET_CAPTURE, value)
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
+void* MicaWin32kSetCapture(void* hwnd) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    return request(MICANT_WIN32K_OP_SET_CAPTURE, value)
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
+int32_t MicaWin32kReleaseCapture(void) {
+    MicaWin32kRequest value{};
+    return request(MICANT_WIN32K_OP_RELEASE_CAPTURE, value)
+        ? static_cast<int32_t>(value.result) : 0;
+}
+
 int32_t MicaWin32kSetWindowIcon(void* hwnd, uint32_t type, uint64_t icon,
                                 uint64_t* previous) {
     if (previous) *previous = 0;

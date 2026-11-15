@@ -116,7 +116,10 @@ enum {
     MICANT_WIN32K_OP_GET_THEME_SNAPSHOT,
     MICANT_WIN32K_OP_BEGIN_WINDOW_UPDATE,
     MICANT_WIN32K_OP_END_WINDOW_UPDATE,
-    MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS
+    MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS,
+    MICANT_WIN32K_OP_GET_CAPTURE,
+    MICANT_WIN32K_OP_SET_CAPTURE,
+    MICANT_WIN32K_OP_RELEASE_CAPTURE
 };
 
 enum {
@@ -191,6 +194,9 @@ MICANT_WIN32K_API int32_t MicaWin32kIsWindowVisible(void*);
 MICANT_WIN32K_API int32_t MicaWin32kIsIconic(void*);
 MICANT_WIN32K_API void* MicaWin32kGetForegroundWindow(void);
 MICANT_WIN32K_API void* MicaWin32kSetFocus(void*);
+MICANT_WIN32K_API void* MicaWin32kGetCapture(void);
+MICANT_WIN32K_API void* MicaWin32kSetCapture(void*);
+MICANT_WIN32K_API int32_t MicaWin32kReleaseCapture(void);
 MICANT_WIN32K_API int32_t MicaWin32kGetCursorPos(MicaWin32kPoint*);
 MICANT_WIN32K_API int32_t MicaWin32kGetClipCursor(MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kSetCursorPos(int32_t, int32_t);

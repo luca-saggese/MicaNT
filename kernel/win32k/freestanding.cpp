@@ -164,6 +164,8 @@ void resetCursorImage() noexcept {
 }
 uint64_t g_captionCapture{};
 uint8_t g_pressedCaptionButton{};
+uint64_t g_mouseCaptureWindow{};
+uint64_t g_mouseCaptureOwner{};
 PointerGesture g_pointerGesture{};
 uint64_t g_cursorHitWindow{};
 int32_t g_cursorHitTest{};
@@ -829,6 +831,10 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 g_captionCapture = 0;
                 g_pressedCaptionButton = 0;
             }
+            if (g_mouseCaptureWindow == window->handle) {
+                g_mouseCaptureWindow = 0;
+                g_mouseCaptureOwner = 0;
+            }
             window->active = false;
             if (wasForeground) {
                 g_foregroundWindow = 0;
@@ -1045,6 +1051,33 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             request.result = previousHandle;
             return NtStatus::Success;
         }
+        case MICANT_WIN32K_OP_GET_CAPTURE:
+            request.result = g_mouseCaptureOwner == ownerProcessId
+                ? g_mouseCaptureWindow : 0;
+            return NtStatus::Success;
+        case MICANT_WIN32K_OP_SET_CAPTURE: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window || !window->visible || window->iconic)
+                return NtStatus::InvalidHandle;
+            request.result = g_mouseCaptureOwner == ownerProcessId
+                ? g_mouseCaptureWindow : 0;
+            if (g_mouseCaptureWindow != window->handle) {
+                if (auto* previous = findWindowAny(g_mouseCaptureWindow))
+                    (void)enqueueWindowMessage(*previous, 0x0215u, window->handle, 0);
+                g_mouseCaptureWindow = window->handle;
+                g_mouseCaptureOwner = ownerProcessId;
+            }
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_RELEASE_CAPTURE:
+            if (g_mouseCaptureOwner != ownerProcessId || !g_mouseCaptureWindow)
+                return NtStatus::InvalidDeviceState;
+            if (auto* previous = findWindowAny(g_mouseCaptureWindow))
+                (void)enqueueWindowMessage(*previous, 0x0215u, 0, 0);
+            g_mouseCaptureWindow = 0;
+            g_mouseCaptureOwner = 0;
+            request.result = 1;
+            return NtStatus::Success;
         case MICANT_WIN32K_OP_SET_WINDOW_ICON: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             const uint32_t type = static_cast<uint32_t>(request.args[1]);
@@ -1211,6 +1244,10 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
                 g_pressedCaptionButton = 0;
             }
         }
+        if (g_mouseCaptureOwner == ownerProcessId) {
+            g_mouseCaptureWindow = 0;
+            g_mouseCaptureOwner = 0;
+        }
         for (auto& windowClass : g_classes)
             if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
         if (g_cursorClipOwner == ownerProcessId) {
@@ -1371,7 +1408,16 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         }
         return true;
     }
-    if (!target) return false;
+    auto* routeTarget = target;
+    if (g_mouseCaptureWindow && g_mouseCaptureOwner) {
+        auto* capture = findWindow(g_mouseCaptureWindow, g_mouseCaptureOwner);
+        if (capture && capture->visible && !capture->iconic) routeTarget = capture;
+        else {
+            g_mouseCaptureWindow = 0;
+            g_mouseCaptureOwner = 0;
+        }
+    }
+    if (!routeTarget) return false;
 
     uint32_t keyState = 0;
     if (currentButtons & 0x01u) keyState |= 0x0001u;
@@ -1380,14 +1426,14 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     // Mouse message lParam coordinates are client-relative. Hit testing and
     // capture use screen coordinates above, so remove the nonclient frame and
     // caption before publishing WM_MOUSEMOVE / button messages to the app.
-    const int32_t clientFrame = frameInset(*target);
-    const int32_t clientCaption = captionHeight(*target);
-    const auto localX64 = static_cast<int64_t>(x) - target->x - clientFrame;
-    const auto localY64 = static_cast<int64_t>(y) - target->y - clientFrame - clientCaption;
+    const int32_t clientFrame = frameInset(*routeTarget);
+    const int32_t clientCaption = captionHeight(*routeTarget);
+    const auto localX64 = static_cast<int64_t>(x) - routeTarget->x - clientFrame;
+    const auto localY64 = static_cast<int64_t>(y) - routeTarget->y - clientFrame - clientCaption;
     const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
     const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
-    if (moved && !enqueueLatestWindowMessage(*target, kWmMouseMove,
+    if (moved && !enqueueLatestWindowMessage(*routeTarget, kWmMouseMove,
                                              keyState, packedPoint, x, y))
         return false;
 
@@ -1401,19 +1447,19 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         const uint32_t mask = buttonMasks[index];
         if ((previousButtons & mask) == (currentButtons & mask)) continue;
         if (currentButtons & mask) {
-            target->zOrder = nextZOrder();
-            if (g_foregroundWindow != target->handle) {
+            routeTarget->zOrder = nextZOrder();
+            if (g_foregroundWindow != routeTarget->handle) {
                 auto* previous = findWindowAny(g_foregroundWindow);
                 if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
                     return false;
-                g_foregroundWindow = target->handle;
-                if (!enqueueWindowMessage(*target, kWmActivate, 1, 0) ||
-                    !enqueueWindowMessage(*target, kWmSetFocus, 0, 0)) return false;
+                g_foregroundWindow = routeTarget->handle;
+                if (!enqueueWindowMessage(*routeTarget, kWmActivate, 1, 0) ||
+                    !enqueueWindowMessage(*routeTarget, kWmSetFocus, 0, 0)) return false;
             }
-            if (!enqueueWindowMessage(*target, downMessages[index], keyState,
+            if (!enqueueWindowMessage(*routeTarget, downMessages[index], keyState,
                                       packedPoint, x, y)) return false;
             buttonDelivered = true;
-        } else if (!enqueueWindowMessage(*target, upMessages[index], keyState,
+        } else if (!enqueueWindowMessage(*routeTarget, upMessages[index], keyState,
                                          packedPoint, x, y)) {
             return false;
         } else {

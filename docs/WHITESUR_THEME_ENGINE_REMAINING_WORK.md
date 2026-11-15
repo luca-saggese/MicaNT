@@ -210,9 +210,16 @@ the evidence named here, not just declarations or a successful compile.
   `BM_GETSTATE`, `BM_CLICK`, and the parent notification. QEMU sampled the
   control's DIB-backed screen pixels in normal (`#F0F0F0`), hover (`#E5EEF9`)
   and pressed (`#D7E4F2`) states in
-  `/private/tmp/micant-theme-user32-button-final`. Disabled/focus keyboard
-  transitions and cancellation after dragging outside still need dedicated
-  input probes; Win32k has no mouse-capture path yet.
+  `/private/tmp/micant-theme-user32-button-final`.
+- [x] Production User32 `GetCapture`/`SetCapture`/`ReleaseCapture` now use
+  canonical Win32k state, route captured mouse moves and releases beyond window
+  bounds, send `WM_CAPTURECHANGED`, and clear capture on window/process teardown.
+  BUTTON tracks an armed press separately from its visible pressed state, so
+  dragging outside cancels the visual and reentry restores it; it sends
+  `BN_CLICKED` only when released inside. QEMU checked outside/reentry pixels
+  and notification counts in
+  `/private/tmp/micant-theme-button-capture-verified`. Capture ownership is
+  process-scoped; Win32 per-thread capture routing remains unsupported.
 - [x] The production BUTTON WndProc handles `WM_SETTEXT`, `WM_GETTEXT`, and
   `WM_GETTEXTLENGTH` against its owned 128-WCHAR label. Updates are copied only
   when they fit, then invalidate the control; reads honor the caller's
@@ -226,7 +233,8 @@ the evidence named here, not just declarations or a successful compile.
   WhiteSur snapshot. This focused probe passed; the enclosing `--verify-input`
   run still stops at the concurrent parent-folder navigation assertion.
 - [ ] Verify normal, hover, pressed, checked, focused and disabled states,
-  dimensions, clipping, keyboard/mouse input and theme changes in QEMU.
+  dimensions, clipping, keyboard focus and complete mouse input/thread capture
+  behavior across all controls in QEMU.
 - [ ] Preserve explicit application colors/styles where the Win32 contract
   gives them precedence; verify all failure paths instead of reporting success.
 

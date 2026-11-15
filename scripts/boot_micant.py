@@ -421,6 +421,7 @@ def verify_mouse(
             move_to(590, 320)
             button_hover = screen("theme-button-hover.ppm")
             set_left_button(True)
+            time.sleep(0.2)
             button_pressed = screen("theme-button-pressed.ppm")
             set_left_button(False)
             def button_region_changed(left: bytes, right: bytes) -> int:
@@ -434,6 +435,44 @@ def verify_mouse(
                 raise RuntimeError("User32 BUTTON hover did not change its rendered pixels")
             if button_region_changed(button_hover, button_pressed) < 4:
                 raise RuntimeError("User32 BUTTON pressed state did not change its rendered pixels")
+            # While the button owns capture, leaving its bounds must clear the
+            # pressed visual without delivering a click. Reentering and
+            # releasing inside must produce exactly one notification.
+            notification = "[MicaNT Theme] BUTTON capture probe notification delivered"
+            serial = serial_path.read_text(encoding="utf-8", errors="replace")
+            notification_baseline = serial.count(notification)
+            if notification_baseline < 1:
+                raise RuntimeError("BUTTON notification probe did not reach its initial click")
+            move_to(590, 320)
+            set_left_button(True)
+            drag_by(100, 0)
+            button_outside = screen("theme-button-capture-outside.ppm")
+            if button_region_changed(button_normal, button_outside) >= \
+                    button_region_changed(button_normal, button_pressed):
+                raise RuntimeError("BUTTON capture did not cancel pressed pixels outside its bounds")
+            set_left_button(False)
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(notification) != notification_baseline:
+                    raise RuntimeError("BUTTON release outside its bounds delivered a click")
+                time.sleep(0.05)
+            drag_by(-100, 0)
+            set_left_button(True)
+            drag_by(100, 0)
+            drag_by(-100, 0)
+            button_reentered = screen("theme-button-capture-reentered.ppm")
+            if button_region_changed(button_hover, button_reentered) < 4:
+                raise RuntimeError("BUTTON capture did not restore pressed pixels on reentry")
+            set_left_button(False)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(notification) == notification_baseline + 1:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("BUTTON release inside its bounds did not deliver one click")
             # The first Explorer window is placed at (190,90); exercise its
             # first drive row and the parent button before opening another view.
             def click_at(x: int, y: int) -> None:
