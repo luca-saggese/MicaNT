@@ -72,6 +72,7 @@ struct ShellState {
     bool fontReady{};
     MicaThemeSnapshot visualTheme{};
     bool visualThemeReady{};
+    char themeProfile[96]{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -468,16 +469,29 @@ bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
     return true;
 }
 
-void loadActiveVisualTheme() noexcept {
+void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
+    const bool hadPrevious = g.visualThemeReady;
+    const MicaThemeSnapshot previousTheme = g.visualTheme;
+    const auto restorePreviousSnapshot = [&]() noexcept {
+        if (hadPrevious) (void)MicaWin32kSetThemeSnapshot(&previousTheme);
+    };
     wchar_t path[512]{};
     size_t cursor = 0, profileBytes = 0;
     char profile[96]{};
-    if (!appendSystemRoot(path, std::size(path), cursor) ||
-        !appendWide(path, std::size(path), cursor,
-                    L"\\System\\Themes\\active.profile", 29) ||
-        !readBoundedFile(path, profile, sizeof(profile) - 1, profileBytes)) {
-        PrintLine("[MicaNT Theme] Active profile could not be read");
-        return;
+    if (selectedProfile) {
+        while (selectedProfile[profileBytes] && profileBytes < sizeof(profile) - 1) {
+            profile[profileBytes] = selectedProfile[profileBytes];
+            ++profileBytes;
+        }
+        if (selectedProfile[profileBytes]) return;
+    } else {
+        if (!appendSystemRoot(path, std::size(path), cursor) ||
+            !appendWide(path, std::size(path), cursor,
+                        L"\\System\\Themes\\active.profile", 29) ||
+            !readBoundedFile(path, profile, sizeof(profile) - 1, profileBytes)) {
+            PrintLine("[MicaNT Theme] Active profile could not be read");
+            return;
+        }
     }
     while (profileBytes && (profile[profileBytes - 1] == '\r' ||
                             profile[profileBytes - 1] == '\n' ||
@@ -532,6 +546,7 @@ void loadActiveVisualTheme() noexcept {
     MicaThemeSnapshot published{};
     if (!MicaWin32kGetThemeSnapshot(&published) ||
         std::memcmp(&candidate, &published, sizeof(candidate)) != 0) {
+        restorePreviousSnapshot();
         PrintLine("[MicaNT Theme] Win32k theme snapshot round-trip failed");
         return;
     }
@@ -547,12 +562,54 @@ void loadActiveVisualTheme() noexcept {
         queriedColor == expectedColor;
     const bool closed = themeHandle && CloseThemeData(themeHandle) == 0;
     if (!queried || !closed) {
+        restorePreviousSnapshot();
         PrintLine("[MicaNT Theme] UxTheme DLL handle/query path failed");
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
     g.visualTheme = candidate;
     g.visualThemeReady = true;
+    for (size_t i = 0; i < profileBytes; ++i) g.themeProfile[i] = profile[i];
+    g.themeProfile[profileBytes] = '\0';
+}
+
+void selectNextThemeProfile() noexcept {
+    constexpr const char* profiles[] = {
+        "WhiteSur/Light", "WhiteSur/Dark", "WhiteSur/LightPurple"
+    };
+    size_t current = 0;
+    const auto equalProfile = [](const char* left, const char* right) noexcept {
+        if (!left || !right) return false;
+        size_t i = 0;
+        while (i < 96 && left[i] && right[i] && left[i] == right[i]) ++i;
+        return i < 96 && left[i] == right[i];
+    };
+    for (size_t i = 0; i < std::size(profiles); ++i)
+        if (equalProfile(g.themeProfile, profiles[i])) current = i;
+    const char* next = profiles[(current + 1) % std::size(profiles)];
+    const bool hadTheme = g.visualThemeReady;
+    const auto oldTheme = g.visualTheme;
+    char oldProfile[sizeof(g.themeProfile)]{};
+    std::memcpy(oldProfile, g.themeProfile, sizeof(oldProfile));
+    loadActiveVisualTheme(next);
+    if (!equalProfile(g.themeProfile, next)) {
+        g.visualTheme = oldTheme;
+        g.visualThemeReady = hadTheme;
+        std::memcpy(g.themeProfile, oldProfile, sizeof(oldProfile));
+        return;
+    }
+    for (auto& app : g.apps) {
+        if (!app.open || !app.hwnd || !app.pixels) continue;
+        drawAppWindow(app);
+        present(app.hwnd);
+    }
+    redrawDesktop();
+    redrawTaskbar();
+    if (g.menuPixels) {
+        micant::explorer::DrawStartMenu(g.menuPixels, MENU_W, MENU_H, "MicaNT User",
+                                        activeShellPalette());
+        present(g.startMenu);
+    }
 }
 
 void loadPackagedWallpaper() noexcept {
@@ -1047,6 +1104,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             case micant::explorer::StartMenuAction::ControlPanel: openView(View::ControlPanel); break;
             case micant::explorer::StartMenuAction::Network: openView(View::Network); break;
             case micant::explorer::StartMenuAction::RecycleBin: openView(View::RecycleBin); break;
+            case micant::explorer::StartMenuAction::ThemeSettings:
+                selectNextThemeProfile();
+                break;
             case micant::explorer::StartMenuAction::Dismiss:
             case micant::explorer::StartMenuAction::Search:
             case micant::explorer::StartMenuAction::Run:

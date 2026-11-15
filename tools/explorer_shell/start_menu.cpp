@@ -58,7 +58,7 @@ void DrawStartMenu(uint32_t* pixels, uint32_t width, uint32_t height,
     }
     static constexpr const char* right[] = {
         "Recent Documents", "My Pictures", "My Music", "My Computer", "Control Panel",
-        "Program Access", "Connect To", "Printers and Faxes", "Help and Support",
+        "Theme Appearance", "Connect To", "Printers and Faxes", "Help and Support",
         "Search", "Run..."
     };
     for (size_t i = 0; i < sizeof(right) / sizeof(right[0]); ++i)
@@ -102,6 +102,7 @@ StartMenuAction HitTestStartMenu(int32_t x, int32_t y,
         case 1: case 2: return StartMenuAction::MyDocuments;
         case 3: return StartMenuAction::MyComputer;
         case 4: return StartMenuAction::ControlPanel;
+        case 5: return StartMenuAction::ThemeSettings;
         case 6: return StartMenuAction::Network;
         case 9: return StartMenuAction::Search;
         case 10: return StartMenuAction::Run;

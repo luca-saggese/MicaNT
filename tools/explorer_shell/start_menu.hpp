@@ -14,6 +14,7 @@ enum class StartMenuAction : uint8_t {
     RecycleBin,
     Search,
     Run,
+    ThemeSettings,
     LogOff,
     PowerOff,
 };
