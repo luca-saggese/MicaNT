@@ -18,6 +18,8 @@ MICANT_NT_API_IMPORT micant::NtStatus NtClose(micant::Handle handle) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtQuerySystemTime(micant::LargeInteger* systemTime) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtQueryPerformanceCounter(
     micant::LargeInteger* counter, micant::LargeInteger* frequency) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtDelayExecution(
+    uint8_t alertable, const micant::LargeInteger* delayInterval) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtAllocateVirtualMemory(
     micant::Handle processHandle, void** baseAddress, uint64_t zeroBits,
     size_t* regionSize, uint32_t allocationType, uint32_t protect) noexcept;

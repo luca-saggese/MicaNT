@@ -379,8 +379,9 @@ int32_t MicaWin32kGetMessageW(MicaWin32kMessage* output, void* hwnd,
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
     value.args[1] = minimum;
     value.args[2] = maximum;
+    value.args[3] = 1; // GetMessageW removes the retrieved message from the queue.
     if (!request(MICANT_WIN32K_OP_GET_MESSAGE, value)) return -1;
-    if (!value.result) return 0;
+    if (!value.result) return -2; // Internal no-message result; User32 performs the wait.
     copyMessage(value, output);
     return value.messageId == 0x0012 ? 0 : 1;
 }

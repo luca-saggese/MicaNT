@@ -1468,14 +1468,39 @@ int32_t User32_PeekMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin,
 }
 
 int32_t User32_GetMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax) noexcept {
-    updateAnimatedCursor();
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (!lpMsg) return -1;
+    using Fn=int32_t (*)(MicaWin32kMessage*,void*,uint32_t,uint32_t);
+    auto fn=Win32kProc<Fn>("MicaWin32kGetMessageW");
+    if (!fn) return -1;
+    for (;;) {
+        updateAnimatedCursor();
+        MicaWin32kMessage msg{};
+        const int32_t result = fn(&msg,hWnd,wMsgFilterMin,wMsgFilterMax);
+        if (result != -2) {
+            if (result > 0) {
+                lpMsg->hwnd=msg.hwnd;lpMsg->message=msg.message;lpMsg->wParam=msg.wParam;
+                lpMsg->lParam=msg.lParam;lpMsg->time=msg.time;lpMsg->pt={msg.pt.x,msg.pt.y};
+            }
+            return result;
+        }
+        micant::LargeInteger interval{};
+        interval.QuadPart = -100000; // 10ms: process input and animation deadlines while idle.
+        if (micant::native_nt::NtDelayExecution(0, &interval) != micant::NtStatus::Success)
+            return -1;
+    }
+#else
     if (!lpMsg) return -1;
     MicaWin32kMessage msg{};
     using Fn=int32_t (*)(MicaWin32kMessage*,void*,uint32_t,uint32_t);
     auto fn=Win32kProc<Fn>("MicaWin32kGetMessageW");
-    const auto ok=fn ? fn(&msg,hWnd,wMsgFilterMin,wMsgFilterMax) : -1;
-    lpMsg->hwnd=msg.hwnd;lpMsg->message=msg.message;lpMsg->wParam=msg.wParam;lpMsg->lParam=msg.lParam;lpMsg->time=msg.time;lpMsg->pt={msg.pt.x,msg.pt.y};
-    return ok;
+    const auto result=fn ? fn(&msg,hWnd,wMsgFilterMin,wMsgFilterMax) : -1;
+    if (result > 0) {
+        lpMsg->hwnd=msg.hwnd;lpMsg->message=msg.message;lpMsg->wParam=msg.wParam;
+        lpMsg->lParam=msg.lParam;lpMsg->time=msg.time;lpMsg->pt={msg.pt.x,msg.pt.y};
+    }
+    return result;
+#endif
 }
 
 int32_t User32_TranslateMessage(const WinNtMsg* lpMsg) noexcept {

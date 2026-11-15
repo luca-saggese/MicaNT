@@ -535,8 +535,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 request.result = 1;
                 return NtStatus::Success;
             }
-            return request.operation == MICANT_WIN32K_OP_GET_MESSAGE
-                ? NtStatus::Timeout : NtStatus::Success;
+            return NtStatus::Success;
         case MICANT_WIN32K_OP_GET_CLIENT_RECT:
         case MICANT_WIN32K_OP_GET_WINDOW_RECT: {
             const auto* window = findWindow(request.args[0], ownerProcessId);

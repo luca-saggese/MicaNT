@@ -1220,19 +1220,22 @@ extern "C" void _start(const char* = nullptr) {
     verifyDirectWriteFonts();
     redrawDesktop();
     updateClock();
-    uint32_t clockPollDivider = 0;
+    uint64_t lastClockUpdate = GetTickCount64();
     for (;;) {
-        // Clock reads cross into the kernel and query the RTC; the taskbar only
-        // needs seconds precision, so avoid doing that work on every idle spin.
-        if (++clockPollDivider == 2000000U) {
-            clockPollDivider = 0;
-            updateClock();
-        }
         MSG msg{};
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        const int32_t result = GetMessageW(&msg, nullptr, 0, 0);
+        if (result > 0) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        } else if (result == 0) {
+            break;
+        } else {
+            Sleep(10);
         }
-        __asm__ __volatile__("pause");
+        const uint64_t now = GetTickCount64();
+        if (now >= lastClockUpdate && now - lastClockUpdate >= 1000) {
+            updateClock();
+            lastClockUpdate = now;
+        }
     }
 }
