@@ -28,15 +28,20 @@ the evidence named here, not just declarations or a successful compile.
   both clamps. Caption hover/pressed pixel states, maximize/restore,
   minimize/taskbar-restore, close, activation, cleanup and reopen also passed
   in `/private/tmp/micant-theme-qemu-nonclient-full`.
-- [ ] The follow-up live-window Light-to-Dark pixel check failed: the profile
-  switch marker arrived, but the titlebar sample stayed `(250,250,250)` in
-  both screenshots. The scanout is in
-  `/private/tmp/micant-theme-qemu-nonclient-switch2`; post-switch drag/resize
-  was not reached. This is the current nonclient blocker.
-- [ ] The preceding QEMU runs built and linked `ntoskrnl_core_baremetal` and
-  Explorer successfully in a clean worktree based on commit `9e40bc0`, with
-  local source copies for the uncommitted compositor and harness edits. A
-  source-matched run of the final diff remains pending.
+- [x] Fixed the live Light-to-Dark revert in commit `e0112a6`: Explorer now
+  reloads persisted `active.profile` for `WM_SETTINGCHANGE`, while
+  `WM_THEMECHANGED` redraws the snapshot already published by the selector.
+  Previously, the latter reloaded persisted Light over the session Dark
+  snapshot.
+- [x] QEMU `--verify-input` passed the Light-to-Dark titlebar pixel assertion,
+  then dragged and edge-resized the still-open window. Evidence:
+  `/private/tmp/micant-theme-nonclient-committed-2`, including
+  `live-window-light.ppm`, `theme-dark.ppm`,
+  `post-switch-caption-drag.ppm`, and `post-switch-edge-resize.ppm`.
+  Baremetal target and native user-mode boundary checks passed. The isolated
+  build manifest identifies base commit `b27331b`; the tested Explorer source
+  contains the exact `e0112a6` fix, while the copied worktree also had unrelated
+  Task Manager edits. No clean-tree manifest proof is claimed.
 - [ ] A build of the latest uncommitted shared worktree is still pending. That
   tree contains unrelated Task Manager/kernel changes; its earlier build
   failed in `kernel/init/kiinit.cpp` (`third`/`fourth` undeclared) and
@@ -66,18 +71,22 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 3. Nonclient window decoration and geometry
 
-- [ ] Render and verify themed titlebars across Light/Dark. The compositor
-  now selects caption-button normal/hover/pressed/inactive colors, opacity and
-  borders from the Button snapshot, but QEMU found that the live titlebar
-  sample remained Light after the Dark switch. Caption title glyphs and icons
-  also still use generic compositor drawing rather than theme assets/font
-  service.
+- [x] Render and verify active titlebar colors in Light and Dark. QEMU compared
+  the same live-window caption pixel before/after the runtime switch; the Dark
+  sample passed after the Explorer broadcast fix above. Caption buttons use
+  theme snapshot normal/hover/pressed/inactive colors, opacity and borders.
+- [ ] Replace generic 8x8 caption title glyphs with the shared font service and
+  carry safe per-window icon pixels through the compositor surface protocol.
+  The compositor currently has no callable font service or process-safe icon
+  snapshot; process-local HICON values must not be sent in shared metadata.
 - [x] QEMU verified caption drag; close, minimize, maximize/restore; all four
   edges and all four corners; and minimum-size clamping with a 160x100 client
   surface. Diagnostic run: `/private/tmp/micant-theme-qemu-nonclient-full`.
-- [ ] Repeat active/inactive caption and geometry pixel checks after runtime
-  Light/Dark/accent changes. The live Dark titlebar assertion currently fails,
-  so post-switch move/resize is not yet accepted.
+- [x] QEMU repeated caption drag and edge resize after the live Light-to-Dark
+  change; both passed and the client surface remained live.
+- [ ] Verify inactive caption pixels and Light Purple/accent caption pixels
+  after runtime changes. These state/color combinations are not yet covered by
+  pixel assertions.
 
 ### 4. Explorer theme coverage
 
