@@ -10,6 +10,7 @@ option(MICANT_ENABLE_BAREMETAL "Build the AMD64 freestanding PE boot targets" OF
 option(MICANT_BOOTSTRAP_RUNTIME_SELFTEST "Halt after kernel C++ lifecycle verification" OFF)
 option(MICANT_BOOTSTRAP_TIMER_SELFTEST "Halt after isolated scheduler-clock tick verification" OFF)
 option(MICANT_BOOTSTRAP_NETWORK_SELFTEST "Enable M10 receive-path fault injection" OFF)
+option(MICANT_BOOTSTRAP_TASKMGR_SELFTEST "Launch taskmgr.exe from the mounted System32 image during QEMU verification" OFF)
 
 if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
@@ -88,6 +89,7 @@ set(NTOSKRNL_SUBSYSTEM_SOURCES
     kernel/ke/zerobsod.cpp
     kernel/io/livehotswap.cpp
     kernel/ex/sysinfo_taskmgr.cpp
+    kernel/ex/perf_taskmgr.cpp
     kernel/ps/quotagov.cpp
     kernel/fsrtl/mftzipui.cpp
     kernel/se/srm_ci.cpp
@@ -310,6 +312,7 @@ if (MICANT_ENABLE_BAREMETAL)
         kernel/win32k/freestanding.cpp
         kernel/ex/freestanding_memory.cpp
         kernel/ex/freestanding.cpp
+        kernel/ex/perf_taskmgr.cpp
         kernel/ex/libcpp_support.cpp
         kernel/ob/obref.cpp
         kernel/io/file_object.cpp
@@ -322,6 +325,7 @@ if (MICANT_ENABLE_BAREMETAL)
         kernel/ps/address_space.cpp
         kernel/ps/apc.cpp
         kernel/ps/exception.cpp
+        kernel/ps/psmgr.cpp
         kernel/ps/object.cpp
         kernel/ps/image.cpp
         kernel/se/freestanding.cpp
@@ -361,6 +365,9 @@ if (MICANT_ENABLE_BAREMETAL)
     endif()
     if (MICANT_BOOTSTRAP_NETWORK_SELFTEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_NETWORK_SELFTEST)
+    endif()
+    if (MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     endif()
     target_compile_options(ntoskrnl_core_baremetal PRIVATE -fno-builtin)
 
@@ -537,6 +544,25 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(explorer_boot PRIVATE user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+    # Import-free Task Manager executable; it queries the native system
+    # information syscall directly and presents through the existing surface
+    # syscall, so it can be built independently of Explorer and its DLLs.
+    add_executable(taskmgr_boot EXCLUDE_FROM_ALL tools/taskmgr_app.cpp)
+    target_include_directories(taskmgr_boot PRIVATE
+        "${CMAKE_SOURCE_DIR}"
+        "${CMAKE_SOURCE_DIR}/tools"
+    )
+    target_compile_options(taskmgr_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(taskmgr_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+    )
+    set_target_properties(taskmgr_boot PROPERTIES
+        OUTPUT_NAME "taskmgr"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
     # The compositor is an independent, import-free Ring 3 image. Its shared

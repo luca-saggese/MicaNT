@@ -433,21 +433,35 @@ def verify_mouse(
                             {"type": "btn", "data": {"button": "left", "down": False}},
                         ]})
 
+                    def move_to(x: int, y: int) -> None:
+                        # Relative QMP mouse motion preserves the cursor position
+                        # left by earlier tests. Clamp it to the origin first so
+                        # each UI target is deterministic. Keep individual
+                        # PS/2 deltas small; large QMP relative values can be
+                        # truncated by the emulated mouse packet format.
+                        events = []
+                        def append_motion(axis: str, distance: int) -> None:
+                            while distance:
+                                step = max(-64, min(64, distance))
+                                events.append({"type": "rel", "data": {
+                                    "axis": axis, "value": step,
+                                }})
+                                distance -= step
+
+                        append_motion("x", -1200)
+                        append_motion("y", -1200)
+                        append_motion("x", x)
+                        append_motion("y", y)
+                        execute("input-send-event", {"events": events})
+                        time.sleep(0.2)
+
                     # Open Start from the taskbar, then select the right-column
                     # Theme Appearance entry (row 5) to switch Light to Dark.
-                    execute("input-send-event", {"events": [
-                        {"type": "rel", "data": {"axis": "x", "value": 50}},
-                        {"type": "rel", "data": {"axis": "y", "value": 748}},
-                    ]})
-                    time.sleep(0.2)
+                    move_to(50, 748)
                     click_left()
                     time.sleep(0.3)
-                    screen("theme-menu-light.ppm")
-                    execute("input-send-event", {"events": [
-                        {"type": "rel", "data": {"axis": "x", "value": 200}},
-                        {"type": "rel", "data": {"axis": "y", "value": -212}},
-                    ]})
-                    time.sleep(0.2)
+                    wait_for_changed_screen(desktop_light, "theme-menu-light.ppm", 5000)
+                    move_to(250, 536)
                     click_left()
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
@@ -606,6 +620,7 @@ def run_qemu(
     verify_usb_input: bool = False,
     network_test: bool = False,
     memory_mib: int = 1024,
+    taskmgr_selftest: bool = False,
 ) -> None:
     if memory_mib not in (256, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -613,6 +628,8 @@ def run_qemu(
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
         raise RuntimeError("timer self-test halts before process tests and desktop/input; incompatible runner options")
+    if taskmgr_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
+        raise RuntimeError("Task Manager self-test requires the unattended desktop boot path")
     if verify_usb_input and not usb_test:
         raise RuntimeError("USB HID verification requires --usb-test")
     validate_build_manifest(
@@ -747,6 +764,11 @@ def run_qemu(
         if not explorer_image.is_file():
             raise RuntimeError("Explorer image was not built for the QEMU system volume")
         shutil.copyfile(explorer_image, system32_dir / explorer_image.name)
+        if taskmgr_selftest:
+            taskmgr_image = ROOT / "build" / "taskmgr.exe"
+            if not taskmgr_image.is_file():
+                raise RuntimeError("Task Manager image was not built for the QEMU system volume")
+            shutil.copyfile(taskmgr_image, system32_dir / taskmgr_image.name)
         compositor_image = ROOT / "build" / "compositor.exe"
         if not compositor_image.is_file():
             raise RuntimeError("Ring 3 compositor image was not built for the QEMU system volume")
@@ -986,6 +1008,13 @@ def run_qemu(
                         )
                         if not time_evidence:
                             raise RuntimeError("CPL3 time probe reported neither UTC success nor explicit unavailable status")
+                        if taskmgr_selftest:
+                            if "Task Manager: process snapshot unavailable from the kernel provider." in serial_log:
+                                raise RuntimeError("Task Manager syscall returned no valid process snapshot")
+                            if "Task Manager: kernel process snapshot received." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
                         if complete_since is None:
                             complete_since = time.monotonic()
                         elif time.monotonic() - complete_since >= stable_seconds:
@@ -1033,6 +1062,7 @@ def run_qemu(
                                 )
                                 print("Explorer input, window cleanup and Light-to-Dark theme switch passed.", flush=True)
                             result = (
+                                "Task Manager process-snapshot self-test" if taskmgr_selftest else
                                 "timer self-test" if timer_selftest else
                                 "C++ runtime self-test" if runtime_selftest else
                                 "modular boot"
@@ -1101,6 +1131,7 @@ def main() -> int:
     parser.add_argument("--network-test", action="store_true")
     parser.add_argument("--runtime-selftest", action="store_true")
     parser.add_argument("--timer-selftest", action="store_true")
+    parser.add_argument("--taskmgr-selftest", action="store_true")
     args = parser.parse_args()
 
     if args.ovmf_code is None:
@@ -1125,6 +1156,7 @@ def main() -> int:
             args.verify_usb_input,
             args.network_test,
             args.memory_mib,
+            args.taskmgr_selftest,
         )
     except KeyboardInterrupt:
         return 130

@@ -148,7 +148,8 @@ def run(command: list[str]) -> None:
 
 
 def write_manifest(
-    cxx: Path, *, runtime_selftest: bool = False, timer_selftest: bool = False
+    cxx: Path, *, runtime_selftest: bool = False, timer_selftest: bool = False,
+    taskmgr_selftest: bool = False
 ) -> None:
     if not all(path.is_file() for path in (KERNEL, BOOTLOADER, DISPLAY_DRIVER)):
         raise RuntimeError("CMake completed without producing all boot PE artifacts")
@@ -189,6 +190,7 @@ def write_manifest(
         "configuration": "Release",
         "runtime_selftest": runtime_selftest,
         "timer_selftest": timer_selftest,
+        "taskmgr_selftest": taskmgr_selftest,
         "target": "ntoskrnl_core_baremetal",
         "architecture": "AMD64",
         "artifacts": {
@@ -260,6 +262,10 @@ def main() -> int:
         help="verify scheduler-clock tick delivery, then halt before process tests and desktop rendering",
     )
     parser.add_argument(
+        "--taskmgr-selftest", action="store_true",
+        help="launch taskmgr.exe in QEMU and verify its live process snapshot syscall",
+    )
+    parser.add_argument(
         "--usb-test", action="store_true",
         help="attach QEMU xHCI, USB HID and read-only USB mass storage devices",
     )
@@ -284,6 +290,8 @@ def main() -> int:
         parser.error("--timer-selftest is mutually exclusive with runtime self-test and Explorer checks")
     if args.network_test and (args.runtime_selftest or args.timer_selftest or args.check_explorer):
         parser.error("--network-test requires a normal kernel boot")
+    if args.taskmgr_selftest and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer):
+        parser.error("--taskmgr-selftest requires the unattended normal desktop boot path")
 
     try:
         cmake = shutil.which("cmake")
@@ -318,6 +326,7 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_RUNTIME_SELFTEST:BOOL={'ON' if args.runtime_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_TIMER_SELFTEST:BOOL={'ON' if args.timer_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_NETWORK_SELFTEST:BOOL={'ON' if args.network_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_TASKMGR_SELFTEST:BOOL={'ON' if args.taskmgr_selftest else 'OFF'}",
             ]
         )
         if args.check_explorer:
@@ -355,6 +364,7 @@ def main() -> int:
                 "shell32_boot",
                 "comctl32_boot",
                 "explorer_runtime_boot",
+                "taskmgr_boot",
                 "compositor_boot",
             ]
         )
@@ -362,6 +372,7 @@ def main() -> int:
             cxx,
             runtime_selftest=args.runtime_selftest,
             timer_selftest=args.timer_selftest,
+            taskmgr_selftest=args.taskmgr_selftest,
         )
         validate_build_manifest(
             ROOT,
@@ -395,6 +406,8 @@ def main() -> int:
             boot_command.append("--runtime-selftest")
         elif args.timer_selftest:
             boot_command.append("--timer-selftest")
+        elif args.taskmgr_selftest:
+            boot_command.append("--taskmgr-selftest")
         elif not args.headless:
             boot_command.append("--interactive")
         elif args.usb_test:

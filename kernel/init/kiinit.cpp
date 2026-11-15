@@ -2461,6 +2461,8 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
 // for the lifetime of the initial interactive session.
 micant::Handle g_explorerProcessHandle{};
 micant::Handle g_explorerProcessId{};
+micant::Handle g_taskmgrProcessHandle{};
+micant::Handle g_taskmgrProcessId{};
 micant::Handle g_compositorProcessHandle{};
 micant::Handle g_compositorProcessId{};
 micant::ps::EProcess* g_compositorProcessObject{};
@@ -2778,6 +2780,23 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const auto result = sys::NtQueryPerformanceCounter(
             reinterpret_cast<LargeInteger*>(first),
             reinterpret_cast<LargeInteger*>(second));
+        return status(result);
+    }
+    if (number == sys::SSN_NtQuerySystemInformation) {
+        // This bootstrap entry runs with user GS/segments restored. The NT
+        // service probes every user pointer before copying its result.
+        __asm__ __volatile__("swapgs" : : : "memory");
+        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es"
+                             : : : "rax", "memory");
+        const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
+        if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
+        const auto result = sys::NtQuerySystemInformation(
+            static_cast<uint32_t>(first), reinterpret_cast<void*>(second),
+            static_cast<uint32_t>(args.third), reinterpret_cast<uint32_t*>(args.fourth));
+        if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
+        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es"
+                             : : : "rax", "memory");
+        __asm__ __volatile__("swapgs" : : : "memory");
         return status(result);
     }
     if (number == sys::SSN_NtContinue) {
@@ -4382,6 +4401,12 @@ void pollKeyboardInput() noexcept {
     serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    if (!launchUserImageProcess(u"taskmgr.exe", g_taskmgrProcessHandle,
+                                g_taskmgrProcessId))
+        stopWithError("[MicaNT Taskmgr] Ring 3 process launch failed\r\n");
+    serialWrite("[MicaNT Taskmgr] QEMU self-test process launched\r\n");
+#endif
     for (;;) {
         if (clockActive && micant::hal::amd64::bootstrapSchedulerClockFailed())
             stopWithError("[MicaNT Ke] Runtime scheduler dispatch failed\r\n");

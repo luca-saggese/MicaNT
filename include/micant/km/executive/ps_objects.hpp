@@ -13,6 +13,14 @@ class EProcess;
 class EThread;
 
 namespace detail {
+struct ProcessSnapshotEntry {
+    Handle processId{};
+    Handle parentProcessId{};
+    uint32_t threadCount{};
+    uint32_t handleCount{};
+    uintptr_t workingSetBytes{};
+    size_t firstThreadIndex{};
+};
 bool deferProcessObjectDelete(ob::ObjectHeader* header) noexcept;
 bool deferThreadObjectDelete(ob::ObjectHeader* header) noexcept;
 bool deferredCleanupPending() noexcept;
@@ -69,5 +77,12 @@ bool isProcessObject(const ob::ObjectHeader& header) noexcept;
 bool isThreadObject(const ob::ObjectHeader& header) noexcept;
 uint32_t bootstrapProcessObjectCount() noexcept;
 uint32_t bootstrapThreadObjectCount() noexcept;
+// Copies scalar metadata from the published process registry while holding
+// the same BSP exclusion used for publication and removal. If output is too
+// small, no entries are written and requiredCount reports the current count.
+NtStatus captureProcessSnapshot(std::span<ProcessSnapshotEntry> output,
+                                std::span<Handle> threadIds,
+                                size_t& requiredCount,
+                                size_t& requiredThreadCount) noexcept;
 }
 }

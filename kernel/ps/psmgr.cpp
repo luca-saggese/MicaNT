@@ -1,9 +1,45 @@
 #include "micant/km/core/ntos_internal.hpp"
 #include "micant/km/executive/ps.hpp"
+#if !defined(MICANT_FREESTANDING)
 #include "micant/km/executive/po.hpp"
+#endif
+#include "micant/km/executive/ps_objects.hpp"
+#include "micant/km/executive/probe.hpp"
+#include "micant/shared/system_information.h"
+#include <cstring>
+#include <new>
+
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+#define TASKMGR_QUERY_TRACE(text) MicantNetbootSerialWrite(text)
+#else
+#define TASKMGR_QUERY_TRACE(text) ((void)0)
+#endif
 
 namespace micant::sys {
 
+namespace {
+class ScopedQueryInterruptDisable {
+public:
+    ScopedQueryInterruptDisable() noexcept {
+#if defined(MICANT_BAREMETAL) && defined(__x86_64__)
+        __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags_) : : "memory");
+#endif
+    }
+    ~ScopedQueryInterruptDisable() {
+#if defined(MICANT_BAREMETAL) && defined(__x86_64__)
+        if (flags_ & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+#endif
+    }
+    ScopedQueryInterruptDisable(const ScopedQueryInterruptDisable&) = delete;
+    ScopedQueryInterruptDisable& operator=(const ScopedQueryInterruptDisable&) = delete;
+
+private:
+    uint64_t flags_{};
+};
+} // namespace
+
+#if !defined(MICANT_FREESTANDING)
 NtStatus NtTerminateProcess(Handle /*processHandle*/, NtStatus /*exitStatus*/) {
     return NtStatus::NotImplemented;
 }
@@ -12,22 +48,131 @@ NtStatus NtShutdownSystem(uint32_t action) {
     auto shutdownAction = static_cast<po::ShutdownAction>(action);
     return po::PowerManager::get().shutdownSystem(shutdownAction);
 }
+#endif
 
 NtStatus NtQuerySystemInformation(
-    uint32_t /*systemInformationClass*/,
+    uint32_t systemInformationClass,
     void* systemInformation,
     uint32_t systemInformationLength,
     uint32_t* returnLength
 ) {
-    if (!systemInformation && systemInformationLength > 0) {
+    constexpr uint32_t systemProcessInformationClass = 5;
+    if (systemInformationClass != systemProcessInformationClass)
+        return NtStatus::InvalidInfoClass;
+
+    TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] NtQuerySystemInformation class accepted\r\n");
+    ScopedQueryInterruptDisable interruptGuard;
+    auto* current = ke::KeGetCurrentThread();
+    const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
+    NtStatus status = NtStatus::Success;
+    if (returnLength)
+        status = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
+    if (status != NtStatus::Success)
+        TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] ReturnLength probe failed\r\n");
+    if (status != NtStatus::Success) return status;
+
+    size_t count = 0, threadCount = 0;
+    status = ps::detail::captureProcessSnapshot({}, {}, count, threadCount);
+    TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process registry count captured\r\n");
+    if (status != NtStatus::InfoLengthMismatch && status != NtStatus::Success) return status;
+    if (count > SIZE_MAX / sizeof(ps::detail::ProcessSnapshotEntry) ||
+        threadCount > SIZE_MAX / sizeof(Handle))
+        return NtStatus::InfoLengthMismatch;
+
+    auto* snapshot = count ? new (std::nothrow_t{}) ps::detail::ProcessSnapshotEntry[count] : nullptr;
+    if (count && !snapshot) return NtStatus::NoMemory;
+    auto* threadIds = threadCount ? new (std::nothrow_t{}) Handle[threadCount] : nullptr;
+    if (threadCount && !threadIds) { delete[] snapshot; return NtStatus::NoMemory; }
+    size_t capturedCount = count;
+    size_t capturedThreadCount = threadCount;
+    status = ps::detail::captureProcessSnapshot({snapshot, count}, {threadIds, threadCount},
+                                                capturedCount, capturedThreadCount);
+    if (status != NtStatus::Success)
+        TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process object snapshot failed\r\n");
+    if (status != NtStatus::Success) {
+        delete[] snapshot;
+        delete[] threadIds;
+        if (returnLength) {
+            const size_t fixedBytes = sizeof(SystemProcessInformation);
+            const bool overflow = capturedCount > UINT32_MAX / fixedBytes ||
+                capturedThreadCount > UINT32_MAX / sizeof(SystemThreadInformation);
+            const size_t requiredBytes = overflow ? UINT32_MAX
+                : capturedCount * fixedBytes + capturedThreadCount * sizeof(SystemThreadInformation);
+            const uint32_t required = requiredBytes <= UINT32_MAX
+                ? static_cast<uint32_t>(requiredBytes) : UINT32_MAX;
+            const auto copyStatus = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+            if (copyStatus != NtStatus::Success) return copyStatus;
+        }
+        return status;
+    }
+
+    size_t requiredSize = 0;
+    for (size_t i = 0; i < capturedCount; ++i) {
+        const size_t threadBytes = static_cast<size_t>(snapshot[i].threadCount) * sizeof(SystemThreadInformation);
+        const size_t recordBytes = sizeof(SystemProcessInformation) + threadBytes;
+        if (recordBytes < threadBytes || recordBytes > UINT32_MAX ||
+            requiredSize > UINT32_MAX - recordBytes) {
+            delete[] snapshot; delete[] threadIds;
+            return NtStatus::InfoLengthMismatch;
+        }
+        requiredSize += recordBytes;
+    }
+    const uint32_t required = static_cast<uint32_t>(requiredSize);
+    if (returnLength) {
+        status = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+        if (status != NtStatus::Success) { delete[] snapshot; delete[] threadIds; return status; }
+    }
+    if (systemInformationLength < required) {
+        delete[] snapshot; delete[] threadIds;
+        return NtStatus::InfoLengthMismatch;
+    }
+    if (required && !systemInformation) {
+        delete[] snapshot; delete[] threadIds;
         return NtStatus::AccessViolation;
     }
-    if (returnLength) {
-        *returnLength = 0;
+    status = ex::ProbeForWrite(systemInformation, required, alignof(SystemProcessInformation), mode);
+    if (status != NtStatus::Success)
+        TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process output buffer probe failed\r\n");
+    if (status != NtStatus::Success) { delete[] snapshot; delete[] threadIds; return status; }
+
+    auto* records = required ? new (std::nothrow_t{}) uint8_t[required] : nullptr;
+    if (required && !records) { delete[] snapshot; delete[] threadIds; return NtStatus::NoMemory; }
+    size_t recordOffset = 0;
+    for (size_t i = 0; i < capturedCount; ++i) {
+        const size_t threadBytes = static_cast<size_t>(snapshot[i].threadCount) * sizeof(SystemThreadInformation);
+        const size_t recordBytes = sizeof(SystemProcessInformation) + threadBytes;
+        auto* record = reinterpret_cast<SystemProcessInformation*>(records + recordOffset);
+        std::memset(record, 0, recordBytes);
+        record->NextEntryOffset = i + 1 < capturedCount ? static_cast<uint32_t>(recordBytes) : 0;
+        record->NumberOfThreads = snapshot[i].threadCount;
+        record->UniqueProcessId = static_cast<uintptr_t>(snapshot[i].processId);
+        record->InheritedFromUniqueProcessId = static_cast<uintptr_t>(snapshot[i].parentProcessId);
+        record->HandleCount = snapshot[i].handleCount;
+        record->WorkingSetSize = snapshot[i].workingSetBytes;
+        // Image name, session, CPU times, and private/peak working set data
+        // are not exported until their metadata/accounting owners provide them.
+        auto* outputThreads = reinterpret_cast<SystemThreadInformation*>(
+            reinterpret_cast<uint8_t*>(record) + sizeof(SystemProcessInformation));
+        for (size_t t = 0; t < snapshot[i].threadCount; ++t) {
+            auto& outputThread = outputThreads[t];
+            outputThread = {};
+            outputThread.UniqueProcessId = static_cast<uintptr_t>(snapshot[i].processId);
+            outputThread.UniqueThreadId = static_cast<uintptr_t>(threadIds[snapshot[i].firstThreadIndex + t]);
+        }
+        recordOffset += recordBytes;
     }
-    return NtStatus::Success;
+    status = ex::ExSafeCopyToUser(systemInformation, records, required, mode);
+    if (status != NtStatus::Success)
+        TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process output copy failed\r\n");
+    delete[] records;
+    delete[] snapshot;
+    delete[] threadIds;
+    return status;
 }
 
+#undef TASKMGR_QUERY_TRACE
+
+#if !defined(MICANT_FREESTANDING)
 NtStatus NtQueryInformationProcess(
     Handle /*processHandle*/,
     ProcessInformationClass processInformationClass,
@@ -48,5 +193,6 @@ NtStatus NtQueryInformationThread(Handle, ThreadInformationClass, void*, uint32_
 
 NtStatus NtAlertThread(Handle) { return NtStatus::NotImplemented; }
 NtStatus NtTestAlert() { return NtStatus::NotImplemented; }
+#endif
 
 } // namespace micant::sys

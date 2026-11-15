@@ -276,6 +276,43 @@ struct ProcessObjectFactory {
             if (process->processId_ == id) return process;
         return nullptr;
     }
+    static NtStatus capture(std::span<ProcessSnapshotEntry> output,
+                            std::span<Handle> threadIds,
+                            size_t& requiredCount,
+                            size_t& requiredThreadCount) noexcept {
+        ob::detail::HandleTableGuard guard;
+        requiredCount = 0;
+        requiredThreadCount = 0;
+        for (auto* process = registeredProcesses; process; process = process->cidNext_)
+        {
+            ++requiredCount;
+            for (auto* thread = process->threads_; thread; thread = thread->processNext)
+                if (thread->state != ke::ThreadState::Terminated) ++requiredThreadCount;
+        }
+        if (requiredCount > output.size() || requiredThreadCount > threadIds.size())
+            return NtStatus::InfoLengthMismatch;
+
+        size_t index = 0, threadIndex = 0;
+        for (auto* process = registeredProcesses; process; process = process->cidNext_) {
+            auto& entry = output[index++];
+            entry.processId = process->processId_;
+            entry.parentProcessId = process->inheritedFromProcessId_;
+            entry.firstThreadIndex = threadIndex;
+            entry.threadCount = 0;
+            for (auto* thread = process->threads_; thread; thread = thread->processNext) {
+                if (thread->state == ke::ThreadState::Terminated) continue;
+                if (threadIndex >= threadIds.size() || !thread->tid) __builtin_trap();
+                threadIds[threadIndex++] = thread->tid;
+                ++entry.threadCount;
+            }
+            entry.handleCount = process->handles_
+                ? static_cast<uint32_t>(process->handles_->getActiveHandleCount()) : 0;
+            const auto residentPages = process->addressSpace_.getResidentPages();
+            entry.workingSetBytes = residentPages <= SIZE_MAX / mm::PageSize4KB
+                ? residentPages * mm::PageSize4KB : SIZE_MAX;
+        }
+        return NtStatus::Success;
+    }
     static ob::ObjectHeader* header(EProcess& process) noexcept { return process.objectHeader_; }
     static const se::FreestandingSecurityDescriptor* defaultSecurity(EProcess& process) noexcept {
         return process.primaryToken_ ? &process.primaryToken_->DefaultDacl : nullptr;
@@ -754,6 +791,13 @@ uint32_t bootstrapProcessObjectCount() noexcept {
 
 uint32_t bootstrapThreadObjectCount() noexcept {
     return threadType.totalNumberOfObjects.load(std::memory_order_relaxed);
+}
+
+NtStatus captureProcessSnapshot(std::span<ProcessSnapshotEntry> output,
+                                std::span<Handle> threadIds,
+                                size_t& requiredCount,
+                                size_t& requiredThreadCount) noexcept {
+    return ProcessObjectFactory::capture(output, threadIds, requiredCount, requiredThreadCount);
 }
 }
 
