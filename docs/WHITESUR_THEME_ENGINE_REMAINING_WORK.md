@@ -223,7 +223,66 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 10. Parser support inventory
 
-- [ ] Record supported WhiteSur selectors, states, properties, color functions,
+#### Implemented bounded subset (source inventory; not a coverage claim)
+
+The import parser lives in `include/micant/um/subsystems/theme/gtk_css.hpp`;
+`native_theme.hpp` narrows parsed rules to the native snapshot model. The
+following describes current code, not all CSS that WhiteSur ships:
+
+- The lexer accepts whitespace and `/* ... */` comments, rule blocks, comma
+  separated selector lists, and declarations with quoted strings. Bounds are
+  1 MiB input, 8192 rules, 256 selectors per rule, 64 declarations per rule,
+  32768 compiled declarations, and 256 bytes per selector.
+- Selector text may contain node names, `.class`, `#id`, universal `*`,
+  descendant/child/adjacent/general-sibling combinators, attribute syntax and
+  pseudo syntax. Pseudo names recognized by parsing are `:hover`, `:active`,
+  `:checked`, `:selected`, `:disabled`, `:focus`, `:backdrop`,
+  `:first-child`, `:last-child`, `:only-child`, `:not(...)`, `:dir(...)`,
+  `:drop(...)`, `:link`, `:visited`, `:indeterminate`, `:first`, and `:last`.
+  However native style compilation currently classifies only a bare supported
+  node or `node:pseudo` for Button, Edit/entry, CheckBox, Radio, ComboBox,
+  Menu/MenuItem, Tab, Progress, ScrollBar, Slider/scale, ToolBar, StatusBar,
+  ToolTip, HeaderBar and Window. Complex selectors, classes, IDs, attributes,
+  and the additional structural/state pseudos parse but are counted as
+  `unsupportedSimpleRules`; they do not participate in style matching.
+- Parsed at-rules are limited to `@define-color name value;` and
+  `@keyframes name { ... }`. Keyframe bodies are skipped and counted in
+  `omittedKeyframeBlocks`; they are not animated. Other at-rules (including
+  `@import`, `@media`, and `@supports`) return `CssStatus::Unsupported`.
+- Native properties are `color`, `background-color`, `border-color`,
+  `border-width`, `border` (width only), `border-radius`, `min-width`,
+  `min-height`, `padding`, `font-size`, and `opacity`. Unknown properties and
+  values that fail their typed conversion increment `unsupportedProperties`.
+  Lengths accept non-negative unitless numbers and `px` only; percentages and
+  other units are rejected. Padding supports CSS one-to-four-value expansion.
+- Colors accept `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `currentColor`,
+  `transparent`, `black`, `white`, `@define-color` references, and bounded
+  `rgb()`, `rgba()`, `alpha()`, `mix()`, `shade()`, `lighter()`, and `darker()`
+  forms. Function nesting is limited to depth 8. Accent replacement applies
+  to the configured source color and selected/accent symbolic names.
+- The compiler does not resolve CSS `url(...)` or other asset references.
+  Background images, gradients, borders with style/color shorthands, font
+  family/weight, transitions, transforms, shadows, and material effects are
+  not represented by the native style snapshot. WhiteSur profiles contain
+  such declarations (for example `background-image`, `box-shadow`, and
+  `transition`); their presence in the input does not mean they are rendered.
+
+This inventory was derived from source inspection plus property examples in
+`System/Themes/WhiteSur/Light/gtk.css` and `Dark/gtk.css`. Parser boundary and
+fixture coverage is still open below; this section alone does not satisfy the
+required bounded tests or asset-safety checks.
+
+Concrete profile examples: Light defines `entry { min-height: 24px; padding:
+2px 8px; border-radius: 6px; color: #363636; background-color: rgba(0, 0, 0,
+0.05); }` and `entry:focus` uses `alpha(mix(white,#0860F2,0.75),0.75)`. These
+declarations exercise the native property/color subset. The same profile also
+has `entry.search`, `entry image`, `entry.flat`, descendant selectors,
+`transition`, `animation-timing-function`, `box-shadow`, and `background-image`;
+those selectors/declarations parse as text, but the unsupported selector or
+property path is skipped/reported by native compilation, with no asset fetch or
+effect rendering.
+
+- [x] Record supported WhiteSur selectors, states, properties, color functions,
   units and asset references with examples from the imported profiles.
 - [ ] Record exclusions and diagnostics for unsupported constructs; expand
   selector/state/property coverage only with bounded parser tests.
