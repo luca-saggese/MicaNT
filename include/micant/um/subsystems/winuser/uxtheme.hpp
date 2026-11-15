@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -172,7 +173,7 @@ inline win32::HRESULT GetThemeColor(HTHEME hTheme, int iPartId, int iStateId, in
 }
 
 inline win32::HRESULT GetThemeFont(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, void* /*pFont*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, void* /*prc*/, int eSize, void* psz) noexcept {
@@ -196,36 +197,51 @@ inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId
     return 0;
 }
 
-inline win32::HRESULT GetThemeBackgroundContentRect(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, const void* pBoundingRect, void* pContentRect) noexcept {
-    if (pBoundingRect && pContentRect) {
-        std::memcpy(pContentRect, pBoundingRect, sizeof(user32::RECT));
-    }
+inline win32::HRESULT GetThemeBackgroundContentRect(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, const void* pBoundingRect, void* pContentRect) noexcept {
+    if (!pBoundingRect || !pContentRect) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style || !(style->flags & MICANT_THEME_HAS_PADDING)) return detail::kNotFound;
+    const auto& bounds = *static_cast<const user32::RECT*>(pBoundingRect);
+    const int64_t left = int64_t(bounds.left) + style->padding[3];
+    const int64_t top = int64_t(bounds.top) + style->padding[0];
+    const int64_t right = int64_t(bounds.right) - style->padding[1];
+    const int64_t bottom = int64_t(bounds.bottom) - style->padding[2];
+    constexpr int64_t min = std::numeric_limits<int32_t>::min();
+    constexpr int64_t max = std::numeric_limits<int32_t>::max();
+    if (right < left || bottom < top || left < min || left > max || top < min || top > max ||
+        right < min || right > max || bottom < min || bottom > max) return detail::kInvalidArgument;
+    *static_cast<user32::RECT*>(pContentRect) = {
+        static_cast<int32_t>(left), static_cast<int32_t>(top),
+        static_cast<int32_t>(right), static_cast<int32_t>(bottom)};
     return 0;
 }
 
 inline win32::HRESULT DrawThemeBackground(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, const void* /*pRect*/, const void* /*pClipRect*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT DrawThemeParentBackground(win32::HWND /*hwnd*/, void* /*hdc*/, const void* /*prc*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT DrawThemeTextEx(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, LPCWSTR /*pszText*/, int /*iCharCount*/, win32::DWORD /*dwFlags*/, void* /*pRect*/, void* /*pOptions*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT SetWindowTheme(win32::HWND /*hwnd*/, LPCWSTR /*pszSubAppName*/, LPCWSTR /*pszSubIdList*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT EnableThemeDialogTexture(win32::HWND /*hwnd*/, win32::DWORD /*dwFlags*/) noexcept {
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT GetThemeTransitionDuration(HTHEME /*hTheme*/, int /*iPartId*/, int /*iStateIdFrom*/, int /*iStateIdTo*/, int /*iPropId*/, win32::DWORD* pdwDuration) noexcept {
     if (pdwDuration) *pdwDuration = 0;
-    return 0;
+    return detail::kNotImplemented;
 }
 
 inline HANAnimation BeginBufferedAnimation(win32::HWND /*hwnd*/, void* /*hdcTarget*/, const void* /*rcTarget*/, int /*dwFormat*/, void* /*pPaintParams*/, void* /*pAnimationParams*/, void* /*phdcFrom*/, void* /*phdcTo*/) noexcept {
@@ -244,19 +260,34 @@ inline win32::HRESULT BufferedPaintStopAllAnimations(win32::HWND /*hwnd*/) noexc
     return 0;
 }
 
-inline win32::HRESULT GetThemeBackgroundExtent(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, const void* pContentRect, void* pExtentRect) noexcept {
-    if (pContentRect && pExtentRect) {
-        std::memcpy(pExtentRect, pContentRect, 16); // RECT copy
-    }
-    return 0; // S_OK
+inline win32::HRESULT GetThemeBackgroundExtent(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, const void* pContentRect, void* pExtentRect) noexcept {
+    if (!pContentRect || !pExtentRect) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style || !(style->flags & MICANT_THEME_HAS_PADDING)) return detail::kNotFound;
+    const auto& content = *static_cast<const user32::RECT*>(pContentRect);
+    const int64_t left = int64_t(content.left) - style->padding[3];
+    const int64_t top = int64_t(content.top) - style->padding[0];
+    const int64_t right = int64_t(content.right) + style->padding[1];
+    const int64_t bottom = int64_t(content.bottom) + style->padding[2];
+    constexpr int64_t min = std::numeric_limits<int32_t>::min();
+    constexpr int64_t max = std::numeric_limits<int32_t>::max();
+    if (left < min || left > max || top < min || top > max || right < min || right > max ||
+        bottom < min || bottom > max) return detail::kInvalidArgument;
+    *static_cast<user32::RECT*>(pExtentRect) = {
+        static_cast<int32_t>(left), static_cast<int32_t>(top),
+        static_cast<int32_t>(right), static_cast<int32_t>(bottom)};
+    return 0;
 }
 
 inline win32::DWORD GetThemeSysColor(HTHEME /*hTheme*/, int /*iColorId*/) noexcept {
-    return 0x00FFFFFF; // White
+    return 0xFFFFFFFFu; // CLR_INVALID: no fabricated system-color value
 }
 
 inline win32::HRESULT GetThemeSysFont(HTHEME /*hTheme*/, int /*iFontId*/, void* /*plf*/) noexcept {
-    return 0; // S_OK
+    return detail::kNotImplemented;
 }
 
 struct MARGINS {
@@ -292,67 +323,85 @@ inline win32::HRESULT GetThemeMargins(HTHEME hTheme, void* /*hdc*/, int iPartId,
     return 0;
 }
 
-inline win32::HRESULT GetThemeInt(HTHEME /*hTheme*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, int* piVal) noexcept {
-    if (piVal) {
-        *piVal = 0;
+inline win32::HRESULT GetThemeInt(HTHEME hTheme, int iPartId, int iStateId, int iPropId, int* piVal) noexcept {
+    if (!piVal) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style) return detail::kNotFound;
+    if (iPropId == 2403 && (style->flags & MICANT_THEME_HAS_BORDER_WIDTH)) {
+        *piVal = style->borderWidth; // TMT_BORDERSIZE
+        return 0;
     }
-    return 0; // S_OK
+    if ((iPropId == 2404 || iPropId == 2405) && (style->flags & MICANT_THEME_HAS_RADIUS)) {
+        *piVal = style->borderRadius; // TMT_ROUNDCORNERWIDTH / HEIGHT
+        return 0;
+    }
+    return detail::kNotFound;
 }
 
 inline win32::HRESULT DrawThemeText(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, LPCWSTR /*pszText*/, int /*iCharCount*/, win32::DWORD /*dwTextFlags*/, win32::DWORD /*dwTextFlags2*/, const void* /*pRect*/) noexcept {
-    return 0; // S_OK
+    return detail::kNotImplemented;
 }
 
-inline win32::BOOL IsThemeBackgroundPartiallyTransparent(HTHEME /*hTheme*/, int /*iPartId*/, int /*iStateId*/) noexcept {
-    return win32::FALSE;
+inline win32::BOOL IsThemeBackgroundPartiallyTransparent(HTHEME hTheme, int iPartId, int iStateId) noexcept {
+    auto* handle = detail::lookup(hTheme);
+    if (!handle || iPartId != 1) return win32::FALSE;
+    const auto* style = detail::style(*handle, iStateId);
+    return style && (style->flags & MICANT_THEME_HAS_BACKGROUND) &&
+           (style->background >> 24) < 255u ? win32::TRUE : win32::FALSE;
 }
 
-inline win32::BOOL IsThemePartDefined(HTHEME /*hTheme*/, int /*iPartId*/, int /*iStateId*/) noexcept {
-    return win32::TRUE;
+inline win32::BOOL IsThemePartDefined(HTHEME hTheme, int iPartId, int iStateId) noexcept {
+    auto* handle = detail::lookup(hTheme);
+    if (!handle || iPartId != 1) return win32::FALSE;
+    const auto* style = detail::style(*handle, iStateId);
+    return style && style->flags ? win32::TRUE : win32::FALSE;
 }
 
 inline win32::HRESULT WINAPI GetThemeBackgroundRegion(HTHEME /*hTheme*/, void* /*hdc*/, int32_t /*iPartId*/, int32_t /*iStateId*/, const void* /*pRect*/, void** pRegion) noexcept {
-    if (pRegion) *pRegion = reinterpret_cast<void*>(0xF001);
-    return 0; // S_OK
+    if (pRegion) *pRegion = nullptr;
+    return detail::kNotImplemented;
 }
 
 inline win32::BOOL WINAPI ThemeOrdinal47(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, void* /*pRect*/) noexcept {
-    return win32::TRUE;
+    return win32::FALSE;
 }
 
 inline win32::HRESULT WINAPI GetThemeBool(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, win32::BOOL* pfVal) noexcept {
-    if (pfVal) *pfVal = win32::TRUE;
-    return 0; // S_OK
+    if (pfVal) *pfVal = win32::FALSE;
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT WINAPI GetThemePropertyOrigin(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, int32_t* pOrigin) noexcept {
-    if (pOrigin) *pOrigin = 1; // PO_PART
-    return 0; // S_OK
+    if (pOrigin) *pOrigin = 4; // PO_NOTFOUND
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT WINAPI GetThemeEnumValue(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, int32_t* piVal) noexcept {
     if (piVal) *piVal = 0;
-    return 0; // S_OK
+    return detail::kNotImplemented;
 }
 
 inline win32::HRESULT WINAPI GetCurrentThemeName(wchar_t* pszThemeFileName, int32_t cchMaxNameChars, wchar_t* pszColorBuff, int32_t cchMaxColorChars, wchar_t* pszSizeBuff, int32_t cchMaxSizeChars) noexcept {
     if (pszThemeFileName && cchMaxNameChars > 0) pszThemeFileName[0] = L'\0';
     if (pszColorBuff && cchMaxColorChars > 0) pszColorBuff[0] = L'\0';
     if (pszSizeBuff && cchMaxSizeChars > 0) pszSizeBuff[0] = L'\0';
-    return 0; // S_OK
+    return detail::kNotImplemented;
 }
 
-inline win32::HRESULT WINAPI BufferedPaintInit() noexcept { return 0; }
-inline win32::HRESULT WINAPI BufferedPaintUnInit() noexcept { return 0; }
-inline HPAINTBUFFER WINAPI BeginBufferedPaint(void* hdcTarget, const void* /*prcTarget*/, int32_t /*dwFormat*/, void* /*pPaintParams*/, void** phdc) noexcept {
-    if (phdc) *phdc = hdcTarget ? hdcTarget : reinterpret_cast<void*>(0x8800);
-    return reinterpret_cast<HPAINTBUFFER>(0x8801);
+inline win32::HRESULT WINAPI BufferedPaintInit() noexcept { return detail::kNotImplemented; }
+inline win32::HRESULT WINAPI BufferedPaintUnInit() noexcept { return detail::kNotImplemented; }
+inline HPAINTBUFFER WINAPI BeginBufferedPaint(void* /*hdcTarget*/, const void* /*prcTarget*/, int32_t /*dwFormat*/, void* /*pPaintParams*/, void** phdc) noexcept {
+    if (phdc) *phdc = nullptr;
+    return nullptr;
 }
-inline win32::HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER /*hBufferedPaint*/, int32_t /*fUpdateTarget*/) noexcept { return 0; }
-inline win32::HRESULT WINAPI BufferedPaintSetAlpha(HPAINTBUFFER /*hBufferedPaint*/, const void* /*prcTarget*/, uint8_t /*alpha*/) noexcept { return 0; }
-inline HTHEME WINAPI OpenThemeDataForDpi(win32::HWND /*hwnd*/, LPCWSTR /*pszClassList*/, uint32_t /*dpi*/) noexcept {
-    static uint64_t dummyDpiTheme = 0x8889;
-    return reinterpret_cast<HTHEME>(&dummyDpiTheme);
+inline win32::HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER /*hBufferedPaint*/, int32_t /*fUpdateTarget*/) noexcept { return detail::kNotImplemented; }
+inline win32::HRESULT WINAPI BufferedPaintSetAlpha(HPAINTBUFFER /*hBufferedPaint*/, const void* /*prcTarget*/, uint8_t /*alpha*/) noexcept { return detail::kNotImplemented; }
+inline HTHEME WINAPI OpenThemeDataForDpi(win32::HWND hwnd, LPCWSTR pszClassList, uint32_t dpi) noexcept {
+    if (dpi != 96) return nullptr;
+    return OpenThemeData(hwnd, pszClassList);
 }
 
 inline void InitializeUxThemeSubsystemExports() {
