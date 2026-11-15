@@ -1377,8 +1377,13 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     if (currentButtons & 0x01u) keyState |= 0x0001u;
     if (currentButtons & 0x02u) keyState |= 0x0002u;
     if (currentButtons & 0x04u) keyState |= 0x0010u;
-    const auto localX64 = static_cast<int64_t>(x) - target->x;
-    const auto localY64 = static_cast<int64_t>(y) - target->y;
+    // Mouse message lParam coordinates are client-relative. Hit testing and
+    // capture use screen coordinates above, so remove the nonclient frame and
+    // caption before publishing WM_MOUSEMOVE / button messages to the app.
+    const int32_t clientFrame = frameInset(*target);
+    const int32_t clientCaption = captionHeight(*target);
+    const auto localX64 = static_cast<int64_t>(x) - target->x - clientFrame;
+    const auto localY64 = static_cast<int64_t>(y) - target->y - clientFrame - clientCaption;
     const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
     const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);

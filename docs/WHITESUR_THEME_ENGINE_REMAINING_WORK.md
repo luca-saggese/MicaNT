@@ -42,13 +42,13 @@ the evidence named here, not just declarations or a successful compile.
   `working_tree_dirty: false`; baremetal target and native user-mode boundary
   checks passed. The sampled titlebar changed from `(250,250,250)` to
   `(54,54,54)`.
-- [x] The shared worktree build completed for the baremetal kernel, Explorer,
-  compositor and required DLLs using `python3 qemu.py --headless` with the
-  persistent `build/qemu-cmake-mingw` tree. That full input run reached
-  Explorer and its theme pixel probes, then failed at the concurrent parent-
-  folder navigation assertion; its final interaction/stability gate did not
-  pass. The detailed per-feature evidence below distinguishes the successful
-  runtime probes from this incomplete full-run result.
+- [x] The integrated `python3 qemu.py --headless` build and `--verify-input`
+  run passed with a stable serial log after the Win32k client-coordinate fix.
+  It covers Explorer theme pixels, parent navigation, caption actions, all
+  resize edges/corners and minimum client size, three reopen cycles, and a live
+  Light-to-Dark switch followed by move/resize. Evidence is in
+  `/private/tmp/micant-theme-client-coordinate-fix-reopen`; the per-feature
+  historical entries below retain earlier runs that stopped before this fix.
 
 ## Remaining acceptance work
 
@@ -78,16 +78,18 @@ the evidence named here, not just declarations or a successful compile.
   UxTheme export registry and ordinal 47, forwarding each to its bounded
   implementation or explicit unsupported result. The ABI audit corrected
   ordinal 47 to `DrawThemeBackgroundEx(HTHEME,HDC,int,int,RECT*,DTBGOPTS*)`;
-  it returns `E_NOTIMPL` until that rendering path exists. `qemu.py
+  the standard and `DTBG_CLIPRECT` paths are now implemented and verified;
+  other defined option flags fail explicitly. `qemu.py
   --check-explorer` passed, and `llvm-readobj --coff-exports` confirmed its
   name and ordinal. Full QEMU reached both app windows and passed UxTheme/GDI
   pixel probes, then failed the existing maximize caption hit-target assertion;
   therefore the interactive regression remains unverified.
 - [ ] Audit every exported UxTheme function against its public signature,
   result codes, handle lifetime and documented unsupported cases.
-- [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`
-  and GDI32 imports in QEMU, including invalid/stale handles, clipping,
-  rounded fills, alpha and allocation/dispatch failures.
+- [x] The QEMU import-path matrix covers invalid/stale handles, clipped and
+  rounded drawing, alpha, handle-capacity exhaustion/cleanup and GDI dispatch
+  failure. These probes all passed in the integrated run
+  `/private/tmp/micant-theme-client-coordinate-fix-reopen`.
 - [x] `GetThemeBool(TMT_TRANSPARENT)` now reports effective background
   transparency from CSS alpha and theme opacity; other boolean properties and
   parts still return `E_NOTIMPL` after clearing the output. Explorer queried
@@ -135,22 +137,20 @@ the evidence named here, not just declarations or a successful compile.
   the real freestanding DLL imports with invalid handles and sentinel outputs;
   QEMU logged `Failed UxTheme color, size, int and rect queries clear outputs`
   in `/private/tmp/micant-theme-uxtheme-failure-output-run/serial.log`. Build
-  and the focused Ring 3 probe passed; the enclosing input suite still stops at
-  the unrelated parent-folder navigation check. Legacy hosted assertions that
-  expected synthetic query/draw success were corrected to expect documented
-  failure statuses and cleared outputs.
+  and the focused Ring 3 probe passed. The latest full QEMU input run also
+  passed; legacy hosted assertions that expected synthetic query/draw success
+  were corrected to expect documented failure statuses and cleared outputs.
 - [x] Explorer closes a real DLL-created theme handle, then queries that stale
   token. QEMU verified `ERROR_INVALID_HANDLE` and a cleared color output in
   `/private/tmp/micant-theme-uxtheme-stale-handle-run/serial.log`. The focused
-  Ring 3 check passed after the baremetal build; the full input run again ended
-  at the unrelated parent-folder navigation assertion.
+  Ring 3 check passed after the baremetal build; the latest integrated input
+  run passed as well.
 - [x] The Explorer process opens all 64 supported UxTheme handles, confirms
   the 65th open fails with null, closes the complete table, then opens and
   closes a new handle. QEMU logged `UxTheme handle exhaustion fails and
   recovers cleanly` in
   `/private/tmp/micant-theme-uxtheme-handle-capacity-run/serial.log`. The
-  capacity/cleanup probe passed after build; full input still fails later at
-  parent-folder navigation.
+  capacity/cleanup probe and the full input run passed after the build.
 
 ### 2. Win32 and common controls
 
@@ -161,10 +161,8 @@ the evidence named here, not just declarations or a successful compile.
   WhiteSur progressbar trough/progress descendants into the native normal and
   selected slots. Explorer creates the actual DLL control, sets a 0–100 range
   and 50 position, copies its rendered surface to a DIB, and compares both
-  sample pixels with the active snapshot colors in QEMU. The build and focused
-  Ring 3/DIB assertions passed. The full --verify-input run stopped afterward
-  at the parallel filesystem parent-folder navigation assertion, so the
-  remaining interaction suite did not pass in this run.
+  sample pixels with the active snapshot colors in QEMU. The build, focused
+  Ring 3/DIB assertion and latest integrated --verify-input run all passed.
 - [ ] Connect actual production DLL renderers for buttons, checkboxes, radio
   buttons, textboxes, menus, tabs and scrollbars to UxTheme/GDI.
 - [x] Implement PBM range, position, step and color messages; render the real
@@ -201,6 +199,12 @@ the evidence named here, not just declarations or a successful compile.
 - [x] QEMU repeated caption drag and edge resize after the live Light-to-Dark
   change; both passed and the client surface remained live in the same
   interactive run above.
+- [x] Freestanding Win32k now packs WM_MOUSEMOVE and button lParam values from
+  the client origin, subtracting frame and caption metrics while preserving
+  screen-space hit testing and capture. The full QEMU run verified the Explorer
+  parent button and folder row at their actual client targets, then passed all
+  caption, drag, resize, clamp, reopen and runtime theme-switch checks in
+  `/private/tmp/micant-theme-client-coordinate-fix-reopen`.
 - [x] QEMU compares inactive and active caption pixels in overlapping Light
   windows, then cycles the live app from Dark to Light Purple and verifies the
   pressed caption button pixel is exactly `#9A57A3` (diagnostics:
