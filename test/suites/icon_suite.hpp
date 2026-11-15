@@ -4,6 +4,7 @@
 #include "micant/um/native/pe.hpp"
 #include "micant/um/subsystems/winuser/icon_handle_table.hpp"
 #include "micant/um/subsystems/winuser/cursor_image.hpp"
+#include "micant/um/subsystems/winuser/ani_image.hpp"
 #include "micant/shared/pixel_composite.h"
 #include <cstdlib>
 #include <vector>
@@ -72,7 +73,7 @@ inline void Test_CurDecoder_PngHotspotAndMalformedInput() {
         [](void*, void* address, size_t) noexcept { std::free(address); },
     };
     std::vector<uint8_t> cur{
-        0,0,2,0,1,0, 1,1,0,0,0,0,70,0,0,0,22,0,0,0,
+        0,0,2,0,1,0, 1,1,0,0,0,0,0,0,70,0,0,0,22,0,0,0,
         137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,
         0,0,0,13,73,68,65,84,120,156,99,96,96,96,96,0,0,0,5,0,1,165,246,69,64,
         0,0,0,0,73,69,78,68,174,66,96,130
@@ -92,6 +93,60 @@ inline void Test_CurDecoder_PngHotspotAndMalformedInput() {
     auto truncated = cur; truncated.pop_back();
     TEST_ASSERT(DecodeCursorImage(truncated, 32, 32, image, allocator) != ImageStatus::Success,
                 "truncated CUR payload fails without publishing an image");
+}
+
+inline void Test_AniParser_SequenceRatesAndUnknownChunks() {
+    using namespace micant::um::winuser;
+    std::vector<uint8_t> ani(12, 0);
+    auto tag = [&](const char* value) { for (size_t i = 0; i < 4; ++i) ani.push_back(value[i]); };
+    auto u32 = [&](uint32_t value) { for (unsigned i = 0; i < 4; ++i) ani.push_back(uint8_t(value >> (i * 8))); };
+    auto chunk = [&](const char* name, const std::vector<uint8_t>& payload) {
+        tag(name); u32(static_cast<uint32_t>(payload.size()));
+        ani.insert(ani.end(), payload.begin(), payload.end());
+        if (payload.size() & 1) ani.push_back(0);
+    };
+    std::vector<uint8_t> header(36, 0);
+    auto set32 = [&](std::vector<uint8_t>& data, size_t at, uint32_t value) {
+        for (unsigned i = 0; i < 4; ++i) data[at+i] = uint8_t(value >> (i*8));
+    };
+    set32(header,0,36); set32(header,4,2); set32(header,8,3);
+    set32(header,28,6); set32(header,32,3);
+    chunk("anih", header);
+    chunk("JUNK", {1,2,3});
+    chunk("rate", {4,0,0,0,5,0,0,0,6,0,0,0});
+    chunk("seq ", {1,0,0,0,0,0,0,0,1,0,0,0});
+    std::vector<uint8_t> frames{'f','r','a','m'};
+    const std::vector<uint8_t> cur{0,0,2,0,1,0,1,1,0,0,0,0,0,0,1,0,0,0,22,0,0,0,0x89,0x50,0};
+    auto frameChunk = [&](std::vector<uint8_t>& target) {
+        target.insert(target.end(), {'i','c','o','n'});
+        const uint32_t n = static_cast<uint32_t>(cur.size());
+        for (unsigned i = 0; i < 4; ++i) target.push_back(uint8_t(n >> (i*8)));
+        target.insert(target.end(), cur.begin(), cur.end());
+        if (cur.size() & 1) target.push_back(0);
+    };
+    frameChunk(frames); frameChunk(frames);
+    chunk("LIST", frames);
+    ani[0]='R'; ani[1]='I'; ani[2]='F'; ani[3]='F';
+    const uint32_t riffSize = static_cast<uint32_t>(ani.size()-8);
+    for (unsigned i=0;i<4;++i) ani[4+i]=uint8_t(riffSize>>(i*8));
+    ani[8]='A'; ani[9]='C'; ani[10]='O'; ani[11]='N';
+    AniFileView parsed{};
+    TEST_ASSERT(ParseAniFile(ani, parsed) == AniStatus::Success,
+                "ANI accepts bounded frames, sequence, rates, and unknown chunks");
+    TEST_ASSERT(parsed.frameCount == 2 && parsed.stepCount == 3 &&
+                parsed.steps[0].frameIndex == 1 && parsed.steps[0].durationJiffies == 4 &&
+                parsed.steps[1].frameIndex == 0 && parsed.steps[2].durationJiffies == 6,
+                "ANI sequence indices and per-step rates are preserved");
+    auto invalid = ani;
+    // First sequence index is at the start of the seq payload.
+    size_t seqOffset = 0;
+    for (size_t i = 0; i + 8 < invalid.size(); ++i)
+        if (invalid[i]=='s' && invalid[i+1]=='e' && invalid[i+2]=='q' && invalid[i+3]==' ') {
+            seqOffset = i + 8; break;
+        }
+    if (seqOffset) invalid[seqOffset] = 9;
+    TEST_ASSERT(ParseAniFile(invalid, parsed) != AniStatus::Success,
+                "ANI rejects a sequence reference beyond available frames");
 }
 
 inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
