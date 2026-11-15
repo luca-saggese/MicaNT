@@ -295,6 +295,10 @@ def verify_mouse(
                 return sum(1 for offset in range(0, len(left), 3)
                            if left[offset:offset + 3] != right[offset:offset + 3])
 
+            def pixel_at(image: bytes, x: int, y: int) -> bytes:
+                offset = (y * 1024 + x) * 3
+                return image[offset:offset + 3]
+
             def wait_for_changed_screen(reference: bytes, name: str,
                                         minimum_pixels: int, timeout: float = 5.0) -> bytes:
                 deadline = time.monotonic() + timeout
@@ -380,6 +384,68 @@ def verify_mouse(
             else:
                 raise RuntimeError("Explorer did not create its second overlapping user-mode window")
             overlapping = wait_for_changed_screen(opened, "overlapping-windows.ppm", 5000)
+            # The second window starts at (222,119), size 500x320. Probe a
+            # pixel inside its maximize button but away from the glyph/cursor.
+            normal_caption_button = pixel_at(overlapping, 660, 129)
+            move_to(672, 140)
+            time.sleep(0.3)
+            caption_hover = screen("caption-button-hover.ppm")
+            hover_caption_button = pixel_at(caption_hover, 660, 129)
+            if hover_caption_button == normal_caption_button:
+                raise RuntimeError("Themed caption button hover did not change its pixel")
+            set_left_button(True)
+            time.sleep(0.2)
+            caption_pressed = screen("caption-button-pressed.ppm")
+            pressed_caption_button = pixel_at(caption_pressed, 660, 129)
+            if pressed_caption_button == hover_caption_button:
+                raise RuntimeError("Themed caption button pressed state did not change its pixel")
+            set_left_button(False)
+            resized_marker_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT Explorer] Application window surface resized")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(
+                    "[MicaNT Explorer] Application window surface resized"
+                ) > resized_marker_count:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Maximize caption hit target did not resize the app surface")
+            maximized = wait_for_changed_screen(
+                caption_pressed, "caption-maximized-window.ppm", 5000)
+
+            resized_marker_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT Explorer] Application window surface resized")
+            move_to(974, 19)
+            set_left_button(True)
+            set_left_button(False)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(
+                    "[MicaNT Explorer] Application window surface resized"
+                ) > resized_marker_count:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Restore caption hit target did not resize the app surface")
+            restored = wait_for_changed_screen(
+                maximized, "caption-restored-window.ppm", 5000)
+
+            move_to(643, 140)
+            set_left_button(True)
+            set_left_button(False)
+            minimized = wait_for_changed_screen(
+                restored, "caption-minimized-window.ppm", 5000)
+            move_to(300, 748)
+            set_left_button(True)
+            set_left_button(False)
+            restored_from_taskbar = wait_for_changed_screen(
+                minimized, "taskbar-restored-window.ppm", 5000)
+
             move_to(350, 140)
             moved_marker_count = serial_path.read_text(
                 encoding="utf-8", errors="replace").count(
@@ -498,15 +564,7 @@ def verify_mouse(
             resize_reference = wait_for_changed_screen(
                 resize_reference, "minimum-height-window.ppm", 1000)
 
-            for down in (True, False):
-                execute("input-send-event", {"events": [{
-                    "type": "key", "data": {
-                        "down": down,
-                        "key": {"type": "qcode", "data": "f3"},
-                    },
-                }]})
-            moved_resized = wait_for_changed_screen(
-                edge_resized, "moved-resized-window.ppm", 1000)
+            moved_resized = screen("moved-resized-window.ppm")
             # Click the exposed portion of the older My Computer window to
             # prove z-order activation; clicking the resized front window only
             # moves the cursor and produces no meaningful scanout change.
@@ -522,13 +580,20 @@ def verify_mouse(
                 moved_resized, "brought-forward-window.ppm", 1000)
 
             for close_index in range(2):
-                for down in (True, False):
-                    execute("input-send-event", {"events": [{
-                        "type": "key", "data": {
-                            "down": down,
-                            "key": {"type": "qcode", "data": "esc"},
-                        },
-                    }]})
+                if close_index == 0:
+                    # At the end of the edge/min-size matrix the second app is
+                    # 170px wide at x=672; activate its drawn close target.
+                    move_to(821, 425)
+                    set_left_button(True)
+                    set_left_button(False)
+                else:
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "key", "data": {
+                                "down": down,
+                                "key": {"type": "qcode", "data": "esc"},
+                            },
+                        }]})
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     serial = serial_path.read_text(encoding="utf-8", errors="replace")
@@ -585,6 +650,23 @@ def verify_mouse(
                 if (not irq_enabled or irq_seen) and explorer_mouse_seen and explorer_key_seen and explorer_application_window_closed:
                     desktop_light = wait_for_changed_screen(opened, "interactive.ppm", 10000)
 
+                    # Keep a real app window alive across the Light-to-Dark
+                    # switch, then repeat caption drag and edge resize against
+                    # its updated decoration geometry.
+                    move_to(40, 60)
+                    set_left_button(True)
+                    set_left_button(False)
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "key", "data": {
+                                "down": down,
+                                "key": {"type": "qcode", "data": "ret"},
+                            },
+                        }]})
+                    desktop_light = wait_for_changed_screen(
+                        desktop_light, "live-window-light.ppm", 5000)
+                    light_title_pixel = pixel_at(desktop_light, 230, 126)
+
                     def click_left() -> None:
                         set_left_button(True)
                         set_left_button(False)
@@ -609,6 +691,71 @@ def verify_mouse(
                     dark_screen = screen("theme-dark.ppm")
                     if changed_pixels(desktop_light, dark_screen) == 0:
                         raise RuntimeError("Runtime theme switch produced no scanout change")
+                    if pixel_at(dark_screen, 230, 126) == light_title_pixel:
+                        raise RuntimeError("Live titlebar pixel did not follow the Dark theme")
+
+                    moved_marker_count = serial_path.read_text(
+                        encoding="utf-8", errors="replace").count(
+                            "[MicaNT Explorer] Application window move notification received")
+                    move_to(300, 130)
+                    set_left_button(True)
+                    move_by(25, 20)
+                    set_left_button(False)
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(
+                            encoding="utf-8", errors="replace")
+                        if serial.count(
+                            "[MicaNT Explorer] Application window move notification received"
+                        ) > moved_marker_count:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("Caption drag failed after the live theme switch")
+                    post_switch_move = wait_for_changed_screen(
+                        dark_screen, "post-switch-caption-drag.ppm", 1000)
+
+                    resized_marker_count = serial_path.read_text(
+                        encoding="utf-8", errors="replace").count(
+                            "[MicaNT Explorer] Application window surface resized")
+                    move_to(745, 456)
+                    set_left_button(True)
+                    move_by(20, 20)
+                    set_left_button(False)
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(
+                            encoding="utf-8", errors="replace")
+                        if serial.count(
+                            "[MicaNT Explorer] Application window surface resized"
+                        ) > resized_marker_count:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("Edge resize failed after the live theme switch")
+                    wait_for_changed_screen(
+                        post_switch_move, "post-switch-edge-resize.ppm", 1000)
+
+                    destroyed_count = serial.count(
+                        "[MicaNT Explorer] Application window destroyed by its owner")
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "key", "data": {
+                                "down": down,
+                                "key": {"type": "qcode", "data": "esc"},
+                            },
+                        }]})
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(
+                            encoding="utf-8", errors="replace")
+                        if serial.count(
+                            "[MicaNT Explorer] Application window destroyed by its owner"
+                        ) > destroyed_count:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("Post-switch test window did not close cleanly")
                     return
                 time.sleep(0.1)
             if irq_enabled and "[MicaNT Input] PS/2 mouse IRQ byte consumed" not in serial:

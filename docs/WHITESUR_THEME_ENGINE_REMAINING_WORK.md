@@ -23,15 +23,20 @@ the evidence named here, not just declarations or a successful compile.
 - [x] Win32k now starts pointer move/resize gestures from its caption and edge/
   corner hit tests, updates the window rectangle during captured mouse motion,
   and queues `WM_MOVE`/`WM_SIZE`; Explorer rebuilds its DIB surface on resize.
-  QEMU serial recorded both notifications, and
-  `caption-dragged-window.ppm` / `edge-resized-window.ppm` show the resulting
-  scanout. The executed gesture covered caption drag and bottom-right resize.
-- [x] Canonical `ntoskrnl_core_baremetal` and Explorer dependencies built and
-  linked at source commit `b98f1be`; QEMU completed input, window cleanup,
-  reopen-cycle, and Light-to-Dark runtime switch paths. The run used a
-  temporary harness adjustment to click the exposed background window while
-  preserving the pixel threshold. Diagnostics are at
-  `/private/tmp/micant-theme-qemu-verify-b98f1be-v2`.
+  QEMU recorded caption drag and all four edges/eight corners. The minimum
+  outer size now preserves a 160x100 client, and Explorer rebuilt its DIB at
+  both clamps. Caption hover/pressed pixel states, maximize/restore,
+  minimize/taskbar-restore, close, activation, cleanup and reopen also passed
+  in `/private/tmp/micant-theme-qemu-nonclient-full`.
+- [ ] The follow-up live-window Light-to-Dark pixel check failed: the profile
+  switch marker arrived, but the titlebar sample stayed `(250,250,250)` in
+  both screenshots. The scanout is in
+  `/private/tmp/micant-theme-qemu-nonclient-switch2`; post-switch drag/resize
+  was not reached. This is the current nonclient blocker.
+- [ ] The preceding QEMU runs built and linked `ntoskrnl_core_baremetal` and
+  Explorer successfully in a clean worktree based on commit `9e40bc0`, with
+  local source copies for the uncommitted compositor and harness edits. A
+  source-matched run of the final diff remains pending.
 - [ ] A build of the latest uncommitted shared worktree is still pending. That
   tree contains unrelated Task Manager/kernel changes; its earlier build
   failed in `kernel/init/kiinit.cpp` (`third`/`fourth` undeclared) and
@@ -61,14 +66,18 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 3. Nonclient window decoration and geometry
 
-- [ ] Render themed titlebars, borders, caption buttons and icons from theme
-  data in the software compositor.
-- [ ] Verify close/minimize/maximize, all supported edge/corner resize hit
-  targets, minimum-size clamping, and client/surface dimensions against
-  Win32k hit testing and compositor output. QEMU currently covers caption drag
-  and bottom-right resize only.
-- [ ] Repeat move/resize and caption-button tests while active/inactive and
-  after Light/Dark/accent switches; compare pixels and hit targets.
+- [ ] Render and verify themed titlebars across Light/Dark. The compositor
+  now selects caption-button normal/hover/pressed/inactive colors, opacity and
+  borders from the Button snapshot, but QEMU found that the live titlebar
+  sample remained Light after the Dark switch. Caption title glyphs and icons
+  also still use generic compositor drawing rather than theme assets/font
+  service.
+- [x] QEMU verified caption drag; close, minimize, maximize/restore; all four
+  edges and all four corners; and minimum-size clamping with a 160x100 client
+  surface. Diagnostic run: `/private/tmp/micant-theme-qemu-nonclient-full`.
+- [ ] Repeat active/inactive caption and geometry pixel checks after runtime
+  Light/Dark/accent changes. The live Dark titlebar assertion currently fails,
+  so post-switch move/resize is not yet accepted.
 
 ### 4. Explorer theme coverage
 

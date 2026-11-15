@@ -218,17 +218,27 @@ bool compose(const MicaCompositorMetadataStore& metadata,
                     const auto* buttonStyle = themeValid
                         ? &metadata.theme.styles[state] : nullptr;
                     if (!buttonStyle || !buttonStyle->flags) buttonStyle = normalButton;
+                    const auto applyOpacity = [&](uint32_t color) noexcept {
+                        uint32_t alpha = color >> 24;
+                        if (buttonStyle &&
+                            (buttonStyle->flags & MICANT_THEME_HAS_OPACITY))
+                            alpha = (alpha * buttonStyle->opacity + 127u) / 255u;
+                        return (alpha << 24) | (color & 0x00FFFFFFu);
+                    };
                     uint32_t background = button == 3 ? closeColor : buttonColor;
                     if (buttonStyle &&
                         (buttonStyle->flags & MICANT_THEME_HAS_BACKGROUND))
-                        background = buttonStyle->background | 0xFF000000u;
+                        background = blend(applyOpacity(buttonStyle->background),
+                                           captionColor);
                     uint32_t glyph = titleColor;
                     if (buttonStyle &&
                         (buttonStyle->flags & MICANT_THEME_HAS_FOREGROUND))
-                        glyph = buttonStyle->foreground | 0xFF000000u;
+                        glyph = blend(applyOpacity(buttonStyle->foreground),
+                                       captionColor);
                     if (buttonStyle &&
                         (buttonStyle->flags & MICANT_THEME_HAS_BORDER)) {
-                        const uint32_t borderColor = buttonStyle->border | 0xFF000000u;
+                        const uint32_t borderColor = blend(
+                            applyOpacity(buttonStyle->border), background);
                         fillRect(buttonLeft, buttonTop, buttonRight, buttonBottom,
                                  borderColor, width, height);
                         fillRect(buttonLeft + 1, buttonTop + 1, buttonRight - 1,
