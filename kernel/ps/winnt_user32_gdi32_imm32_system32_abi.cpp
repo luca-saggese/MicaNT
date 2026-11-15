@@ -584,6 +584,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kDeleteObject);
     MICA_WIN32K_PROC(MicaWin32kGetStockObject);
     MICA_WIN32K_PROC(MicaWin32kCreateDibSection);
+    MICA_WIN32K_PROC(MicaWin32kFillRect);
 #undef MICA_WIN32K_PROC
     return nullptr;
 }
@@ -600,6 +601,7 @@ struct WinNtWindowState {
 constexpr size_t GdiFontCapacity = 24;
 constexpr size_t GdiBitmapCapacity = 32;
 constexpr size_t GdiDcCapacity = 64;
+constexpr size_t GdiBrushCapacity = 64;
 constexpr int32_t GdiFontSize = 9;
 struct GdiLogFontW {
     int32_t height, width, escapement, orientation, weight;
@@ -653,10 +655,37 @@ struct GdiDcSelection {
     uint32_t textColor{0x00000000u}; // COLORREF black
     int32_t backgroundMode{1};       // TRANSPARENT
 };
+struct GdiBrushObject {
+    uint32_t colorRef{};
+    uint32_t generation{};
+    bool active{};
+};
 GdiFontObject g_gdiFonts[GdiFontCapacity]{};
 GdiFontObject* g_systemFont{};
 GdiBitmapSurface g_gdiBitmaps[GdiBitmapCapacity]{};
 GdiDcSelection g_gdiDcs[GdiDcCapacity]{};
+GdiBrushObject g_gdiBrushes[GdiBrushCapacity]{};
+uint32_t g_gdiBrushGeneration{1};
+uint32_t g_gdiBrushLock{};
+struct GdiBrushGuard {
+    GdiBrushGuard() noexcept {
+        while (__atomic_exchange_n(&g_gdiBrushLock, 1u, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    ~GdiBrushGuard() { __atomic_store_n(&g_gdiBrushLock, 0u, __ATOMIC_RELEASE); }
+};
+
+void* GdiBrushHandle(size_t slot, uint32_t generation) noexcept {
+    return reinterpret_cast<void*>((static_cast<uintptr_t>(generation) << 7) | (slot + 1));
+}
+GdiBrushObject* FindGdiBrush(void* handle) noexcept {
+    const uintptr_t value = reinterpret_cast<uintptr_t>(handle);
+    const uintptr_t slot = value & 0x7Fu;
+    const uint32_t generation = static_cast<uint32_t>(value >> 7);
+    if (!slot || slot > GdiBrushCapacity || !generation) return nullptr;
+    auto& brush = g_gdiBrushes[slot - 1];
+    return brush.active && brush.generation == generation ? &brush : nullptr;
+}
 
 GdiFontObject* FindGdiFont(void* handle) noexcept {
     for (auto& font : g_gdiFonts) if (font.active && handle == &font) return &font;
@@ -1794,6 +1823,34 @@ int32_t Gdi32_ChoosePixelFormat(void* hdc, const void* ppfd) noexcept {
     return (hdc && ppfd) ? 1 : 0;
 }
 
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+void* Gdi32_CreateSolidBrush(uint32_t colorRef) noexcept {
+    GdiBrushGuard guard;
+    for (size_t i = 0; i < GdiBrushCapacity; ++i) {
+        auto& brush = g_gdiBrushes[i];
+        if (brush.active) continue;
+        uint32_t generation = ++g_gdiBrushGeneration;
+        if (!generation) generation = ++g_gdiBrushGeneration;
+        brush.colorRef = colorRef & 0x00FFFFFFu;
+        brush.generation = generation;
+        brush.active = true;
+        return GdiBrushHandle(i, generation);
+    }
+    return nullptr;
+}
+
+int32_t Gdi32_FillRect(void* hdc, const void* rectangle, void* hbrush) noexcept {
+    if (!hdc || !rectangle) return 0;
+    GdiBrushGuard guard;
+    auto* brush = FindGdiBrush(hbrush);
+    if (!brush) return 0;
+    using Fn = int32_t (*)(void*, const MicaWin32kRect*, uint32_t);
+    auto fill = Win32kProc<Fn>("MicaWin32kFillRect");
+    return fill ? fill(hdc, static_cast<const MicaWin32kRect*>(rectangle),
+                       brush->colorRef) : 0;
+}
+#endif
+
 int32_t Gdi32_SetPixelFormat(void* hdc, int32_t format, const void* ppfd) noexcept {
     if (!hdc || format <= 0 || !ppfd) return 0;
     g_activePixelFormat = format;
@@ -1888,6 +1945,14 @@ void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
 
 int32_t Gdi32_DeleteObject(void* ho) noexcept {
 #if defined(BUILD_SYSTEM32_GDI32_DLL)
+    {
+        GdiBrushGuard guard;
+    if (GdiBrushObject* brush = FindGdiBrush(ho)) {
+        brush->active = false;
+        brush->colorRef = 0;
+        return 1;
+    }
+    }
     if (GdiFontObject* font = FindGdiFont(ho)) {
         if (font->stock) return 0;
         for (const auto& dc : g_gdiDcs) if (dc.dc && dc.font == font) return 0;
@@ -2487,6 +2552,12 @@ __declspec(dllexport) int32_t GetDeviceCaps(void* hdc, int32_t index) {
 }
 __declspec(dllexport) int32_t ChoosePixelFormat(void* hdc, const void* ppfd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_ChoosePixelFormat(hdc, ppfd);
+}
+__declspec(dllexport) void* CreateSolidBrush(uint32_t colorRef) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateSolidBrush(colorRef);
+}
+__declspec(dllexport) int32_t FillRect(void* hdc, const void* rectangle, void* hbrush) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_FillRect(hdc, rectangle, hbrush);
 }
 __declspec(dllexport) int32_t SetPixelFormat(void* hdc, int32_t format, const void* ppfd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetPixelFormat(hdc, format, ppfd);
