@@ -1333,7 +1333,7 @@ inline void InitializeDirectWriteExports() {
 } // namespace micant::dwrite
 
 #if defined(MICANT_DWRITE_ABI_ONLY)
-extern "C" int32_t __stdcall DWriteCreateFactory(
+extern "C" __declspec(dllexport) int32_t __stdcall DWriteCreateFactory(
     micant::dwrite::DWRITE_FACTORY_TYPE factoryType,
     const micant::ole32::IID& iid,
     micant::ole32::IUnknown** factory);

@@ -12,6 +12,7 @@ namespace {
 
 constexpr uint32_t FamilyCount = 6;
 constexpr uint32_t VariantCount = 5;
+constexpr uint32_t MaxLayoutText = 256;
 constexpr const char16_t* FamilyUtf16[FamilyCount] = {
     u"Segoe UI", u"Arial", u"Times New Roman", u"Courier New", u"Calibri",
     u"DejaVu Sans"
@@ -42,6 +43,24 @@ struct ObjectSlot {
         }
         while (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2) {}
         return reinterpret_cast<T*>(storage);
+    }
+
+    template<typename... Args>
+    T* create(Args... args) noexcept {
+        uint32_t expected = 0;
+        if (!__atomic_compare_exchange_n(&state, &expected, 1, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return nullptr;
+        T* object = ::new (static_cast<void*>(storage)) T(this, args...);
+        __atomic_store_n(&state, 2, __ATOMIC_RELEASE);
+        return object;
+    }
+
+    void destroy(T* object) noexcept {
+        uint32_t expected = 2;
+        if (!__atomic_compare_exchange_n(&state, &expected, 3, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+        object->~T();
+        __atomic_store_n(&state, 0, __ATOMIC_RELEASE);
     }
 };
 
@@ -131,6 +150,8 @@ private:
 };
 
 class Font;
+class TextFormat;
+class TextLayout;
 class Face final : public IDWriteFontFace {
 public:
     explicit Face(Font* font) noexcept : font_(font) {}
@@ -332,10 +353,9 @@ public:
         if (!out) return ole32::E_POINTER;
         Collection* collection = collectionSlot.get(); *out = collection; collection->AddRef(); return ole32::S_OK;
     }
-    int32_t __stdcall CreateTextFormat(const wchar_t*, IDWriteFontCollection*, DWRITE_FONT_WEIGHT,
-            DWRITE_FONT_STYLE, DWRITE_FONT_STRETCH, float, const wchar_t*, IDWriteTextFormat** out) override {
-        if (!out) return ole32::E_POINTER; *out = nullptr; return ole32::E_NOTIMPL;
-    }
+    int32_t __stdcall CreateTextFormat(const wchar_t* family, IDWriteFontCollection* collection,
+            DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
+            float size, const wchar_t* locale, IDWriteTextFormat** out) override;
     int32_t __stdcall CreateTypography(IDWriteTypography** out) override {
         if (!out) return ole32::E_POINTER; *out = nullptr; return ole32::E_NOTIMPL;
     }
@@ -346,14 +366,488 @@ public:
             DWRITE_RENDERING_MODE, IDWriteRenderingParams** out) override {
         if (!out) return ole32::E_POINTER; *out = nullptr; return ole32::E_NOTIMPL;
     }
-    int32_t __stdcall CreateTextLayout(const wchar_t*, uint32_t, IDWriteTextFormat*, float, float,
-            IDWriteTextLayout** out) override {
-        if (!out) return ole32::E_POINTER; *out = nullptr; return ole32::E_NOTIMPL;
-    }
+    int32_t __stdcall CreateTextLayout(const wchar_t* text, uint32_t length,
+            IDWriteTextFormat* format, float width, float height,
+            IDWriteTextLayout** out) override;
 private:
     uint32_t refs_{1};
 };
 ObjectSlot<Factory> factorySlots[2]{};
+
+bool finitePositive(float value, float maximum) noexcept {
+    return value > 0.0f && value <= maximum && value == value;
+}
+
+int familyIndexFor(const wchar_t* family) noexcept {
+    if (!family) return -1;
+    for (uint32_t i = 0; i < FamilyCount; ++i)
+        if (equalFamily(family, FamilyWide[i])) return static_cast<int>(i);
+    return -1;
+}
+
+bool copyWide(const wchar_t* source, wchar_t* output, uint32_t capacity) noexcept {
+    if (!source || !output || capacity < 2) return false;
+    uint32_t length = 0;
+    while (source[length]) {
+        if (length + 1 >= capacity || static_cast<uint32_t>(source[length]) > 0xffffu)
+            return false;
+        output[length] = source[length];
+        ++length;
+    }
+    output[length] = 0;
+    return true;
+}
+
+bool validLocale(const wchar_t* locale) noexcept {
+    if (!locale) return true;
+    for (uint32_t i = 0; locale[i]; ++i)
+        if (locale[i] < 0x20 || locale[i] > 0x7e || i >= 31) return false;
+    return true;
+}
+
+uint16_t pointSizeForDip(float dip) noexcept {
+    float points = dip * 0.75f + 0.5f;
+    if (points < 1.0f) return 1;
+    if (points > 384.0f) return 384;
+    return static_cast<uint16_t>(points);
+}
+
+class TextFormat final : public IDWriteTextFormat {
+public:
+    TextFormat(ObjectSlot<TextFormat>* slot, const wchar_t* family, DWRITE_FONT_WEIGHT weight,
+            DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch, float size,
+            const wchar_t* locale) noexcept
+        : slot_(slot), weight_(weight), style_(style), stretch_(stretch), size_(size) {
+        familyIndex_ = familyIndexFor(family);
+        valid_ = familyIndex_ >= 0 && copyWide(family, family_, 64) &&
+            copyWide(locale ? locale : L"en-us", locale_, 32) &&
+            weight >= 1 && weight <= 1000 &&
+            style >= DWRITE_FONT_STYLE_NORMAL && style <= DWRITE_FONT_STYLE_ITALIC &&
+            stretch >= DWRITE_FONT_STRETCH_ULTRA_CONDENSED &&
+            stretch <= DWRITE_FONT_STRETCH_ULTRA_EXPANDED && finitePositive(size, 512.0f) &&
+            validLocale(locale);
+        if (valid_) valid_ = initializeFont();
+    }
+    ~TextFormat() { manager_.shutdown(); }
+    bool valid() const noexcept { return valid_; }
+    int32_t __stdcall QueryInterface(const ole32::IID& iid, void** out) override {
+        if (!out) return ole32::E_POINTER;
+        *out = nullptr;
+        if (iid != ole32::IID_IUnknown && iid != IID_IDWriteTextFormat) return ole32::E_NOINTERFACE;
+        *out = static_cast<IDWriteTextFormat*>(this); AddRef(); return ole32::S_OK;
+    }
+    uint32_t __stdcall AddRef() override { return addRef<IDWriteTextFormat>(refs_); }
+    uint32_t __stdcall Release() override {
+        const uint32_t remaining = releaseRef(refs_);
+        if (!remaining) slot_->destroy(this);
+        return remaining;
+    }
+    int32_t __stdcall SetTextAlignment(DWRITE_TEXT_ALIGNMENT value) override {
+        if (value < DWRITE_TEXT_ALIGNMENT_LEADING || value > DWRITE_TEXT_ALIGNMENT_JUSTIFIED)
+            return ole32::E_INVALIDARG;
+        textAlignment_ = value; return ole32::S_OK;
+    }
+    int32_t __stdcall SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT value) override {
+        if (value < DWRITE_PARAGRAPH_ALIGNMENT_NEAR || value > DWRITE_PARAGRAPH_ALIGNMENT_CENTER)
+            return ole32::E_INVALIDARG;
+        paragraphAlignment_ = value; return ole32::S_OK;
+    }
+    int32_t __stdcall SetWordWrapping(DWRITE_WORD_WRAPPING value) override {
+        if (value != DWRITE_WORD_WRAPPING_WRAP && value != DWRITE_WORD_WRAPPING_NO_WRAP)
+            return ole32::E_NOTIMPL;
+        wrapping_ = value; return ole32::S_OK;
+    }
+    DWRITE_TEXT_ALIGNMENT __stdcall GetTextAlignment() override { return textAlignment_; }
+    DWRITE_PARAGRAPH_ALIGNMENT __stdcall GetParagraphAlignment() override { return paragraphAlignment_; }
+    DWRITE_WORD_WRAPPING __stdcall GetWordWrapping() override { return wrapping_; }
+    uint32_t __stdcall GetFontFamilyNameLength() override { return lengthOf(family_); }
+    int32_t __stdcall GetFontFamilyName(wchar_t* out, uint32_t size) override {
+        return copyBuffer(family_, out, size);
+    }
+    DWRITE_FONT_WEIGHT __stdcall GetFontWeight() override { return weight_; }
+    DWRITE_FONT_STYLE __stdcall GetFontStyle() override { return style_; }
+    DWRITE_FONT_STRETCH __stdcall GetFontStretch() override { return stretch_; }
+    float __stdcall GetFontSize() override { return size_; }
+    uint32_t __stdcall GetLocaleNameLength() override { return lengthOf(locale_); }
+    int32_t __stdcall GetLocaleName(wchar_t* out, uint32_t size) override {
+        return copyBuffer(locale_, out, size);
+    }
+    bool initializeFont() noexcept {
+        if (familyIndex_ < 0) return false;
+        micant::um::graphics::LogicalFontRequest request{};
+        request.requestedFamily = FamilyUtf16[static_cast<uint32_t>(familyIndex_)];
+        request.weight = static_cast<uint16_t>(weight_);
+        request.italic = style_ != DWRITE_FONT_STYLE_NORMAL;
+        request.pointSize = pointSizeForDip(size_);
+        request.dpi = 96;
+        return manager_.initializeForMetrics(request);
+    }
+    static uint32_t lengthOf(const wchar_t* text) noexcept {
+        uint32_t n = 0; while (text && text[n]) ++n; return n;
+    }
+    static int32_t copyBuffer(const wchar_t* text, wchar_t* out, uint32_t size) noexcept {
+        if (!out) return ole32::E_POINTER;
+        const uint32_t length = lengthOf(text);
+        if (size <= length) return ole32::E_NOT_SUFFICIENT_BUFFER;
+        for (uint32_t i = 0; i <= length; ++i) out[i] = text[i];
+        return ole32::S_OK;
+    }
+    ObjectSlot<TextFormat>* slot_{};
+    uint32_t refs_{1};
+    int32_t familyIndex_{-1};
+    wchar_t family_[64]{};
+    wchar_t locale_[32]{};
+    DWRITE_FONT_WEIGHT weight_{};
+    DWRITE_FONT_STYLE style_{};
+    DWRITE_FONT_STRETCH stretch_{};
+    float size_{};
+    DWRITE_TEXT_ALIGNMENT textAlignment_{DWRITE_TEXT_ALIGNMENT_LEADING};
+    DWRITE_PARAGRAPH_ALIGNMENT paragraphAlignment_{DWRITE_PARAGRAPH_ALIGNMENT_NEAR};
+    DWRITE_WORD_WRAPPING wrapping_{DWRITE_WORD_WRAPPING_WRAP};
+    bool valid_{};
+    micant::um::graphics::FontManager manager_{};
+};
+ObjectSlot<TextFormat> formatSlots[16]{};
+
+struct LayoutLine {
+    uint32_t length{};
+    uint32_t trailingWhitespace{};
+    uint32_t newlineLength{};
+    float width{};
+    float widthIncludingTrailingWhitespace{};
+};
+
+bool nextScalar(const wchar_t* text, uint32_t length, uint32_t& cursor,
+                uint32_t& scalar) noexcept {
+    if (cursor >= length) return false;
+    const uint32_t first = static_cast<uint16_t>(text[cursor++]);
+    if (first >= 0xd800 && first <= 0xdbff) {
+        if (cursor >= length) return false;
+        const uint32_t second = static_cast<uint16_t>(text[cursor++]);
+        if (second < 0xdc00 || second > 0xdfff) return false;
+        scalar = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
+        return true;
+    }
+    if (first >= 0xdc00 && first <= 0xdfff) return false;
+    scalar = first;
+    return true;
+}
+
+bool appendUtf8(char* output, size_t capacity, size_t& used, uint32_t scalar) noexcept {
+    uint8_t bytes[4]{}; size_t count = 0;
+    if (scalar <= 0x7f) { bytes[0] = static_cast<uint8_t>(scalar); count = 1; }
+    else if (scalar <= 0x7ff) {
+        bytes[0] = static_cast<uint8_t>(0xc0 | (scalar >> 6));
+        bytes[1] = static_cast<uint8_t>(0x80 | (scalar & 0x3f)); count = 2;
+    } else if (scalar <= 0xffff) {
+        bytes[0] = static_cast<uint8_t>(0xe0 | (scalar >> 12));
+        bytes[1] = static_cast<uint8_t>(0x80 | ((scalar >> 6) & 0x3f));
+        bytes[2] = static_cast<uint8_t>(0x80 | (scalar & 0x3f)); count = 3;
+    } else if (scalar <= 0x10ffff) {
+        bytes[0] = static_cast<uint8_t>(0xf0 | (scalar >> 18));
+        bytes[1] = static_cast<uint8_t>(0x80 | ((scalar >> 12) & 0x3f));
+        bytes[2] = static_cast<uint8_t>(0x80 | ((scalar >> 6) & 0x3f));
+        bytes[3] = static_cast<uint8_t>(0x80 | (scalar & 0x3f)); count = 4;
+    } else return false;
+    if (used + count >= capacity) return false;
+    for (size_t i = 0; i < count; ++i) output[used++] = static_cast<char>(bytes[i]);
+    output[used] = 0;
+    return true;
+}
+
+class TextLayout final : public IDWriteTextLayout {
+public:
+    TextLayout(ObjectSlot<TextLayout>* slot, const wchar_t* text, uint32_t length,
+            IDWriteTextFormat* format, float width, float height) noexcept
+        : slot_(slot), length_(length), maxWidth_(width), maxHeight_(height) {
+        valid_ = text && format && length <= MaxText && finitePositive(width, 16384.0f) &&
+            finitePositive(height, 16384.0f);
+        if (!valid_) return;
+        for (uint32_t i = 0; i < length; ++i) text_[i] = text[i];
+        text_[length] = 0;
+        wchar_t name[64]{}, locale[32]{};
+        if (format->GetFontFamilyName(name, 64) != ole32::S_OK ||
+            format->GetLocaleName(locale, 32) != ole32::S_OK ||
+            !copyWide(name, family_, 64) || !copyWide(locale, locale_, 32)) {
+            valid_ = false; return;
+        }
+        familyIndex_ = familyIndexFor(family_);
+        weight_ = format->GetFontWeight(); style_ = format->GetFontStyle();
+        stretch_ = format->GetFontStretch(); size_ = format->GetFontSize();
+        textAlignment_ = format->GetTextAlignment();
+        paragraphAlignment_ = format->GetParagraphAlignment();
+        wrapping_ = format->GetWordWrapping();
+        valid_ = familyIndex_ >= 0 && finitePositive(size_, 512.0f) && validateUtf16() &&
+            initializeFont();
+    }
+    ~TextLayout() { manager_.shutdown(); }
+    bool valid() const noexcept { return valid_; }
+    int32_t __stdcall QueryInterface(const ole32::IID& iid, void** out) override {
+        if (!out) return ole32::E_POINTER;
+        *out = nullptr;
+        if (iid == IID_IDWriteTextLayout || iid == IID_IDWriteTextFormat || iid == ole32::IID_IUnknown) {
+            *out = static_cast<IDWriteTextLayout*>(this); AddRef(); return ole32::S_OK;
+        }
+        return ole32::E_NOINTERFACE;
+    }
+    uint32_t __stdcall AddRef() override { return addRef<IDWriteTextLayout>(refs_); }
+    uint32_t __stdcall Release() override {
+        const uint32_t remaining = releaseRef(refs_);
+        if (!remaining) slot_->destroy(this);
+        return remaining;
+    }
+    int32_t __stdcall SetTextAlignment(DWRITE_TEXT_ALIGNMENT value) override {
+        if (value < DWRITE_TEXT_ALIGNMENT_LEADING || value > DWRITE_TEXT_ALIGNMENT_JUSTIFIED)
+            return ole32::E_INVALIDARG;
+        textAlignment_ = value; return ole32::S_OK;
+    }
+    int32_t __stdcall SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT value) override {
+        if (value < DWRITE_PARAGRAPH_ALIGNMENT_NEAR || value > DWRITE_PARAGRAPH_ALIGNMENT_CENTER)
+            return ole32::E_INVALIDARG;
+        paragraphAlignment_ = value; return ole32::S_OK;
+    }
+    int32_t __stdcall SetWordWrapping(DWRITE_WORD_WRAPPING value) override {
+        if (value != DWRITE_WORD_WRAPPING_WRAP && value != DWRITE_WORD_WRAPPING_NO_WRAP)
+            return ole32::E_NOTIMPL;
+        wrapping_ = value; return ole32::S_OK;
+    }
+    DWRITE_TEXT_ALIGNMENT __stdcall GetTextAlignment() override { return textAlignment_; }
+    DWRITE_PARAGRAPH_ALIGNMENT __stdcall GetParagraphAlignment() override { return paragraphAlignment_; }
+    DWRITE_WORD_WRAPPING __stdcall GetWordWrapping() override { return wrapping_; }
+    uint32_t __stdcall GetFontFamilyNameLength() override { return TextFormat::lengthOf(family_); }
+    int32_t __stdcall GetFontFamilyName(wchar_t* out, uint32_t size) override {
+        return TextFormat::copyBuffer(family_, out, size);
+    }
+    DWRITE_FONT_WEIGHT __stdcall GetFontWeight() override { return weight_; }
+    DWRITE_FONT_STYLE __stdcall GetFontStyle() override { return style_; }
+    DWRITE_FONT_STRETCH __stdcall GetFontStretch() override { return stretch_; }
+    float __stdcall GetFontSize() override { return size_; }
+    uint32_t __stdcall GetLocaleNameLength() override { return TextFormat::lengthOf(locale_); }
+    int32_t __stdcall GetLocaleName(wchar_t* out, uint32_t size) override {
+        return TextFormat::copyBuffer(locale_, out, size);
+    }
+    int32_t __stdcall SetMaxWidth(float value) override {
+        if (!finitePositive(value, 16384.0f)) return ole32::E_INVALIDARG;
+        maxWidth_ = value; return ole32::S_OK;
+    }
+    int32_t __stdcall SetMaxHeight(float value) override {
+        if (!finitePositive(value, 16384.0f)) return ole32::E_INVALIDARG;
+        maxHeight_ = value; return ole32::S_OK;
+    }
+    float __stdcall GetMaxWidth() override { return maxWidth_; }
+    float __stdcall GetMaxHeight() override { return maxHeight_; }
+    int32_t __stdcall GetMetrics(DWRITE_TEXT_METRICS* metrics) override {
+        if (!metrics) return ole32::E_POINTER;
+        LayoutLine lines[MaxText + 1]{}; uint32_t count{}; float lineHeight{}, baseline{};
+        const int32_t status = compute(lines, count, lineHeight, baseline);
+        if (status != ole32::S_OK) return status;
+        float width = 0, widthIncludingWhitespace = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (lines[i].width > width) width = lines[i].width;
+            if (lines[i].widthIncludingTrailingWhitespace > widthIncludingWhitespace)
+                widthIncludingWhitespace = lines[i].widthIncludingTrailingWhitespace;
+        }
+        const float height = lineHeight * static_cast<float>(count);
+        if (height > maxHeight_) return ole32::E_NOTIMPL;
+        *metrics = {};
+        metrics->left = metrics->top = 0.0f;
+        metrics->width = width;
+        metrics->widthIncludingTrailingWhitespace = widthIncludingWhitespace;
+        metrics->height = height; metrics->layoutWidth = maxWidth_; metrics->layoutHeight = maxHeight_;
+        metrics->maxBidiReorderingDepth = 1; metrics->lineCount = count;
+        return ole32::S_OK;
+    }
+    int32_t __stdcall GetLineMetrics(DWRITE_LINE_METRICS* output, uint32_t capacity,
+                                     uint32_t* actual) override {
+        if (!actual || (capacity && !output)) return ole32::E_POINTER;
+        LayoutLine lines[MaxText + 1]{}; uint32_t count{}; float lineHeight{}, baseline{};
+        const int32_t status = compute(lines, count, lineHeight, baseline);
+        if (status != ole32::S_OK) return status;
+        *actual = count;
+        const uint32_t written = capacity < count ? capacity : count;
+        for (uint32_t i = 0; i < written; ++i) {
+            output[i].length = lines[i].length;
+            output[i].trailingWhitespaceLength = lines[i].trailingWhitespace;
+            output[i].newlineLength = lines[i].newlineLength;
+            output[i].height = lineHeight; output[i].baseline = baseline;
+            output[i].isTrimmed = 0;
+        }
+        return capacity < count ? ole32::E_NOT_SUFFICIENT_BUFFER : ole32::S_OK;
+    }
+    int32_t __stdcall GetClusterMetrics(DWRITE_CLUSTER_METRICS*, uint32_t,
+                                        uint32_t* actual) override {
+        if (!actual) return ole32::E_POINTER;
+        *actual = 0; return ole32::E_NOTIMPL;
+    }
+    int32_t __stdcall SetFontWeight(DWRITE_FONT_WEIGHT value, DWRITE_TEXT_RANGE range) override {
+        if (value < 1 || value > 1000) return ole32::E_INVALIDARG;
+        return setFontRange(range, value, style_, size_);
+    }
+    int32_t __stdcall SetFontStyle(DWRITE_FONT_STYLE value, DWRITE_TEXT_RANGE range) override {
+        if (value < DWRITE_FONT_STYLE_NORMAL || value > DWRITE_FONT_STYLE_ITALIC)
+            return ole32::E_INVALIDARG;
+        return setFontRange(range, weight_, value, size_);
+    }
+    int32_t __stdcall SetFontSize(float value, DWRITE_TEXT_RANGE range) override {
+        if (!finitePositive(value, 512.0f)) return ole32::E_INVALIDARG;
+        return setFontRange(range, weight_, style_, value);
+    }
+    int32_t __stdcall SetUnderline(int32_t, DWRITE_TEXT_RANGE) override { return ole32::E_NOTIMPL; }
+    int32_t __stdcall SetStrikethrough(int32_t, DWRITE_TEXT_RANGE) override { return ole32::E_NOTIMPL; }
+private:
+    static constexpr uint32_t MaxText = MaxLayoutText;
+    bool validateUtf16() const noexcept {
+        uint32_t cursor = 0, scalar{};
+        while (cursor < length_) if (!nextScalar(text_, length_, cursor, scalar)) return false;
+        return true;
+    }
+    bool initializeFont() noexcept {
+        micant::um::graphics::LogicalFontRequest request{};
+        request.requestedFamily = FamilyUtf16[static_cast<uint32_t>(familyIndex_)];
+        request.weight = static_cast<uint16_t>(weight_);
+        request.italic = style_ != DWRITE_FONT_STYLE_NORMAL;
+        request.pointSize = pointSizeForDip(size_); request.dpi = 96;
+        return manager_.initializeForMetrics(request);
+    }
+    int32_t setFontRange(DWRITE_TEXT_RANGE range, DWRITE_FONT_WEIGHT weight,
+                         DWRITE_FONT_STYLE style, float size) noexcept {
+        if (range.startPosition > length_ || range.length > length_ - range.startPosition)
+            return ole32::E_INVALIDARG;
+        if (!range.length) return ole32::S_OK;
+        if (range.startPosition != 0 || range.length != length_) return ole32::E_NOTIMPL;
+        const DWRITE_FONT_WEIGHT oldWeight = weight_;
+        const DWRITE_FONT_STYLE oldStyle = style_;
+        const float oldSize = size_;
+        weight_ = weight; style_ = style; size_ = size;
+        manager_.shutdown();
+        if (!initializeFont()) {
+            weight_ = oldWeight; style_ = oldStyle; size_ = oldSize;
+            (void)initializeFont();
+            return ole32::E_FAIL;
+        }
+        return ole32::S_OK;
+    }
+    int32_t measureRange(uint32_t start, uint32_t end, float& width) noexcept {
+        char utf8[4096]{}; size_t used = 0; uint32_t cursor = start, scalar{};
+        while (cursor < end) {
+            if (!nextScalar(text_, end, cursor, scalar) ||
+                !appendUtf8(utf8, sizeof(utf8), used, scalar)) return ole32::E_INVALIDARG;
+        }
+        micant::um::graphics::TextExtentPixels extent{};
+        if (!manager_.measureUtf8(utf8, extent)) return ole32::E_FAIL;
+        const uint32_t points = pointSizeForDip(size_);
+        const uint32_t pxEm = micant::um::graphics::truetype::pixelsFromPoints(points, 96);
+        if (!pxEm) return ole32::E_FAIL;
+        width = static_cast<float>(extent.width) * size_ / static_cast<float>(pxEm);
+        return ole32::S_OK;
+    }
+    int32_t compute(LayoutLine* lines, uint32_t& count, float& lineHeight,
+                    float& baseline) noexcept {
+        count = 0;
+        micant::um::graphics::FontMetricsPixels metrics{};
+        if (!manager_.pixelMetrics(metrics)) return ole32::E_FAIL;
+        const uint32_t points = pointSizeForDip(size_);
+        const uint32_t pxEm = micant::um::graphics::truetype::pixelsFromPoints(points, 96);
+        if (!pxEm || metrics.lineHeight <= 0) return ole32::E_FAIL;
+        const float scale = size_ / static_cast<float>(pxEm);
+        lineHeight = static_cast<float>(metrics.lineHeight) * scale;
+        baseline = static_cast<float>(metrics.ascent) * scale;
+        uint32_t start = 0;
+        bool firstLine = true;
+        while (start < length_ || firstLine) {
+            firstLine = false;
+            if (count >= MaxText + 1) return ole32::E_INVALIDARG;
+            const uint32_t lineStart = start;
+            uint32_t cursor = lineStart;
+            float width = 0;
+            while (cursor < length_ && text_[cursor] != L'\n' && text_[cursor] != L'\r') {
+                uint32_t next = cursor, scalar{};
+                if (!nextScalar(text_, length_, next, scalar)) return ole32::E_INVALIDARG;
+                float candidateWidth{};
+                const int32_t measured = measureRange(lineStart, next, candidateWidth);
+                if (measured != ole32::S_OK) return measured;
+                if (wrapping_ != DWRITE_WORD_WRAPPING_NO_WRAP &&
+                    candidateWidth > maxWidth_ && cursor > start) break;
+                cursor = next; width = candidateWidth;
+                if (wrapping_ != DWRITE_WORD_WRAPPING_NO_WRAP && width > maxWidth_) break;
+            }
+            uint32_t newline = 0;
+            if (cursor < length_ && (text_[cursor] == L'\n' || text_[cursor] == L'\r')) {
+                newline = 1;
+                if (text_[cursor] == L'\r' && cursor + 1 < length_ && text_[cursor + 1] == L'\n')
+                    newline = 2;
+            }
+            uint32_t trailing = 0, trimCursor = cursor;
+            for (; trimCursor > lineStart &&
+                    (text_[trimCursor - 1] == L' ' || text_[trimCursor - 1] == L'\t'); --trimCursor)
+                ++trailing;
+            float contentWidth = width;
+            if (trimCursor < cursor) {
+                const int32_t measured = measureRange(lineStart, trimCursor, contentWidth);
+                if (measured != ole32::S_OK) return measured;
+            }
+            lines[count++] = {cursor - lineStart + newline, trailing, newline,
+                              contentWidth, width};
+            start = cursor + newline;
+            if (!newline && start == length_) break;
+            if (!newline && cursor == lineStart) return ole32::E_FAIL;
+            if (newline && start == length_) firstLine = true;
+        }
+        if (lineHeight * static_cast<float>(count) > maxHeight_) return ole32::E_NOTIMPL;
+        return ole32::S_OK;
+    }
+    ObjectSlot<TextLayout>* slot_{};
+    uint32_t refs_{1};
+    wchar_t text_[MaxText + 1]{};
+    uint32_t length_{};
+    wchar_t family_[64]{};
+    wchar_t locale_[32]{};
+    int32_t familyIndex_{-1};
+    DWRITE_FONT_WEIGHT weight_{};
+    DWRITE_FONT_STYLE style_{};
+    DWRITE_FONT_STRETCH stretch_{};
+    float size_{};
+    float maxWidth_{};
+    float maxHeight_{};
+    DWRITE_TEXT_ALIGNMENT textAlignment_{DWRITE_TEXT_ALIGNMENT_LEADING};
+    DWRITE_PARAGRAPH_ALIGNMENT paragraphAlignment_{DWRITE_PARAGRAPH_ALIGNMENT_NEAR};
+    DWRITE_WORD_WRAPPING wrapping_{DWRITE_WORD_WRAPPING_WRAP};
+    bool valid_{};
+    micant::um::graphics::FontManager manager_{};
+};
+ObjectSlot<TextLayout> layoutSlots[16]{};
+
+int32_t Factory::CreateTextFormat(const wchar_t* family, IDWriteFontCollection* collection,
+        DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
+        float size, const wchar_t* locale, IDWriteTextFormat** out) {
+    if (!out) return ole32::E_POINTER;
+    *out = nullptr;
+    if (!family || !finitePositive(size, 512.0f) || !validLocale(locale))
+        return ole32::E_INVALIDARG;
+    if (collection) return ole32::E_NOTIMPL;
+    for (auto& slot : formatSlots) {
+        TextFormat* format = slot.create(family, weight, style, stretch, size, locale);
+        if (!format) continue;
+        if (!format->valid()) { slot.destroy(format); return ole32::E_INVALIDARG; }
+        *out = format; return ole32::S_OK;
+    }
+    return ole32::E_OUTOFMEMORY;
+}
+
+int32_t Factory::CreateTextLayout(const wchar_t* text, uint32_t length,
+        IDWriteTextFormat* format, float width, float height, IDWriteTextLayout** out) {
+    if (!out) return ole32::E_POINTER;
+    *out = nullptr;
+    if (!text || !format || length > MaxLayoutText || !finitePositive(width, 16384.0f) ||
+        !finitePositive(height, 16384.0f)) return ole32::E_INVALIDARG;
+    for (auto& slot : layoutSlots) {
+        TextLayout* layout = slot.create(text, length, format, width, height);
+        if (!layout) continue;
+        if (!layout->valid()) { slot.destroy(layout); return ole32::E_INVALIDARG; }
+        *out = layout; return ole32::S_OK;
+    }
+    return ole32::E_OUTOFMEMORY;
+}
 
 } // namespace
 
@@ -370,7 +864,7 @@ int32_t __stdcall DWriteCreateFactory(DWRITE_FACTORY_TYPE type, const ole32::IID
 
 } // namespace micant::dwrite
 
-extern "C" __declspec(dllexport) int32_t __stdcall DWriteCreateFactory(
+extern "C" int32_t __stdcall DWriteCreateFactory(
         micant::dwrite::DWRITE_FACTORY_TYPE type,
         const micant::ole32::IID& iid,
         micant::ole32::IUnknown** out) {

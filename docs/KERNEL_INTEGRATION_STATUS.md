@@ -1769,8 +1769,7 @@ owned workspace and releases it with the face. This is a bounded TrueType GDI
 subset: untransformed XY composite glyph components are now rasterized with
 bounded component count/depth; point-attached, transformed and grid-rounded
 components remain unsupported. Hint instructions are bounds-checked but not
-executed. Runtime font registration, persistent settings and DirectWrite
-face/collection behavior remain open. UTF-8 precomposed Italian accents and a
+executed. Runtime font registration and persistent settings remain open. UTF-8 precomposed Italian accents and a
 bounded set of combining marks are rendered as base-plus-mark runs; combining
 marks add no advance and are positioned above or below the base glyph. Unicode
 fallback now follows the requested regular/bold/italic style when those DejaVu
@@ -1787,10 +1786,17 @@ is staged with the Explorer runtime closure. Its bounded COM factory, system
 collection, family, font and face objects use the same FontManager for real
 TTF metrics and Unicode cmap lookup. Explorer's CPL3 probe resolves Arial,
 loads a face and maps `A` and `à`; QEMU logs the successful probe. The fixed
-collection currently exposes six logical families. Text format/layout and
-design glyph metrics return `E_NOTIMPL`; vertical glyph metrics need
-`vhea`/`vmtx`. Runtime font registration and persistent settings are not
-implemented.
+collection currently exposes six logical families. The sfnt parser now
+validates optional OpenType `name` tables and retains bounded family,
+subfamily and full-name records, preferring typographic family names and
+English records when present. `CreateTextFormat` resolves the six installed
+logical families; `CreateTextLayout` supports bounded UTF-16 text, scalar
+validation, basic wrapping/newlines, whole-range weight/style/size changes,
+text metrics and line metrics from the same TrueType-backed FontManager.
+Partial-range formatting, cluster metrics, decorations, custom collections,
+clipped layouts and broader shaping remain explicitly unsupported. Design
+glyph metrics return `E_NOTIMPL`; vertical glyph metrics need `vhea`/`vmtx`.
+Runtime font registration and persistent settings are not implemented.
 
 QEMU's Explorer input verification waits for stable scanout pixels after the
 first CPL3 presentation before sending click/Enter. The initial scanout and
@@ -1806,3 +1812,4 @@ test now polls for a changed, stable desktop frame before input dispatch.
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-combining-qemu` | Passed; Explorer's decomposed `e` + acute layout matched precomposed `é` advance, TTF rendering used the combining sequence, DirectWrite probe passed, and input/scanout/cleanup completed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-fallback-weight-qemu` | Passed after style-matched DejaVu fallback selection; DirectWrite, Explorer input, scanout and cleanup probes passed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-glyph-indices-qemu` | Passed; `GetGlyphIndicesW` mapped `A`, flagged missing U+0378, and Explorer/DirectWrite/input/scanout/cleanup probes passed |
+| `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-dwrite-layout-qemu` | Passed; rebuilt `dwrite.dll` and Explorer, Ring 3 boundary checks passed, and CPL3 verified DirectWrite format/layout creation plus width, height, line length and baseline; input, scanout and cleanup passed |

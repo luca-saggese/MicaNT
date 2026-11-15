@@ -42,6 +42,9 @@ public:
         data_ = static_cast<const uint8_t*>(bytes);
         length_ = length;
         tableCount_ = 0;
+        metrics_ = {};
+        familyName_[0] = fullName_[0] = subfamilyName_[0] = 0;
+        valid_ = false;
         if (!data_ || length < 12 || length > MaxFileBytes || be32(0) != 0x00010000u)
             return fail();
         const uint16_t count = be16(4);
@@ -74,6 +77,7 @@ public:
         const Table* glyf = find(TagGlyf);
         const Table* os2 = find(TagOs2);
         const Table* post = find(TagPost);
+        const Table* name = find(TagName);
         const Table* kern = find(TagKern);
         if (!head || head->length < 54 || !maxp || maxp->length < 6 ||
             !hhea || hhea->length < 36 || !hmtx || !cmap || !loca || !glyf)
@@ -121,6 +125,7 @@ public:
         glyfLength_ = glyf->length;
         kernOffset_ = kern ? kern->offset : 0;
         kernLength_ = kern ? kern->length : 0;
+        if (name && !parseNames(*name)) return fail();
         if (!parseCmap(*cmap)) return fail();
         valid_ = true;
         return true;
@@ -128,6 +133,15 @@ public:
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }
     [[nodiscard]] const FaceMetrics& metrics() const noexcept { return metrics_; }
+    [[nodiscard]] const char16_t* familyName() const noexcept {
+        return familyName_[0] ? familyName_ : nullptr;
+    }
+    [[nodiscard]] const char16_t* fullName() const noexcept {
+        return fullName_[0] ? fullName_ : nullptr;
+    }
+    [[nodiscard]] const char16_t* subfamilyName() const noexcept {
+        return subfamilyName_[0] ? subfamilyName_ : nullptr;
+    }
 
     [[nodiscard]] int16_t kerning(uint16_t leftGlyph, uint16_t rightGlyph) const noexcept {
         if (!valid_ || !kernOffset_ || kernLength_ < 4 || be16(kernOffset_) != 0) return 0;
@@ -420,6 +434,8 @@ private:
     static constexpr uint32_t TagCmap = 0x636D6170, TagLoca = 0x6C6F6361;
     static constexpr uint32_t TagGlyf = 0x676C7966, TagOs2 = 0x4F532F32;
     static constexpr uint32_t TagKern = 0x6B65726E, TagPost = 0x706F7374;
+    static constexpr uint32_t TagName = 0x6E616D65;
+    static constexpr size_t MaxNameChars = 64;
     struct Table { uint32_t tag{}, offset{}, length{}; };
     struct Edge { float x0, y0, x1, y1; };
     struct RasterWorkspace {
@@ -430,6 +446,93 @@ private:
         float intersections[MaxEdges]{};
         uint8_t rowCoverage[512]{};
     };
+    [[nodiscard]] bool parseNames(const Table& table) noexcept {
+        if (table.length < 6) return false;
+        const uint16_t format = be16(table.offset);
+        const uint16_t count = be16(table.offset + 2);
+        const uint16_t stringsOffset = be16(table.offset + 4);
+        if (format > 1 || count > 256 ||
+            static_cast<uint64_t>(count) * 12 + 6 > table.length ||
+            stringsOffset < static_cast<uint64_t>(count) * 12 + 6 ||
+            stringsOffset > table.length) return false;
+        const size_t recordsEnd = table.offset + 6 + static_cast<size_t>(count) * 12;
+        if (format == 1) {
+            if (!range(recordsEnd, 2)) return false;
+            const uint16_t languageCount = be16(recordsEnd);
+            if (languageCount > 256 ||
+                static_cast<uint64_t>(languageCount) * 4 + 2 >
+                    table.length - (recordsEnd - table.offset) ||
+                stringsOffset < (recordsEnd - table.offset) + 2 +
+                    static_cast<uint64_t>(languageCount) * 4) return false;
+            for (uint16_t i = 0; i < languageCount; ++i) {
+                const size_t record = recordsEnd + 2 + static_cast<size_t>(i) * 4;
+                const uint16_t length = be16(record), offset = be16(record + 2);
+                if (offset > table.length - stringsOffset ||
+                    length > table.length - stringsOffset - offset) return false;
+            }
+        }
+
+        int familyScore = -1, fullScore = -1, subfamilyScore = -1;
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t record = table.offset + 6 + static_cast<size_t>(i) * 12;
+            const uint16_t platform = be16(record), encoding = be16(record + 2);
+            const uint16_t language = be16(record + 4), nameId = be16(record + 6);
+            const uint16_t byteLength = be16(record + 8), stringOffset = be16(record + 10);
+            if (stringOffset > table.length - stringsOffset ||
+                byteLength > table.length - stringsOffset - stringOffset) return false;
+            if (!((platform == 0 && encoding <= 6) ||
+                  (platform == 3 && (encoding == 1 || encoding == 10))))
+                continue;
+            if (byteLength & 1) return false;
+            if (nameId != 1 && nameId != 2 && nameId != 4 && nameId != 16 && nameId != 17)
+                continue;
+            char16_t decoded[MaxNameChars]{};
+            const size_t units = byteLength / 2;
+            if (!units) continue;
+            size_t out = 0;
+            bool tooLong = false;
+            const size_t text = table.offset + stringsOffset + stringOffset;
+            for (size_t unit = 0; unit < units; ++unit) {
+                uint16_t value = be16(text + unit * 2);
+                if (!value) return false;
+                if (value >= 0xD800u && value <= 0xDBFFu) {
+                    if (++unit >= units) return false;
+                    const uint16_t trail = be16(text + unit * 2);
+                    if (trail < 0xDC00u || trail > 0xDFFFu) return false;
+                    if (out + 2 >= MaxNameChars) tooLong = true;
+                    else if (!tooLong) {
+                        decoded[out++] = static_cast<char16_t>(value);
+                        decoded[out++] = static_cast<char16_t>(trail);
+                    }
+                } else {
+                    if (value >= 0xDC00u && value <= 0xDFFFu) return false;
+                    if (out + 1 >= MaxNameChars) tooLong = true;
+                    else if (!tooLong) decoded[out++] = static_cast<char16_t>(value);
+                }
+            }
+            if (!out || tooLong) continue;
+            const int languageScore = language == 0x0409 ? 4 : (language == 0 ? 3 : 1);
+            const int platformScore = platform == 3 ? 2 : 1;
+            const int baseScore = languageScore * 4 + platformScore;
+            int* targetScore{};
+            char16_t* target{};
+            int preference = 0;
+            if (nameId == 16 || nameId == 1) {
+                targetScore = &familyScore; target = familyName_;
+                preference = nameId == 16 ? 2 : 1;
+            } else if (nameId == 17 || nameId == 2) {
+                targetScore = &subfamilyScore; target = subfamilyName_;
+                preference = nameId == 17 ? 2 : 1;
+            } else {
+                targetScore = &fullScore; target = fullName_; preference = 1;
+            }
+            const int score = baseScore + preference * 32;
+            if (score <= *targetScore) continue;
+            for (size_t n = 0; n <= out; ++n) target[n] = decoded[n];
+            *targetScore = score;
+        }
+        return true;
+    }
     static constexpr uint32_t MaxCompositeDepth = 8;
     static constexpr uint32_t MaxCompositeComponents = 64;
 
@@ -590,6 +693,9 @@ private:
     uint32_t kernOffset_{}, kernLength_{};
     uint16_t cmapFormat_{}, cmapSegments_{}, cmapGroups_{};
     int16_t locaFormat_{};
+    char16_t familyName_[MaxNameChars]{};
+    char16_t fullName_[MaxNameChars]{};
+    char16_t subfamilyName_[MaxNameChars]{};
     bool valid_{};
 };
 

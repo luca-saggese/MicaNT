@@ -409,6 +409,8 @@ void verifyDirectWriteFonts() noexcept {
     IDWriteFontFamily* family = nullptr;
     IDWriteFont* font = nullptr;
     IDWriteFontFace* face = nullptr;
+    IDWriteTextFormat* textFormat = nullptr;
+    IDWriteTextLayout* textLayout = nullptr;
     uint32_t familyIndex = 0;
     int32_t exists = 0;
     uint16_t glyphs[2]{};
@@ -422,15 +424,32 @@ void verifyDirectWriteFonts() noexcept {
         font->CreateFontFace(&face) == HResultOk && face &&
         face->GetGlyphCount() > 2 &&
         face->GetGlyphIndices(codePoints, 2, glyphs) == HResultOk &&
-        glyphs[0] && glyphs[1] && (face->GetMetrics(&metrics), metrics.designUnitsPerEm != 0);
+        glyphs[0] && glyphs[1] && (face->GetMetrics(&metrics), metrics.designUnitsPerEm != 0) &&
+        factory->CreateTextFormat(L"Arial", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"en-us",
+            &textFormat) == HResultOk && textFormat &&
+        factory->CreateTextLayout(L"MicaNT font layout", 17, textFormat, 300.0f, 100.0f,
+            &textLayout) == HResultOk && textLayout;
+    DWRITE_TEXT_METRICS textMetrics{};
+    DWRITE_LINE_METRICS lineMetrics{};
+    uint32_t lineCount = 0;
+    const bool layoutSuccess = textLayout &&
+        textLayout->GetMetrics(&textMetrics) == HResultOk &&
+        textLayout->GetLineMetrics(&lineMetrics, 1, &lineCount) == HResultOk &&
+        lineCount == 1 && lineMetrics.length == 17 && textMetrics.width > 0.0f &&
+        textMetrics.height > 0.0f && lineMetrics.baseline > 0.0f;
+    if (textLayout) textLayout->Release();
+    if (textFormat) textFormat->Release();
     if (face) face->Release();
     if (font) font->Release();
     if (family) family->Release();
     if (collection) collection->Release();
     factory->Release();
-    PrintLine(success
+    PrintLine(success && layoutSuccess
         ? "[MicaNT FontProbe] DirectWrite loaded Arial TTF metrics and Unicode cmap"
-        : "[MicaNT FontProbe] DirectWrite collection/face verification failed");
+        : "[MicaNT FontProbe] DirectWrite collection/face/layout verification failed");
+    if (success && layoutSuccess)
+        PrintLine("[MicaNT FontProbe] DirectWrite text layout reports TrueType line metrics");
 }
 
 void chooseFallbackActiveApp() noexcept {
