@@ -414,10 +414,10 @@ def verify_mouse(
             pressed_caption_button = pixel_at(caption_pressed, 660, 129)
             if pressed_caption_button == hover_caption_button:
                 raise RuntimeError("Themed caption button pressed state did not change its pixel")
-            set_left_button(False)
             resized_marker_count = serial_path.read_text(
                 encoding="utf-8", errors="replace").count(
                     "[MicaNT Explorer] Application window surface resized")
+            set_left_button(False)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")

@@ -107,11 +107,16 @@ the evidence named here, not just declarations or a successful compile.
   experiment linked its NTDLL dependency and built, but QEMU trapped with
   `#UD` in the compositor after the first app window was created; keep the
   current 8x8 fallback until the compositor's import/syscall path is resolved.
-- [x] QEMU verified caption drag; close, minimize, maximize/restore; all four
-  edges and all four corners; and minimum-size clamping with a 160x100 client
-  surface. Diagnostic run: `/private/tmp/micant-theme-qemu-nonclient-full`.
+- [x] Win32k clamps resize against client-area minima, accounting for the
+  active frame and caption metrics on all four edges/corners; the minimum
+  outer size therefore preserves a 160x100 client. The QEMU input test now
+  captures the resize marker before releasing the maximize button, avoiding a
+  race with Explorer dispatch. Full QEMU passed maximize/restore, move, all
+  eight resize targets, minimum width/height, close/reopen, and stable boot in
+  `/private/tmp/micant-nonclient-min-client-fixed-run`.
 - [x] QEMU repeated caption drag and edge resize after the live Light-to-Dark
-  change; both passed and the client surface remained live.
+  change; both passed and the client surface remained live in the same
+  interactive run above.
 - [ ] Verify inactive caption pixels and Light Purple/accent caption pixels
   after runtime changes. These state/color combinations are not yet covered by
   pixel assertions.

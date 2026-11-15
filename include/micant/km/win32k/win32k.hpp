@@ -2204,10 +2204,12 @@ public:
                 } else if (m_mouseInteraction == MouseInteraction::Resize) {
                     int32_t left = m_resizeStartRect.left, top = m_resizeStartRect.top;
                     int32_t right = m_resizeStartRect.right, bottom = m_resizeStartRect.bottom;
-                    if (m_resizeEdges & 0x01) left = std::min(x, right - 140);
-                    if (m_resizeEdges & 0x02) right = std::max(x, left + 140);
-                    if (m_resizeEdges & 0x04) top = std::min(y, bottom - 90);
-                    if (m_resizeEdges & 0x08) bottom = std::max(y, top + 90);
+                    const int32_t minWidth = minimumOuterWidth(*window);
+                    const int32_t minHeight = minimumOuterHeight(*window);
+                    if (m_resizeEdges & 0x01) left = std::min(x, right - minWidth);
+                    if (m_resizeEdges & 0x02) right = std::max(x, left + minWidth);
+                    if (m_resizeEdges & 0x04) top = std::min(y, bottom - minHeight);
+                    if (m_resizeEdges & 0x08) bottom = std::max(y, top + minHeight);
                     setWindowPos(window->hwnd, HWND_TOP, left, top, right - left, bottom - top,
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 } else if (!m_pressedCaptionButton) {
@@ -2600,6 +2602,16 @@ private:
 
     static int32_t windowCaptionHeight(const WND& window) noexcept {
         return (!window.hwndParent && (window.style & WS_CAPTION)) ? 26 : 0;
+    }
+
+    static int32_t minimumOuterWidth(const WND& window) noexcept {
+        constexpr int32_t minimumClientWidth = 160;
+        return minimumClientWidth + 2 * windowFrameInset(window);
+    }
+
+    static int32_t minimumOuterHeight(const WND& window) noexcept {
+        constexpr int32_t minimumClientHeight = 100;
+        return minimumClientHeight + 2 * windowFrameInset(window) + windowCaptionHeight(window);
     }
 
     static void updateClientGeometry(WND& window) noexcept {
