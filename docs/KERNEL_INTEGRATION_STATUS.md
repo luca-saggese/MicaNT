@@ -1787,7 +1787,7 @@ collection, family, font and face objects use the same FontManager for real
 TTF metrics and Unicode cmap lookup. Explorer's CPL3 probe resolves Arial,
 loads a face and maps `A` and `à`; QEMU logs the successful probe. The fixed
 collection currently exposes six logical families. The sfnt parser now
-validates optional OpenType `name` tables and retains bounded family,
+requires and validates OpenType `name` tables and retains bounded family,
 subfamily and full-name records, preferring typographic family names and
 English records when present. `CreateTextFormat` resolves the six installed
 logical families; `CreateTextLayout` supports bounded UTF-16 text, scalar
@@ -1813,3 +1813,4 @@ test now polls for a changed, stable desktop frame before input dispatch.
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-fallback-weight-qemu` | Passed after style-matched DejaVu fallback selection; DirectWrite, Explorer input, scanout and cleanup probes passed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-glyph-indices-qemu` | Passed; `GetGlyphIndicesW` mapped `A`, flagged missing U+0378, and Explorer/DirectWrite/input/scanout/cleanup probes passed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-dwrite-layout-qemu` | Passed; rebuilt `dwrite.dll` and Explorer, Ring 3 boundary checks passed, and CPL3 verified DirectWrite format/layout creation plus width, height, line length and baseline; input, scanout and cleanup passed |
+| `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-name-table-required-qemu` | Passed after requiring a valid sfnt `name` table; all staged TTFs loaded in CPL3 and font, layout, input, scanout and cleanup probes passed |

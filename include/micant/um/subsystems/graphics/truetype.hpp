@@ -79,7 +79,7 @@ public:
         const Table* post = find(TagPost);
         const Table* name = find(TagName);
         const Table* kern = find(TagKern);
-        if (!head || head->length < 54 || !maxp || maxp->length < 6 ||
+        if (!head || head->length < 54 || !maxp || maxp->length < 6 || !name ||
             !hhea || hhea->length < 36 || !hmtx || !cmap || !loca || !glyf)
             return fail();
 
@@ -125,7 +125,7 @@ public:
         glyfLength_ = glyf->length;
         kernOffset_ = kern ? kern->offset : 0;
         kernLength_ = kern ? kern->length : 0;
-        if (name && !parseNames(*name)) return fail();
+        if (!parseNames(*name)) return fail();
         if (!parseCmap(*cmap)) return fail();
         valid_ = true;
         return true;
