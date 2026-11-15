@@ -1118,6 +1118,14 @@ extern "C" void _start(const char* = nullptr) {
     PrintLine(windowClass.hCursor
         ? "[MicaNT Cursor] Explorer class arrow loaded"
         : "[MicaNT Cursor] Explorer class arrow load failed");
+    HCURSOR penCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32631));
+    if (penCursor) {
+        HCURSOR previousCursor = SetCursor(penCursor);
+        SetCursor(previousCursor ? previousCursor : windowClass.hCursor);
+        PrintLine("[MicaNT Cursor] IDC_PEN theme cursor loaded");
+    } else {
+        PrintLine("[MicaNT Cursor] IDC_PEN theme cursor load failed");
+    }
     HCURSOR moduleCursor = LoadCursorW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
     if (moduleCursor) {
         SetCursor(moduleCursor);

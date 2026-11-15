@@ -862,6 +862,7 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
     constexpr SystemCursor cursors[]{
         {32512, L"mini_mouse_arrow.cur"}, {32513, L"mini_mouse_beam.cur"},
         {32515, L"mini_mouse_cross.cur"}, {32516, L"mini_mouse_up.cur"},
+        {32631, L"mini_mouse_pen.cur"},
         {32642, L"mini_mouse_nwse.cur"}, {32643, L"mini_mouse_nesw.cur"},
         {32644, L"mini_mouse_ew.cur"}, {32645, L"mini_mouse_ns.cur"},
         {32646, L"mini_mouse_move.cur"}, {32648, L"mini_mouse_unavail.cur"},
