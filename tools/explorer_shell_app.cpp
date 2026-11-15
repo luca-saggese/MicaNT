@@ -22,6 +22,7 @@
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/theme_snapshot.h"
+#include "micant/shared/native_uxtheme_api.h"
 #include "gui_common.hpp"
 #include "explorer_shell/taskbar.hpp"
 #include "explorer_shell/start_menu.hpp"
@@ -512,6 +513,22 @@ void loadActiveVisualTheme() noexcept {
         PrintLine("[MicaNT Theme] Win32k theme snapshot round-trip failed");
         return;
     }
+    const auto& button = candidate.styles[0];
+    uint32_t queriedColor{};
+    const uint32_t packedColor = button.background;
+    const uint32_t expectedColor = ((packedColor >> 16) & 0xFFu) |
+        (packedColor & 0xFF00u) | ((packedColor & 0xFFu) << 16);
+    MicaThemeHandle themeHandle = IsThemeActive()
+        ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
+    const bool queried = themeHandle && (button.flags & MICANT_THEME_HAS_BACKGROUND) &&
+        GetThemeColor(themeHandle, 1, 1, 3802, &queriedColor) == 0 &&
+        queriedColor == expectedColor;
+    const bool closed = themeHandle && CloseThemeData(themeHandle) == 0;
+    if (!queried || !closed) {
+        PrintLine("[MicaNT Theme] UxTheme DLL handle/query path failed");
+        return;
+    }
+    PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
     g.visualTheme = candidate;
     g.visualThemeReady = true;
 }

@@ -30,6 +30,8 @@ def variants() -> tuple[Variant, ...]:
         Variant("dnsapi_boot", "tools/dlls/dnsapi.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("crypt32_boot", "tools/dlls/crypt32.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("winhttp_boot", "tools/dlls/winhttp.cpp", ("MICANT_NATIVE_USERMODE",)),
+        Variant("uxtheme_boot", "tools/dlls/uxtheme.cpp",
+                ("MICANT_NATIVE_USERMODE", "MICANT_WIN32K_IMPORTS")),
         Variant("svchost_boot", "tools/svchost_app.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("svchost_boot", "tools/dlls/dhcpcsvc.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("kernel32_boot", "kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp",

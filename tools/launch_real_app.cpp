@@ -31,7 +31,7 @@
 #include "micant/um/subsystems/security/wintrust.hpp"
 #include "micant/um/subsystems/security/cipherksp.hpp"
 #include "micant/um/subsystems/winuser/tsf.hpp"
-#include "micant/um/subsystems/winuser/uxtheme.hpp"
+#include "micant/um/subsystems/winuser/uxtheme_exports.hpp"
 #include "micant/um/subsystems/net/ws2_32.hpp"
 #include "micant/um/subsystems/net/iphlpapi.hpp"
 #include "micant/um/subsystems/winuser/user32_extended.hpp"

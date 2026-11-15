@@ -453,6 +453,29 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
 
+    # UxTheme is a native Ring 3 client of the mode-neutral theme snapshot and
+    # Win32k GDI surface ABI. Keep kernel Executive and User32 implementation
+    # headers out of the DLL's transitive include closure.
+    add_library(uxtheme_boot SHARED EXCLUDE_FROM_ALL
+        tools/dlls/uxtheme.cpp tools/dlls/native_stack_probe.cpp
+        kernel/ex/freestanding_memory.cpp)
+    target_include_directories(uxtheme_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(uxtheme_boot PRIVATE MICANT_NATIVE_USERMODE MICANT_WIN32K_IMPORTS)
+    target_compile_options(uxtheme_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -O2
+    )
+    target_link_options(uxtheme_boot PRIVATE
+        -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
+    )
+    target_link_libraries(uxtheme_boot PRIVATE win32k_boot)
+    set_target_properties(uxtheme_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "uxtheme"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
+    )
+
     add_library(dwrite_boot SHARED EXCLUDE_FROM_ALL
         tools/dlls/dwrite.cpp tools/dlls/native_stack_probe.cpp
         kernel/ex/freestanding_memory.cpp)
@@ -510,7 +533,8 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(explorer_boot PRIVATE
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
-    target_link_libraries(explorer_boot PRIVATE user32_boot gdi32_boot win32k_boot dwrite_boot)
+    target_compile_definitions(explorer_boot PRIVATE MICANT_UXTHEME_IMPORTS)
+    target_link_libraries(explorer_boot PRIVATE user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
@@ -826,7 +850,7 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot
+        DEPENDS explorer_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot uxtheme_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)
@@ -869,7 +893,7 @@ if(WIN32 OR MICANT_ENABLE_BAREMETAL)
     add_custom_target(micant_user_mode_boundary_check)
     foreach(_user_mode_variant IN ITEMS
         micant_win32k micant_user32 micant_gdi32 micant_imm32
-        kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot
+        kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot uxtheme_boot
         imm32_boot explorer_boot explorer_runtime_boot
     )
         add_custom_target(micant_boundary_${_user_mode_variant}

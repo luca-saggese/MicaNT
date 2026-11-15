@@ -23,7 +23,7 @@
 #include "micant/um/subsystems/net/ws2_32.hpp"
 #include "micant/um/subsystems/com/ole32.hpp"
 #include "micant/um/subsystems/com/oleaut32.hpp"
-#include "micant/um/subsystems/winuser/uxtheme.hpp"
+#include "micant/um/subsystems/winuser/uxtheme_exports.hpp"
 #include "micant/um/subsystems/com/propsys.hpp"
 #include "micant/um/subsystems/net/urlmon.hpp"
 #include "micant/um/subsystems/net/wininet.hpp"
