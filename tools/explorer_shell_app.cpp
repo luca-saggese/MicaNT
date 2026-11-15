@@ -845,6 +845,18 @@ void updateClock() noexcept {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NCCREATE) return 1;
+    if (hwnd == g.desktop &&
+        (message == 0x001A /* WM_SETTINGCHANGE */ ||
+         message == 0x031A /* WM_THEMECHANGED */)) {
+        loadActiveVisualTheme();
+        for (auto& app : g.apps) {
+            if (!app.open || !app.hwnd || !app.pixels) continue;
+            drawAppWindow(app);
+            present(app.hwnd);
+        }
+        redrawDesktop();
+        return 0;
+    }
     if (hwnd == g.desktop && message == WM_KEYDOWN && wParam == VK_RETURN) {
         openView(View::MyComputer);
         return 0;
