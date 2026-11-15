@@ -145,8 +145,18 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-uxtheme-font-failure-output-run2/serial.log`. The full
   input suite later stopped at the concurrent root-folder navigation test;
   this records the focused runtime probe, not a passing full suite.
-- [ ] Add font query and remaining text behaviors, and verify buffered paint
-  lifecycle; unsupported variants must continue returning documented failures.
+- [ ] Add font query and remaining text behaviors; unsupported variants must
+  continue returning documented failures.
+- [x] Implemented a bounded Buffered Paint lifecycle in the real `uxtheme.dll`:
+  per-thread nested init/uninit, generation-tagged thread-owned handles,
+  top-down 32bpp DIB buffers, one-shot discard/update, and failure cleanup.
+  This slice accepts only `BPBF_TOPDOWNDIB`, a null `PAINTPARAMS`, and
+  zero-origin rectangles up to 16M pixels; unsupported formats/parameters and
+  `BufferedPaintSetAlpha` fail explicitly. Explorer exercised the actual DLL
+  imports and checked discard pixels, updated pixels, nesting, stale handles,
+  rejected-format output clearing and cleanup. Full `python3 qemu.py --headless`
+  with `--verify-input` passed at
+  `/private/tmp/micant-theme-buffered-paint-final-3`.
 - [x] UxTheme color, part-size, integer, background-content and background-extent
   queries now clear caller outputs before returning an error. Explorer exercised
   the real freestanding DLL imports with invalid handles and sentinel outputs;

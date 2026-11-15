@@ -37,6 +37,14 @@ __declspec(dllimport) int32_t __stdcall GetTextExtentPoint32W(
     void*, const wchar_t*, int32_t, MicaUxThemeGdiSize*);
 __declspec(dllimport) uint32_t __stdcall SetTextColor(void*, uint32_t);
 __declspec(dllimport) int32_t __stdcall SetBkMode(void*, int32_t);
+__declspec(dllimport) void* __stdcall CreateCompatibleDC(void*);
+__declspec(dllimport) int32_t __stdcall DeleteDC(void*);
+__declspec(dllimport) void* __stdcall CreateDIBSection(void*, const void*, uint32_t,
+                                                       void**, void*, uint32_t);
+__declspec(dllimport) void* __stdcall SelectObject(void*, void*);
+__declspec(dllimport) int32_t __stdcall DeleteObject(void*);
+__declspec(dllimport) int32_t __stdcall BitBlt(void*, int32_t, int32_t, int32_t, int32_t,
+                                               void*, int32_t, int32_t, uint32_t);
 }
 #endif
 
@@ -60,6 +68,80 @@ struct ThemeHandle {
 inline std::array<ThemeHandle, 64> handles{};
 inline MicaThemeSnapshot activeSnapshot{};
 inline uint32_t nextGeneration{1};
+
+struct BufferedPaintThread {
+    uint32_t threadId{};
+    uint32_t initCount{};
+    bool occupied{};
+};
+struct BufferedPaintHandle {
+    uint32_t generation{1};
+    uint32_t ownerThreadId{};
+    void* targetDc{};
+    void* memoryDc{};
+    void* bitmap{};
+    void* previousBitmap{};
+    int32_t width{}, height{};
+    bool occupied{};
+    bool building{};
+};
+inline std::array<BufferedPaintThread, 64> bufferedPaintThreads{};
+inline std::array<BufferedPaintHandle, 64> bufferedPaintHandles{};
+inline uint32_t nextBufferedPaintGeneration{1};
+inline uint32_t bufferedPaintLock{};
+
+struct BufferedPaintLockGuard {
+    BufferedPaintLockGuard() noexcept {
+        while (__atomic_exchange_n(&bufferedPaintLock, 1u, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    ~BufferedPaintLockGuard() noexcept {
+        __atomic_store_n(&bufferedPaintLock, 0u, __ATOMIC_RELEASE);
+    }
+};
+
+inline uint32_t currentThreadId() noexcept {
+#if defined(__x86_64__)
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (teb && teb <= UINTPTR_MAX - 0x48)
+        return *reinterpret_cast<const uint32_t*>(teb + 0x48);
+#endif
+    return 0;
+}
+
+inline BufferedPaintThread* findBufferedPaintThread(uint32_t threadId) noexcept {
+    for (auto& entry : bufferedPaintThreads)
+        if (entry.occupied && entry.threadId == threadId) return &entry;
+    return nullptr;
+}
+
+inline void* bufferedPaintToken(size_t slot, uint32_t generation) noexcept {
+    return reinterpret_cast<void*>((static_cast<uintptr_t>(generation) << 7) | (slot + 1));
+}
+
+inline size_t bufferedPaintSlot(void* token, uint32_t& generation) noexcept {
+    const uintptr_t value = reinterpret_cast<uintptr_t>(token);
+    const uintptr_t encodedSlot = value & 0x7Fu;
+    generation = static_cast<uint32_t>(value >> 7);
+    if (!encodedSlot || encodedSlot > bufferedPaintHandles.size() || !generation)
+        return bufferedPaintHandles.size();
+    return static_cast<size_t>(encodedSlot - 1);
+}
+
+inline void releaseBufferedPaintResources(BufferedPaintHandle& buffer) noexcept {
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+    if (buffer.memoryDc && buffer.previousBitmap)
+        (void)SelectObject(buffer.memoryDc, buffer.previousBitmap);
+    if (buffer.bitmap) (void)DeleteObject(buffer.bitmap);
+    if (buffer.memoryDc) (void)DeleteDC(buffer.memoryDc);
+#endif
+    buffer.targetDc = nullptr;
+    buffer.memoryDc = nullptr;
+    buffer.bitmap = nullptr;
+    buffer.previousBitmap = nullptr;
+    buffer.width = buffer.height = 0;
+}
 
 constexpr win32::HRESULT kInvalidArgument = static_cast<win32::HRESULT>(0x80070057u);
 constexpr win32::HRESULT kInvalidHandle = static_cast<win32::HRESULT>(0x80070006u);
@@ -748,13 +830,177 @@ inline win32::HRESULT WINAPI GetCurrentThemeName(wchar_t* pszThemeFileName, int3
     return detail::kNotImplemented;
 }
 
-inline win32::HRESULT WINAPI BufferedPaintInit() noexcept { return detail::kNotImplemented; }
-inline win32::HRESULT WINAPI BufferedPaintUnInit() noexcept { return detail::kNotImplemented; }
-inline HPAINTBUFFER WINAPI BeginBufferedPaint(void* /*hdcTarget*/, const void* /*prcTarget*/, int32_t /*dwFormat*/, void* /*pPaintParams*/, void** phdc) noexcept {
-    if (phdc) *phdc = nullptr;
-    return nullptr;
+inline win32::HRESULT WINAPI BufferedPaintInit() noexcept {
+    const uint32_t threadId = detail::currentThreadId();
+    if (!threadId) return detail::kFailure;
+    detail::BufferedPaintLockGuard guard;
+    if (auto* entry = detail::findBufferedPaintThread(threadId)) {
+        if (entry->initCount == UINT32_MAX) return detail::kFailure;
+        ++entry->initCount;
+        return 0;
+    }
+    for (auto& entry : detail::bufferedPaintThreads) {
+        if (entry.occupied) continue;
+        entry = {threadId, 1, true};
+        return 0;
+    }
+    return detail::kFailure;
 }
-inline win32::HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER /*hBufferedPaint*/, int32_t /*fUpdateTarget*/) noexcept { return detail::kNotImplemented; }
+
+inline win32::HRESULT WINAPI BufferedPaintUnInit() noexcept {
+    const uint32_t threadId = detail::currentThreadId();
+    if (!threadId) return detail::kFailure;
+    detail::BufferedPaintLockGuard guard;
+    auto* entry = detail::findBufferedPaintThread(threadId);
+    if (!entry || !entry->initCount) return detail::kFailure;
+    for (const auto& buffer : detail::bufferedPaintHandles)
+        if ((buffer.occupied || buffer.building) && buffer.ownerThreadId == threadId)
+            return detail::kFailure;
+    if (--entry->initCount == 0) *entry = {};
+    return 0;
+}
+
+inline HPAINTBUFFER WINAPI BeginBufferedPaint(void* hdcTarget,
+        const void* prcTarget, int32_t dwFormat, void* pPaintParams,
+        void** phdc) noexcept {
+    if (phdc) *phdc = nullptr;
+    if (!phdc || !hdcTarget || !prcTarget) return nullptr;
+    // BPBF_TOPDOWNDIB only. A null PAINTPARAMS has no flags or exclusions.
+    // This GDI subset has no DC origin transform; nonzero target origins cannot
+    // be represented correctly by the returned memory DC and are rejected.
+    constexpr int32_t kBpbfTopDownDib = 2;
+    if (dwFormat != kBpbfTopDownDib || pPaintParams) return nullptr;
+    const auto& target = *static_cast<const MicaWin32kRect*>(prcTarget);
+    if (target.left != 0 || target.top != 0 || target.right <= 0 ||
+        target.bottom <= 0 || target.right > 4096 || target.bottom > 4096)
+        return nullptr;
+    const uint64_t pixelCount = static_cast<uint64_t>(target.right) *
+                                static_cast<uint64_t>(target.bottom);
+    if (pixelCount > 16ull * 1024 * 1024) return nullptr;
+    const uint32_t threadId = detail::currentThreadId();
+    if (!threadId) return nullptr;
+
+    size_t slot = detail::bufferedPaintHandles.size();
+    uint32_t generation{};
+    {
+        detail::BufferedPaintLockGuard guard;
+        const auto* thread = detail::findBufferedPaintThread(threadId);
+        if (!thread || !thread->initCount) return nullptr;
+        for (size_t index = 0; index < detail::bufferedPaintHandles.size(); ++index) {
+            auto& entry = detail::bufferedPaintHandles[index];
+            if (entry.occupied || entry.building) continue;
+            generation = ++detail::nextBufferedPaintGeneration;
+            if (!generation) generation = ++detail::nextBufferedPaintGeneration;
+            entry.generation = generation;
+            entry.ownerThreadId = threadId;
+            entry.building = true;
+            slot = index;
+            break;
+        }
+    }
+    if (slot == detail::bufferedPaintHandles.size()) return nullptr;
+
+    detail::BufferedPaintHandle candidate{};
+    candidate.generation = generation;
+    candidate.ownerThreadId = threadId;
+    candidate.targetDc = hdcTarget;
+    candidate.width = target.right;
+    candidate.height = target.bottom;
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+    struct BitmapInfo {
+        MicaWin32kBitmapInfoHeader header{};
+        uint32_t color{};
+    } info{};
+    info.header.size = sizeof(MicaWin32kBitmapInfoHeader);
+    info.header.width = target.right;
+    info.header.height = -target.bottom;
+    info.header.planes = 1;
+    info.header.bitCount = 32;
+    info.header.compression = 0; // BI_RGB
+    info.header.imageSize = static_cast<uint32_t>(pixelCount * 4);
+    void* dibBits{};
+    candidate.memoryDc = CreateCompatibleDC(hdcTarget);
+    if (candidate.memoryDc)
+        candidate.bitmap = CreateDIBSection(candidate.memoryDc, &info, 0,
+                                             &dibBits, nullptr, 0);
+    if (candidate.bitmap && dibBits) {
+        candidate.previousBitmap = SelectObject(candidate.memoryDc, candidate.bitmap);
+        if (reinterpret_cast<uintptr_t>(candidate.previousBitmap) == UINTPTR_MAX)
+            candidate.previousBitmap = nullptr;
+    }
+    if (!candidate.memoryDc || !candidate.bitmap || !dibBits ||
+        !candidate.previousBitmap) {
+        detail::releaseBufferedPaintResources(candidate);
+        detail::BufferedPaintLockGuard guard;
+        auto& entry = detail::bufferedPaintHandles[slot];
+        if (entry.building && entry.generation == generation) {
+            const uint32_t savedGeneration = entry.generation;
+            entry = {};
+            entry.generation = savedGeneration;
+        }
+        return nullptr;
+    }
+#else
+    {
+        detail::BufferedPaintLockGuard guard;
+        auto& entry = detail::bufferedPaintHandles[slot];
+        if (entry.building && entry.generation == generation) {
+            const uint32_t savedGeneration = entry.generation;
+            entry = {};
+            entry.generation = savedGeneration;
+        }
+    }
+    return nullptr;
+#endif
+    bool reservationValid = false;
+    {
+        detail::BufferedPaintLockGuard guard;
+        auto& entry = detail::bufferedPaintHandles[slot];
+        if (entry.building && entry.generation == generation &&
+            entry.ownerThreadId == threadId) {
+            candidate.occupied = true;
+            candidate.building = false;
+            entry = candidate;
+            reservationValid = true;
+        }
+    }
+    if (!reservationValid) {
+        detail::releaseBufferedPaintResources(candidate);
+        return nullptr;
+    }
+    *phdc = candidate.memoryDc;
+    return detail::bufferedPaintToken(slot, generation);
+}
+
+inline win32::HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER hBufferedPaint,
+        int32_t fUpdateTarget) noexcept {
+    uint32_t generation{};
+    const size_t slot = detail::bufferedPaintSlot(hBufferedPaint, generation);
+    if (slot == detail::bufferedPaintHandles.size()) return detail::kInvalidHandle;
+    const uint32_t threadId = detail::currentThreadId();
+    detail::BufferedPaintHandle buffer{};
+    {
+        detail::BufferedPaintLockGuard guard;
+        auto& entry = detail::bufferedPaintHandles[slot];
+        if (!entry.occupied || entry.generation != generation ||
+            !threadId || entry.ownerThreadId != threadId)
+            return detail::kInvalidHandle;
+        buffer = entry;
+        const uint32_t savedGeneration = entry.generation;
+        entry = {};
+        entry.generation = savedGeneration;
+    }
+    bool copied = true;
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+    if (fUpdateTarget)
+        copied = BitBlt(buffer.targetDc, 0, 0, buffer.width, buffer.height,
+                        buffer.memoryDc, 0, 0, 0x00CC0020u) != 0;
+#else
+    copied = !fUpdateTarget;
+#endif
+    detail::releaseBufferedPaintResources(buffer);
+    return copied ? 0 : detail::kFailure;
+}
 inline win32::HRESULT WINAPI BufferedPaintSetAlpha(HPAINTBUFFER /*hBufferedPaint*/, const void* /*prcTarget*/, uint8_t /*alpha*/) noexcept { return detail::kNotImplemented; }
 inline HTHEME WINAPI OpenThemeDataForDpi(win32::HWND hwnd, LPCWSTR pszClassList, uint32_t dpi) noexcept {
     if (dpi != 96) return nullptr;

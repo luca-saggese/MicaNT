@@ -94,6 +94,7 @@ struct ShellState {
     bool commonControlsProgressReported{};
     bool themeBackgroundExReported{};
     HWND themeProgressProbe{};
+    bool bufferedPaintReported{};
     HWND themeButtonProbe{};
     bool themeButtonProbeReported{};
     bool windowTtfDrawReported{};
@@ -679,6 +680,80 @@ void drawAppWindow(AppWindow& app) noexcept {
     }
     fill(p, w, h, 0, h - 25, w, 1, separator);
     text(p, w, h, 12, h - 17, "3 objects", statusBarForeground);
+    if (!g.bufferedPaintReported && app.dc && w >= 16 && h >= 16) {
+        constexpr int32_t kBufferWidth = 16;
+        constexpr int32_t kBufferHeight = 16;
+        constexpr int32_t kBufferFormatTopDownDib = 2;
+        constexpr uint32_t kBufferColorRef = RGB(32, 64, 96);
+        constexpr uint32_t kBufferPixel = 0xFF204060u;
+        uint32_t original[kBufferWidth * kBufferHeight]{};
+        for (int32_t y = 0; y < kBufferHeight; ++y)
+            for (int32_t x = 0; x < kBufferWidth; ++x)
+                original[y * kBufferWidth + x] = p[y * w + x];
+        const RECT bounds{0, 0, kBufferWidth, kBufferHeight};
+        void* rejectedDc = reinterpret_cast<void*>(1);
+        const bool rejectedFormatClearsDc = !BeginBufferedPaint(app.dc, &bounds,
+            0x7FFFFFFF, nullptr, &rejectedDc) && !rejectedDc;
+        const int32_t firstInit = BufferedPaintInit();
+        const int32_t secondInit = firstInit == 0 ? BufferedPaintInit() : -1;
+        const bool initialized = firstInit == 0 && secondInit == 0;
+        bool discardPassed = false;
+        bool updatePassed = false;
+        bool staleRejected = false;
+        bool nestingPassed = false;
+        if (initialized) {
+            void* bufferDc{};
+            void* buffer = BeginBufferedPaint(app.dc, &bounds,
+                kBufferFormatTopDownDib, nullptr, &bufferDc);
+            void* brush = CreateSolidBrush(kBufferColorRef);
+            const bool filled = buffer && bufferDc && brush &&
+                FillRect(static_cast<HDC>(bufferDc), &bounds, static_cast<HBRUSH>(brush)) != 0;
+            if (brush) DeleteObject(static_cast<HGDIOBJ>(brush));
+            const bool endedWithoutUpdate = buffer && EndBufferedPaint(buffer, FALSE) == 0;
+            discardPassed = filled && endedWithoutUpdate &&
+                p[8 * w + 8] == original[8 * kBufferWidth + 8];
+            staleRejected = buffer && EndBufferedPaint(buffer, TRUE) != 0;
+
+            const int32_t firstUninit = BufferedPaintUnInit();
+            void* nestedDc{};
+            void* nestedBuffer = firstUninit == 0
+                ? BeginBufferedPaint(app.dc, &bounds, kBufferFormatTopDownDib,
+                                     nullptr, &nestedDc) : nullptr;
+            const bool nestedBegin = nestedBuffer && nestedDc;
+            if (nestedBuffer) (void)EndBufferedPaint(nestedBuffer, FALSE);
+            const int32_t secondUninit = BufferedPaintUnInit();
+            void* postUninitDc = reinterpret_cast<void*>(1);
+            const void* postUninitBuffer = BeginBufferedPaint(app.dc, &bounds,
+                kBufferFormatTopDownDib, nullptr, &postUninitDc);
+            nestingPassed = firstUninit == 0 && nestedBegin && secondUninit == 0 &&
+                !postUninitBuffer && !postUninitDc;
+        }
+        if (firstInit == 0 && !initialized) (void)BufferedPaintUnInit();
+        void* updateDc{};
+        const int32_t updateInit = BufferedPaintInit();
+        void* updateBuffer = BeginBufferedPaint(app.dc, &bounds,
+            kBufferFormatTopDownDib, nullptr, &updateDc);
+        void* updateBrush = updateBuffer && updateDc
+            ? CreateSolidBrush(kBufferColorRef) : nullptr;
+        const bool updateFilled = updateBuffer && updateDc && updateBrush &&
+            FillRect(static_cast<HDC>(updateDc), &bounds, static_cast<HBRUSH>(updateBrush)) != 0;
+        if (updateBrush) DeleteObject(static_cast<HGDIOBJ>(updateBrush));
+        const bool endedWithUpdate = updateBuffer &&
+            EndBufferedPaint(updateBuffer, TRUE) == 0;
+        const int32_t updateUninit = updateInit == 0 ? BufferedPaintUnInit() : -1;
+        updatePassed = initialized && updateInit == 0 && updateFilled && endedWithUpdate &&
+            updateUninit == 0 &&
+            p[8 * w + 8] == kBufferPixel;
+        for (int32_t y = 0; y < kBufferHeight; ++y)
+            for (int32_t x = 0; x < kBufferWidth; ++x)
+                p[y * w + x] = original[y * kBufferWidth + x];
+        g.bufferedPaintReported = true;
+        if (rejectedFormatClearsDc && discardPassed && updatePassed &&
+            staleRejected && nestingPassed)
+            PrintLine("[MicaNT Theme] Buffered DIB paint init, discard, update and cleanup verified");
+        else
+            PrintLine("[MicaNT Theme] Buffered DIB paint lifecycle mismatch");
+    }
 }
 
 void present(HWND hwnd) noexcept {
