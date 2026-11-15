@@ -706,4 +706,12 @@ int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot* snapshot) {
     return request(MICANT_WIN32K_OP_SET_THEME_SNAPSHOT, value) && value.result == 1;
 }
 
+int32_t MicaWin32kGetThemeSnapshot(MicaThemeSnapshot* snapshot) {
+    if (!snapshot) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(snapshot);
+    return request(MICANT_WIN32K_OP_GET_THEME_SNAPSHOT, value) && value.result == 1 &&
+           MicaThemeSnapshotIsValid(snapshot, sizeof(*snapshot));
+}
+
 }

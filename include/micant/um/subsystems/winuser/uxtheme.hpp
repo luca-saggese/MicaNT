@@ -8,9 +8,14 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include "micant/shared/ntdef.hpp"
+#include "micant/shared/theme_snapshot.h"
+#include "micant/shared/win32k_client.h"
 #include "micant/um/subsystems/winbase/kernel32.hpp"
 #include "micant/um/subsystems/winuser/user32.hpp"
 #include "micant/um/native/ldr.hpp"
@@ -22,17 +27,147 @@ using HTHEME = void*;
 using HPAINTBUFFER = void*;
 using HANAnimation = void*;
 
-inline HTHEME OpenThemeData(win32::HWND /*hwnd*/, LPCWSTR /*pszClassList*/) noexcept {
-    static uint64_t dummyTheme = 0x8888;
-    return reinterpret_cast<HTHEME>(&dummyTheme);
+// UxTheme handles are process-local tokens. Each open handle pins the immutable
+// snapshot it was opened against, so a later theme change cannot invalidate a
+// query already in progress.
+namespace detail {
+struct ThemeHandle {
+    MicaThemeSnapshot snapshot{};
+    uint32_t generation{1};
+    uint8_t control{};
+    bool occupied{};
+};
+inline std::array<ThemeHandle, 64> handles{};
+inline MicaThemeSnapshot activeSnapshot{};
+inline uint32_t nextGeneration{1};
+
+constexpr win32::HRESULT kInvalidArgument = static_cast<win32::HRESULT>(0x80070057u);
+constexpr win32::HRESULT kInvalidHandle = static_cast<win32::HRESULT>(0x80070006u);
+constexpr win32::HRESULT kNotFound = static_cast<win32::HRESULT>(0x80070490u);
+constexpr win32::HRESULT kNotImplemented = static_cast<win32::HRESULT>(0x80004001u);
+
+inline bool publish(const MicaThemeSnapshot& snapshot) noexcept {
+    if (!MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot))) return false;
+    activeSnapshot = snapshot;
+    return true;
+}
+inline void* token(size_t slot, uint32_t generation) noexcept {
+    const uintptr_t value = (static_cast<uintptr_t>(generation) << 8) | (slot + 1);
+    return reinterpret_cast<void*>(value);
+}
+inline ThemeHandle* lookup(HTHEME handle) noexcept {
+    const uintptr_t value = reinterpret_cast<uintptr_t>(handle);
+    const uintptr_t encodedSlot = value & 0xFFu;
+    const uint32_t generation = static_cast<uint32_t>(value >> 8);
+    if (!encodedSlot || encodedSlot > handles.size() || !generation) return nullptr;
+    auto& entry = handles[encodedSlot - 1];
+    return entry.occupied && entry.generation == generation ? &entry : nullptr;
+}
+inline bool classControl(LPCWSTR classes, uint8_t& control) noexcept {
+    if (!classes) return false;
+    // GTK-independent mapping to the control order in theme_snapshot.h.
+    constexpr std::pair<std::wstring_view, uint8_t> names[] = {
+        {L"BUTTON", 0}, {L"EDIT", 1}, {L"CHECKBOX", 2}, {L"RADIO", 3},
+        {L"COMBOBOX", 4}, {L"MENU", 5}, {L"TAB", 6}, {L"PROGRESS", 7},
+        {L"SCROLLBAR", 8}, {L"TRACKBAR", 9}, {L"TOOLBAR", 10},
+        {L"STATUS", 11}, {L"TOOLTIP", 12}, {L"HEADER", 13}, {L"WINDOW", 14},
+    };
+    const wchar_t* begin = classes;
+    while (*begin) {
+        while (*begin == L' ' || *begin == L'\t' || *begin == L';') ++begin;
+        const wchar_t* end = begin;
+        while (*end && *end != L';') ++end;
+        const std::wstring_view candidate(begin, static_cast<size_t>(end - begin));
+        for (const auto& name : names) {
+            if (candidate.size() != name.first.size()) continue;
+            bool equal = true;
+            for (size_t i = 0; i < candidate.size(); ++i) {
+                wchar_t c = candidate[i];
+                if (c >= L'a' && c <= L'z') c -= L'a' - L'A';
+                if (c != name.first[i]) { equal = false; break; }
+            }
+            if (equal) { control = name.second; return true; }
+        }
+        begin = end;
+    }
+    return false;
+}
+inline uint8_t stateIndex(uint8_t control, int state) noexcept {
+    if (state == 1) return 0;
+    if (control == 2 || control == 3) {
+        switch (state) {
+            case 2: return 1;
+            case 3: return 2;
+            case 4: return 4;
+            case 5: case 6: return 5;
+            case 7: return 2;
+            case 8: return 4;
+            default: return 0xFF;
+        }
+    }
+    // Map the documented common-control state groups into the theme snapshot.
+    switch (state) {
+        case 2: return 1; // hot
+        case 3: return 2; // pressed
+        case 4: return 4; // disabled
+        case 5: return (control == 1 || control == 4) ? 3 : 0; // edit/combo focused
+        case 7: return 6; // selected
+        default: return 0xFF;
+    }
+}
+inline const MicaThemeStyleSnapshot* style(const ThemeHandle& handle, int state) noexcept {
+    const uint8_t stateSlot = stateIndex(handle.control, state);
+    if (stateSlot >= MICANT_THEME_STATE_COUNT) return nullptr;
+    const size_t index = static_cast<size_t>(handle.control) * MICANT_THEME_STATE_COUNT + stateSlot;
+    return index < MICANT_THEME_STYLE_COUNT ? &handle.snapshot.styles[index] : nullptr;
+}
 }
 
-inline win32::HRESULT CloseThemeData(HTHEME /*hTheme*/) noexcept {
-    return 0; // S_OK
+inline bool PublishActiveThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
+    return detail::publish(snapshot);
 }
 
-inline win32::HRESULT GetThemeColor(HTHEME /*hTheme*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, win32::DWORD* pColor) noexcept {
-    if (pColor) *pColor = 0x00FFFFFF; // White
+inline HTHEME OpenThemeData(win32::HWND /*hwnd*/, LPCWSTR pszClassList) noexcept {
+    MicaThemeSnapshot current{};
+    if (MicaWin32kGetThemeSnapshot(&current)) detail::publish(current);
+    if (!MicaThemeSnapshotIsValid(&detail::activeSnapshot, sizeof(detail::activeSnapshot))) return nullptr;
+    uint8_t control{};
+    if (!detail::classControl(pszClassList, control)) return nullptr;
+    for (size_t i = 0; i < detail::handles.size(); ++i) {
+        auto& entry = detail::handles[i];
+        if (entry.occupied) continue;
+        uint32_t generation = ++detail::nextGeneration;
+        if (!generation) generation = ++detail::nextGeneration;
+        entry.snapshot = detail::activeSnapshot;
+        entry.control = control;
+        entry.generation = generation;
+        entry.occupied = true;
+        return detail::token(i, generation);
+    }
+    return nullptr;
+}
+
+inline win32::HRESULT CloseThemeData(HTHEME hTheme) noexcept {
+    auto* entry = detail::lookup(hTheme);
+    if (!entry) return detail::kInvalidHandle;
+    entry->occupied = false;
+    entry->snapshot = {};
+    return 0;
+}
+
+inline win32::HRESULT GetThemeColor(HTHEME hTheme, int iPartId, int iStateId, int iPropId, win32::DWORD* pColor) noexcept {
+    if (!pColor) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style) return detail::kNotFound;
+    uint32_t color{};
+    if (iPropId == 3803 && (style->flags & MICANT_THEME_HAS_FOREGROUND)) color = style->foreground;
+    else if (iPropId == 3802 && (style->flags & MICANT_THEME_HAS_BACKGROUND)) color = style->background;
+    else if (iPropId == 3801 && (style->flags & MICANT_THEME_HAS_BORDER)) color = style->border;
+    else return detail::kNotFound;
+    *pColor = ((color >> 16) & 0xFFu) | (color & 0xFF00u) | ((color & 0xFFu) << 16);
     return 0;
 }
 
@@ -40,12 +175,24 @@ inline win32::HRESULT GetThemeFont(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPart
     return 0;
 }
 
-inline win32::HRESULT GetThemePartSize(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, void* /*prc*/, int /*eSize*/, void* psz) noexcept {
-    if (psz) {
-        auto* sz = reinterpret_cast<int32_t*>(psz);
-        sz[0] = 16;
-        sz[1] = 16;
+inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, void* /*prc*/, int eSize, void* psz) noexcept {
+    if (!psz || eSize < 0 || eSize > 2) return detail::kInvalidArgument;
+    if (eSize != 0) return detail::kNotImplemented; // TS_MIN only
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style) return detail::kNotFound;
+    int32_t width = (style->flags & MICANT_THEME_HAS_MIN_WIDTH) ? style->minWidth : 0;
+    int32_t height = (style->flags & MICANT_THEME_HAS_MIN_HEIGHT) ? style->minHeight : 0;
+    if (style->flags & MICANT_THEME_HAS_PADDING) {
+        width += style->padding[1] + style->padding[3];
+        height += style->padding[0] + style->padding[2];
     }
+    if (!width && !height) return detail::kNotFound;
+    auto* size = reinterpret_cast<int32_t*>(psz);
+    size[0] = width;
+    size[1] = height;
     return 0;
 }
 
@@ -120,21 +267,29 @@ struct MARGINS {
 };
 
 inline win32::BOOL IsThemeActive() noexcept {
-    return win32::TRUE;
+    MicaThemeSnapshot current{};
+    if (MicaWin32kGetThemeSnapshot(&current)) detail::publish(current);
+    return MicaThemeSnapshotIsValid(&detail::activeSnapshot, sizeof(detail::activeSnapshot))
+        ? win32::TRUE : win32::FALSE;
 }
 
 inline win32::BOOL IsAppThemed() noexcept {
-    return win32::TRUE;
+    return IsThemeActive();
 }
 
-inline win32::HRESULT GetThemeMargins(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, const void* /*prc*/, MARGINS* pMargins) noexcept {
-    if (pMargins) {
-        pMargins->cxLeftWidth = 2;
-        pMargins->cxRightWidth = 2;
-        pMargins->cyTopHeight = 2;
-        pMargins->cyBottomHeight = 2;
-    }
-    return 0; // S_OK
+inline win32::HRESULT GetThemeMargins(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, int iPropId, const void* /*prc*/, MARGINS* pMargins) noexcept {
+    if (!pMargins) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    if (iPropId != 3602) return detail::kNotFound; // TMT_CONTENTMARGINS
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style || !(style->flags & MICANT_THEME_HAS_PADDING)) return detail::kNotFound;
+    pMargins->cyTopHeight = style->padding[0];
+    pMargins->cxRightWidth = style->padding[1];
+    pMargins->cyBottomHeight = style->padding[2];
+    pMargins->cxLeftWidth = style->padding[3];
+    return 0;
 }
 
 inline win32::HRESULT GetThemeInt(HTHEME /*hTheme*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, int* piVal) noexcept {

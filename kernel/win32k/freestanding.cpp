@@ -1026,4 +1026,12 @@ micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
     return NtStatus::Success;
 }
 
+micant::NtStatus getThemeSnapshot(MicaThemeSnapshot& snapshot) noexcept {
+    StateLockGuard lock;
+    if (!MicaThemeSnapshotIsValid(&g_themeSnapshot, sizeof(g_themeSnapshot)))
+        return NtStatus::NotFound;
+    snapshot = g_themeSnapshot;
+    return NtStatus::Success;
+}
+
 } // namespace micant::win32k::freestanding

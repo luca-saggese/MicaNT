@@ -3982,6 +3982,17 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
                                                &request, sizeof(request)));
         }
+        if (request.operation == MICANT_WIN32K_OP_GET_THEME_SNAPSHOT) {
+            MicaThemeSnapshot snapshot{};
+            const NtStatus themeStatus = win32k::freestanding::getThemeSnapshot(snapshot);
+            if (themeStatus != NtStatus::Success) return status(themeStatus);
+            const NtStatus copyStatus = ex::ExSafeCopyToUser(
+                reinterpret_cast<void*>(request.args[0]), &snapshot, sizeof(snapshot));
+            if (copyStatus != NtStatus::Success) return status(copyStatus);
+            request.result = 1;
+            return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
+                                               &request, sizeof(request)));
+        }
         if (request.operation == MICANT_WIN32K_OP_PUMP_INPUT) {
             bool keyboardQueued = false;
             static bool explorerMouseClickObserved = false;

@@ -15,6 +15,7 @@
 #include "micant/um/subsystems/graphics/dwrite.hpp"
 
 #include <windows.h>
+#include <cstring>
 #ifdef GetGlyphIndices
 #undef GetGlyphIndices
 #endif
@@ -503,6 +504,12 @@ void loadActiveVisualTheme() noexcept {
     }
     if (!MicaWin32kSetThemeSnapshot(&candidate)) {
         PrintLine("[MicaNT Theme] Win32k rejected the style snapshot");
+        return;
+    }
+    MicaThemeSnapshot published{};
+    if (!MicaWin32kGetThemeSnapshot(&published) ||
+        std::memcmp(&candidate, &published, sizeof(candidate)) != 0) {
+        PrintLine("[MicaNT Theme] Win32k theme snapshot round-trip failed");
         return;
     }
     g.visualTheme = candidate;
