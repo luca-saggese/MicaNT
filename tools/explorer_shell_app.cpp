@@ -1220,6 +1220,29 @@ extern "C" void _start(const char* = nullptr) {
     verifyDirectWriteFonts();
     redrawDesktop();
     updateClock();
+    HCURSOR busyCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32514));
+    if (busyCursor && g.desktop) {
+        HCURSOR previousCursor = SetCursor(busyCursor);
+        bool animationWaitPassed = true;
+        for (unsigned poll = 0; poll < 4; ++poll) {
+            if (!PostMessageW(g.desktop, WM_NULL, 0, 0)) {
+                animationWaitPassed = false;
+                break;
+            }
+            MSG idleMessage{};
+            if (GetMessageW(&idleMessage, g.desktop, 0, 0) <= 0) {
+                animationWaitPassed = false;
+                break;
+            }
+            TranslateMessage(&idleMessage);
+            DispatchMessageW(&idleMessage);
+            Sleep(40);
+        }
+        SetCursor(previousCursor ? previousCursor : windowClass.hCursor);
+        PrintLine(animationWaitPassed
+            ? "[MicaNT Cursor] ANI wait path exercised through blocking GetMessage"
+            : "[MicaNT Cursor] ANI blocking GetMessage probe failed");
+    }
     uint64_t lastClockUpdate = GetTickCount64();
     for (;;) {
         MSG msg{};
