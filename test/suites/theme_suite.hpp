@@ -125,6 +125,12 @@ inline void Test_NativeTheme_ColorExpressionsAndControlCascade() {
     TEST_ASSERT(resolveCssColor("darker(#808080)", parsed, {}, color) &&
                 color.red < 128 && color.green == color.red && color.blue == color.red,
                 "GTK darker expression lowers HSL lightness");
+    TEST_ASSERT(resolveCssColor("shade(#ff0000, 0.5)", parsed, {}, color) &&
+                color == (CssColor{128, 0, 0, 255}),
+                "GTK shade preserves saturated hue while reducing lightness");
+    TEST_ASSERT(resolveCssColor("shade(#ff0000, 1.5)", parsed, {}, color) &&
+                color == (CssColor{255, 128, 128, 255}),
+                "GTK shade raises lightness without losing saturated hue");
 }
 
 inline void Test_WhiteSur_RealProfilesCompileToNativeButtonStyles() {

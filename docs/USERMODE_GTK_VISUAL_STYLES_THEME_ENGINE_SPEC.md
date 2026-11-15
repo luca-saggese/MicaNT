@@ -1,6 +1,6 @@
 # MicaNT Native GTK Visual Styles Theme Engine
 
-**Status:** implementation specification; implementation not yet started.
+**Status:** implementation in progress; import/package and bounded CSS/native style compilation are implemented, but not connected to runtime rendering.
 **Baseline:** repository HEAD `7443801d334936cc9a5ccf4e702668339022fe30`, inspected 2026-11-15.
 **Scope:** a bounded, native C++23 theme compiler/runtime. GTK 3 CSS is an import format; GTK, GLib, Sass, and Linux graphics runtimes are not production dependencies.
 
@@ -20,14 +20,14 @@ Current evidence from `KERNEL_ARCHITECTURE.md` and the 2026-11-14 integration le
 
 | Component | Declared | Implemented now | Built/linked | QEMU | Hardware |
 |---|---|---|---|---|---|
-| `uxtheme.hpp` | Broad API surface and export registration | Many inline functions are placeholders: static fake theme handles, constant outputs, no-op drawing, and success for unsupported work | Registered by `InitializeUxThemeSubsystemExports()` in the dynamic loader; standalone canonical UxTheme DLL target not found | No themed-control evidence found | Not verified |
+| `uxtheme.hpp` | Broad API surface and export registration | Many inline functions remain placeholders: static fake theme handles, constant outputs, no-op drawing, and success for unsupported work | Included in loader export registration; standalone canonical UxTheme DLL target not found | No themed-control evidence found | Not verified |
 | `dwmapi.hpp`, DWM seal | Attributes, blur, frame and composition types/exports | State/API stubs exist; must audit each exported path and connect state changes to rendering | DWM seal is in the System32 implementation; theme effects are not established | No themed DWM evidence found | Not verified |
 | User32/GDI32/Comctl32 | Win32 headers and freestanding DLL sources | Multiple code paths exist: freestanding DLL sources are minimal; canonical Explorer's Ring 3 GDI/font path has real DIB text and font metrics; common controls remain partial. Treat each target/implementation separately | `explorer_runtime_boot` and native-user-mode boundary checks have prior successful builds; recheck current tree | Explorer Ring 3 windows/input, painting, teardown, software composition and TTF text were QEMU exercised; no themed controls | Not verified |
 | Win32k | Canonical window/input/surface ABI | Bounded classes/windows, hit testing, input queues, present/surface ownership and teardown are the integration owner; theme metrics/decorations are not yet a theme contract | Bare-metal target previously linked | Explorer window interaction exercised; no themed nonclient rendering | Not verified |
 | `compositor.exe` / `tools/compositor_app.cpp` | Shared surface contract | Ring 3 software composition, clipping, z-order, alpha and display-service submission; titlebar/frame/buttons are currently hardcoded raster drawing. It redraws the full frame per publication; dirty-region and optional effects are not implemented | E4 path previously linked and run | QEMU scanout and E1–E6 bounded interaction/cleanup accepted in ledger | No physical hardware evidence |
 | Explorer shell | Real app and shell modules | Real Ring 3 entry/window path exists; shell and compositor painting contain fixed colors/drawing and are not theme-driven | Seven-image closure accepted in prior checkpoint | E1–E6 bounded app window, input, close/move/resize/cleanup; 2026-11-15 font probes and text rendering accepted | Not verified |
 | Font engine | Detailed TTF/OTF implementation spec exists | Bounded Ring 3 TrueType parser/rasterizer, GDI metrics/text and DirectWrite subset now implemented; broader shaping/format support remains limited | Built in Explorer dependency closure per ledger | QEMU probes for TTF metrics, text, fallback, glyph indices, layout and shell input passed 2026-11-15 | Not verified |
-| Image/icon/cursor | Existing subsystem specifications and icon work | Reuse canonical decoders/handle tables; no theme-specific asset loader may bypass them | Varies by target | No WhiteSur-specific asset evidence | Not verified |
+| Image/icon/cursor | Existing subsystem specifications and icon work | Reuse canonical decoders/handle tables; no theme-specific asset loader may bypass them | Varies by target | WhiteSur package is staged into the QEMU system volume; no asset use in rendering | Not verified |
 | User preferences / Cm / Userenv | Existing subsystem owners | Theme persistence integration not established | Not established | Not verified | Not verified |
 
 No compositor or Explorer theme specification was found under `docs/` at baseline. Relevant references are `KERNEL_ARCHITECTURE.md`, `KERNEL_MILESTONES.md`, `KERNEL_INTEGRATION_STATUS.md`, `KERNEL_GPU_DRIVER_IMPLEMENTATION_SPEC.md`, `USERMODE_FONT_ENGINE_TRUETYPE_OPENTYPE_SPEC.md`, `USERMODE_IMAGE_CODEC_AND_WALLPAPER_SPEC.md`, `USERMODE_WINDOWS_ICON_SUBSYSTEM_IMPLEMENTATION_SPEC.md`, and `USERMODE_WINDOWS_CURSOR_SUBSYSTEM_IMPLEMENTATION_SPEC.md`. The current compositor and shell source are authoritative for code behavior; the integration ledger is evidence, not a second milestone definition.
@@ -177,3 +177,15 @@ Cross-cutting error handling: validate before mutation; allocate temporary state
 9. Assess hardware profile and future accelerated backend independently; do not block software completeness on an unoffered QEMU VirGL device, and do not claim GPU acceleration from 2D scanout.
 
 The immediate first visible deliverable is a real Explorer Ring 3 window whose titlebar and initial controls use generated WhiteSur Light/Dark style data through the existing window/compositor pipeline, while close, resize, focus, input, cleanup and Base fallback continue to work. This is an intermediate gate, not completion of the broader request.
+
+## 21. Current implementation evidence — 2026-11-15
+
+| Check | Command / source | Result |
+|---|---|---|
+| Parser/native model unit slice | `clang++ -std=c++23 -Wall -Wextra -Wpedantic -I include /private/tmp/micant_theme_test_main.cpp -o /private/tmp/micant_theme_tests && /private/tmp/micant_theme_tests` | Passed, including raw Light/Dark WhiteSur compilation and `shade()`/`lighter()`/`darker()` color expressions. This is a hosted test only. |
+| WhiteSur import and QEMU image staging | `scripts/import_whitesur_theme.py` and `scripts/boot_micant.py` at source commit `d634e08` | Package validation passed and the theme directory was copied into the ESP image. |
+| Production build / boundary checks | `python3 qemu.py --headless` | Bare-metal kernel, compositor, Explorer and DLL build targets linked; native user-mode boundary checks passed. |
+| QEMU boot | `python3 qemu.py --headless` with permission to bind its temporary QMP socket | QEMU entered the boot path and reached CPL3 initialization, then the kernel stopped at `ExHeap: invalid free rejected` during the Ring 3 syscall suite. Explorer did not run, so this is not WhiteSur visual acceptance. The cause has not yet been root-caused. |
+| Hardware | Not run | No physical hardware evidence. |
+
+The initial sandboxed QEMU attempt failed before boot because its temporary QMP Unix socket could not be bound; the retried command with socket permission reached the kernel failure recorded above. Do not attribute this failure to the theme package without a reproducer or causal trace.

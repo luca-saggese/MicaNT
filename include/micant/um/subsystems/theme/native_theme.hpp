@@ -78,7 +78,7 @@ inline CssColor shadeCssColor(CssColor color, double factor) noexcept {
     const double delta = maximum - minimum;
     double hue = 0.0, saturation = 0.0;
     if (delta != 0.0) {
-        saturation = delta / (1.0 - (lightness < 0.5 ? 2.0 * lightness : 2.0 - 2.0 * lightness));
+        saturation = delta / (lightness < 0.5 ? 2.0 * lightness : 2.0 - 2.0 * lightness);
         if (maximum == red) hue = (green - blue) / delta + (green < blue ? 6.0 : 0.0);
         else if (maximum == green) hue = (blue - red) / delta + 2.0;
         else hue = (red - green) / delta + 4.0;
@@ -87,8 +87,8 @@ inline CssColor shadeCssColor(CssColor color, double factor) noexcept {
     factor = std::clamp(factor, 0.0, 2.0);
     const double shadedLightness = factor <= 1.0 ? lightness * factor :
                                    1.0 - (1.0 - lightness) * (2.0 - factor);
-    const double chroma = (1.0 - (shadedLightness < 0.5 ? 2.0 * shadedLightness :
-                                  2.0 - 2.0 * shadedLightness)) * saturation;
+    const double chroma = (shadedLightness < 0.5 ? 2.0 * shadedLightness :
+                           2.0 - 2.0 * shadedLightness) * saturation;
     const double sector = hue / 60.0;
     const int sectorIndex = static_cast<int>(sector);
     const double x = chroma * (1.0 - ((sectorIndex & 1) ? sector - sectorIndex : 1.0 - (sector - sectorIndex)));
