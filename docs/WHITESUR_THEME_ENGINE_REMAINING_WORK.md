@@ -104,6 +104,14 @@ the evidence named here, not just declarations or a successful compile.
   in `/private/tmp/micant-theme-drawthemebackgroundex-errors-run/serial.log`;
   build and focused pixel/error checks passed before the enclosing
   parent-folder input assertion failed.
+- [x] `GetThemeEnumValue(TMT_BGTYPE)` reports `BT_BORDERFILL` only for a
+  supported style carrying a background or border; unsupported properties
+  clear their output and return `E_NOTIMPL`. The actual Explorer import checked
+  both the value and failure case in QEMU, logging
+  `UxTheme TMT_BGTYPE reports borderfill` in
+  `/private/tmp/micant-theme-uxtheme-bgtype-enum-run/serial.log`. Build and
+  focused probes passed; the enclosing input suite still fails later at parent
+  folder navigation.
 - [x] `DrawThemeText` now draws supported one-line text through the caller's
   GDI DC and the theme foreground (inheriting WhiteSur HeaderBar foreground
   when a control omits it). Unsupported flags and text clipping return

@@ -661,9 +661,22 @@ inline win32::HRESULT WINAPI GetThemePropertyOrigin(HTHEME /*hTheme*/, int32_t /
     return detail::kNotImplemented;
 }
 
-inline win32::HRESULT WINAPI GetThemeEnumValue(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, int32_t* piVal) noexcept {
-    if (piVal) *piVal = 0;
-    return detail::kNotImplemented;
+inline win32::HRESULT WINAPI GetThemeEnumValue(HTHEME hTheme, int32_t iPartId,
+        int32_t iStateId, int32_t iPropId, int32_t* piVal) noexcept {
+    if (!piVal) return detail::kInvalidArgument;
+    *piVal = 0;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    constexpr int32_t kTmtBackgroundType = 4001;
+    constexpr int32_t kBackgroundTypeBorderFill = 1;
+    if (iPropId != kTmtBackgroundType) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style || !(style->flags & (MICANT_THEME_HAS_BACKGROUND |
+                                   MICANT_THEME_HAS_BORDER)))
+        return detail::kNotFound;
+    *piVal = kBackgroundTypeBorderFill;
+    return 0;
 }
 
 inline win32::HRESULT WINAPI GetCurrentThemeName(wchar_t* pszThemeFileName, int32_t cchMaxNameChars, wchar_t* pszColorBuff, int32_t cchMaxColorChars, wchar_t* pszSizeBuff, int32_t cchMaxSizeChars) noexcept {

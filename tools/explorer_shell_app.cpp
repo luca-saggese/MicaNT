@@ -923,6 +923,14 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool unsupportedBooleanFailed = themeHandle &&
         GetThemeBool(themeHandle, 1, 1, 0x7FFFFFFF, &unsupportedBoolean) ==
             static_cast<int32_t>(0x80004001u) && unsupportedBoolean == 0;
+    int32_t backgroundType = static_cast<int32_t>(0xA5A5A5A5u);
+    const bool backgroundTypeQueryPassed = themeHandle &&
+        GetThemeEnumValue(themeHandle, 1, 1, 4001, &backgroundType) == 0 &&
+        backgroundType == 1;
+    int32_t unsupportedEnum = 1;
+    const bool unsupportedEnumFailed = themeHandle &&
+        GetThemeEnumValue(themeHandle, 1, 1, 0x7FFFFFFF, &unsupportedEnum) ==
+            static_cast<int32_t>(0x80004001u) && unsupportedEnum == 0;
     uint8_t themeFontOutput[92];
     std::memset(themeFontOutput, 0xA5, sizeof(themeFontOutput));
     const int32_t unsupportedFont = themeHandle
@@ -944,6 +952,10 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] UxTheme TMT_TRANSPARENT follows alpha and opacity");
     else
         PrintLine("[MicaNT Theme] UxTheme transparent boolean query mismatch");
+    if (backgroundTypeQueryPassed && unsupportedEnumFailed)
+        PrintLine("[MicaNT Theme] UxTheme TMT_BGTYPE reports borderfill");
+    else
+        PrintLine("[MicaNT Theme] UxTheme background enum query mismatch");
     if (unsupportedFont == static_cast<int32_t>(0x80004001u) && themeFontOutputCleared)
         PrintLine("[MicaNT Theme] Unsupported font query clears LOGFONTW output");
     else
