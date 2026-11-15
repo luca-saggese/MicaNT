@@ -915,11 +915,28 @@ intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
         : User32_DefWindowProcW(lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam);
 #if defined(BUILD_SYSTEM32_USER32_DLL)
     if (lpMsg->message == 0x0020u && result == 0) {
+        constexpr uint32_t HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11, HTTOP = 12;
+        constexpr uint32_t HTTOPLEFT = 13, HTTOPRIGHT = 14, HTBOTTOM = 15;
+        constexpr uint32_t HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+        constexpr uintptr_t IDC_ARROW = 32512, IDC_SIZEWE = 32644, IDC_SIZENS = 32645;
+        constexpr uintptr_t IDC_SIZEALL = 32646, IDC_SIZENWSE = 32642, IDC_SIZENESW = 32643;
         void* cursor{};
+        const uint32_t hitTest = static_cast<uint16_t>(lpMsg->lParam);
+        uintptr_t cursorId = IDC_ARROW;
+        switch (hitTest) {
+        case HTLEFT: case HTRIGHT: cursorId = IDC_SIZEWE; break;
+        case HTTOP: case HTBOTTOM: cursorId = IDC_SIZENS; break;
+        case HTTOPLEFT: case HTBOTTOMRIGHT: cursorId = IDC_SIZENWSE; break;
+        case HTTOPRIGHT: case HTBOTTOMLEFT: cursorId = IDC_SIZENESW; break;
+        case HTCAPTION: cursorId = IDC_SIZEALL; break;
+        default: break;
+        }
+        if (hitTest != 1u) cursor = User32_LoadCursorW(nullptr,
+            reinterpret_cast<const wchar_t*>(cursorId));
         if (auto* window = findRegisteredWindowClass(lpMsg->hwnd);
-            window && window->icons) cursor = window->icons->cursor;
+            !cursor && window && window->icons) cursor = window->icons->cursor;
         if (!cursor) cursor = User32_LoadCursorW(nullptr,
-            reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(32512)));
+            reinterpret_cast<const wchar_t*>(IDC_ARROW));
         if (cursor) { (void)User32_SetCursor(cursor); return 1; }
     }
 #endif

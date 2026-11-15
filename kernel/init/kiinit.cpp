@@ -23,6 +23,7 @@
 #include "micant/km/drivers/usb/usb_host_baremetal.hpp"
 #include "micant/km/drivers/input/input_device_baremetal.hpp"
 #include "micant/km/drivers/input/kbdclass_contract.hpp"
+#include "micant/km/drivers/input/mouclass_contract.hpp"
 #include "micant/km/fsrtl/fat_boot.hpp"
 #include "micant/km/core/syscalls.hpp"
 #include "micant/km/win32k/freestanding.hpp"
@@ -3981,6 +3982,22 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                     explorerMouseClickObserved = true;
                     serialWrite("[MicaNT Explorer] Mouse click queued to the hit window\r\n");
                 }
+                request.result = 1;
+            }
+            for (unsigned count = 0; count < 32; ++count) {
+                km::hid::MOUSE_INPUT_DATA packet{};
+                if (!km::hid::MouClassPopInputData(packet)) break;
+                const int32_t nextX = static_cast<int32_t>(g_mouseX) + packet.LastX;
+                const int32_t nextY = static_cast<int32_t>(g_mouseY) + packet.LastY;
+                g_mouseX = nextX < 0 ? 0 : (nextX >= static_cast<int32_t>(kWidth)
+                    ? kWidth - 1 : static_cast<uint32_t>(nextX));
+                g_mouseY = nextY < 0 ? 0 : (nextY >= static_cast<int32_t>(kHeight)
+                    ? kHeight - 1 : static_cast<uint32_t>(nextY));
+                g_mouseButtons = packet.RawButtons & 7u;
+                event = {static_cast<int32_t>(g_mouseX), static_cast<int32_t>(g_mouseY),
+                    g_mouseButtons, ++g_mouseSequence};
+                (void)win32k::freestanding::dispatchMouseInput(event);
+                publishCompositorSurfacesInCompositorSpace();
                 request.result = 1;
             }
             for (unsigned count = 0; count < 32; ++count) {
