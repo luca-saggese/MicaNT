@@ -1860,6 +1860,11 @@ limited to the compositor's 64x64 cursor bound; per-frame hotspots are applied
 when the sequence advances. Shared system cursor handles remain non-destroyable
 and their animation state is retained with the shared handle.
 
+`LoadImageW` with `IMAGE_CURSOR | LR_LOADFROMFILE` now honors requested ANI
+width and height by scaling each frame and hotspot independently, rejecting
+dimensions above the compositor limit before publication. A zero dimension
+preserves that dimension from the selected frame.
+
 The `user32_boot` target linked after this change and its native user-mode
 boundary check passed. A follow-up now connects `LoadCursorW` and resource-form
 `LoadImageW(IMAGE_CURSOR)` to the loaded module list and canonical bounded
@@ -1890,3 +1895,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pe-qemu-final5` | Passed; modular UEFI boot, CPL3 compositor scanout, Explorer mouse/keyboard dispatch, window cleanup and five seconds of stable serial; custom PE cursor resource loading was not directly exercised |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-theme-qemu` | Passed; full modular boot, Explorer input/scanout/window cleanup and five seconds stable serial; cursor mapping compiled and package staged, though no dedicated theme-switch probe is present |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-arrow-probe-final` | Passed; Explorer serial reported `class arrow loaded` through `LoadCursorW(IDC_ARROW)`, then input/scanout/window cleanup passed and serial remained stable five seconds |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-resize` | Passed modular boot and Explorer input/scanout/cleanup; ANI resize path compiled and linked but was not directly invoked by Explorer |

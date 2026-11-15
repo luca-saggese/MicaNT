@@ -272,7 +272,9 @@ void updateAnimatedCursor() noexcept {
 
 void* loadAniCursor(std::span<const uint8_t> encoded,
                     const imaging::ImageAllocator& allocator,
-                    const imaging::ImageLimits& limits, bool shared = false) noexcept {
+                    const imaging::ImageLimits& limits, bool shared = false,
+                    uint32_t requestedWidth = 0,
+                    uint32_t requestedHeight = 0) noexcept {
     winuser::AniFileView view{};
     if (winuser::ParseAniFile(encoded, view, limits.maxEncodedBytes) != winuser::AniStatus::Success)
         return nullptr;
@@ -280,23 +282,43 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
     frameLimits.maxPixels = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS;
     frameLimits.maxDecodedBytes = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS * 4u;
     frameLimits.maxIntermediateBytes = 1024u * 1024u;
+    if (requestedWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        requestedHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
     AnimatedCursor candidate{};
     candidate.frameCount = view.frameCount;
     for (uint16_t i = 0; i < view.frameCount; ++i) {
         winuser::CursorImage cursor{};
-        if (winuser::DecodeCursorImage(view.frames[i], 0, 0, cursor, allocator, frameLimits) !=
+        if (winuser::DecodeCursorImage(view.frames[i], requestedWidth, requestedHeight,
+                cursor, allocator, frameLimits) !=
             imaging::ImageStatus::Success) return nullptr;
-        candidate.frameHotX[i] = cursor.hotX;
-        candidate.frameHotY[i] = cursor.hotY;
-        if (!i) { candidate.hotX = cursor.hotX; candidate.hotY = cursor.hotY; }
         if (cursor.image.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
             cursor.image.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        const uint32_t targetWidth = requestedWidth ? requestedWidth : cursor.image.width;
+        const uint32_t targetHeight = requestedHeight ? requestedHeight : cursor.image.height;
+        if (!targetWidth || !targetHeight) return nullptr;
+        uint16_t hotX = cursor.hotX, hotY = cursor.hotY;
+        if (cursor.image.width != targetWidth || cursor.image.height != targetHeight) {
+            const uint32_t sourceWidth = cursor.image.width, sourceHeight = cursor.image.height;
+            imaging::ImageFrame scaled{};
+            if (imaging::ScaleIconFrame(cursor.image, targetWidth, targetHeight, scaled,
+                    allocator, frameLimits) != imaging::ImageStatus::Success) return nullptr;
+            hotX = static_cast<uint16_t>(std::min<uint32_t>(targetWidth - 1,
+                (uint32_t(hotX) * targetWidth + sourceWidth / 2) / sourceWidth));
+            hotY = static_cast<uint16_t>(std::min<uint32_t>(targetHeight - 1,
+                (uint32_t(hotY) * targetHeight + sourceHeight / 2) / sourceHeight));
+            cursor.image = std::move(scaled);
+        }
+        candidate.frameHotX[i] = hotX;
+        candidate.frameHotY[i] = hotY;
         candidate.frames[i] = std::move(cursor.image);
     }
     candidate.stepCount = view.stepCount;
     std::copy_n(view.steps.begin(), view.stepCount, candidate.steps.begin());
     imaging::ImageFrame first{};
-    const auto& frame = candidate.frames[view.steps[0].frameIndex];
+    const uint16_t firstFrameIndex = view.steps[0].frameIndex;
+    const auto& frame = candidate.frames[firstFrameIndex];
+    candidate.hotX = candidate.frameHotX[firstFrameIndex];
+    candidate.hotY = candidate.frameHotY[firstFrameIndex];
     first.width = frame.width; first.height = frame.height; first.stride = frame.stride;
     first.format = imaging::PixelFormat::Bgra8Premultiplied;
     if (!first.pixels.allocate(frame.pixels.size(), allocator)) return nullptr;
@@ -1026,8 +1048,8 @@ void* User32_LoadImageW(void* instance, const wchar_t* name, uint32_t type,
         if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[1] == 'I' &&
             bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'A' &&
             bytes[9] == 'C' && bytes[10] == 'O' && bytes[11] == 'N') {
-            if (width || height) return nullptr;
-            return loadAniCursor(bytes, imaging::NativeImageAllocator(), limits);
+            return loadAniCursor(bytes, imaging::NativeImageAllocator(), limits,
+                false, width, height);
         }
         winuser::CursorImage cursor{};
         if (winuser::DecodeCursorImage(bytes, width, height, cursor,
