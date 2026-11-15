@@ -210,6 +210,7 @@ MICANT_WIN32K_API int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage*);
 MICANT_WIN32K_API int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo*);
 MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot*);
 MICANT_WIN32K_API int32_t MicaWin32kGetThemeSnapshot(MicaThemeSnapshot*);
+MICANT_WIN32K_API int32_t MicaWin32kFillRect(void*, const MicaWin32kRect*, uint32_t);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <array>
 #include <cstring>
@@ -46,6 +47,7 @@ constexpr win32::HRESULT kInvalidArgument = static_cast<win32::HRESULT>(0x800700
 constexpr win32::HRESULT kInvalidHandle = static_cast<win32::HRESULT>(0x80070006u);
 constexpr win32::HRESULT kNotFound = static_cast<win32::HRESULT>(0x80070490u);
 constexpr win32::HRESULT kNotImplemented = static_cast<win32::HRESULT>(0x80004001u);
+constexpr win32::HRESULT kFailure = static_cast<win32::HRESULT>(0x80004005u);
 
 inline bool publish(const MicaThemeSnapshot& snapshot) noexcept {
     if (!MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot))) return false;
@@ -219,8 +221,28 @@ inline win32::HRESULT GetThemeBackgroundContentRect(HTHEME hTheme, void* /*hdc*/
     return 0;
 }
 
-inline win32::HRESULT DrawThemeBackground(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, const void* /*pRect*/, const void* /*pClipRect*/) noexcept {
-    return detail::kNotImplemented;
+inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId, int iStateId, const void* pRect, const void* pClipRect) noexcept {
+    if (!hdc || !pRect) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    const auto* style = detail::style(*handle, iStateId);
+    if (!style || !(style->flags & MICANT_THEME_HAS_BACKGROUND)) return detail::kNotFound;
+    if ((style->background >> 24) != 255u) return detail::kNotImplemented;
+    const auto& source = *static_cast<const user32::RECT*>(pRect);
+    MicaWin32kRect rectangle{source.left, source.top, source.right, source.bottom};
+    if (pClipRect) {
+        const auto& clip = *static_cast<const user32::RECT*>(pClipRect);
+        rectangle.left = std::max(rectangle.left, clip.left);
+        rectangle.top = std::max(rectangle.top, clip.top);
+        rectangle.right = std::min(rectangle.right, clip.right);
+        rectangle.bottom = std::min(rectangle.bottom, clip.bottom);
+    }
+    if (rectangle.right <= rectangle.left || rectangle.bottom <= rectangle.top) return 0;
+    const uint32_t color = style->background;
+    const uint32_t colorRef = ((color >> 16) & 0xFFu) | (color & 0xFF00u) |
+                              ((color & 0xFFu) << 16);
+    return MicaWin32kFillRect(hdc, &rectangle, colorRef) ? 0 : detail::kFailure;
 }
 
 inline win32::HRESULT DrawThemeParentBackground(win32::HWND /*hwnd*/, void* /*hdc*/, const void* /*prc*/) noexcept {
