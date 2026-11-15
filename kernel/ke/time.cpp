@@ -78,6 +78,12 @@ void KeAccountClockInterruptTime(bool interruptedUserMode) noexcept {
     }
     modeTime += tickDuration100ns;
     if (idleTick) cpu.processorIdleTime100ns += tickDuration100ns;
+    auto& threadTime = interruptedUserMode ? cpu.currentThread->userTime100ns
+                                           : cpu.currentThread->kernelTime100ns;
+    if (threadTime > std::numeric_limits<uint64_t>::max() - tickDuration100ns)
+        threadTime = std::numeric_limits<uint64_t>::max();
+    else
+        threadTime += tickDuration100ns;
     cpu.processorPerformanceTimeAvailable = true;
 #else
     (void)interruptedUserMode;

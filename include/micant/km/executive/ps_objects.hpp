@@ -13,12 +13,20 @@ class EProcess;
 class EThread;
 
 namespace detail {
+struct ProcessSnapshotThreadEntry {
+    Handle threadId{};
+    uint64_t userTime100ns{};
+    uint64_t kernelTime100ns{};
+};
+
 struct ProcessSnapshotEntry {
     Handle processId{};
     Handle parentProcessId{};
     uint32_t threadCount{};
     uint32_t handleCount{};
     uintptr_t workingSetBytes{};
+    uint64_t userTime100ns{};
+    uint64_t kernelTime100ns{};
     size_t firstThreadIndex{};
     char16_t imageName[128]{};
     uint16_t imageNameLength{};
@@ -82,8 +90,9 @@ uint32_t bootstrapThreadObjectCount() noexcept;
 // Copies scalar metadata from the published process registry while holding
 // the same BSP exclusion used for publication and removal. If output is too
 // small, no entries are written and requiredCount reports the current count.
+// Thread records carry IDs and Ke-accounted user/kernel tick time.
 NtStatus captureProcessSnapshot(std::span<ProcessSnapshotEntry> output,
-                                std::span<Handle> threadIds,
+                                std::span<ProcessSnapshotThreadEntry> threads,
                                 size_t& requiredCount,
                                 size_t& requiredThreadCount) noexcept;
 }

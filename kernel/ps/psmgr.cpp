@@ -147,22 +147,23 @@ NtStatus NtQuerySystemInformation(
     TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process registry count captured\r\n");
     if (status != NtStatus::InfoLengthMismatch && status != NtStatus::Success) return status;
     if (count > SIZE_MAX / sizeof(ps::detail::ProcessSnapshotEntry) ||
-        threadCount > SIZE_MAX / sizeof(Handle))
+        threadCount > SIZE_MAX / sizeof(ps::detail::ProcessSnapshotThreadEntry))
         return NtStatus::InfoLengthMismatch;
 
     auto* snapshot = count ? new (std::nothrow_t{}) ps::detail::ProcessSnapshotEntry[count] : nullptr;
     if (count && !snapshot) return NtStatus::NoMemory;
-    auto* threadIds = threadCount ? new (std::nothrow_t{}) Handle[threadCount] : nullptr;
-    if (threadCount && !threadIds) { delete[] snapshot; return NtStatus::NoMemory; }
+    auto* threads = threadCount
+        ? new (std::nothrow_t{}) ps::detail::ProcessSnapshotThreadEntry[threadCount] : nullptr;
+    if (threadCount && !threads) { delete[] snapshot; return NtStatus::NoMemory; }
     size_t capturedCount = count;
     size_t capturedThreadCount = threadCount;
-    status = ps::detail::captureProcessSnapshot({snapshot, count}, {threadIds, threadCount},
+    status = ps::detail::captureProcessSnapshot({snapshot, count}, {threads, threadCount},
                                                 capturedCount, capturedThreadCount);
     if (status != NtStatus::Success)
         TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process object snapshot failed\r\n");
     if (status != NtStatus::Success) {
         delete[] snapshot;
-        delete[] threadIds;
+        delete[] threads;
         if (returnLength) {
             const size_t fixedBytes = sizeof(SystemProcessInformation);
             const bool overflow = capturedCount > UINT32_MAX / fixedBytes ||
@@ -185,13 +186,13 @@ NtStatus NtQuerySystemInformation(
         const size_t unalignedBytes = sizeof(SystemProcessInformation) + threadBytes + nameBytes;
         if (unalignedBytes < threadBytes || unalignedBytes < nameBytes ||
             unalignedBytes > SIZE_MAX - (alignof(uintptr_t) - 1)) {
-            delete[] snapshot; delete[] threadIds;
+            delete[] snapshot; delete[] threads;
             return NtStatus::InfoLengthMismatch;
         }
         const size_t recordBytes = (unalignedBytes + alignof(uintptr_t) - 1) & ~(alignof(uintptr_t) - 1);
         if (recordBytes > UINT32_MAX ||
             requiredSize > UINT32_MAX - recordBytes) {
-            delete[] snapshot; delete[] threadIds;
+            delete[] snapshot; delete[] threads;
             return NtStatus::InfoLengthMismatch;
         }
         requiredSize += recordBytes;
@@ -199,27 +200,27 @@ NtStatus NtQuerySystemInformation(
     const uint32_t required = static_cast<uint32_t>(requiredSize);
     if (returnLength) {
         status = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
-        if (status != NtStatus::Success) { delete[] snapshot; delete[] threadIds; return status; }
+        if (status != NtStatus::Success) { delete[] snapshot; delete[] threads; return status; }
     }
     if (systemInformationLength < required) {
-        delete[] snapshot; delete[] threadIds;
+        delete[] snapshot; delete[] threads;
         return NtStatus::InfoLengthMismatch;
     }
     if (required && !systemInformation) {
-        delete[] snapshot; delete[] threadIds;
+        delete[] snapshot; delete[] threads;
         return NtStatus::AccessViolation;
     }
     status = ex::ProbeForWrite(systemInformation, required, alignof(SystemProcessInformation), mode);
     if (status != NtStatus::Success)
         TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process output buffer probe failed\r\n");
-    if (status != NtStatus::Success) { delete[] snapshot; delete[] threadIds; return status; }
+    if (status != NtStatus::Success) { delete[] snapshot; delete[] threads; return status; }
 
     auto* records = required ? new (std::nothrow_t{}) uint8_t[required] : nullptr;
-    if (required && !records) { delete[] snapshot; delete[] threadIds; return NtStatus::NoMemory; }
+    if (required && !records) { delete[] snapshot; delete[] threads; return NtStatus::NoMemory; }
     size_t recordOffset = 0;
     const uintptr_t outputBase = reinterpret_cast<uintptr_t>(systemInformation);
     if (required && outputBase > UINTPTR_MAX - required) {
-        delete[] records; delete[] snapshot; delete[] threadIds;
+        delete[] records; delete[] snapshot; delete[] threads;
         return NtStatus::AccessViolation;
     }
     for (size_t i = 0; i < capturedCount; ++i) {
@@ -236,6 +237,13 @@ NtStatus NtQuerySystemInformation(
         record->InheritedFromUniqueProcessId = static_cast<uintptr_t>(snapshot[i].parentProcessId);
         record->HandleCount = snapshot[i].handleCount;
         record->WorkingSetSize = snapshot[i].workingSetBytes;
+        if (snapshot[i].userTime100ns > static_cast<uint64_t>(INT64_MAX) ||
+            snapshot[i].kernelTime100ns > static_cast<uint64_t>(INT64_MAX)) {
+            delete[] records; delete[] snapshot; delete[] threads;
+            return NtStatus::NotSupported;
+        }
+        record->UserTime = static_cast<int64_t>(snapshot[i].userTime100ns);
+        record->KernelTime = static_cast<int64_t>(snapshot[i].kernelTime100ns);
         if (snapshot[i].imageNameLength) {
             const size_t imageNameOffset = sizeof(SystemProcessInformation) + threadBytes;
             record->ImageName.Length = static_cast<uint16_t>(snapshot[i].imageNameLength * sizeof(char16_t));
@@ -244,15 +252,23 @@ NtStatus NtQuerySystemInformation(
             std::memcpy(records + recordOffset + imageNameOffset, snapshot[i].imageName,
                         record->ImageName.Length);
         }
-        // Session, CPU times, and private/peak working set data are not
-        // exported until their metadata/accounting owners provide them.
+        // Session and private/peak working set data remain unavailable until
+        // their metadata/accounting owners provide them.
         auto* outputThreads = reinterpret_cast<SystemThreadInformation*>(
             reinterpret_cast<uint8_t*>(record) + sizeof(SystemProcessInformation));
         for (size_t t = 0; t < snapshot[i].threadCount; ++t) {
             auto& outputThread = outputThreads[t];
             outputThread = {};
+            const auto& thread = threads[snapshot[i].firstThreadIndex + t];
+            if (thread.userTime100ns > static_cast<uint64_t>(INT64_MAX) ||
+                thread.kernelTime100ns > static_cast<uint64_t>(INT64_MAX)) {
+                delete[] records; delete[] snapshot; delete[] threads;
+                return NtStatus::NotSupported;
+            }
+            outputThread.UserTime = static_cast<int64_t>(thread.userTime100ns);
+            outputThread.KernelTime = static_cast<int64_t>(thread.kernelTime100ns);
             outputThread.UniqueProcessId = static_cast<uintptr_t>(snapshot[i].processId);
-            outputThread.UniqueThreadId = static_cast<uintptr_t>(threadIds[snapshot[i].firstThreadIndex + t]);
+            outputThread.UniqueThreadId = static_cast<uintptr_t>(thread.threadId);
         }
         recordOffset += recordBytes;
     }
@@ -261,7 +277,7 @@ NtStatus NtQuerySystemInformation(
         TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] Process output copy failed\r\n");
     delete[] records;
     delete[] snapshot;
-    delete[] threadIds;
+    delete[] threads;
     return status;
 }
 

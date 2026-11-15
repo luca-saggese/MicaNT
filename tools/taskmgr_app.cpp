@@ -30,10 +30,22 @@ constexpr uint64_t NtQuerySystemInformationService = 0x36;
 constexpr uint32_t StatusSuccess = 0x00000000U;
 constexpr uint32_t StatusInfoLengthMismatch = 0xC0000004U;
 constexpr uint32_t MaxSnapshotBytes = 64 * 1024;
+constexpr uint32_t MaxTrackedProcesses =
+    MaxSnapshotBytes / sizeof(micant::SystemProcessInformation);
 alignas(4096) uint32_t s_tmBuffer[WIN_W * WIN_H];
 alignas(16) uint8_t s_processSnapshot[MaxSnapshotBytes];
 constexpr uint32_t MaxProcessorRecords = 64;
 alignas(16) micant::SystemProcessorPerformanceInformation s_processorSnapshot[MaxProcessorRecords];
+
+struct ProcessCpuSample {
+    uintptr_t processId{};
+    uint64_t userTime100ns{};
+    uint64_t kernelTime100ns{};
+};
+
+ProcessCpuSample s_previousProcessSamples[MaxTrackedProcesses]{};
+ProcessCpuSample s_currentProcessSamples[MaxTrackedProcesses]{};
+uint32_t s_previousProcessCount{};
 
 struct ProcessorTimes {
     uint64_t idleTime100ns{};
@@ -50,6 +62,8 @@ struct SnapshotView {
     uint32_t status{StatusInfoLengthMismatch};
     uint32_t availablePages{0};
     uint32_t cpuPercent{0};
+    uint32_t processCpuPercent[MaxTrackedProcesses]{};
+    uint8_t processCpuAvailable[MaxTrackedProcesses]{};
     bool taskmgrImageNameFound{false};
     bool available{false};
     bool memoryAvailable{false};
@@ -123,6 +137,82 @@ bool ComputeCpuPercent(const ProcessorTimes& previous, const ProcessorTimes& cur
     return true;
 }
 
+bool ComputeRatioPercent(uint64_t numerator, uint64_t denominator,
+                         uint32_t& percent) noexcept {
+    percent = 0;
+    if (!denominator || numerator > denominator) return false;
+    uint64_t remainder = 0;
+    for (uint32_t i = 0; i < 100; ++i) {
+        const uint64_t complement = denominator - numerator;
+        if (remainder >= complement) {
+            remainder -= complement;
+            ++percent;
+        } else {
+            remainder += numerator;
+        }
+    }
+    return true;
+}
+
+void UpdateProcessCpuSamples(SnapshotView& snapshot,
+                             const ProcessorTimes& previousCpu,
+                             const ProcessorTimes& currentCpu,
+                             bool havePreviousCpu) noexcept {
+    for (uint32_t i = 0; i < MaxTrackedProcesses; ++i) {
+        snapshot.processCpuAvailable[i] = 0;
+        snapshot.processCpuPercent[i] = 0;
+    }
+    if (!snapshot.available || snapshot.processCount > MaxTrackedProcesses) {
+        s_previousProcessCount = 0;
+        return;
+    }
+
+    uint64_t totalDelta = 0;
+    bool validTotal = havePreviousCpu && previousCpu.available && currentCpu.available &&
+        previousCpu.processorCount == currentCpu.processorCount &&
+        currentCpu.kernelTime100ns >= previousCpu.kernelTime100ns &&
+        currentCpu.userTime100ns >= previousCpu.userTime100ns;
+    if (validTotal) {
+        const uint64_t kernelDelta = currentCpu.kernelTime100ns - previousCpu.kernelTime100ns;
+        const uint64_t userDelta = currentCpu.userTime100ns - previousCpu.userTime100ns;
+        validTotal = kernelDelta <= UINT64_MAX - userDelta;
+        if (validTotal) totalDelta = kernelDelta + userDelta;
+        validTotal = validTotal && totalDelta != 0;
+    }
+
+    uint32_t offset = 0;
+    for (uint32_t i = 0; i < snapshot.processCount; ++i) {
+        const auto* entry = reinterpret_cast<const micant::SystemProcessInformation*>(
+            snapshot.data + offset);
+        auto& current = s_currentProcessSamples[i];
+        current = {entry->UniqueProcessId,
+                   entry->UserTime >= 0 ? static_cast<uint64_t>(entry->UserTime) : 0,
+                   entry->KernelTime >= 0 ? static_cast<uint64_t>(entry->KernelTime) : 0};
+        if (validTotal && entry->UserTime >= 0 && entry->KernelTime >= 0) {
+            for (uint32_t p = 0; p < s_previousProcessCount; ++p) {
+                const auto& old = s_previousProcessSamples[p];
+                if (old.processId != current.processId ||
+                    current.userTime100ns < old.userTime100ns ||
+                    current.kernelTime100ns < old.kernelTime100ns) continue;
+                const uint64_t userDelta = current.userTime100ns - old.userTime100ns;
+                const uint64_t kernelDelta = current.kernelTime100ns - old.kernelTime100ns;
+                if (kernelDelta > UINT64_MAX - userDelta) break;
+                uint32_t value{};
+                if (ComputeRatioPercent(userDelta + kernelDelta, totalDelta, value)) {
+                    snapshot.processCpuPercent[i] = value;
+                    snapshot.processCpuAvailable[i] = 1;
+                }
+                break;
+            }
+        }
+        if (entry->NextEntryOffset == 0) break;
+        offset += entry->NextEntryOffset;
+    }
+    for (uint32_t i = 0; i < snapshot.processCount; ++i)
+        s_previousProcessSamples[i] = s_currentProcessSamples[i];
+    s_previousProcessCount = snapshot.processCount;
+}
+
 bool QueryAvailablePages(SnapshotView& result) noexcept {
     result.memoryAvailable = false;
     micant::SystemPerformanceInformation information{};
@@ -184,8 +274,12 @@ bool ImageNameEquals(const micant::SystemProcessInformation& entry,
     return true;
 }
 
-bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& processId) noexcept {
+bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& processId,
+                             uint64_t* userTime100ns = nullptr,
+                             uint64_t* kernelTime100ns = nullptr,
+                             bool* threadTotalsMatch = nullptr) noexcept {
     processId = 0;
+    if (threadTotalsMatch) *threadTotalsMatch = false;
     if (!snapshot.available) return false;
     uint32_t offset = 0;
     for (uint32_t i = 0; i < snapshot.processCount; ++i) {
@@ -193,6 +287,28 @@ bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& proce
             snapshot.data + offset);
         if (ImageNameEquals(*entry, snapshot.data, snapshot.length, u"taskmgr_probe.exe")) {
             processId = static_cast<micant::Handle>(entry->UniqueProcessId);
+            if (entry->UserTime < 0 || entry->KernelTime < 0) return false;
+            const uint64_t processUser = static_cast<uint64_t>(entry->UserTime);
+            const uint64_t processKernel = static_cast<uint64_t>(entry->KernelTime);
+            if (userTime100ns) *userTime100ns = processUser;
+            if (kernelTime100ns) *kernelTime100ns = processKernel;
+            uint64_t threadUser = 0, threadKernel = 0;
+            bool validThreadTimes = true;
+            const auto* threads = reinterpret_cast<const micant::SystemThreadInformation*>(
+                reinterpret_cast<const uint8_t*>(entry) + sizeof(*entry));
+            for (uint32_t t = 0; t < entry->NumberOfThreads; ++t) {
+                if (threads[t].UserTime < 0 || threads[t].KernelTime < 0 ||
+                    static_cast<uint64_t>(threads[t].UserTime) > UINT64_MAX - threadUser ||
+                    static_cast<uint64_t>(threads[t].KernelTime) > UINT64_MAX - threadKernel) {
+                    validThreadTimes = false;
+                    break;
+                }
+                threadUser += static_cast<uint64_t>(threads[t].UserTime);
+                threadKernel += static_cast<uint64_t>(threads[t].KernelTime);
+            }
+            if (threadTotalsMatch)
+                *threadTotalsMatch = validThreadTimes && threadUser == processUser &&
+                    threadKernel == processKernel;
             return processId != 0;
         }
         if (!entry->NextEntryOffset) break;
@@ -406,7 +522,18 @@ void RenderTaskManagerWindow(const SnapshotView& snapshot) noexcept {
             uint32_t handlesCursor = 0;
             AppendUnsigned(handles, sizeof(handles), handlesCursor, entry->HandleCount);
             DrawString(s_tmBuffer, WIN_W, 300, y + 7, handles, PackBGRA(200, 220, 245));
-            DrawString(s_tmBuffer, WIN_W, 390, y + 7, "N/A", PackBGRA(150, 165, 185));
+            if (row < MaxTrackedProcesses && snapshot.processCpuAvailable[row]) {
+                char cpuText[8]{};
+                uint32_t cpuCursor = 0;
+                AppendUnsigned(cpuText, sizeof(cpuText), cpuCursor,
+                               snapshot.processCpuPercent[row]);
+                cpuText[cpuCursor++] = '%';
+                cpuText[cpuCursor] = '\0';
+                DrawString(s_tmBuffer, WIN_W, 390, y + 7, cpuText,
+                           PackBGRA(0, 210, 255));
+            } else {
+                DrawString(s_tmBuffer, WIN_W, 390, y + 7, "N/A", PackBGRA(150, 165, 185));
+            }
             DrawString(s_tmBuffer, WIN_W, 465, y + 7, "N/A", PackBGRA(150, 165, 185));
 
             ++row;
@@ -470,12 +597,21 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     bool probeTerminationRequested = false;
     bool probeTerminationReported = false;
+    bool probeFoundReported = false;
+    bool probeThreadTotalsReported = false;
+    bool probeCpuTimesReported = false;
+    bool havePreviousProbeTimes = false;
+    uint64_t previousProbeUserTime{};
+    uint64_t previousProbeKernelTime{};
 #endif
     while (true) {
         QueryProcessSnapshot(snapshot);
         const bool memoryAvailable = QueryAvailablePages(snapshot);
+        const ProcessorTimes priorCpu = previousCpu;
+        const bool hadPreviousCpu = havePreviousCpu;
         ProcessorTimes currentCpu{};
-        if (QueryProcessorTimes(currentCpu)) {
+        const bool currentCpuAvailable = QueryProcessorTimes(currentCpu);
+        if (currentCpuAvailable) {
             snapshot.cpuAvailable = false;
             if (havePreviousCpu) {
                 uint32_t cpuPercent{};
@@ -497,6 +633,8 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
                 cpuUnavailableReported = true;
             }
         }
+        UpdateProcessCpuSamples(snapshot, priorCpu, currentCpu,
+                                hadPreviousCpu && currentCpuAvailable);
         if (!reported) {
             if (snapshot.available) {
                 PrintLine("Task Manager: kernel process snapshot received.");
@@ -524,8 +662,38 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
         if (!probeTerminationRequested) {
             micant::Handle processId{};
-            if (FindTaskmgrProbeProcess(snapshot, processId)) {
-                PrintLine("Task Manager: authorized probe process found.");
+            uint64_t probeUserTime{}, probeKernelTime{};
+            bool threadTotalsMatch = false;
+            if (FindTaskmgrProbeProcess(snapshot, processId, &probeUserTime,
+                                        &probeKernelTime, &threadTotalsMatch)) {
+                if (!probeFoundReported) {
+                    PrintLine("Task Manager: authorized probe process found.");
+                    probeFoundReported = true;
+                }
+                if (threadTotalsMatch && !probeThreadTotalsReported) {
+                    PrintLine("Task Manager: process and thread CPU totals reconciled.");
+                    probeThreadTotalsReported = true;
+                }
+                if (havePreviousProbeTimes && probeUserTime >= previousProbeUserTime &&
+                    probeKernelTime >= previousProbeKernelTime &&
+                    (probeUserTime > previousProbeUserTime ||
+                     probeKernelTime > previousProbeKernelTime) && !probeCpuTimesReported) {
+                    PrintLine("Task Manager: process CPU times validated.");
+                    probeCpuTimesReported = true;
+                }
+                if ((probeUserTime < previousProbeUserTime ||
+                     probeKernelTime < previousProbeKernelTime) && havePreviousProbeTimes)
+                    PrintLine("Task Manager: process CPU times regressed.");
+                previousProbeUserTime = probeUserTime;
+                previousProbeKernelTime = probeKernelTime;
+                havePreviousProbeTimes = true;
+                if (!probeCpuTimesReported || !probeThreadTotalsReported) {
+                    RenderTaskManagerWindow(snapshot);
+                    const int64_t accountingInterval100ns = -100'000; // 10 ms
+                    (void)DoSyscall(0x34, 0,
+                        reinterpret_cast<uint64_t>(&accountingInterval100ns));
+                    continue;
+                }
                 const uint32_t terminateStatus = TerminateTaskmgrProbe(processId);
                 if (terminateStatus == StatusSuccess) {
                     probeTerminationRequested = true;

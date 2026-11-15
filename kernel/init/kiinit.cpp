@@ -4419,13 +4419,15 @@ void pollKeyboardInput() noexcept {
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    serialWrite("[MicaNT Taskmgr] Launching process-action probe\r\n");
     if (!launchUserImageProcess(u"taskmgr_probe.exe", g_taskmgrProbeProcessHandle,
-                                g_taskmgrProbeProcessId, true))
+                                g_taskmgrProbeProcessId))
         stopWithError("[MicaNT Taskmgr] Process-action probe launch failed\r\n");
     if (micant::sys::NtClose(g_taskmgrProbeProcessHandle) != micant::NtStatus::Success)
         stopWithError("[MicaNT Taskmgr] Process-action probe handle close failed\r\n");
     g_taskmgrProbeProcessHandle = 0;
     serialWrite("[MicaNT Taskmgr] QEMU process-action probe launched\r\n");
+    serialWrite("[MicaNT Taskmgr] Launching Task Manager\r\n");
     if (!launchUserImageProcess(u"taskmgr.exe", g_taskmgrProcessHandle,
                                 g_taskmgrProcessId))
         stopWithError("[MicaNT Taskmgr] Ring 3 process launch failed\r\n");

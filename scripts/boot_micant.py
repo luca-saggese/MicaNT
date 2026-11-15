@@ -1331,6 +1331,16 @@ def run_qemu(
                                 complete_since = None
                                 time.sleep(0.1)
                                 continue
+                            if "Task Manager: process and thread CPU totals reconciled." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: process CPU times validated." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: process CPU times regressed." in serial_log:
+                                raise RuntimeError("Task Manager process CPU counters regressed")
                             if "Task Manager: native process image name validated." not in serial_log:
                                 complete_since = None
                                 time.sleep(0.1)

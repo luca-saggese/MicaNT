@@ -874,6 +874,8 @@ struct KThread {
     uint32_t priority{8};
     int32_t quantumRemaining{6};
     uint64_t totalCyclesExecuted{0};
+    uint64_t userTime100ns{0};
+    uint64_t kernelTime100ns{0};
     std::string name;
 
     // Address space and stacks

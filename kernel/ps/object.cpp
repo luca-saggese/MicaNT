@@ -277,7 +277,7 @@ struct ProcessObjectFactory {
         return nullptr;
     }
     static NtStatus capture(std::span<ProcessSnapshotEntry> output,
-                            std::span<Handle> threadIds,
+                            std::span<ProcessSnapshotThreadEntry> threads,
                             size_t& requiredCount,
                             size_t& requiredThreadCount) noexcept {
         ob::detail::HandleTableGuard guard;
@@ -290,7 +290,7 @@ struct ProcessObjectFactory {
             for (auto* thread = process->threads_; thread; thread = thread->processNext)
                 if (thread->state != ke::ThreadState::Terminated) ++requiredThreadCount;
         }
-        if (requiredCount > output.size() || requiredThreadCount > threadIds.size())
+        if (requiredCount > output.size() || requiredThreadCount > threads.size())
             return NtStatus::InfoLengthMismatch;
 
         size_t index = 0, threadIndex = 0;
@@ -305,10 +305,18 @@ struct ProcessObjectFactory {
                             entry.imageNameLength * sizeof(char16_t));
             entry.firstThreadIndex = threadIndex;
             entry.threadCount = 0;
+            entry.userTime100ns = 0;
+            entry.kernelTime100ns = 0;
             for (auto* thread = process->threads_; thread; thread = thread->processNext) {
                 if (thread->state == ke::ThreadState::Terminated) continue;
-                if (threadIndex >= threadIds.size() || !thread->tid) __builtin_trap();
-                threadIds[threadIndex++] = thread->tid;
+                if (threadIndex >= threads.size() || !thread->tid) __builtin_trap();
+                if (thread->userTime100ns > UINT64_MAX - entry.userTime100ns ||
+                    thread->kernelTime100ns > UINT64_MAX - entry.kernelTime100ns)
+                    return NtStatus::NotSupported;
+                threads[threadIndex++] = {thread->tid, thread->userTime100ns,
+                                          thread->kernelTime100ns};
+                entry.userTime100ns += thread->userTime100ns;
+                entry.kernelTime100ns += thread->kernelTime100ns;
                 ++entry.threadCount;
             }
             entry.handleCount = process->handles_
@@ -800,10 +808,10 @@ uint32_t bootstrapThreadObjectCount() noexcept {
 }
 
 NtStatus captureProcessSnapshot(std::span<ProcessSnapshotEntry> output,
-                                std::span<Handle> threadIds,
+                                std::span<ProcessSnapshotThreadEntry> threads,
                                 size_t& requiredCount,
                                 size_t& requiredThreadCount) noexcept {
-    return ProcessObjectFactory::capture(output, threadIds, requiredCount, requiredThreadCount);
+    return ProcessObjectFactory::capture(output, threads, requiredCount, requiredThreadCount);
 }
 }
 
