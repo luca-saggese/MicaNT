@@ -279,6 +279,7 @@ struct alignas(4096) DeviceState {
     bool virglOffered{};
     bool virglActive{};
     bool frameNeedsFullTransfer{};
+    bool frameContentsInitialized{};
     bool initialized{};
 };
 
@@ -767,18 +768,34 @@ bool presentFrame(void*, const uint32_t* pixels, uint32_t width, uint32_t height
     if (top + copyHeight > g_device.height) copyHeight = g_device.height - top;
     if (copyWidth <= 0 || copyHeight <= 0) return false;
 
-    int64_t dirtyLeft = copyWidth, dirtyTop = copyHeight;
-    int64_t dirtyRight = 0, dirtyBottom = 0;
+    const bool fullFrameSubmission = dstX == 0 && dstY == 0 &&
+        width == g_device.width && height == g_device.height;
+    // A partial update is meaningful only after the persistent DMA shadow has
+    // a complete frame. Refuse it until the required initial full submission
+    // arrives, rather than transferring an incomplete shadow to the device.
+    if (!fullFrameSubmission && !g_device.frameContentsInitialized) return false;
+
+    int64_t dirtyLeft = 0, dirtyTop = 0;
+    int64_t dirtyRight = copyWidth, dirtyBottom = copyHeight;
     const auto* frame = reinterpret_cast<const uint32_t*>(g_device.dma->frame);
-    for (int64_t row = 0; row < copyHeight; ++row) {
-        const uint32_t* src = pixels + (srcTop + row) * pitch + srcLeft;
-        const uint32_t* dst = frame + (top + row) * g_device.pitch + left;
-        for (int64_t col = 0; col < copyWidth; ++col) {
-            if (src[col] == dst[col]) continue;
-            if (col < dirtyLeft) dirtyLeft = col;
-            if (col + 1 > dirtyRight) dirtyRight = col + 1;
-            if (row < dirtyTop) dirtyTop = row;
-            if (row + 1 > dirtyBottom) dirtyBottom = row + 1;
+    if (fullFrameSubmission && g_device.frameContentsInitialized) {
+        // Keep the full-frame comparison as the safe fallback for existing
+        // callers. A non-full rectangle is already an explicit present region,
+        // so comparing every pixel inside it only repeats work the caller did.
+        dirtyLeft = copyWidth;
+        dirtyTop = copyHeight;
+        dirtyRight = 0;
+        dirtyBottom = 0;
+        for (int64_t row = 0; row < copyHeight; ++row) {
+            const uint32_t* src = pixels + (srcTop + row) * pitch + srcLeft;
+            const uint32_t* dst = frame + (top + row) * g_device.pitch + left;
+            for (int64_t col = 0; col < copyWidth; ++col) {
+                if (src[col] == dst[col]) continue;
+                if (col < dirtyLeft) dirtyLeft = col;
+                if (col + 1 > dirtyRight) dirtyRight = col + 1;
+                if (row < dirtyTop) dirtyTop = row;
+                if (row + 1 > dirtyBottom) dirtyBottom = row + 1;
+            }
         }
     }
     if (dirtyRight <= dirtyLeft || dirtyBottom <= dirtyTop) {
@@ -791,6 +808,7 @@ bool presentFrame(void*, const uint32_t* pixels, uint32_t width, uint32_t height
             (top + row) * g_device.pitch + left + dirtyLeft;
         for (int64_t col = dirtyLeft; col < dirtyRight; ++col) dst[col - dirtyLeft] = src[col - dirtyLeft];
     }
+    if (fullFrameSubmission) g_device.frameContentsInitialized = true;
     ioBarrier();
     if (g_device.virglActive) {
         const bool transferred = transferResource3D(kVirglOutputResourceId,

@@ -6,6 +6,7 @@
 #define MICANT_COMPOSITOR_SCREEN_WIDTH 1024u
 #define MICANT_COMPOSITOR_SCREEN_HEIGHT 768u
 #define MICANT_COMPOSITOR_SURFACE_CAPACITY 16u
+#define MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY 16u
 #define MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION 64u
 #define MICANT_COMPOSITOR_CURSOR_MAX_PIXELS \
     (MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION * MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION)
@@ -19,7 +20,7 @@
 #define MICANT_COMPOSITOR_PIXELS_BASE (MICANT_COMPOSITOR_METADATA_BASE + 0x10000u)
 
 #define MICANT_COMPOSITOR_STORE_MAGIC 0x4D434F4Du /* MCOM */
-#define MICANT_COMPOSITOR_STORE_VERSION 2u
+#define MICANT_COMPOSITOR_STORE_VERSION 3u
 
 enum {
     MICANT_COMPOSITOR_SURFACE_ACTIVE = 0x01u,
@@ -34,8 +35,13 @@ enum {
     MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT = 10u,
     MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_MASK = 0xC00u,
     MICANT_COMPOSITOR_CURSOR_ACTIVE = 0x01u,
-    MICANT_COMPOSITOR_CURSOR_VISIBLE = 0x02u
+    MICANT_COMPOSITOR_CURSOR_VISIBLE = 0x02u,
+    MICANT_COMPOSITOR_DIRTY_FULL = 0x01u
 };
+
+typedef struct MicaCompositorDirtyRect {
+    int32_t left, top, right, bottom;
+} MicaCompositorDirtyRect;
 
 typedef struct MicaCompositorCursorInfo {
     int32_t x, y;
@@ -54,6 +60,8 @@ typedef struct MicaCompositorSurfaceInfo {
     uint32_t flags;
     uint32_t pixelOffset;
     int32_t dirtyLeft, dirtyTop, dirtyRight, dirtyBottom;
+    uint64_t contentGeneration;
+    uint32_t activeWriters;
     uint32_t style;
     uint16_t title[64];
 } MicaCompositorSurfaceInfo;
@@ -69,9 +77,14 @@ typedef struct MicaCompositorMetadataStore {
     uint64_t frameSequence;
     MicaCompositorSurfaceInfo surfaces[MICANT_COMPOSITOR_SURFACE_CAPACITY];
     MicaCompositorCursorInfo cursor;
+    uint64_t compositorAckSequence;
+    uint32_t dirtyRegionCount;
+    uint32_t dirtyFlags;
+    MicaCompositorDirtyRect dirtyRegions[MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY];
 } MicaCompositorMetadataStore;
 
 #ifdef __cplusplus
-static_assert(sizeof(MicaCompositorSurfaceInfo) == 200);
+static_assert(sizeof(MicaCompositorDirtyRect) == 16);
+static_assert(sizeof(MicaCompositorSurfaceInfo) == 208);
 static_assert(sizeof(MicaCompositorMetadataStore) <= MICANT_COMPOSITOR_METADATA_STORE_SIZE);
 #endif

@@ -44,6 +44,10 @@ constexpr int32_t kScreenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
 constexpr int32_t kScreenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
 std::atomic_flag g_stateLock = ATOMIC_FLAG_INIT;
 sync::detail::BootstrapEvent g_compositorWakeEvent{true, false};
+MicaCompositorDirtyRect g_pendingDirtyRegions[MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY]{};
+uint32_t g_pendingDirtyRegionCount{};
+bool g_pendingFullRedraw{true};
+bool g_damageChangedSinceLastPublish{true};
 
 class StateLockGuard {
 public:
@@ -84,6 +88,11 @@ struct Window {
     int32_t x{}, y{}, width{}, height{};
     int32_t restoreX{}, restoreY{}, restoreWidth{}, restoreHeight{};
     uint32_t style{}, extendedStyle{};
+    uint64_t contentGeneration{};
+    uint32_t activeWriters{};
+    struct WriterOwner { uint64_t processId{}; uint32_t count{}; };
+    WriterOwner writerOwners[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+    int32_t dirtyLeft{}, dirtyTop{}, dirtyRight{}, dirtyBottom{};
     uint16_t classAtom{};
     uint64_t ownerProcessId{};
     uint64_t zOrder{};
@@ -170,6 +179,138 @@ int32_t captionHeight(const Window& window) noexcept {
         headerbar.minHeight >= 24 && headerbar.minHeight <= 96)
         return headerbar.minHeight;
     return 28;
+}
+
+void clearPendingDamage() noexcept {
+    g_pendingDirtyRegionCount = 0;
+    g_pendingFullRedraw = false;
+    for (auto& window : g_windows) {
+        window.dirtyLeft = window.dirtyTop = 0;
+        window.dirtyRight = window.dirtyBottom = 0;
+    }
+}
+
+void markDamageRect(int64_t left, int64_t top,
+                    int64_t right, int64_t bottom) noexcept {
+    left = std::max<int64_t>(left, 0);
+    top = std::max<int64_t>(top, 0);
+    right = std::min<int64_t>(right, kScreenWidth);
+    bottom = std::min<int64_t>(bottom, kScreenHeight);
+    if (left >= right || top >= bottom) return;
+    g_damageChangedSinceLastPublish = true;
+    if (g_pendingFullRedraw) return;
+
+    MicaCompositorDirtyRect incoming{static_cast<int32_t>(left),
+        static_cast<int32_t>(top), static_cast<int32_t>(right),
+        static_cast<int32_t>(bottom)};
+    for (uint32_t index = 0; index < g_pendingDirtyRegionCount;) {
+        auto& existing = g_pendingDirtyRegions[index];
+        const bool separated = incoming.right < existing.left ||
+            existing.right < incoming.left || incoming.bottom < existing.top ||
+            existing.bottom < incoming.top;
+        if (separated) {
+            ++index;
+            continue;
+        }
+        incoming.left = std::min(incoming.left, existing.left);
+        incoming.top = std::min(incoming.top, existing.top);
+        incoming.right = std::max(incoming.right, existing.right);
+        incoming.bottom = std::max(incoming.bottom, existing.bottom);
+        g_pendingDirtyRegions[index] =
+            g_pendingDirtyRegions[--g_pendingDirtyRegionCount];
+        index = 0;
+    }
+    if (g_pendingDirtyRegionCount == MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY) {
+        g_pendingDirtyRegionCount = 0;
+        g_pendingFullRedraw = true;
+        return;
+    }
+    g_pendingDirtyRegions[g_pendingDirtyRegionCount++] = incoming;
+}
+
+void markDamageFull() noexcept {
+    g_damageChangedSinceLastPublish = true;
+    g_pendingDirtyRegionCount = 0;
+    g_pendingFullRedraw = true;
+}
+
+void markWindowBounds(const Window& window) noexcept {
+    if (!window.active || !window.visible || window.iconic) return;
+    const int64_t left = window.x;
+    const int64_t top = window.y;
+    markDamageRect(left, top, left + window.width, top + window.height);
+}
+
+void markCursorBounds(int32_t x, int32_t y) noexcept {
+    if (!g_mousePositionValid || g_cursorDisplayCount < 0 ||
+        !g_activeCursorWidth || !g_activeCursorHeight) return;
+    const int64_t left = static_cast<int64_t>(x) - g_activeCursorHotX;
+    const int64_t top = static_cast<int64_t>(y) - g_activeCursorHotY;
+    markDamageRect(left, top, left + g_activeCursorWidth,
+                   top + g_activeCursorHeight);
+}
+
+void markWindowClientDamage(Window& window, int64_t left, int64_t top,
+                            int64_t right, int64_t bottom) noexcept {
+    const int64_t frame = frameInset(window);
+    const int64_t caption = captionHeight(window);
+    const int64_t clientWidth = std::max<int64_t>(1, window.width - frame * 2);
+    const int64_t clientHeight = std::max<int64_t>(1,
+        window.height - frame * 2 - caption);
+    left = std::clamp<int64_t>(left, 0, clientWidth);
+    top = std::clamp<int64_t>(top, 0, clientHeight);
+    right = std::clamp<int64_t>(right, 0, clientWidth);
+    bottom = std::clamp<int64_t>(bottom, 0, clientHeight);
+    if (left >= right || top >= bottom) return;
+    g_damageChangedSinceLastPublish = true;
+    if (window.dirtyRight <= window.dirtyLeft ||
+        window.dirtyBottom <= window.dirtyTop) {
+        window.dirtyLeft = static_cast<int32_t>(left);
+        window.dirtyTop = static_cast<int32_t>(top);
+        window.dirtyRight = static_cast<int32_t>(right);
+        window.dirtyBottom = static_cast<int32_t>(bottom);
+    } else {
+        window.dirtyLeft = std::min(window.dirtyLeft, static_cast<int32_t>(left));
+        window.dirtyTop = std::min(window.dirtyTop, static_cast<int32_t>(top));
+        window.dirtyRight = std::max(window.dirtyRight, static_cast<int32_t>(right));
+        window.dirtyBottom = std::max(window.dirtyBottom, static_cast<int32_t>(bottom));
+    }
+    ++window.contentGeneration;
+    if (!window.contentGeneration) ++window.contentGeneration;
+    markDamageRect(static_cast<int64_t>(window.x) + frame + left,
+        static_cast<int64_t>(window.y) + frame + caption + top,
+        static_cast<int64_t>(window.x) + frame + right,
+        static_cast<int64_t>(window.y) + frame + caption + bottom);
+}
+
+bool beginWindowWriter(Window& window, uint64_t processId) noexcept {
+    if (!processId || window.activeWriters == UINT32_MAX) return false;
+    Window::WriterOwner* freeOwner = nullptr;
+    for (auto& owner : window.writerOwners) {
+        if (owner.processId == processId) {
+            if (owner.count == UINT32_MAX) return false;
+            ++owner.count;
+            ++window.activeWriters;
+            return true;
+        }
+        if (!owner.processId && !freeOwner) freeOwner = &owner;
+    }
+    if (!freeOwner) return false;
+    freeOwner->processId = processId;
+    freeOwner->count = 1;
+    ++window.activeWriters;
+    return true;
+}
+
+bool endWindowWriter(Window& window, uint64_t processId) noexcept {
+    for (auto& owner : window.writerOwners) {
+        if (owner.processId != processId || !owner.count) continue;
+        if (!window.activeWriters) return false;
+        if (!--owner.count) owner.processId = 0;
+        --window.activeWriters;
+        return true;
+    }
+    return false;
 }
 
 uint8_t captionButtonAt(const Window& window, int32_t localX,
@@ -411,6 +552,7 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
                                     static_cast<size_t>(sized);
     if (freeMessageSlots() < requiredMessages) return false;
 
+    markWindowBounds(*window);
     window->x = newX;
     window->y = newY;
     window->width = newWidth;
@@ -434,6 +576,7 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
         (void)enqueueWindowMessage(*window, kWmSize, 0,
                                    static_cast<int64_t>(packedSize));
     }
+    markWindowBounds(*window);
     return true;
 }
 
@@ -521,6 +664,7 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         copyText(window.title, request.title);
         request.result = window.handle;
         if (window.visible) g_foregroundWindow = window.handle;
+        markWindowBounds(window);
         return NtStatus::Success;
     }
     return NtStatus::InsufficientResources;
@@ -549,6 +693,44 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_PRESENT_WINDOW: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
+            if (request.args[1] > 1) return NtStatus::InvalidParameter;
+            const auto rect = request.rect;
+            if (request.args[1] &&
+                (rect.right < rect.left || rect.bottom < rect.top))
+                return NtStatus::InvalidParameter;
+            const int64_t clientWidth = std::max<int64_t>(1,
+                window->width - frameInset(*window) * 2);
+            const int64_t clientHeight = std::max<int64_t>(1,
+                window->height - frameInset(*window) * 2 - captionHeight(*window));
+            if (request.args[1]) {
+                markWindowClientDamage(*window, rect.left, rect.top,
+                    rect.right, rect.bottom);
+            } else {
+                markWindowClientDamage(*window, 0, 0, clientWidth, clientHeight);
+            }
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_BEGIN_WINDOW_UPDATE: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            if (!beginWindowWriter(*window, ownerProcessId))
+                return NtStatus::InsufficientResources;
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_END_WINDOW_UPDATE: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            if (!endWindowWriter(*window, ownerProcessId))
+                return NtStatus::InvalidDeviceState;
+            if (!request.args[1]) {
+                const int64_t clientWidth = std::max<int64_t>(1,
+                    window->width - frameInset(*window) * 2);
+                const int64_t clientHeight = std::max<int64_t>(1,
+                    window->height - frameInset(*window) * 2 - captionHeight(*window));
+                markWindowClientDamage(*window, 0, 0, clientWidth, clientHeight);
+            }
             request.result = 1;
             return NtStatus::Success;
         }
@@ -556,6 +738,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             const bool wasForeground = g_foregroundWindow == window->handle;
+            markWindowBounds(*window);
             if (g_pointerGesture.window == window->handle) g_pointerGesture = {};
             if (g_captionCapture == window->handle) {
                 g_captionCapture = 0;
@@ -566,6 +749,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 g_foregroundWindow = 0;
                 if (auto* next = topmostVisibleWindow()) {
                     g_foregroundWindow = next->handle;
+                    markWindowBounds(*next);
                     (void)enqueueWindowMessage(*next, kWmActivate, 1, 0);
                     (void)enqueueWindowMessage(*next, kWmSetFocus, 0, 0);
                 }
@@ -578,6 +762,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (!window) return NtStatus::InvalidHandle;
             const int32_t command = static_cast<int32_t>(request.args[1]);
             const bool wasVisible = window->visible;
+            const bool wasIconic = window->iconic;
+            if (wasVisible || wasIconic) markWindowBounds(*window);
             window->visible = command != 0;
             window->iconic = command == kSwShowMinimized ||
                              command == kSwMinimize;
@@ -585,6 +771,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 window->zOrder = nextZOrder();
                 g_foregroundWindow = window->handle;
             }
+            if (window->visible) markWindowBounds(*window);
             request.result = wasVisible;
             return NtStatus::Success;
         }
@@ -610,6 +797,15 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX ||
                 x + width > INT32_MAX || y + height > INT32_MAX)
                 return NtStatus::InvalidParameter;
+            const bool geometryChanged = x != window->x || y != window->y ||
+                width != window->width || height != window->height;
+            const bool raiseWindow = request.args[6] == 0;
+            const uint64_t oldForeground = g_foregroundWindow;
+            if (geometryChanged || raiseWindow) {
+                if (auto* previous = findWindowAny(oldForeground))
+                    markWindowBounds(*previous);
+                markWindowBounds(*window);
+            }
             window->x = static_cast<int32_t>(x);
             window->y = static_cast<int32_t>(y);
             window->width = static_cast<int32_t>(width);
@@ -632,6 +828,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 (void)enqueueWindowMessage(*window, kWmSize, 0,
                     static_cast<int64_t>(packedSize));
             }
+            if (geometryChanged || raiseWindow) markWindowBounds(*window);
             request.result = 1;
             return NtStatus::Success;
         }
@@ -730,6 +927,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             const uint64_t previousHandle = g_foregroundWindow;
             if (previousHandle != window->handle) {
                 auto* previous = findWindowAny(previousHandle);
+                if (previous) markWindowBounds(*previous);
+                markWindowBounds(*window);
                 if (previous && !enqueueWindowMessage(*previous, kWmActivate, 0, 0))
                     return NtStatus::InsufficientResources;
                 g_foregroundWindow = window->handle;
@@ -737,6 +936,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                     !enqueueWindowMessage(*window, kWmSetFocus, 0, 0))
                     return NtStatus::InsufficientResources;
             }
+            if (previousHandle == window->handle) markWindowBounds(*window);
             window->zOrder = nextZOrder();
             request.result = previousHandle;
             return NtStatus::Success;
@@ -745,6 +945,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindow(request.args[0], ownerProcessId);
             const uint32_t type = static_cast<uint32_t>(request.args[1]);
             if (!window || type > 2) return NtStatus::InvalidParameter;
+            markWindowBounds(*window);
             request.result = window->icons[type];
             window->icons[type] = request.args[2];
             return NtStatus::Success;
@@ -782,16 +983,23 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
             const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
             if (right <= left || bottom <= top) return NtStatus::InvalidParameter;
-            g_mouseX = std::clamp(requestedX, left, right - 1);
-            g_mouseY = std::clamp(requestedY, top, bottom - 1);
+            const int32_t newX = std::clamp(requestedX, left, right - 1);
+            const int32_t newY = std::clamp(requestedY, top, bottom - 1);
+            const bool moved = !g_mousePositionValid || newX != g_mouseX || newY != g_mouseY;
+            if (moved && g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+            g_mouseX = newX;
+            g_mouseY = newY;
             g_mousePositionValid = true;
+            if (moved) markCursorBounds(newX, newY);
             request.result = 1;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_CURSOR_CLIP: {
             if (request.args[0] == 0) {
+                if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
                 g_cursorClip = {0, 0, kScreenWidth, kScreenHeight};
                 g_cursorClipOwner = 0;
+                if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
                 request.result = 1;
                 return NtStatus::Success;
             }
@@ -799,10 +1007,12 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (rect.left < 0 || rect.top < 0 || rect.right > kScreenWidth ||
                 rect.bottom > kScreenHeight || rect.right <= rect.left || rect.bottom <= rect.top)
                 return NtStatus::InvalidParameter;
+            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
             g_cursorClip = rect;
             g_cursorClipOwner = ownerProcessId;
             g_mouseX = std::clamp(g_mouseX, rect.left, rect.right - 1);
             g_mouseY = std::clamp(g_mouseY, rect.top, rect.bottom - 1);
+            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
             request.result = 1;
             return NtStatus::Success;
         }
@@ -812,7 +1022,13 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if ((delta > 0 && g_cursorDisplayCount == INT32_MAX) ||
                 (delta < 0 && g_cursorDisplayCount == INT32_MIN))
                 return NtStatus::InvalidParameter;
+            const bool wasVisible = g_cursorDisplayCount >= 0;
             g_cursorDisplayCount += delta;
+            const bool isVisible = g_cursorDisplayCount >= 0;
+            if (wasVisible && !isVisible)
+                markCursorBounds(g_mouseX, g_mouseY);
+            if (!wasVisible && isVisible)
+                markCursorBounds(g_mouseX, g_mouseY);
             request.result = static_cast<uint64_t>(static_cast<int64_t>(g_cursorDisplayCount));
             return NtStatus::Success;
         }
@@ -864,8 +1080,20 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             if (message.active && message.ownerProcessId == ownerProcessId) message.active = false;
         for (auto& window : g_windows) {
             if (!window.active || window.ownerProcessId != ownerProcessId) continue;
+            markWindowBounds(window);
+            window.activeWriters = 0;
+            for (auto& writerOwner : window.writerOwners) writerOwner = {};
             if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
             window = {};
+        }
+        for (auto& window : g_windows) {
+            if (!window.active) continue;
+            for (auto& writerOwner : window.writerOwners) {
+                if (writerOwner.processId != ownerProcessId) continue;
+                window.activeWriters -= std::min(window.activeWriters,
+                                                  writerOwner.count);
+                writerOwner = {};
+            }
         }
         if (g_pointerGesture.window) {
             const auto* gestureWindow = findWindowAny(g_pointerGesture.window);
@@ -886,7 +1114,9 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             g_cursorClipOwner = 0;
         }
         if (g_activeCursorOwner == ownerProcessId) {
+            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
             resetCursorImage();
+            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
         }
     }
     if (publish) publish();
@@ -900,15 +1130,27 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
     const int32_t x = std::clamp(event.x, left, std::max(left, right - 1));
     const int32_t y = std::clamp(event.y, top, std::max(top, bottom - 1));
+    const int32_t oldMouseX = g_mouseX;
+    const int32_t oldMouseY = g_mouseY;
+    const bool oldMouseValid = g_mousePositionValid;
     g_mousePositionValid = true;
     const uint32_t previousButtons = g_mouseButtons;
     const uint32_t currentButtons = event.buttons & 0x07u;
     const bool moved = x != g_mouseX || y != g_mouseY;
+    if (moved && oldMouseValid) markCursorBounds(oldMouseX, oldMouseY);
     g_mouseButtons = currentButtons;
     g_mouseX = x;
     g_mouseY = y;
+    if (moved || !oldMouseValid) markCursorBounds(x, y);
     auto* target = topmostVisibleWindow(x, y);
     const int32_t hitTest = target ? hitTestWindow(*target, x, y) : 0;
+    const uint64_t oldCursorHitWindow = g_cursorHitWindow;
+    const int32_t oldCursorHitTest = g_cursorHitTest;
+    if (oldCursorHitWindow != (target ? target->handle : 0) ||
+        oldCursorHitTest != hitTest) {
+        if (auto* oldHover = findWindowAny(oldCursorHitWindow)) markWindowBounds(*oldHover);
+        if (target) markWindowBounds(*target);
+    }
     if (!target) {
         g_cursorHitWindow = 0;
         g_cursorHitTest = 0;
@@ -936,6 +1178,9 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         g_pointerGesture = {};
     }
     if (leftPressed && target) {
+        if (auto* previous = findWindowAny(g_foregroundWindow))
+            markWindowBounds(*previous);
+        markWindowBounds(*target);
         target->zOrder = nextZOrder();
         if (g_foregroundWindow != target->handle) {
             auto* previous = findWindowAny(g_foregroundWindow);
@@ -960,6 +1205,7 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
 
     if (leftReleased && g_captionCapture) {
         auto* captured = findWindowAny(g_captionCapture);
+        if (captured) markWindowBounds(*captured);
         const uint8_t releasedButton = captured ? captionButtonAt(*captured,
             static_cast<int32_t>(static_cast<int64_t>(x) - captured->x),
             static_cast<int32_t>(static_cast<int64_t>(y) - captured->y)) : 0;
@@ -974,6 +1220,7 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
                 auto* next = topmostVisibleWindow();
                 g_foregroundWindow = next ? next->handle : 0;
                 if (next) {
+                    markWindowBounds(*next);
                     (void)enqueueWindowMessage(*next, kWmActivate, 1, 0);
                     (void)enqueueWindowMessage(*next, kWmSetFocus, 0, 0);
                 }
@@ -996,6 +1243,7 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
                 captured->height = captured->restoreHeight;
                 captured->maximized = false;
             }
+            markWindowBounds(*captured);
             const int32_t frame = frameInset(*captured);
             const int32_t caption = captionHeight(*captured);
             const uint32_t clientWidth = static_cast<uint32_t>(
@@ -1084,6 +1332,9 @@ void bindCompositorStore(MicaCompositorMetadataStore* store,
     }
     g_compositorStore = store;
     g_compositorPublishCallback = publishCallback;
+    g_pendingDirtyRegionCount = 0;
+    g_pendingFullRedraw = true;
+    g_damageChangedSinceLastPublish = true;
 }
 
 void publishCompositorSurfaces() noexcept {
@@ -1093,6 +1344,13 @@ void publishCompositorSurfaces() noexcept {
     StateLockGuard lock;
     store = g_compositorStore;
     if (!store) return;
+    const uint64_t previousSequence = __atomic_load_n(
+        &store->frameSequence, __ATOMIC_ACQUIRE);
+    const uint64_t acknowledged = __atomic_load_n(
+        &store->compositorAckSequence, __ATOMIC_ACQUIRE);
+    if (!g_damageChangedSinceLastPublish && previousSequence &&
+        !(previousSequence & 1u) && acknowledged == previousSequence)
+        clearPendingDamage();
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_ACQ_REL);
     if (store->themeGeneration != g_themeGeneration) {
         store->theme = g_themeSnapshot;
@@ -1148,14 +1406,26 @@ void publishCompositorSurfaces() noexcept {
                      MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT)
                 : 0u);
         info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
-        info.dirtyRight = window.width;
-        info.dirtyBottom = window.height;
+        info.dirtyLeft = window.dirtyLeft;
+        info.dirtyTop = window.dirtyTop;
+        info.dirtyRight = window.dirtyRight;
+        info.dirtyBottom = window.dirtyBottom;
+        info.contentGeneration = window.contentGeneration;
+        info.activeWriters = window.activeWriters;
         info.style = window.style;
         for (size_t character = 0; character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
              window.title[character]; ++character)
             info.title[character] = window.title[character];
     }
+    store->dirtyRegionCount = g_pendingFullRedraw
+        ? 0u : g_pendingDirtyRegionCount;
+    store->dirtyFlags = g_pendingFullRedraw
+        ? MICANT_COMPOSITOR_DIRTY_FULL : 0u;
+    for (size_t index = 0; index < MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY; ++index)
+        store->dirtyRegions[index] = index < store->dirtyRegionCount
+            ? g_pendingDirtyRegions[index] : MicaCompositorDirtyRect{};
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
+    g_damageChangedSinceLastPublish = false;
     }
     (void)g_compositorWakeEvent.set();
 }
@@ -1210,6 +1480,7 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
             (pixel & 0xFFu) > alpha) return NtStatus::InvalidParameter;
     }
     StateLockGuard lock;
+    if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
     g_activeCursorHandle = image.cursorHandle;
     g_activeCursorOwner = image.cursorHandle ? ownerProcessId : 0;
     if (image.cursorHandle) {
@@ -1223,6 +1494,7 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
     } else {
         resetCursorImage();
     }
+    if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
     return NtStatus::Success;
 }
 
@@ -1237,6 +1509,7 @@ micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
     for (const auto& message : g_messages) freeMessageSlots += message.active ? 0u : 1u;
     if (freeMessageSlots < activeWindows) return NtStatus::InsufficientResources;
 
+    markDamageFull();
     g_themeSnapshot = snapshot;
     if (++g_themeGeneration == 0) ++g_themeGeneration;
     for (const auto& window : g_windows) {

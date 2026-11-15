@@ -35,6 +35,8 @@ struct DeviceContext {
     uint32_t defaultPixel{};
     bool memory{};
     bool active{};
+    bool windowUpdateActive{};
+    bool windowUpdatePresented{};
 };
 
 struct Bitmap {
@@ -480,14 +482,33 @@ uint64_t MicaWin32kGetWindowIcon(void* hwnd, uint32_t type) {
 
 void* MicaWin32kGetDC(void* window) {
     auto* context = allocateContext(window, false);
+    if (context && window) {
+        MicaWin32kRequest value{};
+        value.operation = MICANT_WIN32K_OP_BEGIN_WINDOW_UPDATE;
+        value.args[0] = reinterpret_cast<uint64_t>(window);
+        if (!request(value.operation, value) || !value.result) {
+            context->active = false;
+            return nullptr;
+        }
+        context->windowUpdateActive = true;
+    }
     return context ? reinterpret_cast<void*>(context->handle) : nullptr;
 }
 
 int32_t MicaWin32kReleaseDC(void* window, void* dc) {
     auto* context = findContext(dc);
     if (!context || context->memory || context->window != window) return 0;
+    bool released = true;
+    if (context->windowUpdateActive) {
+        MicaWin32kRequest value{};
+        value.operation = MICANT_WIN32K_OP_END_WINDOW_UPDATE;
+        value.args[0] = reinterpret_cast<uint64_t>(window);
+        value.args[1] = context->windowUpdatePresented ? 1u : 0u;
+        released = request(value.operation, value) && value.result;
+    }
     context->active = false;
-    return 1;
+    context->windowUpdateActive = false;
+    return released;
 }
 
 void* MicaWin32kCreateCompatibleDC(void*) {
@@ -636,7 +657,7 @@ int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
     return 1;
 }
 
-int32_t MicaWin32kPresentDC(void* dc) {
+int32_t MicaWin32kPresentDCRect(void* dc, const MicaWin32kRect* dirtyRect) {
     auto* context = findContext(dc);
     if (!context) return 0;
     uint32_t width{}, height{};
@@ -646,10 +667,21 @@ int32_t MicaWin32kPresentDC(void* dc) {
         MicaWin32kRequest value{};
         value.operation = MICANT_WIN32K_OP_PRESENT_WINDOW;
         value.args[0] = reinterpret_cast<uint64_t>(context->window);
-        return request(value.operation, value) && value.result ? 1 : 0;
+        if (dirtyRect) {
+            value.rect = *dirtyRect;
+            value.args[1] = 1;
+        }
+        const bool presented = request(value.operation, value) && value.result;
+        if (presented && context->windowUpdateActive)
+            context->windowUpdatePresented = true;
+        return presented ? 1 : 0;
     }
     if (!context->memory) return 0;
     return presentSurface(pixels, width, height, 0, 0);
+}
+
+int32_t MicaWin32kPresentDC(void* dc) {
+    return MicaWin32kPresentDCRect(dc, nullptr);
 }
 
 int32_t MicaWin32kDeleteObject(void* object) {

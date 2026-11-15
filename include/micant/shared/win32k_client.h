@@ -113,7 +113,9 @@ enum {
     MICANT_WIN32K_OP_GET_CURSOR_HANDLE,
     MICANT_WIN32K_OP_GET_CURSOR_INFO,
     MICANT_WIN32K_OP_SET_THEME_SNAPSHOT,
-    MICANT_WIN32K_OP_GET_THEME_SNAPSHOT
+    MICANT_WIN32K_OP_GET_THEME_SNAPSHOT,
+    MICANT_WIN32K_OP_BEGIN_WINDOW_UPDATE,
+    MICANT_WIN32K_OP_END_WINDOW_UPDATE
 };
 
 typedef struct MicaWin32kRequest {
@@ -167,6 +169,7 @@ MICANT_WIN32K_API void* MicaWin32kCreateCompatibleBitmap(void*, int32_t, int32_t
 MICANT_WIN32K_API void* MicaWin32kSelectObject(void*, void*);
 MICANT_WIN32K_API int32_t MicaWin32kBitBlt(void*, int32_t, int32_t, int32_t, int32_t, void*, int32_t, int32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kPresentDC(void*);
+MICANT_WIN32K_API int32_t MicaWin32kPresentDCRect(void*, const MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kDeleteObject(void*);
 MICANT_WIN32K_API void* MicaWin32kGetStockObject(int32_t);
 MICANT_WIN32K_API void* MicaWin32kCreateDibSection(void*, int32_t, int32_t, void**);

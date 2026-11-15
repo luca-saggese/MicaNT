@@ -1468,11 +1468,13 @@ void* User32_BeginPaint(void* hWnd, WinNtPaintStruct* paint) noexcept {
 
 int32_t User32_EndPaint(void* hWnd, const WinNtPaintStruct* paint) noexcept {
     if (!hWnd || !paint || !paint->hdc) return 0;
-    using PresentFn=int32_t (*)(void*);
+    using PresentFn=int32_t (*)(void*, const MicaWin32kRect*);
     using ReleaseFn=int32_t (*)(void*,void*);
-    auto present=Win32kProc<PresentFn>("MicaWin32kPresentDC");
+    auto present=Win32kProc<PresentFn>("MicaWin32kPresentDCRect");
     auto release=Win32kProc<ReleaseFn>("MicaWin32kReleaseDC");
-    const int32_t presented = present ? present(paint->hdc) : 0;
+    const MicaWin32kRect dirtyRect{paint->rcPaint.left, paint->rcPaint.top,
+        paint->rcPaint.right, paint->rcPaint.bottom};
+    const int32_t presented = present ? present(paint->hdc, &dirtyRect) : 0;
     const int32_t released = release ? release(hWnd,paint->hdc) : 0;
     return presented && released;
 }

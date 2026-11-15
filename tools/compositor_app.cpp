@@ -10,7 +10,16 @@
 namespace {
 
 uint32_t g_frame[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
+MicaCompositorMetadataStore g_metadataSnapshot{};
 bool g_presentFailureReported{};
+bool g_hasPresentedFrame{};
+uint64_t g_lastThemeGeneration{};
+
+struct ScreenRect {
+    int64_t left{}, top{}, right{}, bottom{};
+};
+
+ScreenRect g_composeClip{};
 
 void print(const char* text, size_t length) noexcept {
     (void)micant::sys::invokeUserService(0x25,
@@ -39,6 +48,10 @@ void fillRect(int64_t left, int64_t top, int64_t right, int64_t bottom,
     top = top < 0 ? 0 : top;
     right = right > width ? width : right;
     bottom = bottom > height ? height : bottom;
+    left = left < g_composeClip.left ? g_composeClip.left : left;
+    top = top < g_composeClip.top ? g_composeClip.top : top;
+    right = right > g_composeClip.right ? g_composeClip.right : right;
+    bottom = bottom > g_composeClip.bottom ? g_composeClip.bottom : bottom;
     if (left >= right || top >= bottom) return;
     for (int64_t y = top; y < bottom; ++y)
         for (int64_t x = left; x < right; ++x)
@@ -53,7 +66,9 @@ void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
         for (int column = 0; column < 8; ++column) {
             if (!(rows[row] & (1u << (7 - column)))) continue;
             const int64_t px = x + column, py = y + row;
-            if (px >= 0 && px < width && py >= 0 && py < height)
+            if (px >= g_composeClip.left && px < g_composeClip.right &&
+                py >= g_composeClip.top && py < g_composeClip.bottom &&
+                px < width && py < height)
                 g_frame[static_cast<size_t>(py) * width + static_cast<size_t>(px)] = color;
         }
     }
@@ -89,13 +104,16 @@ void drawControlIcon(uint8_t kind, bool maximized, int64_t left,
     }
 }
 
-bool compose(const MicaCompositorMetadataStore& metadata,
-             const uint32_t* surfaces) noexcept {
+bool composeRegion(const MicaCompositorMetadataStore& metadata,
+                   const uint32_t* surfaces, ScreenRect clip) noexcept {
     const uint32_t width = metadata.screenWidth;
     const uint32_t height = metadata.screenHeight;
     if (width != MICANT_COMPOSITOR_SCREEN_WIDTH ||
         height != MICANT_COMPOSITOR_SCREEN_HEIGHT ||
-        metadata.surfaceCapacity > MICANT_COMPOSITOR_SURFACE_CAPACITY) return false;
+        metadata.surfaceCapacity > MICANT_COMPOSITOR_SURFACE_CAPACITY ||
+        clip.left < 0 || clip.top < 0 || clip.right > width || clip.bottom > height ||
+        clip.left >= clip.right || clip.top >= clip.bottom) return false;
+    g_composeClip = clip;
 
     const bool themeValid = MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme));
     const auto* normalHeaderbar = themeValid
@@ -104,8 +122,8 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         ? &metadata.theme.styles[13u * MICANT_THEME_STATE_COUNT + 7u] : nullptr;
     const auto* normalButton = themeValid ? &metadata.theme.styles[0] : nullptr;
 
-    for (size_t pixel = 0; pixel < MICANT_COMPOSITOR_SURFACE_PIXELS; ++pixel)
-        g_frame[pixel] = 0xFF1C3A5Cu;
+    fillRect(clip.left, clip.top, clip.right, clip.bottom, 0xFF1C3A5Cu,
+             width, height);
 
     const MicaCompositorSurfaceInfo* ordered[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
     size_t count = 0;
@@ -276,10 +294,12 @@ bool compose(const MicaCompositorMetadataStore& metadata,
             }
         }
 
-        const int64_t clipLeft = left < 0 ? 0 : left;
-        const int64_t clipTop = top < 0 ? 0 : top;
-        const int64_t right = left + clientWidth < width ? left + clientWidth : width;
-        const int64_t bottom = top + clientHeight < height ? top + clientHeight : height;
+        const int64_t clipLeft = left < clip.left ? clip.left : left;
+        const int64_t clipTop = top < clip.top ? clip.top : top;
+        const int64_t clientRight = left + clientWidth;
+        const int64_t clientBottom = top + clientHeight;
+        const int64_t right = clientRight < clip.right ? clientRight : clip.right;
+        const int64_t bottom = clientBottom < clip.bottom ? clientBottom : clip.bottom;
         if (right <= clipLeft || bottom <= clipTop) continue;
         for (int64_t y = clipTop; y < bottom; ++y) {
             const size_t sourceY = static_cast<size_t>(y - top);
@@ -305,10 +325,10 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         const int64_t originY = static_cast<int64_t>(cursor.y) - cursor.hotY;
         for (uint32_t sy = 0; sy < cursor.height; ++sy) {
             const int64_t dy = originY + sy;
-            if (dy < 0 || dy >= height) continue;
+            if (dy < clip.top || dy >= clip.bottom) continue;
             for (uint32_t sx = 0; sx < cursor.width; ++sx) {
                 const int64_t dx = originX + sx;
-                if (dx < 0 || dx >= width) continue;
+                if (dx < clip.left || dx >= clip.right) continue;
                 const uint32_t source = cursor.pixels[static_cast<size_t>(sy) * cursor.pitch + sx];
                 const size_t destination = static_cast<size_t>(dy) * width + static_cast<size_t>(dx);
                 g_frame[destination] = micant::shared::graphics::PremultipliedSourceOver(
@@ -317,11 +337,18 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         }
     }
 
+    return true;
+}
+
+bool presentRegion(uint32_t screenWidth, ScreenRect clip) noexcept {
     micant::um::UserPresentSurfaceParams64 present{};
-    present.surfaceBufferVa = reinterpret_cast<uint64_t>(g_frame);
-    present.width = width;
-    present.height = height;
-    present.pitch = width;
+    present.surfaceBufferVa = reinterpret_cast<uint64_t>(
+        g_frame + static_cast<size_t>(clip.top) * screenWidth + clip.left);
+    present.dstX = static_cast<uint32_t>(clip.left);
+    present.dstY = static_cast<uint32_t>(clip.top);
+    present.width = static_cast<uint32_t>(clip.right - clip.left);
+    present.height = static_cast<uint32_t>(clip.bottom - clip.top);
+    present.pitch = screenWidth;
     const uint64_t status = micant::sys::invokeUserService(
         0x81, reinterpret_cast<uint64_t>(&present));
     if (status != 0) {
@@ -333,6 +360,67 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         return false;
     }
     return true;
+}
+
+struct DamageSet {
+    ScreenRect regions[MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY]{};
+    size_t count{};
+};
+
+bool composeDamage(const MicaCompositorMetadataStore& metadata,
+                   const uint32_t* surfaces, DamageSet& damage) noexcept {
+    constexpr ScreenRect fullScreen{
+        0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH, MICANT_COMPOSITOR_SCREEN_HEIGHT};
+    bool fullRedraw = !g_hasPresentedFrame ||
+        (metadata.dirtyFlags & MICANT_COMPOSITOR_DIRTY_FULL) != 0 ||
+        (metadata.dirtyFlags & ~MICANT_COMPOSITOR_DIRTY_FULL) != 0 ||
+        metadata.themeGeneration != g_lastThemeGeneration ||
+        metadata.dirtyRegionCount > MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY;
+    if (!fullRedraw) {
+        for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
+            const auto& dirty = metadata.dirtyRegions[index];
+            if (dirty.left < 0 || dirty.top < 0 ||
+                dirty.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
+                dirty.bottom > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT) ||
+                dirty.left >= dirty.right || dirty.top >= dirty.bottom) {
+                fullRedraw = true;
+                break;
+            }
+        }
+    }
+
+    if (fullRedraw) {
+        damage.regions[0] = fullScreen;
+        damage.count = 1;
+        return composeRegion(metadata, surfaces, fullScreen);
+    }
+
+    damage.count = metadata.dirtyRegionCount;
+    for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
+        const auto& dirty = metadata.dirtyRegions[index];
+        const ScreenRect region{dirty.left, dirty.top, dirty.right, dirty.bottom};
+        damage.regions[index] = region;
+        if (!composeRegion(metadata, surfaces, region)) return false;
+    }
+    return true;
+}
+
+bool presentDamage(uint32_t screenWidth, const DamageSet& damage) noexcept {
+    for (size_t index = 0; index < damage.count; ++index)
+        if (!presentRegion(screenWidth, damage.regions[index])) return false;
+    return true;
+}
+
+bool copyStableMetadata(const MicaCompositorMetadataStore* source,
+                        MicaCompositorMetadataStore& destination,
+                        uint64_t& sequence) noexcept {
+    sequence = __atomic_load_n(&source->frameSequence, __ATOMIC_ACQUIRE);
+    if (sequence & 1u) return false;
+    const auto* src = reinterpret_cast<const volatile uint8_t*>(source);
+    auto* dst = reinterpret_cast<uint8_t*>(&destination);
+    for (size_t index = 0; index < sizeof(destination); ++index)
+        dst[index] = src[index];
+    return __atomic_load_n(&source->frameSequence, __ATOMIC_ACQUIRE) == sequence;
 }
 
 } // namespace
@@ -352,10 +440,14 @@ extern "C" void _start() noexcept {
         (void)micant::sys::invokeUserService(0x83, observed);
     };
     for (;;) {
-        const uint64_t sequence = __atomic_load_n(&metadata->frameSequence,
-                                                   __ATOMIC_ACQUIRE);
-        if (metadata->magic != MICANT_COMPOSITOR_STORE_MAGIC ||
-            metadata->version != MICANT_COMPOSITOR_STORE_VERSION) {
+        uint64_t sequence{};
+        if (!copyStableMetadata(metadata, g_metadataSnapshot, sequence)) {
+            waitForUpdate(sequence);
+            continue;
+        }
+        const auto& snapshot = g_metadataSnapshot;
+        if (snapshot.magic != MICANT_COMPOSITOR_STORE_MAGIC ||
+            snapshot.version != MICANT_COMPOSITOR_STORE_VERSION) {
             if (!invalidHeaderReported) {
                 constexpr char invalid[] = "[MicaNT Compositor] Shared metadata header invalid\r\n";
                 print(invalid, sizeof(invalid) - 1);
@@ -369,18 +461,54 @@ extern "C" void _start() noexcept {
             waitForUpdate(sequence);
             continue;
         }
+        bool surfaceWriteInProgress = false;
+        if (snapshot.surfaceCapacity <= MICANT_COMPOSITOR_SURFACE_CAPACITY) {
+            for (size_t index = 0; index < snapshot.surfaceCapacity; ++index) {
+                const auto& surface = snapshot.surfaces[index];
+                if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                                      MICANT_COMPOSITOR_SURFACE_VISIBLE)) ==
+                        (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                         MICANT_COMPOSITOR_SURFACE_VISIBLE) &&
+                    !(surface.flags & MICANT_COMPOSITOR_SURFACE_ICONIC) &&
+                    surface.activeWriters) {
+                    surfaceWriteInProgress = true;
+                    break;
+                }
+            }
+        }
+        if (surfaceWriteInProgress) {
+            waitForUpdate(sequence);
+            continue;
+        }
         if (!metadataObserved) {
             constexpr char observed[] = "[MicaNT Compositor] Shared frame metadata observed\r\n";
             print(observed, sizeof(observed) - 1);
             metadataObserved = true;
         }
-        const bool composed = compose(*metadata, pixels);
+        DamageSet damage{};
+        bool composed = composeDamage(snapshot, pixels, damage);
+        if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) != sequence)
+            continue;
+        if (composed) composed = presentDamage(snapshot.screenWidth, damage);
+        if (!composed) {
+            constexpr ScreenRect fullScreen{
+                0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH, MICANT_COMPOSITOR_SCREEN_HEIGHT};
+            composed = composeRegion(snapshot, pixels, fullScreen) &&
+                presentRegion(snapshot.screenWidth, fullScreen);
+        }
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {
             previous = sequence;
             if (composed && !firstPresentationReported) {
                 constexpr char presented[] = "[MicaNT Compositor] First shared frame presented\r\n";
                 print(presented, sizeof(presented) - 1);
                 firstPresentationReported = true;
+            }
+            if (composed) {
+                auto* writableMetadata = const_cast<MicaCompositorMetadataStore*>(metadata);
+                __atomic_store_n(&writableMetadata->compositorAckSequence,
+                                 sequence, __ATOMIC_RELEASE);
+                g_hasPresentedFrame = true;
+                g_lastThemeGeneration = snapshot.themeGeneration;
             }
         }
     }
