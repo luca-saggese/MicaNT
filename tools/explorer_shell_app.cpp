@@ -50,6 +50,13 @@ struct AppWindow {
     bool minimized{};
 };
 
+struct CachedDesktopIcon {
+    uint8_t* pixels{};
+    size_t bytes{};
+    uint32_t width{}, height{}, stride{};
+    micant::um::imaging::ImageAllocator allocator{};
+};
+
 struct ShellState {
     uint32_t screenW{1024}, screenH{768};
     HWND desktop{};
@@ -60,6 +67,7 @@ struct ShellState {
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
+    CachedDesktopIcon desktopIcons[4]{};
     HWND taskbar{};
     HDC taskbarDc{};
     uint32_t* taskbarPixels{};
@@ -256,8 +264,18 @@ void redrawTaskbar() noexcept {
 
 void redrawDesktop() noexcept {
     if (!g.desktopPixels) return;
+    const micant::explorer::DesktopIconSet icons{
+        {reinterpret_cast<const uint32_t*>(g.desktopIcons[0].pixels),
+         g.desktopIcons[0].width, g.desktopIcons[0].height, g.desktopIcons[0].stride},
+        {reinterpret_cast<const uint32_t*>(g.desktopIcons[1].pixels),
+         g.desktopIcons[1].width, g.desktopIcons[1].height, g.desktopIcons[1].stride},
+        {reinterpret_cast<const uint32_t*>(g.desktopIcons[2].pixels),
+         g.desktopIcons[2].width, g.desktopIcons[2].height, g.desktopIcons[2].stride},
+        {reinterpret_cast<const uint32_t*>(g.desktopIcons[3].pixels),
+         g.desktopIcons[3].width, g.desktopIcons[3].height, g.desktopIcons[3].stride},
+    };
     micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
-                                  g.wallpaperPixels);
+                                  g.wallpaperPixels, &icons);
     if (g.fontReady) micant_gui::DrawStringClipped(g.desktopPixels, g.screenW,
         g.screenH - TASKBAR_H, 420, 48, "MicaNT — Città, perché? e\xCC\x81 Ĉ ƀ", rgb(255, 255, 255));
 
@@ -305,6 +323,52 @@ void loadPackagedWallpaper() noexcept {
     auto* pixels = composed.pixels.releaseOwnership(g.wallpaperBytes,
                                                      g.wallpaperAllocator);
     g.wallpaperPixels = reinterpret_cast<uint32_t*>(pixels);
+}
+
+void loadPackagedDesktopIcons() noexcept {
+    constexpr char16_t prefix[] = u"\\System\\Icons\\WhiteSur\\";
+    constexpr char16_t categoryNames[4][8] = {u"devices", u"places", u"apps", u"places"};
+    constexpr char16_t iconNames[4][24] = {
+        u"computer.png", u"folder-documents.png", u"network-workgroup.png", u"user-trash.png"};
+    const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(
+        micant::UserSharedDataAddress);
+    size_t rootLength = 0;
+    while (rootLength < std::size(shared->ntSystemRoot) &&
+           shared->ntSystemRoot[rootLength]) ++rootLength;
+    if (rootLength < 3 || shared->ntSystemRoot[1] != u':' ||
+        shared->ntSystemRoot[2] != u'\\') return;
+    constexpr char16_t sizeDir[] = u"\\48\\";
+    const auto allocator = micant::um::imaging::NativeImageAllocator();
+    for (size_t item = 0; item < 4; ++item) {
+        wchar_t path[320]{};
+        size_t cursor = 0;
+        for (; cursor < rootLength && cursor + 1 < std::size(path); ++cursor)
+            path[cursor] = static_cast<wchar_t>(shared->ntSystemRoot[cursor]);
+        auto append = [&](const char16_t* value, size_t capacity) noexcept {
+            for (size_t i = 0; i < capacity && value[i]; ++i) {
+                if (cursor + 1 >= std::size(path)) return false;
+                path[cursor++] = static_cast<wchar_t>(value[i]);
+            }
+            return true;
+        };
+        if (cursor != rootLength || !append(prefix, std::size(prefix)) ||
+            !append(categoryNames[item], std::size(categoryNames[item])) ||
+            !append(sizeDir, std::size(sizeDir)) ||
+            !append(iconNames[item], std::size(iconNames[item]))) continue;
+        micant::um::imaging::ImageLimits limits{};
+        limits.maxEncodedBytes = 2ull * 1024 * 1024;
+        limits.maxPixels = 256ull * 256;
+        limits.maxDecodedBytes = 256ull * 256 * 4;
+        limits.maxIntermediateBytes = 2ull * 1024 * 1024;
+        micant::um::imaging::ImageFrame decoded{};
+        if (micant::um::imaging::DecodeImageFile(path, decoded, allocator, limits) !=
+            micant::um::imaging::ImageStatus::Success) continue;
+        auto& cached = g.desktopIcons[item];
+        cached.pixels = decoded.pixels.releaseOwnership(cached.bytes, cached.allocator);
+        cached.width = decoded.width;
+        cached.height = decoded.height;
+        cached.stride = decoded.stride;
+    }
 }
 
 
@@ -843,6 +907,7 @@ extern "C" void _start(const char* = nullptr) {
     }
 
     loadPackagedWallpaper();
+    loadPackagedDesktopIcons();
     initializeSystemFonts();
     verifyDirectWriteFonts();
     redrawDesktop();

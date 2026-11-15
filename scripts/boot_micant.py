@@ -646,6 +646,14 @@ def run_qemu(
         if missing_fonts:
             raise RuntimeError(f"Required system font files are missing: {', '.join(missing_fonts)}")
         shutil.copytree(font_source_dir, esp / "MicaNT" / "System" / "Fonts")
+        icon_source_dir = ROOT / "System" / "Icons" / "WhiteSur"
+        required_icon_files = ("COPYING", "AUTHORS", "ATTRIBUTIONS.md", "index.theme")
+        missing_icon_files = [name for name in required_icon_files
+                              if not (icon_source_dir / name).is_file()]
+        if missing_icon_files:
+            raise RuntimeError(
+                f"WhiteSur icon theme is incomplete: {', '.join(missing_icon_files)}")
+        shutil.copytree(icon_source_dir, esp / "MicaNT" / "System" / "Icons" / "WhiteSur")
         wallpaper_asset = ROOT / "assets" / "wallpaper.png"
         if not wallpaper_asset.is_file():
             raise RuntimeError(f"Packaged desktop wallpaper is missing: {wallpaper_asset}")
