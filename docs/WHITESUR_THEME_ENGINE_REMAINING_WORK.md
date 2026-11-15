@@ -87,8 +87,7 @@ the evidence named here, not just declarations or a successful compile.
 - [x] Audited every freestanding UxTheme export wrapper against the local
   public/ReactOS declarations, including ordinal 47; no parameter-count or
   calling-convention mismatch was found. Bounded implementations and explicit
-  `E_NOTIMPL`/null/false paths are listed in `uxtheme.hpp`. `GetThemeSysColor`
-  currently supports no system-color ids (`CLR_INVALID`), and
+  `E_NOTIMPL`/null/false paths are listed in `uxtheme.hpp`.
   `GetThemePartSize` supports only `TS_MIN`; other variants remain unsupported.
   `GetThemePropertyOrigin` also explicitly returns `E_NOTIMPL` and clears its
   output; Explorer verified the status and sentinel clearing through the real
@@ -96,6 +95,12 @@ the evidence named here, not just declarations or a successful compile.
   The real import/export probe and the integrated QEMU run passed. The audit
   also found that the process-local handle table has no lock, so concurrent
   calls still need synchronization if UxTheme is used from multiple threads.
+- [x] `GetThemeSysColor` maps supported system-color IDs to the corresponding
+  foreground/background/border values in the pinned theme snapshot; unmapped
+  IDs and stale handles return `CLR_INVALID`. Explorer checked `COLOR_BTNFACE`
+  through both a real BUTTON theme handle and the global null-handle path, plus
+  an unmapped ID. The QEMU marker repeated after Light-to-Dark runtime
+  replacement in `/private/tmp/micant-theme-syscolor-run/serial.log`.
 - [x] The QEMU import-path matrix covers invalid/stale handles, clipped and
   rounded drawing, alpha, handle-capacity exhaustion/cleanup and GDI dispatch
   failure. These probes all passed in the integrated run
@@ -184,7 +189,7 @@ the evidence named here, not just declarations or a successful compile.
   `BM_GETSTATE`, `BM_CLICK`, and the parent notification. QEMU sampled the
   control's DIB-backed screen pixels in normal (`#F0F0F0`), hover (`#E5EEF9`)
   and pressed (`#D7E4F2`) states in
-  `/private/tmp/micant-theme-user32-button-run2`. Disabled/focus keyboard
+  `/private/tmp/micant-theme-user32-button-final`. Disabled/focus keyboard
   transitions and cancellation after dragging outside still need dedicated
   input probes; Win32k has no mouse-capture path yet.
 - [x] Implement PBM range, position, step and color messages; render the real

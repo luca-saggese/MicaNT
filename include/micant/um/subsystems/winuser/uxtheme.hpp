@@ -456,8 +456,69 @@ inline win32::HRESULT GetThemeBackgroundExtent(HTHEME hTheme, void* /*hdc*/, int
     return 0;
 }
 
-inline win32::DWORD GetThemeSysColor(HTHEME /*hTheme*/, int /*iColorId*/) noexcept {
-    return 0xFFFFFFFFu; // CLR_INVALID: no fabricated system-color value
+inline win32::DWORD GetThemeSysColor(HTHEME hTheme, int iColorId) noexcept {
+    MicaThemeSnapshot current{};
+    const MicaThemeSnapshot* snapshot{};
+    if (hTheme) {
+        const auto* handle = detail::lookup(hTheme);
+        if (!handle) return 0xFFFFFFFFu; // CLR_INVALID
+        snapshot = &handle->snapshot;
+    } else {
+        if (!MicaWin32kGetThemeSnapshot(&current) || !detail::publish(current))
+            return 0xFFFFFFFFu;
+        snapshot = &detail::activeSnapshot;
+    }
+
+    struct Binding { int id; uint8_t control, state; uint8_t property; };
+    // property: 0 background, 1 foreground, 2 border.
+    constexpr Binding bindings[]{
+        {0, 8, 0, 0},       // COLOR_SCROLLBAR
+        {2, 13, 0, 0},      // COLOR_ACTIVECAPTION
+        {3, 13, 7, 0},      // COLOR_INACTIVECAPTION
+        {4, 5, 0, 0},       // COLOR_MENU
+        {5, 14, 0, 0},      // COLOR_WINDOW
+        {6, 14, 0, 2},      // COLOR_WINDOWFRAME
+        {7, 5, 0, 1},       // COLOR_MENUTEXT
+        {8, 14, 0, 1},      // COLOR_WINDOWTEXT
+        {9, 13, 0, 1},      // COLOR_CAPTIONTEXT
+        {10, 13, 0, 2},     // COLOR_ACTIVEBORDER
+        {11, 13, 7, 2},     // COLOR_INACTIVEBORDER
+        {13, 0, 6, 0},      // COLOR_HIGHLIGHT
+        {14, 0, 6, 1},      // COLOR_HIGHLIGHTTEXT
+        {15, 0, 0, 0},      // COLOR_BTNFACE / COLOR_3DFACE
+        {16, 0, 0, 2},      // COLOR_BTNSHADOW
+        {17, 0, 4, 1},      // COLOR_GRAYTEXT
+        {18, 0, 0, 1},      // COLOR_BTNTEXT
+        {19, 13, 7, 1},     // COLOR_INACTIVECAPTIONTEXT
+        {20, 0, 0, 2},      // COLOR_BTNHIGHLIGHT
+        {22, 0, 0, 2},      // COLOR_3DLIGHT
+        {23, 12, 0, 1},     // COLOR_INFOTEXT
+        {24, 12, 0, 0},     // COLOR_INFOBK
+        {26, 0, 1, 1},      // COLOR_HOTLIGHT
+    };
+    for (const auto& binding : bindings) {
+        if (binding.id != iColorId) continue;
+        const size_t index = static_cast<size_t>(binding.control) *
+            MICANT_THEME_STATE_COUNT + binding.state;
+        if (index >= MICANT_THEME_STYLE_COUNT) return 0xFFFFFFFFu;
+        const auto& style = snapshot->styles[index];
+        uint32_t color{};
+        uint32_t requiredFlag{};
+        if (binding.property == 0) {
+            color = style.background;
+            requiredFlag = MICANT_THEME_HAS_BACKGROUND;
+        } else if (binding.property == 1) {
+            color = style.foreground;
+            requiredFlag = MICANT_THEME_HAS_FOREGROUND;
+        } else {
+            color = style.border;
+            requiredFlag = MICANT_THEME_HAS_BORDER;
+        }
+        if (!(style.flags & requiredFlag)) return 0xFFFFFFFFu;
+        return ((color >> 16) & 0xFFu) | (color & 0x00FF00u) |
+               ((color & 0xFFu) << 16);
+    }
+    return 0xFFFFFFFFu; // CLR_INVALID for system colors without a CSS mapping.
 }
 
 inline win32::HRESULT GetThemeSysFont(HTHEME /*hTheme*/, int /*iFontId*/, void* plf) noexcept {

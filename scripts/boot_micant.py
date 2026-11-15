@@ -355,7 +355,8 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in startup_serial:
+                if ("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in startup_serial and
+                        "[MicaNT Theme] GetThemeSysColor resolves themed button face" in startup_serial):
                     break
                 time.sleep(0.1)
             else:
@@ -821,6 +822,9 @@ def verify_mouse(
                         raise RuntimeError("Live titlebar pixel did not follow the Dark theme")
                     if pixel_at(dark_screen, 90, 733) == light_start_surface_pixel:
                         raise RuntimeError("Taskbar Start surface pixel did not follow the Dark theme")
+                    if serial_path.read_text(encoding="utf-8", errors="replace").count(
+                        "[MicaNT Theme] GetThemeSysColor resolves themed button face") < 2:
+                        raise RuntimeError("GetThemeSysColor did not follow the runtime theme reload")
 
                     moved_marker_count = serial_path.read_text(
                         encoding="utf-8", errors="replace").count(

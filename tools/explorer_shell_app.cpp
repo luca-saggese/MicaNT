@@ -911,6 +911,11 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         (packedColor & 0xFF00u) | ((packedColor & 0xFFu) << 16);
     MicaThemeHandle themeHandle = IsThemeActive()
         ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
+    const uint32_t invalidSystemColor = 0xFFFFFFFFu;
+    const bool systemColorQueryPassed = themeHandle &&
+        GetThemeSysColor(themeHandle, 15) == expectedColor &&
+        GetThemeSysColor(nullptr, 15) == expectedColor &&
+        GetThemeSysColor(themeHandle, 0x7FFFFFFF) == invalidSystemColor;
     const bool queried = themeHandle && (button.flags & MICANT_THEME_HAS_BACKGROUND) &&
         GetThemeColor(themeHandle, 1, 1, 3802, &queriedColor) == 0 &&
         queriedColor == expectedColor;
@@ -979,6 +984,9 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
+    PrintLine(systemColorQueryPassed
+        ? "[MicaNT Theme] GetThemeSysColor resolves themed button face"
+        : "[MicaNT Theme] GetThemeSysColor result mismatch");
     if (staleHandleRejected)
         PrintLine("[MicaNT Theme] Closed UxTheme handle rejected and output cleared");
     else
