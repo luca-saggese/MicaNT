@@ -18,11 +18,12 @@ requisiti completi in
   nativo User32/GDI32 → Win32k, finestra HWND, `WM_PAINT`/`WM_SIZE` e pump input.
   Primo boot ha fallito in fase SEC_IMAGE: l'import di Win32k incontrava un
   DIB arena statico da 16 MiB per processo; ora limitato a 4 MiB. Build/link
-  bare-metal passati. QEMU con build isolato verifica `_start`, classe User32,
-  `WM_NCCREATE` e `WM_CREATE`; poi il kernel termina con #UD (`RIP=0x66F5701F`,
-  `CS=0x10`) durante la richiesta superficie del compositor. Localizzare il
-  call path prima di considerare U1 verificato. Restano resize/paint/close
-  QEMU, resize adattivo, schede, ricerca, selezione e grafico storico.
+  bare-metal passati. QEMU con build isolato arriva a `_start`, classe User32,
+  `WM_NCCREATE` e `WM_CREATE`, poi il timer rileva RSP kernel fuori dai limiti
+  registrati e scatta il guard. Un run successivo fallisce prima in probe syscall
+  CPL3 (`RIP=0x4000000005DB`). Risolvere e rendere stabile il boot; UI non
+  verificata. Restano resize/paint/close, resize adattivo, schede, ricerca,
+  selezione e grafico storico.
 - [ ] **D2 — End task dalla UI** — dipende da U1; selezione, conferma, errori
   accesso/uscita e azione tramite handle.
 - [ ] **S1/S2 — Hotkey e SAS** — nessun chord globale trusted; Winlogon, sessione,
@@ -40,11 +41,11 @@ requisiti completi in
 ## Punto di ripresa
 
 P1b è chiuso. U1 in corso: usare `--cmake-build-dir` dedicato perché il build
-directory condiviso può disattivare la macro del self-test. Il run isolato
-arriva a `WM_CREATE`, poi #UD nel kernel prima di `WM_SIZE`/paint. Localizzare
-la chiamata che crea la superficie; non committare la UI finché il percorso
-QEMU non passa. Modifiche Win32k/compositor condivise escluse dal commit Task
-Manager.
+directory condiviso può disattivare la macro del self-test. Un run arriva a
+`WM_CREATE` e poi fallisce il guard dello stack al timer interrupt; un altro
+fallisce prima nel probe syscall CPL3. Stabilizzare il QEMU completo, poi chiudere
+resize/paint/close. Modifiche Win32k/compositor condivise escluse dal commit
+Task Manager.
 
 Audit paralleli: S1/S2 dipendono da sessione/autenticazione reali; P2 da
 accounting Mm/Ps; P3 da provider Io/NDIS/GPU; F1 da SCM/session/Userenv reali.
