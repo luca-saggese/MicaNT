@@ -646,6 +646,17 @@ def run_qemu(
         if missing_fonts:
             raise RuntimeError(f"Required system font files are missing: {', '.join(missing_fonts)}")
         shutil.copytree(font_source_dir, esp / "MicaNT" / "System" / "Fonts")
+        # Keep user-replaceable cursor files on the mounted system volume, not
+        # embedded in User32, Win32k, or the kernel image.
+        cursor_source_dir = ROOT / "System" / "Cursors" / "MiniMouse"
+        required_cursor_files = ("ATTRIBUTIONS.md", "LICENSE", "mini_mouse_arrow.cur")
+        missing_cursor_files = [name for name in required_cursor_files
+                                if not (cursor_source_dir / name).is_file()]
+        if missing_cursor_files:
+            raise RuntimeError(
+                f"Mini Mouse cursor theme is incomplete: {', '.join(missing_cursor_files)}")
+        shutil.copytree(cursor_source_dir,
+                        esp / "MicaNT" / "System" / "Cursors" / "MiniMouse")
         icon_source_dir = ROOT / "System" / "Icons" / "WhiteSur"
         required_icon_files = ("COPYING", "AUTHORS", "ATTRIBUTIONS.md", "index.theme")
         missing_icon_files = [name for name in required_icon_files

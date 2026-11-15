@@ -346,30 +346,48 @@ int32_t User32_DestroyCursor(void* cursor) noexcept {
 }
 
 void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
-    constexpr uintptr_t IDC_ARROW = 32512;
-    if (instance || reinterpret_cast<uintptr_t>(name) != IDC_ARROW) return nullptr;
-    static void* sharedArrow{};
-    if (sharedArrow) return sharedArrow;
-    using namespace micant::um;
-    imaging::ImageFrame frame{};
-    frame.width = frame.height = 16; frame.stride = 64;
-    frame.format = imaging::PixelFormat::Bgra8Premultiplied;
-    const auto allocator = imaging::NativeImageAllocator();
-    if (!frame.pixels.allocate(16 * 16 * 4, allocator)) return nullptr;
-    constexpr uint16_t rows[16]{
-        0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
-        0xFF80,0xFCC0,0xCCC0,0x86C0,0x06C0,0x0360,0x0360,0x0000};
-    for (uint32_t y=0;y<16;++y) for (uint32_t x=0;x<16;++x) {
-        if (!(rows[y] & (0x8000u >> x))) continue;
-        const bool edge = x == 0 || y == 0 || !(rows[y] & (0x8000u >> (x-1))) ||
-            (y && !(rows[y-1] & (0x8000u >> x)));
-        const uint8_t c = edge ? 0 : 255;
-        const size_t p = (size_t(y)*16+x)*4;
-        frame.pixels[p]=frame.pixels[p+1]=frame.pixels[p+2]=c;
-        frame.pixels[p+3]=255;
+    struct SystemCursor { uintptr_t id; const wchar_t* file; };
+    constexpr SystemCursor cursors[]{
+        {32512, L"mini_mouse_arrow.cur"}, {32513, L"mini_mouse_beam.cur"},
+        {32515, L"mini_mouse_cross.cur"}, {32516, L"mini_mouse_up.cur"},
+        {32642, L"mini_mouse_nwse.cur"}, {32643, L"mini_mouse_nesw.cur"},
+        {32644, L"mini_mouse_ew.cur"}, {32645, L"mini_mouse_ns.cur"},
+        {32646, L"mini_mouse_move.cur"}, {32648, L"mini_mouse_unavail.cur"},
+        {32649, L"mini_mouse_link.cur"}, {32651, L"mini_mouse_helpsel.cur"},
+    };
+    if (instance || !name || reinterpret_cast<uintptr_t>(name) > UINT16_MAX) return nullptr;
+    const uintptr_t id = reinterpret_cast<uintptr_t>(name);
+    for (size_t i = 0; i < std::size(cursors); ++i) {
+        if (cursors[i].id != id) continue;
+        static void* sharedHandles[std::size(cursors)]{};
+        if (sharedHandles[i]) return sharedHandles[i];
+        wchar_t path[128] = L"\\MicaNT\\System\\Cursors\\MiniMouse\\";
+        size_t length{};
+        while (length < std::size(path) && path[length]) ++length;
+        for (const wchar_t* p = cursors[i].file; *p && length + 1 < std::size(path); ++p)
+            path[length++] = *p;
+        if (*cursors[i].file == L'\0' || length + 1 >= std::size(path)) return nullptr;
+        path[length] = L'\0';
+        using namespace micant::um;
+        const auto allocator = imaging::NativeImageAllocator();
+        imaging::ImageLimits limits{};
+        limits.maxEncodedBytes = 16ull * 1024 * 1024;
+        limits.maxPixels = 16ull * 1024 * 1024;
+        limits.maxDecodedBytes = 64ull * 1024 * 1024;
+        limits.maxIntermediateBytes = 80ull * 1024 * 1024;
+        imaging::ImageBuffer encoded{};
+        if (imaging::ReadIconSourceFile(path, encoded, allocator, limits) !=
+            imaging::ImageStatus::Success) return nullptr;
+        winuser::CursorImage cursor{};
+        if (winuser::DecodeCursorImage(encoded.span(), 0, 0, cursor, allocator, limits) !=
+            imaging::ImageStatus::Success) return nullptr;
+        sharedHandles[i] = winuser::ProcessIconHandles().createCursor(
+            std::move(cursor.image), allocator, cursor.hotX, cursor.hotY, true);
+        return sharedHandles[i];
     }
-    sharedArrow = winuser::ProcessIconHandles().createCursor(std::move(frame), allocator, 0, 0, true);
-    return sharedArrow;
+    // ANI system cursors need timer driven frame changes; do not silently
+    // return a static image for IDC_WAIT or IDC_APPSTARTING.
+    return nullptr;
 }
 
 void* User32_LoadCursorA(void* instance, const char* name) noexcept {
