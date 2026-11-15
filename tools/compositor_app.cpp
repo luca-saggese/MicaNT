@@ -203,26 +203,57 @@ bool compose(const MicaCompositorMetadataStore& metadata,
                 const int64_t closeLeft = windowRight - frame - 30;
                 const int64_t buttonTop = windowTop + frame + 3;
                 const int64_t buttonBottom = windowTop + frame + caption - 3;
-                fillRect(closeLeft, buttonTop, windowRight - frame - 2,
-                         buttonBottom, closeColor, width, height);
-                fillRect(closeLeft - 29, buttonTop, closeLeft - 1,
-                         buttonBottom, buttonColor, width, height);
-                fillRect(closeLeft - 58, buttonTop, closeLeft - 30,
-                         buttonBottom, buttonColor, width, height);
+                const auto drawCaptionButton = [&](uint8_t button,
+                    int64_t buttonLeft, int64_t buttonRight) noexcept {
+                    const bool pressed =
+                        (surface.flags & MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_PRESSED) &&
+                        ((surface.flags & MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_MASK) >>
+                         MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_SHIFT) == button;
+                    const bool hovered =
+                        (surface.flags & MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_HOVER) &&
+                        ((surface.flags & MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_MASK) >>
+                         MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT) == button;
+                    const uint32_t state = pressed ? 2u : hovered ? 1u :
+                        foreground ? 0u : 7u;
+                    const auto* buttonStyle = themeValid
+                        ? &metadata.theme.styles[state] : nullptr;
+                    if (!buttonStyle || !buttonStyle->flags) buttonStyle = normalButton;
+                    uint32_t background = button == 3 ? closeColor : buttonColor;
+                    if (buttonStyle &&
+                        (buttonStyle->flags & MICANT_THEME_HAS_BACKGROUND))
+                        background = buttonStyle->background | 0xFF000000u;
+                    uint32_t glyph = titleColor;
+                    if (buttonStyle &&
+                        (buttonStyle->flags & MICANT_THEME_HAS_FOREGROUND))
+                        glyph = buttonStyle->foreground | 0xFF000000u;
+                    if (buttonStyle &&
+                        (buttonStyle->flags & MICANT_THEME_HAS_BORDER)) {
+                        const uint32_t borderColor = buttonStyle->border | 0xFF000000u;
+                        fillRect(buttonLeft, buttonTop, buttonRight, buttonBottom,
+                                 borderColor, width, height);
+                        fillRect(buttonLeft + 1, buttonTop + 1, buttonRight - 1,
+                                 buttonBottom - 1, background, width, height);
+                    } else {
+                        fillRect(buttonLeft, buttonTop, buttonRight, buttonBottom,
+                                 background, width, height);
+                    }
+                    return glyph;
+                };
+                const uint32_t minimizeGlyph = drawCaptionButton(
+                    1, closeLeft - 58, closeLeft - 30);
+                const uint32_t maximizeGlyph = drawCaptionButton(
+                    2, closeLeft - 29, closeLeft - 1);
+                const uint32_t closeGlyph = drawCaptionButton(
+                    3, closeLeft, windowRight - frame - 2);
 
                 const int64_t iconTop = windowTop + frame + (caption - 22) / 2;
-                const uint32_t iconColor = (captionForegroundStyle &&
-                    (captionForegroundStyle->flags & MICANT_THEME_HAS_FOREGROUND)) ? titleColor :
-                    (foreground ? 0xFFF5F8FCu : 0xFFE3E8EDu);
                 const bool maximized = (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) != 0;
                 drawControlIcon(1, false, closeLeft - 58, iconTop,
-                                iconColor, width, height);
+                                minimizeGlyph, width, height);
                 drawControlIcon(2, maximized, closeLeft - 29, iconTop,
-                                iconColor, width, height);
+                                maximizeGlyph, width, height);
                 drawControlIcon(3, false, closeLeft, iconTop,
-                                (captionForegroundStyle &&
-                                 (captionForegroundStyle->flags & MICANT_THEME_HAS_FOREGROUND))
-                                    ? titleColor : 0xFFFFFFFFu,
+                                closeGlyph,
                                 width, height);
 
                 int64_t titleX = windowLeft + frame + 9;

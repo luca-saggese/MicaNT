@@ -370,7 +370,10 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
         constexpr int32_t HTLEFT = 10, HTRIGHT = 11, HTTOP = 12;
         constexpr int32_t HTTOPLEFT = 13, HTTOPRIGHT = 14, HTBOTTOM = 15;
         constexpr int32_t HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
-        constexpr int64_t minWidth = 160, minHeight = 100, maxExtent = 16384;
+        const int64_t minWidth = 160 + frameInset(*window) * 2;
+        const int64_t minHeight = 100 + frameInset(*window) * 2 +
+                                  captionHeight(*window);
+        constexpr int64_t maxExtent = 16384;
         const bool moveLeft = gesture.hitTest == HTLEFT ||
             gesture.hitTest == HTTOPLEFT || gesture.hitTest == HTBOTTOMLEFT;
         const bool moveRight = gesture.hitTest == HTRIGHT ||
@@ -1125,7 +1128,20 @@ void publishCompositorSurfaces() noexcept {
             (window.iconic ? MICANT_COMPOSITOR_SURFACE_ICONIC : 0u) |
             (window.handle == g_foregroundWindow
                 ? MICANT_COMPOSITOR_SURFACE_FOREGROUND : 0u) |
-            (window.maximized ? MICANT_COMPOSITOR_SURFACE_MAXIMIZED : 0u);
+            (window.maximized ? MICANT_COMPOSITOR_SURFACE_MAXIMIZED : 0u) |
+            ((g_captionCapture == window.handle && g_pressedCaptionButton)
+                ? MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_PRESSED |
+                    (static_cast<uint32_t>(g_pressedCaptionButton) <<
+                     MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_SHIFT)
+                : 0u) |
+            ((g_cursorHitWindow == window.handle &&
+              captionButtonAt(window, g_mouseX - window.x,
+                              g_mouseY - window.y) != 0)
+                ? MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_HOVER |
+                    (static_cast<uint32_t>(captionButtonAt(
+                        window, g_mouseX - window.x, g_mouseY - window.y)) <<
+                     MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT)
+                : 0u);
         info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
         info.dirtyRight = window.width;
         info.dirtyBottom = window.height;

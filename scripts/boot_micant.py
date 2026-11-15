@@ -262,6 +262,14 @@ def verify_mouse(
                 ]})
                 time.sleep(0.2)
 
+            def drag_by(dx: int, dy: int) -> None:
+                while dx or dy:
+                    step_x = max(-64, min(64, dx))
+                    step_y = max(-64, min(64, dy))
+                    move_by(step_x, step_y)
+                    dx -= step_x
+                    dy -= step_y
+
             def set_left_button(down: bool) -> None:
                 execute("input-send-event", {"events": [
                     {"type": "btn", "data": {"button": "left", "down": down}},
@@ -411,6 +419,84 @@ def verify_mouse(
                 raise RuntimeError("Bottom-right resize did not rebuild the Explorer surface")
             edge_resized = wait_for_changed_screen(
                 caption_dragged, "edge-resized-window.ppm", 1000)
+
+            # The initial bottom-right drag leaves the second app window at
+            # x=262, y=149, 540x355. Exercise every remaining Win32k edge and
+            # corner hit-test path with a bounded inward/outward delta.
+            resize_cases = (
+                ("left-edge-resized-window.ppm", 264, 326, -20, 0),
+                ("right-edge-resized-window.ppm", 800, 326, 20, 0),
+                ("top-edge-resized-window.ppm", 500, 151, 0, -20),
+                ("bottom-edge-resized-window.ppm", 500, 502, 0, 20),
+                ("top-left-resized-window.ppm", 244, 131, -10, -10),
+                ("top-right-resized-window.ppm", 820, 121, 10, -10),
+                ("bottom-left-resized-window.ppm", 234, 522, -10, 10),
+                ("bottom-right-resized-window-2.ppm", 830, 532, 10, 10),
+            )
+            resize_reference = edge_resized
+            for name, x, y, dx, dy in resize_cases:
+                move_to(x, y)
+                resized_marker_count = serial_path.read_text(
+                    encoding="utf-8", errors="replace").count(
+                        "[MicaNT Explorer] Application window surface resized")
+                set_left_button(True)
+                move_by(dx, dy)
+                set_left_button(False)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    serial = serial_path.read_text(
+                        encoding="utf-8", errors="replace")
+                    if serial.count(
+                        "[MicaNT Explorer] Application window surface resized"
+                    ) > resized_marker_count:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(f"Resize hit target did not deliver WM_SIZE: {name}")
+                resize_reference = wait_for_changed_screen(
+                    resize_reference, name, 1000)
+
+            # Clamp both axes while keeping the opposite edge anchored. The
+            # minimum outer size must still leave Explorer a 160x100 client.
+            move_to(224, 326)
+            resized_marker_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT Explorer] Application window surface resized")
+            set_left_button(True)
+            drag_by(500, 0)
+            set_left_button(False)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(
+                    "[MicaNT Explorer] Application window surface resized"
+                ) > resized_marker_count:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Minimum-width clamp did not rebuild a 160px client surface")
+            resize_reference = wait_for_changed_screen(
+                resize_reference, "minimum-width-window.ppm", 1000)
+
+            move_to(750, 111)
+            resized_marker_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT Explorer] Application window surface resized")
+            set_left_button(True)
+            drag_by(0, 400)
+            set_left_button(False)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(
+                    "[MicaNT Explorer] Application window surface resized"
+                ) > resized_marker_count:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Minimum-height clamp did not rebuild a 100px client surface")
+            resize_reference = wait_for_changed_screen(
+                resize_reference, "minimum-height-window.ppm", 1000)
 
             for down in (True, False):
                 execute("input-send-event", {"events": [{
