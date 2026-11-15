@@ -207,7 +207,7 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
         [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
         [](void*, void* address, size_t) noexcept { std::free(address); },
     };
-    std::vector<uint8_t> pe(0x600, 0);
+    std::vector<uint8_t> pe(0x800, 0);
     const auto put16 = [&](size_t offset, uint16_t value) {
         pe[offset] = static_cast<uint8_t>(value);
         pe[offset + 1] = static_cast<uint8_t>(value >> 8);
@@ -228,8 +228,8 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     put32(optional + 112 + pe::IMAGE_DIRECTORY_ENTRY_RESOURCE * 8, 0x1000);
     put32(optional + 116 + pe::IMAGE_DIRECTORY_ENTRY_RESOURCE * 8, 0x200);
     const size_t section = 0x188;
-    put32(section + 8, 0x400); put32(section + 12, 0x1000);
-    put32(section + 16, 0x400); put32(section + 20, 0x200);
+    put32(section + 8, 0x600); put32(section + 12, 0x1000);
+    put32(section + 16, 0x600); put32(section + 20, 0x200);
     put32(section + 36, pe::IMAGE_SCN_MEM_READ);
 
     // root: RT_GROUP_ICON (14), RT_CURSOR (1), and RT_GROUP_CURSOR (12).
@@ -244,22 +244,22 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     put16(root + 0x50 + 14, 1); put32(root + 0x50 + 16, 1033); put32(root + 0x50 + 20, 0x1a0);
     pe[0x2c0] = 0xde; pe[0x2c1] = 0xad; pe[0x2c2] = 0xbe; pe[0x2c3] = 0xef;
     put16(root + 0x80 + 14, 1); put32(root + 0x80 + 16, 1); put32(root + 0x80 + 20, 0x800000a0u);
-    put16(root + 0xa0 + 14, 1); put32(root + 0xa0 + 16, 1033); put32(root + 0xa0 + 20, 0xc0);
-    put32(root + 0xc0, 0x10e4); put32(root + 0xc4, 48);
-    put32(root + 0x1a0, 0x10d0); put32(root + 0x1a4, 20);
-    pe[0x2d0] = 0; pe[0x2d2] = 1; pe[0x2d4] = 1;
-    pe[0x2d6] = 1; pe[0x2d7] = 1; pe[0x2da] = 1; pe[0x2dc] = 32;
-    pe[0x2de] = 48; pe[0x2e2] = 1;
+    put16(root + 0xa0 + 14, 1); put32(root + 0xa0 + 16, 1033); put32(root + 0xa0 + 20, 0x190);
+    put32(root + 0x190, 0x1214); put32(root + 0x194, 48);
+    put32(root + 0x1a0, 0x1200); put32(root + 0x1a4, 20); put32(root + 0x1a8, 1200);
+    pe[0x400] = 0; pe[0x402] = 1; pe[0x404] = 1;
+    pe[0x406] = 1; pe[0x407] = 1; pe[0x40a] = 1; pe[0x40c] = 32;
+    pe[0x40e] = 48; pe[0x412] = 1;
     // One-pixel 32bpp icon DIB: header + XOR BGRA + zeroed AND mask.
-    put32(0x2e4, 40); put32(0x2e8, 1); put32(0x2ec, 2);
-    put16(0x2f0, 1); put16(0x2f2, 32); put32(0x2f4, 0);
-    pe[0x30c] = 0x11; pe[0x30d] = 0x22; pe[0x30e] = 0x33; pe[0x30f] = 0xff;
+    put32(0x414, 40); put32(0x418, 1); put32(0x41c, 2);
+    put16(0x420, 1); put16(0x422, 32); put32(0x424, 0);
+    pe[0x43c] = 0x11; pe[0x43d] = 0x22; pe[0x43e] = 0x33; pe[0x43f] = 0xff;
 
     put16(root + 0xd0 + 14, 1); put32(root + 0xd0 + 16, 301);
     put32(root + 0xd0 + 20, 0x800000f0u);
     put16(root + 0xf0 + 14, 1); put32(root + 0xf0 + 16, 1033);
     put32(root + 0xf0 + 20, 0x110);
-    put32(root + 0x110, 0x1300); put32(root + 0x114, 14); put32(root + 0x118, 1200);
+    put32(root + 0x110, 0x1300); put32(root + 0x114, 20); put32(root + 0x118, 1200);
     put16(root + 0x130 + 14, 1); put32(root + 0x130 + 16, 2);
     put32(root + 0x130 + 20, 0x80000150u);
     put16(root + 0x150 + 14, 1); put32(root + 0x150 + 16, 1033);
@@ -268,7 +268,7 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
     pe[0x500 + 2] = 2; pe[0x500 + 4] = 1;
     pe[0x500 + 6] = pe[0x500 + 7] = 1;
     put32(0x500 + 14, 52); put16(0x500 + 18, 2);
-    std::copy_n(pe.begin() + 0x2e4, 48, pe.begin() + 0x554);
+    std::copy_n(pe.begin() + 0x414, 48, pe.begin() + 0x554);
 
     pe::PeImageView64 image;
     TEST_ASSERT(image.inspect(pe) == NtStatus::Success, "synthetic PE fixture validates");
@@ -311,7 +311,7 @@ inline void Test_PeResources_BoundedTypeNameLanguageLookup() {
                 "PE cursor resource preserves embedded hotspots and strips only its four-byte prefix");
     TEST_ASSERT(resources.find({14, {}, false}, {102, {}, false}, 1033, result) == NtStatus::NotFound,
                  "missing resource is reported without synthetic data");
-    put32(root + 0x70, 0x1200);
+    put32(root + 0x1a0, 0x1800);
     pe::PeImageView64 tailImage;
     TEST_ASSERT(tailImage.inspect(pe) == NtStatus::Success, "PE remains structurally valid with bad resource RVA");
     pe::PeResourceView tailResources(tailImage);
