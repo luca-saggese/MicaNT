@@ -97,6 +97,13 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         height != MICANT_COMPOSITOR_SCREEN_HEIGHT ||
         metadata.surfaceCapacity > MICANT_COMPOSITOR_SURFACE_CAPACITY) return false;
 
+    const bool themeValid = MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme));
+    const auto& headerbarStyle = metadata.theme.styles[13u * MICANT_THEME_STATE_COUNT];
+    const bool themedCaptionBackground = themeValid &&
+        (headerbarStyle.flags & MICANT_THEME_HAS_BACKGROUND);
+    const bool themedCaptionForeground = themeValid &&
+        (headerbarStyle.flags & MICANT_THEME_HAS_FOREGROUND);
+
     for (size_t pixel = 0; pixel < MICANT_COMPOSITOR_SURFACE_PIXELS; ++pixel)
         g_frame[pixel] = 0xFF1C3A5Cu;
 
@@ -136,7 +143,11 @@ bool compose(const MicaCompositorMetadataStore& metadata,
         const int64_t frame = !topLevel ? 0 :
             ((surface.style & kWsThickFrame) ? 5 :
              ((surface.style & (kWsBorder | kWsDlgFrame)) ? 1 : 0));
-        const int64_t caption = topLevel && (surface.style & kWsCaption) ? 28 : 0;
+        const int64_t caption = topLevel && (surface.style & kWsCaption)
+            ? (themeValid && (headerbarStyle.flags & MICANT_THEME_HAS_MIN_HEIGHT) &&
+               headerbarStyle.minHeight >= 24 && headerbarStyle.minHeight <= 96
+                ? headerbarStyle.minHeight : 28)
+            : 0;
         const int64_t windowLeft = surface.x;
         const int64_t windowTop = surface.y;
         const int64_t windowRight = windowLeft + surface.width;
@@ -149,11 +160,19 @@ bool compose(const MicaCompositorMetadataStore& metadata,
 
         if (frame || caption) {
             const bool foreground = (surface.flags & MICANT_COMPOSITOR_SURFACE_FOREGROUND) != 0;
-            const uint32_t frameColor = foreground ? 0xFF334B66u : 0xFF778492u;
-            const uint32_t captionColor = foreground ? 0xFF245987u : 0xFF596775u;
-            const uint32_t titleColor = foreground ? 0xFFF5F8FCu : 0xFFDCE3EAu;
-            const uint32_t buttonColor = foreground ? 0xFF376D9Au : 0xFF75818Cu;
-            const uint32_t closeColor = foreground ? 0xFFC84753u : 0xFF916A70u;
+            uint32_t frameColor = foreground ? 0xFF334B66u : 0xFF778492u;
+            uint32_t captionColor = foreground ? 0xFF245987u : 0xFF596775u;
+            uint32_t titleColor = foreground ? 0xFFF5F8FCu : 0xFFDCE3EAu;
+            uint32_t buttonColor = foreground ? 0xFF376D9Au : 0xFF75818Cu;
+            uint32_t closeColor = foreground ? 0xFFC84753u : 0xFF916A70u;
+            if (themedCaptionBackground) {
+                captionColor = headerbarStyle.background | 0xFF000000u;
+                frameColor = captionColor;
+                buttonColor = captionColor;
+                closeColor = captionColor;
+            }
+            if (themedCaptionForeground)
+                titleColor = headerbarStyle.foreground | 0xFF000000u;
             fillRect(windowLeft, windowTop, windowRight, windowBottom,
                      frameColor, width, height);
             if (caption) {

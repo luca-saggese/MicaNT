@@ -698,4 +698,11 @@ int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo* output) {
     return 1;
 }
 
+int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot* snapshot) {
+    if (!snapshot || !MicaThemeSnapshotIsValid(snapshot, sizeof(*snapshot))) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(snapshot);
+    return request(MICANT_WIN32K_OP_SET_THEME_SNAPSHOT, value) && value.result == 1;
+}
+
 }

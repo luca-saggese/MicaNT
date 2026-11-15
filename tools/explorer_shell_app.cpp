@@ -452,6 +452,7 @@ void loadActiveVisualTheme() noexcept {
     size_t styleBytes = 0;
     if (!readBoundedFile(path, &candidate, sizeof(candidate), styleBytes) ||
         !MicaThemeSnapshotIsValid(&candidate, styleBytes)) return;
+    if (!MicaWin32kSetThemeSnapshot(&candidate)) return;
     g.visualTheme = candidate;
     g.visualThemeReady = true;
 }

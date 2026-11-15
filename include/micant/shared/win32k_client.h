@@ -111,7 +111,8 @@ enum {
     MICANT_WIN32K_OP_SET_CURSOR_CLIP,
     MICANT_WIN32K_OP_SHOW_CURSOR,
     MICANT_WIN32K_OP_GET_CURSOR_HANDLE,
-    MICANT_WIN32K_OP_GET_CURSOR_INFO
+    MICANT_WIN32K_OP_GET_CURSOR_INFO,
+    MICANT_WIN32K_OP_SET_THEME_SNAPSHOT
 };
 
 typedef struct MicaWin32kRequest {
@@ -206,6 +207,7 @@ typedef struct MicaWin32kCursorInfo {
 #define MICANT_WIN32K_CURSOR_IMAGE_VERSION 1u
 MICANT_WIN32K_API int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage*);
 MICANT_WIN32K_API int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo*);
+MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot*);
 
 #ifdef __cplusplus
 }

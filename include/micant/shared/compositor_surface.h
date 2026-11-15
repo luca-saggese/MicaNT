@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "micant/shared/theme_snapshot.h"
 
 #define MICANT_COMPOSITOR_SCREEN_WIDTH 1024u
 #define MICANT_COMPOSITOR_SCREEN_HEIGHT 768u
@@ -18,7 +19,7 @@
 #define MICANT_COMPOSITOR_PIXELS_BASE (MICANT_COMPOSITOR_METADATA_BASE + 0x10000u)
 
 #define MICANT_COMPOSITOR_STORE_MAGIC 0x4D434F4Du /* MCOM */
-#define MICANT_COMPOSITOR_STORE_VERSION 1u
+#define MICANT_COMPOSITOR_STORE_VERSION 2u
 
 enum {
     MICANT_COMPOSITOR_SURFACE_ACTIVE = 0x01u,
@@ -57,6 +58,8 @@ typedef struct MicaCompositorMetadataStore {
     uint32_t screenWidth, screenHeight;
     uint32_t surfaceCapacity;
     uint32_t reserved[3];
+    uint64_t themeGeneration;
+    MicaThemeSnapshot theme;
     uint64_t frameSequence;
     MicaCompositorSurfaceInfo surfaces[MICANT_COMPOSITOR_SURFACE_CAPACITY];
     MicaCompositorCursorInfo cursor;

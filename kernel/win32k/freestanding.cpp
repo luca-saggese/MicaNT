@@ -138,6 +138,9 @@ uint64_t g_captionCapture{};
 uint8_t g_pressedCaptionButton{};
 uint64_t g_cursorHitWindow{};
 int32_t g_cursorHitTest{};
+MicaCompositorMetadataStore* g_compositorStore{};
+MicaThemeSnapshot g_themeSnapshot{};
+uint64_t g_themeGeneration{};
 
 int32_t frameInset(const Window& window) noexcept {
     if (window.parent || (window.style & kWsChild)) return 0;
@@ -146,8 +149,15 @@ int32_t frameInset(const Window& window) noexcept {
 }
 
 int32_t captionHeight(const Window& window) noexcept {
-    return (!window.parent && !(window.style & kWsChild) &&
-            (window.style & kWsCaption)) ? 28 : 0;
+    if (window.parent || (window.style & kWsChild) || !(window.style & kWsCaption))
+        return 0;
+    constexpr size_t headerbarIndex = 13u * MICANT_THEME_STATE_COUNT;
+    const auto& headerbar = g_themeSnapshot.styles[headerbarIndex];
+    if (MicaThemeSnapshotIsValid(&g_themeSnapshot, sizeof(g_themeSnapshot)) &&
+        (headerbar.flags & MICANT_THEME_HAS_MIN_HEIGHT) &&
+        headerbar.minHeight >= 24 && headerbar.minHeight <= 96)
+        return headerbar.minHeight;
+    return 28;
 }
 
 uint8_t captionButtonAt(const Window& window, int32_t localX,
@@ -162,7 +172,6 @@ uint8_t captionButtonAt(const Window& window, int32_t localX,
     return 0;
 }
 uint32_t g_mouseButtons{};
-MicaCompositorMetadataStore* g_compositorStore{};
 void (*g_compositorPublishCallback)() noexcept{};
 
 bool equalText(const uint16_t* first, const uint16_t* second) noexcept {
@@ -921,6 +930,10 @@ void publishCompositorSurfaces() noexcept {
     StateLockGuard lock;
     auto* store = g_compositorStore;
     if (!store) return;
+    if (store->themeGeneration != g_themeGeneration) {
+        store->theme = g_themeSnapshot;
+        store->themeGeneration = g_themeGeneration;
+    }
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
     auto& cursor = store->cursor;
     cursor = {};
@@ -1002,6 +1015,15 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
     } else {
         resetCursorImage();
     }
+    return NtStatus::Success;
+}
+
+micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
+    if (!MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot)))
+        return NtStatus::InvalidParameter;
+    StateLockGuard lock;
+    g_themeSnapshot = snapshot;
+    if (++g_themeGeneration == 0) ++g_themeGeneration;
     return NtStatus::Success;
 }
 

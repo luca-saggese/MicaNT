@@ -3968,6 +3968,20 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         // The isolated pre-Executive CPL3 ABI probe has no Ps owner yet. Its
         // objects use owner zero and are explicitly torn down by the probe;
         // every process-backed request is keyed by its allocated Ps ID.
+        if (request.operation == MICANT_WIN32K_OP_SET_THEME_SNAPSHOT) {
+            if (!process || process->processId() != g_explorerProcessId)
+                return status(NtStatus::AccessDenied);
+            MicaThemeSnapshot snapshot{};
+            const NtStatus themeCopyStatus = ex::ExSafeCopyFromUser(
+                &snapshot, reinterpret_cast<const void*>(request.args[0]), sizeof(snapshot));
+            if (themeCopyStatus != NtStatus::Success) return status(themeCopyStatus);
+            const NtStatus themeStatus = win32k::freestanding::setThemeSnapshot(snapshot);
+            if (themeStatus != NtStatus::Success) return status(themeStatus);
+            request.result = 1;
+            publishCompositorSurfacesInCompositorSpace();
+            return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
+                                               &request, sizeof(request)));
+        }
         if (request.operation == MICANT_WIN32K_OP_PUMP_INPUT) {
             bool keyboardQueued = false;
             static bool explorerMouseClickObserved = false;
