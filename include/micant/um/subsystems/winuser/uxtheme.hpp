@@ -235,8 +235,9 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
     const auto* style = detail::style(*handle, iStateId);
     if (!style || !(style->flags & (MICANT_THEME_HAS_BACKGROUND | MICANT_THEME_HAS_BORDER)))
         return detail::kNotFound;
-    if ((style->flags & MICANT_THEME_HAS_RADIUS) && style->borderRadius)
-        return detail::kNotImplemented;
+    const uint32_t radius = (style->flags & MICANT_THEME_HAS_RADIUS)
+        ? style->borderRadius : 0u;
+    if (radius > 128u) return detail::kNotImplemented;
     if (((style->flags & MICANT_THEME_HAS_BACKGROUND) &&
          (style->background >> 24) != 255u) ||
         ((style->flags & MICANT_THEME_HAS_BORDER) && (style->border >> 24) != 255u) ||
@@ -257,6 +258,9 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
         clip.bottom = std::min(clip.bottom, requested.bottom);
     }
     if (clip.right <= clip.left || clip.bottom <= clip.top) return 0;
+    const uint64_t width64 = static_cast<uint64_t>(int64_t(bounds.right) - bounds.left);
+    const uint64_t height64 = static_cast<uint64_t>(int64_t(bounds.bottom) - bounds.top);
+    if (radius && (width64 > 16384u || height64 > 16384u)) return detail::kNotImplemented;
     const auto fill = [&](MicaWin32kRect rectangle, uint32_t color) noexcept {
         rectangle.left = std::max(rectangle.left, clip.left);
         rectangle.top = std::max(rectangle.top, clip.top);
@@ -267,6 +271,66 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
                                   ((color & 0xFFu) << 16);
         return MicaWin32kFillRect(hdc, &rectangle, colorRef) != 0;
     };
+    if (radius) {
+        const uint32_t width = static_cast<uint32_t>(width64);
+        const uint32_t height = static_cast<uint32_t>(height64);
+        const uint32_t outerRadius = std::min(radius, std::min(width, height) / 2u);
+        uint32_t borderWidth = (style->flags & MICANT_THEME_HAS_BORDER_WIDTH)
+            ? style->borderWidth : 1u;
+        borderWidth = std::min(borderWidth, std::min(width, height) / 2u);
+        const uint32_t innerRadius = outerRadius > borderWidth ? outerRadius - borderWidth : 0u;
+        const auto integerSqrt = [](uint32_t value) noexcept {
+            uint32_t low = 0, high = 129;
+            while (low + 1 < high) {
+                const uint32_t middle = low + (high - low) / 2;
+                if (middle * middle <= value) low = middle;
+                else high = middle;
+            }
+            return low;
+        };
+        const auto roundedInset = [&](uint32_t cornerRadius, uint32_t distance) noexcept {
+            if (!cornerRadius || distance >= cornerRadius) return uint32_t{0};
+            const uint32_t cornerY = cornerRadius - 1u - distance;
+            const uint32_t square = cornerRadius * cornerRadius - cornerY * cornerY;
+            return cornerRadius - integerSqrt(square);
+        };
+        const bool hasBackground = (style->flags & MICANT_THEME_HAS_BACKGROUND) != 0;
+        const bool hasBorder = (style->flags & MICANT_THEME_HAS_BORDER) != 0 && borderWidth;
+        for (int64_t y = bounds.top; y < bounds.bottom; ++y) {
+            const uint32_t edgeDistance = static_cast<uint32_t>(std::min(
+                y - bounds.top, int64_t(bounds.bottom) - 1 - y));
+            const uint32_t outerInset = roundedInset(outerRadius, edgeDistance);
+            const int32_t outerLeft = bounds.left + static_cast<int32_t>(outerInset);
+            const int32_t outerRight = bounds.right - static_cast<int32_t>(outerInset);
+            const int64_t innerTop = int64_t(bounds.top) + borderWidth;
+            const int64_t innerBottom = int64_t(bounds.bottom) - borderWidth;
+            if (hasBorder) {
+                if (y < innerTop || y >= innerBottom) {
+                    if (!fill({outerLeft, static_cast<int32_t>(y), outerRight,
+                               static_cast<int32_t>(y + 1)}, style->border))
+                        return detail::kFailure;
+                } else {
+                    const uint32_t innerDistance = static_cast<uint32_t>(std::min(
+                        y - innerTop, innerBottom - 1 - y));
+                    const uint32_t innerInset = roundedInset(innerRadius, innerDistance);
+                    const int32_t innerLeft = static_cast<int32_t>(int64_t(bounds.left) + borderWidth + innerInset);
+                    const int32_t innerRight = static_cast<int32_t>(int64_t(bounds.right) - borderWidth - innerInset);
+                    if (innerLeft > outerLeft && !fill(
+                            {outerLeft, static_cast<int32_t>(y), innerLeft, static_cast<int32_t>(y + 1)},
+                            style->border)) return detail::kFailure;
+                    if (outerRight > innerRight && !fill(
+                            {innerRight, static_cast<int32_t>(y), outerRight, static_cast<int32_t>(y + 1)},
+                            style->border)) return detail::kFailure;
+                    if (hasBackground && innerRight > innerLeft && !fill(
+                            {innerLeft, static_cast<int32_t>(y), innerRight, static_cast<int32_t>(y + 1)},
+                            style->background)) return detail::kFailure;
+                }
+            } else if (hasBackground && !fill(
+                    {outerLeft, static_cast<int32_t>(y), outerRight, static_cast<int32_t>(y + 1)},
+                    style->background)) return detail::kFailure;
+        }
+        return 0;
+    }
     if ((style->flags & MICANT_THEME_HAS_BACKGROUND) && !fill(bounds, style->background))
         return detail::kFailure;
     if (style->flags & MICANT_THEME_HAS_BORDER) {

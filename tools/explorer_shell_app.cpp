@@ -74,6 +74,7 @@ struct ShellState {
     bool visualThemeReady{};
     char themeProfile[96]{};
     bool themeGdiDrawReported{};
+    bool themeGdiEditDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -294,7 +295,33 @@ void drawAppWindow(AppWindow& app) noexcept {
     fill(p, w, h, 12, 8, 8, 8, entryForeground);
     text(p, w, h, 27, 8, "Address", toolbarForeground);
     fill(p, w, h, 12, 32, w - 24, 25, entryBackground);
-    DrawRect(p, w, 12, 32, w - 24, 25, entryBorder);
+    bool themedEditDrawn = false;
+    if (g.visualThemeReady && w > 36 && h > 58) {
+        const MicaThemeHandle theme = IsThemeActive() ? OpenThemeData(nullptr, L"EDIT") : nullptr;
+        if (theme) {
+            RECT editRect{12, 32, static_cast<LONG>(w - 12), 57};
+            const bool drawSucceeded = DrawThemeBackground(theme, app.dc, 1, 1,
+                                                            &editRect, nullptr) == 0;
+            const bool closeSucceeded = CloseThemeData(theme) == 0;
+            const uint32_t expected = entryStyle &&
+                (entryStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+                    ? themePixel(entryStyle->background, windowBackground)
+                    : entryBackground;
+            const size_t probe = static_cast<size_t>(44) * w + w / 2;
+            themedEditDrawn = drawSucceeded && closeSucceeded && p[probe] == expected;
+        }
+    }
+    if (!themedEditDrawn) {
+        fill(p, w, h, 12, 32, w - 24, 25, entryBackground);
+        DrawRect(p, w, 12, 32, w - 24, 25, entryBorder);
+    } else {
+        if (!entryStyle || !(entryStyle->flags & MICANT_THEME_HAS_BORDER))
+            DrawRect(p, w, 12, 32, w - 24, 25, entryBorder);
+        if (!g.themeGdiEditDrawReported) {
+            PrintLine("[MicaNT Theme] UxTheme GDI rounded EDIT draw and pixel check passed");
+            g.themeGdiEditDrawReported = true;
+        }
+    }
     const char* address = app.view == View::MyComputer ? "My Computer" :
                           app.view == View::MyDocuments ? "C:\\Documents and Settings\\MicaNT\\My Documents" :
                           app.view == View::ControlPanel ? "Control Panel" :
