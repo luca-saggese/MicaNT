@@ -89,6 +89,26 @@ void rejectAllocation(const char* reason) noexcept {
     }
 }
 
+void logHexValue(const char* label, uintptr_t value) noexcept {
+    if (!g_bootstrapLog) return;
+    char buffer[48]{};
+    constexpr char digits[] = "0123456789ABCDEF";
+    size_t index{};
+    while (label[index] && index + sizeof(value) * 2 + 4 < sizeof(buffer)) {
+        buffer[index] = label[index];
+        ++index;
+    }
+    buffer[index++] = '0';
+    buffer[index++] = 'x';
+    for (size_t nibble = sizeof(value) * 2; nibble != 0; --nibble) {
+        const auto shift = static_cast<unsigned>((nibble - 1) * 4);
+        buffer[index++] = digits[(value >> shift) & 0xFu];
+    }
+    buffer[index++] = '\r';
+    buffer[index++] = '\n';
+    g_bootstrapLog(buffer);
+}
+
 [[noreturn]] void stop(const char* reason) noexcept {
     logMessage(g_bootstrapLog, "ExRuntime FATAL: ");
     logMessage(g_bootstrapLog, reason);
@@ -265,6 +285,9 @@ void releaseMemory(void* pointer) noexcept {
 
     AllocationHeader* header = validatedHeader(pointer);
     if (!header) {
+        logHexValue("ExHeap invalid free pointer=", reinterpret_cast<uintptr_t>(pointer));
+        logHexValue("ExHeap invalid free caller=",
+            reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
         stop("ExHeap: invalid free rejected; stopping\r\n");
     }
 

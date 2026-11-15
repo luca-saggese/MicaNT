@@ -1,6 +1,7 @@
 #if defined(MICANT_FREESTANDING_KERNEL32)
 
 #include <cstdint>
+#include "micant/shared/ntdef.hpp"
 #include "micant/shared/system_time.hpp"
 #include "micant/um/subsystems/winbase/utf8_conversion.hpp"
 
@@ -20,6 +21,21 @@ __declspec(dllimport) int32_t __stdcall NtProtectVirtualMemory(
 __declspec(dllimport) int32_t __stdcall NtQueryVirtualMemory(
     void* process, const void* base, uint32_t informationClass,
     void* information, size_t informationLength, size_t* returnLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateFile(
+    micant::Handle* fileHandle, uint32_t desiredAccess,
+    micant::ObjectAttributes* objectAttributes, micant::IoStatusBlock* ioStatusBlock,
+    micant::LargeInteger* allocationSize, uint32_t fileAttributes,
+    uint32_t shareAccess, uint32_t createDisposition, uint32_t createOptions,
+    void* eaBuffer, uint32_t eaLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtReadFile(
+    micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
+    void* apcContext, micant::IoStatusBlock* ioStatusBlock, void* buffer,
+    uint32_t length, micant::LargeInteger* byteOffset, uint32_t* key) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryInformationFile(
+    micant::Handle fileHandle, micant::IoStatusBlock* ioStatusBlock,
+    void* fileInformation, uint32_t length,
+    micant::FileInformationClass fileInformationClass) noexcept;
 
 struct Kernel32SystemTime {
     uint16_t year, month, dayOfWeek, day, hour, minute, second, milliseconds;
@@ -249,6 +265,107 @@ __declspec(dllexport) uint32_t __stdcall GetCurrentThreadId() noexcept {
     uint32_t threadId = 0;
     __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(threadId));
     return threadId;
+}
+
+__declspec(dllexport) void __stdcall SetLastError(uint32_t error) noexcept;
+
+static uint32_t Win32ErrorFromNtStatus(int32_t status) noexcept {
+    switch (static_cast<uint32_t>(status)) {
+        case 0xC0000008u: return 6;   // ERROR_INVALID_HANDLE
+        case 0xC000000Du: return 87;  // ERROR_INVALID_PARAMETER
+        case 0xC0000022u: return 5;   // ERROR_ACCESS_DENIED
+        case 0xC0000034u: return 2;   // ERROR_FILE_NOT_FOUND
+        case 0xC000003Au: return 3;   // ERROR_PATH_NOT_FOUND
+        case 0xC0000035u: return 183; // ERROR_ALREADY_EXISTS
+        case 0xC000009Au: return 8;   // ERROR_NOT_ENOUGH_MEMORY
+        case 0xC00000A3u: return 21;  // ERROR_NOT_READY
+        case 0xC00000BBu: return 50;  // ERROR_NOT_SUPPORTED
+        default: return 31;           // ERROR_GEN_FAILURE
+    }
+}
+
+__declspec(dllexport) void* __stdcall CreateFileW(
+    const wchar_t* fileName, uint32_t desiredAccess, uint32_t shareMode,
+    void* securityAttributes, uint32_t creationDisposition,
+    uint32_t flagsAndAttributes, void* templateFile) noexcept {
+    (void)securityAttributes;
+    (void)templateFile;
+    // The current native syscall supports FILE_OPEN and FILE_OPEN_IF. File
+    // attributes are meaningful only on creation; normal existing-file reads
+    // accept FILE_ATTRIBUTE_NORMAL but pass zero creation attributes.
+    if (!fileName || (flagsAndAttributes & ~0x80u)) {
+        SetLastError(87);
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    if (creationDisposition != 3 && creationDisposition != 4) {
+        SetLastError(50); // The filesystem syscall currently opens existing files only.
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    micant::UnicodeString name(fileName);
+    micant::ObjectAttributes attributes{};
+    attributes.objectName = &name;
+    attributes.attributes = 0x40; // OBJ_CASE_INSENSITIVE
+    micant::IoStatusBlock ioStatus{};
+    micant::Handle handle{};
+    const uint32_t disposition = creationDisposition == 3 ? 1u : 3u;
+    const int32_t status = NtCreateFile(&handle, desiredAccess, &attributes,
+        &ioStatus, nullptr, 0, shareMode,
+        disposition, 0, nullptr, 0);
+    if (status != 0) {
+        SetLastError(Win32ErrorFromNtStatus(status));
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    return reinterpret_cast<void*>(handle);
+}
+
+__declspec(dllexport) int32_t __stdcall ReadFile(
+    void* file, void* buffer, uint32_t bytesToRead, uint32_t* bytesRead,
+    void* overlapped) noexcept {
+    if (bytesRead) *bytesRead = 0;
+    if (!file || file == reinterpret_cast<void*>(static_cast<intptr_t>(-1)) ||
+        (!buffer && bytesToRead) || overlapped) {
+        SetLastError(87);
+        return 0;
+    }
+    micant::IoStatusBlock ioStatus{};
+    const int32_t status = NtReadFile(reinterpret_cast<micant::Handle>(file),
+        0, nullptr, nullptr, &ioStatus, buffer, bytesToRead, nullptr, nullptr);
+    if (status != 0) {
+        SetLastError(Win32ErrorFromNtStatus(status));
+        return 0;
+    }
+    if (bytesRead) *bytesRead = static_cast<uint32_t>(ioStatus.information);
+    return 1;
+}
+
+__declspec(dllexport) int32_t __stdcall GetFileSizeEx(
+    void* file, micant::LargeInteger* fileSize) noexcept {
+    if (!file || file == reinterpret_cast<void*>(static_cast<intptr_t>(-1)) || !fileSize) {
+        SetLastError(87);
+        return 0;
+    }
+    micant::IoStatusBlock ioStatus{};
+    micant::FileStandardInformation information{};
+    const int32_t status = NtQueryInformationFile(
+        reinterpret_cast<micant::Handle>(file), &ioStatus, &information,
+        sizeof(information), micant::FileInformationClass::FileStandardInformation);
+    if (status != 0) {
+        SetLastError(Win32ErrorFromNtStatus(status));
+        return 0;
+    }
+    *fileSize = information.endOfFile;
+    return 1;
+}
+
+__declspec(dllexport) int32_t __stdcall CloseHandle(void* handle) noexcept {
+    const int32_t status = NtClose(handle);
+    if (status == 0) return 1;
+    uint32_t error = 31; // ERROR_GEN_FAILURE for statuses without a specific mapping here.
+    if (static_cast<uint32_t>(status) == 0xC0000008u) error = 6; // ERROR_INVALID_HANDLE
+    else if (static_cast<uint32_t>(status) == 0xC0000022u) error = 5; // ERROR_ACCESS_DENIED
+    else if (static_cast<uint32_t>(status) == 0xC000000Du) error = 87; // ERROR_INVALID_PARAMETER
+    SetLastError(error);
+    return 0;
 }
 
 __declspec(dllexport) uint32_t __stdcall GetLastError() noexcept {

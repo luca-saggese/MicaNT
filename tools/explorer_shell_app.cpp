@@ -384,15 +384,38 @@ bool appendWide(wchar_t* path, size_t capacity, size_t& cursor,
     return true;
 }
 
+void PrintThemeWin32Error(const char* prefix, uint32_t error) noexcept {
+    char message[96]{};
+    size_t length{};
+    while (prefix[length] && length + 1 < sizeof(message)) {
+        message[length] = prefix[length];
+        ++length;
+    }
+    message[length++] = ' ';
+    char digits[10]{};
+    size_t digitCount{};
+    do {
+        digits[digitCount++] = static_cast<char>('0' + error % 10);
+        error /= 10;
+    } while (error && digitCount < sizeof(digits));
+    while (digitCount && length + 1 < sizeof(message))
+        message[length++] = digits[--digitCount];
+    PrintLine(message);
+}
+
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
                      size_t& bytesRead) noexcept {
     bytesRead = 0;
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
+    if (file == INVALID_HANDLE_VALUE) {
+        PrintThemeWin32Error("[MicaNT Theme] CreateFileW error", GetLastError());
+        return false;
+    }
     LARGE_INTEGER length{};
     if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 ||
         static_cast<uint64_t>(length.QuadPart) > capacity) {
+        PrintLine("[MicaNT Theme] GetFileSizeEx failed or size was out of bounds");
         CloseHandle(file);
         return false;
     }
@@ -403,6 +426,7 @@ bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
             ? 65536 : expected - bytesRead);
         DWORD amount = 0;
         if (!ReadFile(file, destination + bytesRead, request, &amount, nullptr) || !amount) {
+            PrintLine("[MicaNT Theme] ReadFile failed or returned no data");
             CloseHandle(file);
             bytesRead = 0;
             return false;
@@ -420,7 +444,10 @@ void loadActiveVisualTheme() noexcept {
     if (!appendSystemRoot(path, std::size(path), cursor) ||
         !appendWide(path, std::size(path), cursor,
                     L"\\System\\Themes\\active.profile", 29) ||
-        !readBoundedFile(path, profile, sizeof(profile) - 1, profileBytes)) return;
+        !readBoundedFile(path, profile, sizeof(profile) - 1, profileBytes)) {
+        PrintLine("[MicaNT Theme] Active profile could not be read");
+        return;
+    }
     while (profileBytes && (profile[profileBytes - 1] == '\r' ||
                             profile[profileBytes - 1] == '\n' ||
                             profile[profileBytes - 1] == ' ' ||
@@ -431,15 +458,24 @@ void loadActiveVisualTheme() noexcept {
         for (size_t i = first; i < profileBytes; ++i) profile[i - first] = profile[i];
         profileBytes -= first;
     }
-    if (!profileBytes || profileBytes > 80) return;
+    if (!profileBytes || profileBytes > 80) {
+        PrintLine("[MicaNT Theme] Active profile length rejected");
+        return;
+    }
     size_t separators = 0;
     for (size_t i = 0; i < profileBytes; ++i) {
         const char c = profile[i];
         if (c == '/') { ++separators; continue; }
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_' || c == '-')) return;
+              (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            PrintLine("[MicaNT Theme] Active profile path rejected");
+            return;
+        }
     }
-    if (separators != 1) return;
+    if (separators != 1) {
+        PrintLine("[MicaNT Theme] Active profile format rejected");
+        return;
+    }
     cursor = 0;
     if (!appendSystemRoot(path, std::size(path), cursor) ||
         !appendWide(path, std::size(path), cursor, L"\\System\\Themes\\", 15)) return;
@@ -450,9 +486,18 @@ void loadActiveVisualTheme() noexcept {
     if (!appendWide(path, std::size(path), cursor, L"\\native.style", 13)) return;
     MicaThemeSnapshot candidate{};
     size_t styleBytes = 0;
-    if (!readBoundedFile(path, &candidate, sizeof(candidate), styleBytes) ||
-        !MicaThemeSnapshotIsValid(&candidate, styleBytes)) return;
-    if (!MicaWin32kSetThemeSnapshot(&candidate)) return;
+    if (!readBoundedFile(path, &candidate, sizeof(candidate), styleBytes)) {
+        PrintLine("[MicaNT Theme] Compiled style snapshot could not be read");
+        return;
+    }
+    if (!MicaThemeSnapshotIsValid(&candidate, styleBytes)) {
+        PrintLine("[MicaNT Theme] Compiled style snapshot rejected");
+        return;
+    }
+    if (!MicaWin32kSetThemeSnapshot(&candidate)) {
+        PrintLine("[MicaNT Theme] Win32k rejected the style snapshot");
+        return;
+    }
     g.visualTheme = candidate;
     g.visualThemeReady = true;
 }

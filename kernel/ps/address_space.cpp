@@ -33,6 +33,7 @@ namespace {
 constexpr size_t MinimumUserExceptionStackCommit = 24 * 1024;
 constexpr size_t MinimumUserExceptionStackReserve =
     MinimumUserExceptionStackCommit + mm::PageSize4KB;
+constexpr size_t UserThreadKernelStackSize = 64 * 1024;
 
 // IDs share one namespace and are never reused by the bootstrap. Exhaustion
 // fails creation instead of wrapping onto an existing process or thread.
@@ -2106,7 +2107,9 @@ static NtStatus createThreadEx(Handle* threadHandle, uint32_t desiredAccess,
             if (result == NtStatus::Success && !hal::amd64::bootstrapUserRange(entry, 1, false, true))
                 result = NtStatus::BadInitialPc;
             if (result == NtStatus::Success)
-                result = ps::detail::createUserThreadHandle(*process, entry, 32768, maximumStackSize,
+                result = ps::detail::createUserThreadHandle(*process, entry,
+                    ps::UserThreadKernelStackSize,
+                    maximumStackSize,
                     true, desiredAccess, handle, thread, stackSize,
                     attributes ? capturedObjectAttributes.attributes : 0, objectSecurity);
             if (result == NtStatus::Success) result = thread->configureUserStart(startRoutine, argument);
