@@ -20,6 +20,10 @@ struct DesktopIconSet {
     DesktopIconImage recycleBin{};
 };
 
+void DrawIconImage(uint32_t* pixels, uint32_t width, uint32_t height,
+                   int32_t x, int32_t y, uint32_t targetSize,
+                   const DesktopIconImage& image) noexcept;
+
 void DrawDesktop(uint32_t* pixels, uint32_t width, uint32_t height,
                  const uint32_t* wallpaper = nullptr,
                  const DesktopIconSet* icons = nullptr) noexcept;

@@ -35,46 +35,10 @@ void text(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t 
 void drawIcon(uint32_t* pixels, uint32_t width, uint32_t height,
               int32_t x, int32_t y, Icon kind,
               const DesktopIconImage* image) noexcept {
-    if (image && image->pixels && image->width && image->height &&
-        image->stride >= image->width * 4u) {
-        constexpr uint32_t targetSize = 48;
-        const uint32_t scale = image->width > image->height ? image->width : image->height;
-        const uint32_t drawWidth = image->width * targetSize / scale;
-        const uint32_t drawHeight = image->height * targetSize / scale;
-        const int32_t left = x + static_cast<int32_t>((targetSize - drawWidth) / 2);
-        const int32_t top = y + static_cast<int32_t>((targetSize - drawHeight) / 2);
-        for (uint32_t dy = 0; dy < drawHeight; ++dy) {
-            const int32_t py = top + static_cast<int32_t>(dy);
-            if (py < 0 || py >= static_cast<int32_t>(height)) continue;
-            const uint32_t sy = static_cast<uint32_t>(
-                static_cast<uint64_t>(dy) * image->height / drawHeight);
-            uint32_t* destination = pixels + static_cast<size_t>(py) * width;
-            const auto* source = reinterpret_cast<const uint32_t*>(
-                reinterpret_cast<const uint8_t*>(image->pixels) +
-                static_cast<size_t>(sy) * image->stride);
-            for (uint32_t dx = 0; dx < drawWidth; ++dx) {
-                const int32_t px = left + static_cast<int32_t>(dx);
-                if (px < 0 || px >= static_cast<int32_t>(width)) continue;
-                const uint32_t sx = static_cast<uint32_t>(
-                    static_cast<uint64_t>(dx) * image->width / drawWidth);
-                const uint32_t foreground = source[sx];
-                const uint32_t alpha = foreground >> 24;
-                if (!alpha) continue;
-                const uint32_t background = destination[px];
-                const uint32_t inverse = 255u - alpha;
-                const uint32_t blue = (foreground & 0xFFu) +
-                    (((background & 0xFFu) * inverse + 127u) / 255u);
-                const uint32_t green = ((foreground >> 8) & 0xFFu) +
-                    ((((background >> 8) & 0xFFu) * inverse + 127u) / 255u);
-                const uint32_t red = ((foreground >> 16) & 0xFFu) +
-                    ((((background >> 16) & 0xFFu) * inverse + 127u) / 255u);
-                destination[px] = 0xFF000000u | ((red > 255u ? 255u : red) << 16) |
-                    ((green > 255u ? 255u : green) << 8) | (blue > 255u ? 255u : blue);
-            }
-        }
+    if (image && image->pixels) {
+        DrawIconImage(pixels, width, height, x, y, 48, *image);
         return;
     }
-
     fill(pixels, width, height, x + 4, y + 5, 34, 28, color(0, 0, 0));
     if (kind == Icon::Computer) {
         fill(pixels, width, height, x + 5, y + 2, 29, 19, color(28, 93, 170));
@@ -105,6 +69,49 @@ void drawDesktopIcon(uint32_t* pixels, uint32_t width, uint32_t height,
 }
 
 } // namespace
+
+void DrawIconImage(uint32_t* pixels, uint32_t width, uint32_t height,
+                   int32_t x, int32_t y, uint32_t targetSize,
+                   const DesktopIconImage& image) noexcept {
+    if (!pixels || !targetSize || targetSize > 256 || !image.pixels ||
+        !image.width || !image.height || image.width > 256 || image.height > 256 ||
+        image.stride < image.width * 4u) return;
+    const uint32_t longest = image.width > image.height ? image.width : image.height;
+    const uint32_t drawWidth = image.width * targetSize / longest;
+    const uint32_t drawHeight = image.height * targetSize / longest;
+    if (!drawWidth || !drawHeight) return;
+    const int32_t left = x + static_cast<int32_t>((targetSize - drawWidth) / 2);
+    const int32_t top = y + static_cast<int32_t>((targetSize - drawHeight) / 2);
+    for (uint32_t dy = 0; dy < drawHeight; ++dy) {
+        const int32_t py = top + static_cast<int32_t>(dy);
+        if (py < 0 || py >= static_cast<int32_t>(height)) continue;
+        const uint32_t sy = static_cast<uint32_t>(
+            static_cast<uint64_t>(dy) * image.height / drawHeight);
+        uint32_t* destination = pixels + static_cast<size_t>(py) * width;
+        const auto* source = reinterpret_cast<const uint32_t*>(
+            reinterpret_cast<const uint8_t*>(image.pixels) +
+            static_cast<size_t>(sy) * image.stride);
+        for (uint32_t dx = 0; dx < drawWidth; ++dx) {
+            const int32_t px = left + static_cast<int32_t>(dx);
+            if (px < 0 || px >= static_cast<int32_t>(width)) continue;
+            const uint32_t sx = static_cast<uint32_t>(
+                static_cast<uint64_t>(dx) * image.width / drawWidth);
+            const uint32_t foreground = source[sx];
+            const uint32_t alpha = foreground >> 24;
+            if (!alpha) continue;
+            const uint32_t background = destination[px];
+            const uint32_t inverse = 255u - alpha;
+            const uint32_t blue = (foreground & 0xFFu) +
+                (((background & 0xFFu) * inverse + 127u) / 255u);
+            const uint32_t green = ((foreground >> 8) & 0xFFu) +
+                ((((background >> 8) & 0xFFu) * inverse + 127u) / 255u);
+            const uint32_t red = ((foreground >> 16) & 0xFFu) +
+                ((((background >> 16) & 0xFFu) * inverse + 127u) / 255u);
+            destination[px] = 0xFF000000u | ((red > 255u ? 255u : red) << 16) |
+                ((green > 255u ? 255u : green) << 8) | (blue > 255u ? 255u : blue);
+        }
+    }
+}
 
 void DrawDesktop(uint32_t* pixels, uint32_t width, uint32_t height,
                  const uint32_t* wallpaper, const DesktopIconSet* icons) noexcept {
