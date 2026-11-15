@@ -1814,3 +1814,54 @@ test now polls for a changed, stable desktop frame before input dispatch.
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-glyph-indices-qemu` | Passed; `GetGlyphIndicesW` mapped `A`, flagged missing U+0378, and Explorer/DirectWrite/input/scanout/cleanup probes passed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-dwrite-layout-qemu` | Passed; rebuilt `dwrite.dll` and Explorer, Ring 3 boundary checks passed, and CPL3 verified DirectWrite format/layout creation plus width, height, line length and baseline; input, scanout and cleanup passed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-name-table-required-qemu` | Passed after requiring a valid sfnt `name` table; all staged TTFs loaded in CPL3 and font, layout, input, scanout and cleanup probes passed |
+
+### Windows cursor subsystem implementation checkpoint — 2026-11-15
+
+The cursor implementation specification is in
+`docs/USERMODE_WINDOWS_CURSOR_SUBSYSTEM_IMPLEMENTATION_SPEC.md`. The current
+local commits add bounded CUR decoding and ANI RIFF sequence parsing, typed
+process-local cursor handles with hotspot ownership, Win32k cursor position,
+clip and visibility state, a 64x64 premultiplied cursor overlay in the shared
+compositor metadata, and User32 `LoadImage`, `LoadCursor`, `CreateCursor`,
+`CopyCursor`, `DestroyCursor`, `SetCursor`, `GetCursor`, `GetCursorInfo`,
+`GetCursorPos`, `SetCursorPos`, `ClipCursor` and `ShowCursor` exports. The
+MiniMouse upstream assets are pinned at `b01df120a3c370a870427d13d954359c0dd709cf`
+and staged under `System/Cursors/MiniMouse` with the original MIT license,
+attribution and per-file hashes. The QEMU image builder copies the directory
+onto the mounted system volume. Static stock IDC cursors load their files from
+that replaceable directory, and `WM_SETCURSOR` maps nonclient resize and caption
+hit tests to the corresponding cursor.
+
+`hidusb.sys` already delivered USB reports to MouClass; the Win32k pump now
+drains MouClass mouse packets into the same canonical mouse dispatch used by
+PS/2. VirtIO-GPU 2D frame presents now compare against the retained frame and
+transfer/flush the changed rectangle, falling back to a full transfer after a
+failed command. The software cursor remains the active presentation path; the
+VirtIO-GPU driver does not implement a verified cursor queue or cursor update
+command.
+
+Targeted hosted cursor tests passed, including decoding all 13 imported CUR
+files and parsing both 18-frame ANI files. The bare-metal `ntoskrnl_core`,
+User32, compositor and VirtIO-GPU targets linked successfully, and user-mode
+boundary checks passed. QEMU reached the modular kernel and initial scanout but
+stopped in the pre-Explorer Ring 3 process-syscall suite with
+`ExHeap: invalid free rejected; stopping` followed by an unexpected #UD in
+`ThreadReaper::workerEntry`. A temporary diagnostic build logged invalid free
+pointer `0x00004100407AE070` from `ZwClose+0xE4`; that diagnostic change was
+removed after identifying the failing close path. The cursor/Explorer path was
+therefore not executed in QEMU.
+
+Open requirements: ANI frame decoding and timer-driven playback are not
+connected to the cursor API; `IDC_WAIT` and `IDC_APPSTARTING` explicitly fail
+instead of returning a static frame. RT_CURSOR/RT_GROUP_CURSOR PE resource
+loading, persistent per-user cursor themes, DPI-aware theme size selection,
+secure-desktop authorization and end-to-end Explorer cursor-context tests are
+not implemented. The compositor still recomposes and submits a complete frame
+from user mode; the driver-side dirty transfer reduces device traffic but is
+not an incremental desktop compositor.
+
+| Command | Result |
+|---|---|
+| `cmake --build /private/tmp/micant-cursor-qemu-build --target ntoskrnl_core_baremetal user32_boot virtio_gpu_boot compositor_boot -j4` | Passed; kernel, User32 and VirtIO-GPU targets linked; native user-mode boundary checks passed |
+| `c++ -std=c++23 -Iinclude -Itest /private/tmp/cursor_suite_test.cpp kernel/win32k/freestanding.cpp -o /private/tmp/cursor_suite_test && /private/tmp/cursor_suite_test` | Passed; CUR PNG/DIB and malformed fixtures, ANI sequence fixture and real MiniMouse CUR/ANI files, cursor handle lifecycle, Win32k state and compositor metadata checks |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-qemu-final-attempt` | Kernel and Explorer dependency closure built, but QEMU stopped before Explorer at the pre-existing Ring 3 process-syscall/ExHeap failure described above |
