@@ -1879,6 +1879,9 @@ It also embeds a generated PE RT_GROUP_CURSOR/RT_CURSOR pair and now loads and
 selects that image through `LoadCursorW` in the actual Explorer process. Still
 open are persistent per-user themes, DPI-aware theme-size selection and
 secure-desktop authorization.
+System cursor handles are now reserved, loaded and published through a
+synchronized process-local cache; failed loads release their reservation so a
+later request can retry without exposing duplicate shared handles.
 The replaceable MiniMouse package now carries a bounded `cursor.map` from
 stock cursor IDs to CUR/ANI basenames; malformed entries fall back to the
 built-in map, and a missing selected asset falls back to its stock asset. This
@@ -1900,3 +1903,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-resize` | Passed modular boot and Explorer input/scanout/cleanup; ANI resize path compiled and linked but was not directly invoked by Explorer |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-runtime` | Passed; Explorer serial confirmed ANI load, 24x24 resize and release, followed by mouse/keyboard dispatch, scanout, cleanup and five seconds of stable serial |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pe-resource-success` | Passed; Explorer serial confirmed an embedded PE group cursor loaded and selected through `LoadCursorW`, then ANI load/resize/release, input dispatch, scanout, cleanup and five seconds of stable serial |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-system-cache` | Passed after synchronized system cursor cache integration; PE cursor load/selection and ANI load/resize/release passed in Explorer, followed by input dispatch, scanout, cleanup and five seconds of stable serial |

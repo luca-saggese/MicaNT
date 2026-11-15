@@ -76,6 +76,9 @@ struct SharedPeCursorCacheEntry {
 std::array<SharedPeCursorCacheEntry, 255> g_sharedPeCursorCache{};
 CursorMutex g_animatedCursorLock{};
 CursorMutex g_sharedPeCursorCacheLock{};
+struct SystemCursorCacheEntry { void* handle{}; bool reserved{}; };
+std::array<SystemCursorCacheEntry, 14> g_systemCursorCache{};
+CursorMutex g_systemCursorCacheLock{};
 struct SharedCursorReservation {
     size_t slot{g_sharedPeCursorCache.size()};
     bool active{};
@@ -89,6 +92,22 @@ struct SharedCursorReservation {
         CursorLockGuard lock(g_sharedPeCursorCacheLock);
         g_sharedPeCursorCache[slot].cursor = handle;
         g_sharedPeCursorCache[slot].reserved = false;
+        active = false;
+    }
+};
+struct SystemCursorReservation {
+    size_t slot{};
+    bool active{true};
+    ~SystemCursorReservation() {
+        if (!active) return;
+        CursorLockGuard lock(g_systemCursorCacheLock);
+        g_systemCursorCache[slot] = {};
+    }
+    void publish(void* handle) noexcept {
+        if (!active) return;
+        CursorLockGuard lock(g_systemCursorCacheLock);
+        g_systemCursorCache[slot].handle = handle;
+        g_systemCursorCache[slot].reserved = false;
         active = false;
     }
 };
@@ -853,8 +872,19 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
     const uintptr_t id = reinterpret_cast<uintptr_t>(name);
     for (size_t i = 0; i < std::size(cursors); ++i) {
         if (cursors[i].id != id) continue;
-        static void* sharedHandles[std::size(cursors)]{};
-        if (sharedHandles[i]) return sharedHandles[i];
+        for (;;) {
+            bool waitForLoader = false;
+            {
+                CursorLockGuard lock(g_systemCursorCacheLock);
+                auto& entry = g_systemCursorCache[i];
+                if (entry.handle) return entry.handle;
+                if (entry.reserved) waitForLoader = true;
+                else entry.reserved = true;
+            }
+            if (!waitForLoader) break;
+            __asm__ __volatile__("pause" ::: "memory");
+        }
+        SystemCursorReservation reservation{i};
         wchar_t fileName[64]{};
         cursorThemeFile(id, cursors[i].file, fileName);
         const auto makePath = [](const wchar_t* file, wchar_t (&path)[512]) noexcept {
@@ -892,15 +922,17 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[1] == 'I' &&
             bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'A' &&
             bytes[9] == 'C' && bytes[10] == 'O' && bytes[11] == 'N') {
-            sharedHandles[i] = loadAniCursor(bytes, allocator, limits, true);
-            return sharedHandles[i];
+            void* handle = loadAniCursor(bytes, allocator, limits, true);
+            reservation.publish(handle);
+            return handle;
         }
         winuser::CursorImage cursor{};
         if (winuser::DecodeCursorImage(bytes, 0, 0, cursor, allocator, limits) !=
             imaging::ImageStatus::Success) return nullptr;
-        sharedHandles[i] = winuser::ProcessIconHandles().createCursor(
+        void* handle = winuser::ProcessIconHandles().createCursor(
             std::move(cursor.image), allocator, cursor.hotX, cursor.hotY, true);
-        return sharedHandles[i];
+        reservation.publish(handle);
+        return handle;
     }
     // ANI system cursors need timer driven frame changes; do not silently
     // return a static image for IDC_WAIT or IDC_APPSTARTING.
