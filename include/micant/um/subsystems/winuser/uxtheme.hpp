@@ -238,11 +238,6 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
     const uint32_t radius = (style->flags & MICANT_THEME_HAS_RADIUS)
         ? style->borderRadius : 0u;
     if (radius > 128u) return detail::kNotImplemented;
-    if (((style->flags & MICANT_THEME_HAS_BACKGROUND) &&
-         (style->background >> 24) != 255u) ||
-        ((style->flags & MICANT_THEME_HAS_BORDER) && (style->border >> 24) != 255u) ||
-        ((style->flags & MICANT_THEME_HAS_OPACITY) && style->opacity != 255u))
-        return detail::kNotImplemented;
     const auto& source = *static_cast<const MicaWin32kRect*>(pRect);
     if (source.right < source.left || source.bottom < source.top)
         return detail::kInvalidArgument;
@@ -267,6 +262,12 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
         rectangle.right = std::min(rectangle.right, clip.right);
         rectangle.bottom = std::min(rectangle.bottom, clip.bottom);
         if (rectangle.right <= rectangle.left || rectangle.bottom <= rectangle.top) return true;
+        uint32_t alpha = color >> 24;
+        if (style->flags & MICANT_THEME_HAS_OPACITY)
+            alpha = (alpha * style->opacity + 127u) / 255u;
+        if (!alpha) return true;
+        const uint32_t argb = (alpha << 24) | (color & 0x00FFFFFFu);
+        if (alpha != 255u) return MicaWin32kBlendRect(hdc, &rectangle, argb) != 0;
         const uint32_t colorRef = ((color >> 16) & 0xFFu) | (color & 0xFF00u) |
                                   ((color & 0xFFu) << 16);
         return MicaWin32kFillRect(hdc, &rectangle, colorRef) != 0;

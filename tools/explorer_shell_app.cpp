@@ -294,7 +294,12 @@ void drawAppWindow(AppWindow& app) noexcept {
     fill(p, w, h, 0, 26, w, 1, separator);
     fill(p, w, h, 12, 8, 8, 8, entryForeground);
     text(p, w, h, 27, 8, "Address", toolbarForeground);
-    fill(p, w, h, 12, 32, w - 24, 25, entryBackground);
+    const bool editNeedsAlphaComposition = entryStyle &&
+        (entryStyle->flags & MICANT_THEME_HAS_BACKGROUND) &&
+        ((entryStyle->background >> 24) != 255u ||
+         ((entryStyle->flags & MICANT_THEME_HAS_OPACITY) && entryStyle->opacity != 255u));
+    fill(p, w, h, 12, 32, w - 24, 25,
+         editNeedsAlphaComposition ? windowBackground : entryBackground);
     bool themedEditDrawn = false;
     if (g.visualThemeReady && w > 36 && h > 58) {
         const MicaThemeHandle theme = IsThemeActive() ? OpenThemeData(nullptr, L"EDIT") : nullptr;
