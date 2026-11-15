@@ -29,20 +29,16 @@ terminato il probe con un handle aperto per `PROCESS_TERMINATE`, il successivo
 snapshot valido non lo contiene e il seriale è rimasto stabile per 5 secondi.
 
 L'azione End task nella UI non è ancora collegata: questo blocco verifica il
-percorso nativo attraverso il self-test. Il worktree contiene modifiche
-contemporanee Win32k/compositor e script QEMU; vanno preservate ed escluse dai
-commit Task Manager salvo gli hunk del fixture.
-
-L'ultimo test non ha prodotto un pass QEMU, quindi questo blocco non va
-committato come funzionalità completata. Il worktree contiene anche modifiche
-contemporanee Win32k/compositor e script QEMU, da preservare e non includere
-automaticamente nei commit Task Manager.
+percorso nativo attraverso il self-test. Il commit D1 è
+`1eb9b54 feat(taskmgr): verify authorized process termination`. Le modifiche
+contemporanee Win32k/compositor e script QEMU restano nel worktree e non sono
+state incluse.
 
 ## Punti aperti ordinati per dipendenza
 
 | ID | Punto | Owner canonico | Stato / criterio di chiusura |
 |---|---|---|---|
-| D1 | Completamento della terminazione remota e rundown Ps/Ob; processi terminanti non devono restare nei risultati di `SystemProcessInformation`. Verificare handle di processo, thread inizialmente sospeso, reaper e visibilità atomica del registro. | Ps/Ob/Ke | **Passato QEMU**, commit locale in preparazione; il probe è scomparso dallo snapshot valido e il seriale è rimasto stabile per 5 secondi. |
+| D1 | Completamento della terminazione remota e rundown Ps/Ob; processi terminanti non devono restare nei risultati di `SystemProcessInformation`. Verificare handle di processo, thread inizialmente sospeso, reaper e visibilità atomica del registro. | Ps/Ob/Ke | **Passato QEMU e committato** in `1eb9b54`; il probe è scomparso dallo snapshot valido e il seriale è rimasto stabile per 5 secondi. |
 | D2 | Azione End task collegata a selezione riga e conferma nell'interfaccia interattiva. | Task Manager UI + Ps/Ob | L'utente seleziona il processo, conferma; access denied, uscita concorrente e successo hanno esiti corretti; no PID come autorità. Dipende da D1. |
 | P1 | Contatori CPU reali globali/per processo (tempi 100 ns, monotonicità, processori effettivamente online), delta e grafico storico bounded. | Ke/Ps + performance provider + UI | Stress QEMU controllato, delte coerenti e campionamento con overhead misurato; campo indisponibile se manca il contatore. |
 | U1 | Finestra Win32 interattiva, resize, navigazione Processes/Performance/Details, ricerca, ordinamento, selezione e refresh timer con cache. | Win32k/User32/GDI/theme/compositor + UI | Input QMP e screenshot dimostrano layout e azioni; la UI continua senza Explorer quando il servizio grafico/sessione è operativo. Coordinare le modifiche Win32k/compositor in corso. |
@@ -69,15 +65,12 @@ automaticamente nei commit Task Manager.
 
 ## Sessione corrente — prossimo intervento
 
-1. Creare il commit selettivo D1 includendo solo il fixture, l'aggiornamento
-   della cattura Ps e questo registro; preservare gli hunk Win32k/compositor
-   nella stessa `kiinit.cpp`.
-2. Avviare P1, contatori CPU reali, verificando prima owner/counter esistenti in
+1. Avviare P1, contatori CPU reali, verificando prima owner/counter esistenti in
    Ke e il provider `kernel/ex/perf_taskmgr.cpp`; non inventare contatori.
-3. Coordinare U1 con gli owner Win32k/compositor già attivi prima di toccare
+2. Coordinare U1 con gli owner Win32k/compositor già attivi prima di toccare
    `tools/taskmgr_app.cpp` o file GUI condivisi. L'azione End task D2 segue la
    disponibilità di selezione riga/UI e riusa D1.
-4. Audit scope: restano UI navigabile, hotkey/SAS,
+3. Audit scope: restano UI navigabile, hotkey/SAS,
    sessioni/startup/servizi e integrazione/stress. Il percorso tasti attuale
    è solo PS/2 bootstrap diretto al foreground: non traccia i modificatori per
    chord globali; `winlogon.exe` e `logonui.exe` non sono avviati e le app
