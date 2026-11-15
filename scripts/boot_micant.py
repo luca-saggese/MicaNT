@@ -310,8 +310,9 @@ def verify_mouse(
                         stable_since = 0.0
                     time.sleep(0.1)
                 raise RuntimeError(
-                    f"Explorer scanout did not change by {minimum_pixels} pixels "
-                    f"within {timeout:g}s after the window creation marker"
+                    f"Explorer scanout for {name} changed by "
+                    f"{changed_pixels(reference, latest)} pixels; expected at least "
+                    f"{minimum_pixels} within {timeout:g}s"
                 )
 
             execute("qmp_capabilities")
@@ -420,11 +421,10 @@ def verify_mouse(
                 }]})
             moved_resized = wait_for_changed_screen(
                 edge_resized, "moved-resized-window.ppm", 1000)
-            execute("input-send-event", {"events": [
-                {"type": "rel", "data": {"axis": "x", "value": -344}},
-                {"type": "rel", "data": {"axis": "y", "value": -296}},
-            ]})
-            time.sleep(0.2)
+            # Click the exposed portion of the older My Computer window to
+            # prove z-order activation; clicking the resized front window only
+            # moves the cursor and produces no meaningful scanout change.
+            move_to(240, 250)
             execute("input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": True}},
             ]})

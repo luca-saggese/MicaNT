@@ -26,16 +26,17 @@ the evidence named here, not just declarations or a successful compile.
   QEMU serial recorded both notifications, and
   `caption-dragged-window.ppm` / `edge-resized-window.ppm` show the resulting
   scanout. The executed gesture covered caption drag and bottom-right resize.
-- [ ] The complete QEMU input regression did not finish: after the move/resize
-  evidence, a later scanout-delta assertion failed before window teardown.
-  Diagnostics are at `/private/tmp/micant-theme-qemu-move-resize2`; the log
-  confirms the geometry gestures ran, but the full regression remains open.
-- [ ] A complete build and QEMU run on current `HEAD` is pending. The shared
-  worktree has unrelated, uncommitted Task Manager/kernel edits; the last full
-  build stopped in `kernel/init/kiinit.cpp` (`third`/`fourth` undeclared) and
-  `kernel/ps/psmgr.cpp` (exceptions disabled and missing `ob::ObjectNamespace`).
-  The previous image is rejected by the boot runner because its Git manifest
-  does not match `HEAD`.
+- [x] Canonical `ntoskrnl_core_baremetal` and Explorer dependencies built and
+  linked at source commit `b98f1be`; QEMU completed input, window cleanup,
+  reopen-cycle, and Light-to-Dark runtime switch paths. The run used a
+  temporary harness adjustment to click the exposed background window while
+  preserving the pixel threshold. Diagnostics are at
+  `/private/tmp/micant-theme-qemu-verify-b98f1be-v2`.
+- [ ] A build of the latest uncommitted shared worktree is still pending. That
+  tree contains unrelated Task Manager/kernel changes; its earlier build
+  failed in `kernel/init/kiinit.cpp` (`third`/`fourth` undeclared) and
+  `kernel/ps/psmgr.cpp` (exceptions disabled and missing
+  `ob::ObjectNamespace`).
 
 ## Remaining acceptance work
 
@@ -96,9 +97,10 @@ the evidence named here, not just declarations or a successful compile.
 - [x] Win32k preflights notification queue capacity, publishes the validated
   snapshot and queues `WM_THEMECHANGED` for active windows under its update
   lock; Explorer redraws app windows on receipt.
-- [ ] Exercise the selector in QEMU and prove existing windows update without
-  an Explorer restart; test queue exhaustion and failed reload preserve the
-  previous complete theme.
+- [x] Exercise Light-to-Dark selection in QEMU; the profile-specific serial
+  marker arrived after Explorer redrew existing surfaces without restarting.
+- [ ] Test queue exhaustion and failed reload preserve the previous complete
+  theme.
 
 ### 8. Compositor effects
 
@@ -138,10 +140,9 @@ the evidence named here, not just declarations or a successful compile.
 
 ## Next concrete steps
 
-1. Diagnose the later scanout-delta failure in the QEMU input regression and
-   complete its teardown/reopen checks after the move/resize gestures.
-2. Run a clean, source-matched full QEMU pass without modifying the concurrent
-   Task Manager edits in the shared worktree.
-3. Exercise Light-to-Dark selection and verify the post-switch window gestures.
-4. Continue through the unchecked acceptance items in dependency order and
+1. Verify additional resize edges/corners, min-size clamping, caption buttons,
+   and gestures after a theme switch.
+2. Complete theme-backed common controls and nonclient drawing, then extend
+   QEMU state and pixel coverage.
+3. Continue through the unchecked acceptance items in dependency order and
    check items only after implementation plus their stated evidence.
