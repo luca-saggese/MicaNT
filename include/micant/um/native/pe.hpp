@@ -1249,12 +1249,19 @@ public:
     [[nodiscard]] NtStatus findCursor(uint16_t groupId, uint16_t language,
                                       uint32_t width, uint32_t height,
                                       PeCursorResource& result) const noexcept {
+        return findCursor({groupId, {}, false}, language, width, height, result);
+    }
+
+    [[nodiscard]] NtStatus findCursor(PeResourceIdentifier groupName, uint16_t language,
+                                      uint32_t width, uint32_t height,
+                                      PeCursorResource& result) const noexcept {
         result = {};
-        if (!resources_ || !groupId || !width || !height || width > 4096 || height > 4096)
+        if (!resources_ || (!groupName.id && !groupName.isName) || !width || !height ||
+            width > 4096 || height > 4096)
             return NtStatus::InvalidParameter;
         PeResourceData group{};
         NtStatus status = resources_->find(
-            {IMAGE_RESOURCE_TYPE_GROUP_CURSOR, {}, false}, {groupId, {}, false}, language, group);
+            {IMAGE_RESOURCE_TYPE_GROUP_CURSOR, {}, false}, groupName, language, group);
         if (status != NtStatus::Success) return status;
         if (group.bytes.size() < 6 || PeResourceView::read16(group.bytes.data()) != 0 ||
             PeResourceView::read16(group.bytes.data() + 2) != 2)

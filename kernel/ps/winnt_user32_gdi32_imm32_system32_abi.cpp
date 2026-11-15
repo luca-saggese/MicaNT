@@ -13,6 +13,7 @@
 #include "micant/um/subsystems/winuser/icon_handle_table.hpp"
 #include "micant/um/subsystems/winuser/cursor_image.hpp"
 #include "micant/um/subsystems/winuser/ani_image.hpp"
+#include "micant/um/native/pe.hpp"
 #include "micant/shared/native_nt_api.hpp"
 #endif
 #include "micant/shared/win32k_client.h"
@@ -47,6 +48,16 @@ struct AnimatedCursor {
 };
 std::array<AnimatedCursor, 16> g_animatedCursors{};
 std::mutex g_animatedCursorLock{};
+struct SharedPeCursorCacheEntry {
+    void* module{};
+    void* cursor{};
+    uint32_t width{}, height{};
+    uint16_t id{}, nameLength{};
+    bool named{};
+    std::array<char16_t, 256> name{};
+};
+std::array<SharedPeCursorCacheEntry, 255> g_sharedPeCursorCache{};
+std::mutex g_sharedPeCursorCacheLock{};
 uint64_t cursorClockMs() noexcept {
     return *reinterpret_cast<volatile const uint64_t*>(
         micant::UserSharedDataAddress + offsetof(micant::KUserSharedData, tickCountQuad));
@@ -139,6 +150,136 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
     }
     (void)winuser::ProcessIconHandles().destroyCursor(candidate.handle);
     return nullptr;
+}
+
+bool loadedModulePath(void* moduleHandle, wchar_t (&path)[512]) noexcept {
+    constexpr uintptr_t UserLimit = 0x00007FFFFFFF0000ULL;
+    const uintptr_t wantedBase = reinterpret_cast<uintptr_t>(moduleHandle);
+    if (wantedBase < 0x10000 || wantedBase >= UserLimit) return false;
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (teb < 0x10000 || teb >= UserLimit - 0x68) return false;
+    const uintptr_t peb = *reinterpret_cast<const uintptr_t*>(teb + 0x60);
+    if (peb < 0x10000 || peb >= UserLimit - 0x20) return false;
+    const uintptr_t loader = *reinterpret_cast<const uintptr_t*>(peb + 0x18);
+    if (loader < 0x10000 || loader >= UserLimit - 0x28) return false;
+    const uintptr_t headAddress = loader + 0x20; // InMemoryOrderModuleList
+    const auto* head = reinterpret_cast<const uintptr_t*>(headAddress);
+    uintptr_t link = head[0];
+    for (size_t count = 0; count < 64 && link != headAddress; ++count) {
+        if (link < 0x10010 || link >= UserLimit) return false;
+        const uintptr_t entry = link - 0x10;
+        if (entry >= UserLimit - 0x60) return false;
+        if (*reinterpret_cast<const uintptr_t*>(entry + 0x30) == wantedBase) {
+            const uint32_t imageSize = *reinterpret_cast<const uint32_t*>(entry + 0x40);
+            const auto* unicode = reinterpret_cast<const uint8_t*>(entry + 0x48);
+            const uint16_t bytes = *reinterpret_cast<const uint16_t*>(unicode);
+            const wchar_t* buffer = *reinterpret_cast<const wchar_t* const*>(unicode + 8);
+            if (imageSize < 0x1000 || imageSize > 256u * 1024u * 1024u ||
+                !bytes || (bytes & 1u) || bytes > (sizeof(path) - sizeof(wchar_t)) ||
+                reinterpret_cast<uintptr_t>(buffer) < 0x10000 ||
+                reinterpret_cast<uintptr_t>(buffer) >= UserLimit - bytes) return false;
+            const size_t length = bytes / sizeof(wchar_t);
+            for (size_t i = 0; i < length; ++i) path[i] = buffer[i];
+            path[length] = L'\0';
+            return true;
+        }
+        link = *reinterpret_cast<const uintptr_t*>(link);
+    }
+    return false;
+}
+
+void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
+                   uint32_t desiredWidth, uint32_t desiredHeight,
+                   bool shared) noexcept {
+    using namespace micant::um;
+    if (!resourceName || !desiredWidth || !desiredHeight ||
+        desiredWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        desiredHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+    pe::PeResourceIdentifier identifier{};
+    std::array<char16_t, 256> nameBuffer{};
+    const uintptr_t rawName = reinterpret_cast<uintptr_t>(resourceName);
+    if (rawName <= UINT16_MAX) {
+        if (!rawName) return nullptr;
+        identifier = {static_cast<uint16_t>(rawName), {}, false};
+    } else {
+        size_t length{};
+        while (length < nameBuffer.size() && resourceName[length]) {
+            const uint32_t value = static_cast<uint32_t>(resourceName[length]);
+            if (value > UINT16_MAX) return nullptr;
+            nameBuffer[length] = static_cast<char16_t>(value);
+            ++length;
+        }
+        if (!length || length == nameBuffer.size()) return nullptr;
+        identifier = {0, std::u16string_view(nameBuffer.data(), length), true};
+    }
+    std::unique_lock<std::mutex> cacheLock(g_sharedPeCursorCacheLock, std::defer_lock);
+    size_t cacheSlot = g_sharedPeCursorCache.size();
+    if (shared) {
+        cacheLock.lock();
+        for (size_t i = 0; i < g_sharedPeCursorCache.size(); ++i) {
+            const auto& entry = g_sharedPeCursorCache[i];
+            if (!entry.cursor) { if (cacheSlot == g_sharedPeCursorCache.size()) cacheSlot = i; continue; }
+            if (entry.module != moduleHandle || entry.width != desiredWidth ||
+                entry.height != desiredHeight || entry.named != identifier.isName) continue;
+            const bool matches = identifier.isName
+                ? entry.nameLength == identifier.name.size() &&
+                    std::equal(identifier.name.begin(), identifier.name.end(), entry.name.begin())
+                : entry.id == identifier.id;
+            if (matches) return entry.cursor;
+        }
+        if (cacheSlot == g_sharedPeCursorCache.size()) return nullptr;
+    }
+    wchar_t modulePath[512]{};
+    if (!loadedModulePath(moduleHandle, modulePath)) return nullptr;
+    imaging::ImageLimits limits{};
+    limits.maxEncodedBytes = 64ull * 1024 * 1024;
+    limits.maxPixels = 16ull * 1024 * 1024;
+    limits.maxDecodedBytes = 64ull * 1024 * 1024;
+    limits.maxIntermediateBytes = 80ull * 1024 * 1024;
+    imaging::ImageBuffer encoded{};
+    const auto allocator = imaging::NativeImageAllocator();
+    if (imaging::ReadIconSourceFile(modulePath, encoded, allocator, limits) !=
+        imaging::ImageStatus::Success) return nullptr;
+    pe::PeImageView64 image{};
+    if (image.inspect(encoded.span()) != NtStatus::Success) return nullptr;
+    pe::PeResourceView resources(image);
+    pe::PeGroupCursorView cursors(resources);
+    pe::PeCursorResource selected{};
+    if (cursors.findCursor(identifier, 0, desiredWidth, desiredHeight, selected) !=
+        NtStatus::Success) return nullptr;
+    imaging::ImageFrame frame{};
+    if (imaging::DecodeIconResourcePayload(selected.imageBytes, frame, allocator, limits) !=
+        imaging::ImageStatus::Success || frame.width != selected.entry.width ||
+        frame.height != selected.entry.height || frame.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        frame.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+    uint16_t hotX = selected.entry.hotX, hotY = selected.entry.hotY;
+    if (frame.width != desiredWidth || frame.height != desiredHeight) {
+        const uint32_t oldWidth = frame.width, oldHeight = frame.height;
+        imaging::ImageFrame scaled{};
+        if (imaging::ScaleIconFrame(frame, desiredWidth, desiredHeight, scaled, allocator, limits) !=
+            imaging::ImageStatus::Success) return nullptr;
+        hotX = static_cast<uint16_t>(std::min<uint32_t>(desiredWidth - 1,
+            (uint32_t(hotX) * desiredWidth + oldWidth / 2) / oldWidth));
+        hotY = static_cast<uint16_t>(std::min<uint32_t>(desiredHeight - 1,
+            (uint32_t(hotY) * desiredHeight + oldHeight / 2) / oldHeight));
+        frame = std::move(scaled);
+    }
+    void* handle = winuser::ProcessIconHandles().createCursor(std::move(frame), allocator,
+        hotX, hotY, shared);
+    if (handle && shared) {
+        auto& entry = g_sharedPeCursorCache[cacheSlot];
+        entry.module = moduleHandle;
+        entry.cursor = handle;
+        entry.width = desiredWidth;
+        entry.height = desiredHeight;
+        entry.named = identifier.isName;
+        entry.id = identifier.id;
+        entry.nameLength = static_cast<uint16_t>(identifier.name.size());
+        if (identifier.isName)
+            std::copy(identifier.name.begin(), identifier.name.end(), entry.name.begin());
+    }
+    return handle;
 }
 
 template <typename T> T Win32kProc(const char* name) noexcept {
@@ -469,6 +610,7 @@ int32_t User32_DestroyCursor(void* cursor) noexcept {
 }
 
 void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
+    if (instance) return loadPeCursor(instance, name, 32, 32, true);
     struct SystemCursor { uintptr_t id; const wchar_t* file; };
     constexpr SystemCursor cursors[]{
         {32512, L"mini_mouse_arrow.cur"}, {32513, L"mini_mouse_beam.cur"},
@@ -479,7 +621,7 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         {32649, L"mini_mouse_link.cur"}, {32651, L"mini_mouse_helpsel.cur"},
         {32514, L"mini_mouse_busy.ani"}, {32650, L"mini_mouse_working.ani"},
     };
-    if (instance || !name || reinterpret_cast<uintptr_t>(name) > UINT16_MAX) return nullptr;
+    if (!name || reinterpret_cast<uintptr_t>(name) > UINT16_MAX) return nullptr;
     const uintptr_t id = reinterpret_cast<uintptr_t>(name);
     for (size_t i = 0; i < std::size(cursors); ++i) {
         if (cursors[i].id != id) continue;
@@ -635,14 +777,29 @@ int32_t User32_DestroyIcon(void* icon) noexcept {
     return micant::um::winuser::ProcessIconHandles().destroy(icon) ? 1 : 0;
 }
 
-void* User32_LoadImageW(void* /*instance*/, const wchar_t* name, uint32_t type,
+void* User32_LoadImageW(void* instance, const wchar_t* name, uint32_t type,
                         int32_t desiredWidth, int32_t desiredHeight,
                         uint32_t flags) noexcept {
     using namespace micant::um;
     constexpr uint32_t LoadFromFile = 0x0010u;
     constexpr uint32_t DefaultSize = 0x0040u;
-    if (!name || !*name || (type != 1u && type != 2u) || desiredWidth < 0 || desiredHeight < 0 ||
-        !(flags & LoadFromFile) || (flags & ~(LoadFromFile | DefaultSize))) return nullptr;
+    constexpr uint32_t Shared = 0x8000u;
+    if (!name || (type != 1u && type != 2u) || desiredWidth < 0 || desiredHeight < 0)
+        return nullptr;
+    if (!(flags & LoadFromFile)) {
+        if (type != 2u || !instance || (flags & ~(DefaultSize | Shared))) return nullptr;
+        uint32_t width = static_cast<uint32_t>(desiredWidth);
+        uint32_t height = static_cast<uint32_t>(desiredHeight);
+        if (flags & DefaultSize) {
+            if (!width) width = 32;
+            if (!height) height = 32;
+        }
+        if (!width) width = 32;
+        if (!height) height = 32;
+        return loadPeCursor(instance, name, width, height, (flags & Shared) != 0);
+    }
+    if ((flags & ~(LoadFromFile | DefaultSize)) ||
+        reinterpret_cast<uintptr_t>(name) <= UINT16_MAX || !*name) return nullptr;
     uint32_t width = static_cast<uint32_t>(desiredWidth);
     uint32_t height = static_cast<uint32_t>(desiredHeight);
     if (flags & DefaultSize) {

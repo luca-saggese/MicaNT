@@ -1861,11 +1861,14 @@ when the sequence advances. Shared system cursor handles remain non-destroyable
 and their animation state is retained with the shared handle.
 
 The `user32_boot` target linked after this change and its native user-mode
-boundary check passed. QEMU was not rerun; the previous recorded attempt stopped
-before Explorer in the Ring 3 process-syscall/ExHeap path. Still open are
-RT_CURSOR/RT_GROUP_CURSOR integration with the canonical module/resource
-owner, persistent per-user themes, DPI-aware theme-size selection,
-secure-desktop authorization, and end-to-end Explorer animation/context tests.
+boundary check passed. A follow-up now connects `LoadCursorW` and resource-form
+`LoadImageW(IMAGE_CURSOR)` to the loaded module list and canonical bounded
+`PeImageView64` / `PeGroupCursorView` parser, including numeric and named group
+identifiers, hotspot scaling, and `LR_SHARED` process-local caching. QEMU was
+not rerun; the previous recorded attempt stopped before Explorer in the Ring 3
+process-syscall/ExHeap path. Still open are persistent per-user themes,
+DPI-aware theme-size selection, secure-desktop authorization, and end-to-end
+Explorer animation/context tests.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
