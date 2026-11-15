@@ -136,9 +136,8 @@ void setThreadLastError(uint32_t error) noexcept {
 }
 
 bool validSystemCursorId(uintptr_t id) noexcept {
-    constexpr uintptr_t ids[]{32512, 32513, 32514, 32515, 32516, 32631,
-        32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650, 32651};
-    for (uintptr_t value : ids) if (id == value) return true;
+    for (const auto& cursor : g_systemCursors)
+        if (cursor.id == id) return true;
     return false;
 }
 

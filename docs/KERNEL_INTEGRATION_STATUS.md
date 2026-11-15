@@ -1899,9 +1899,10 @@ Explorer also loads the staged `mini_mouse_busy.ani` through
 `LoadCursorFromFileW`, selects it during timed message polling, restores the
 class cursor, and destroys the resulting owned handle. This exercises the
 file-specific API path independently of the `LoadImageW` ANI resize probe.
-The system-cursor cache capacity is derived from the canonical cursor table,
-and Explorer loads and selects `IDC_APPSTARTING` from its final entry, covering
-the previously undersized cache and its working ANI asset.
+The system-cursor cache capacity and supported-ID validation both use the
+canonical cursor table, and Explorer loads and selects `IDC_APPSTARTING` from
+its final entry, covering the previously undersized cache and its working ANI
+asset.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
@@ -1925,3 +1926,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-loadfromfile-ani` | Passed; Explorer serial confirmed `LoadCursorFromFileW` loaded and released the staged ANI cursor; ANI resize, PE resource selection, input dispatch, scanout, cleanup and five seconds stable serial also passed |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-appstarting-cache` | Passed; Explorer loaded and selected the last mapped system cursor (`IDC_APPSTARTING` ANI), confirming its cache slot is in bounds; ANI file load, input dispatch, scanout, cleanup and five seconds stable serial passed |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-derived-cache` | Passed after deriving cache capacity from the system cursor table; `IDC_APPSTARTING`, ANI file load, input dispatch, scanout, cleanup and five seconds stable serial passed |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-map-validation` | Passed after deriving supported system cursor IDs from the canonical table; `IDC_APPSTARTING`, input dispatch, scanout, cleanup and five seconds stable serial passed |
