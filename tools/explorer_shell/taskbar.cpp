@@ -69,8 +69,8 @@ void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
     fill(pixels, screenWidth, screenHeight, 0, barY + 4, screenWidth, 1, palette.surfaceAlt);
 
     // Start button: a compact four pane mark and label.
-    fill(pixels, screenWidth, screenHeight, 0, barY + 3, 102, taskbarHeight - 3, 0xFF2D9331);
-    fill(pixels, screenWidth, screenHeight, 0, barY + 3, 8, taskbarHeight - 3, 0xFF52B744);
+    fill(pixels, screenWidth, screenHeight, 0, barY + 3, 102, taskbarHeight - 3, palette.selected);
+    fill(pixels, screenWidth, screenHeight, 0, barY + 3, 8, taskbarHeight - 3, palette.accent);
     fill(pixels, screenWidth, screenHeight, 12, barY + 8, 24, 24, 0xFFE1EEF3);
     fill(pixels, screenWidth, screenHeight, 15, barY + 11, 8, 8, 0xFFEB3B2F);
     fill(pixels, screenWidth, screenHeight, 24, barY + 11, 8, 8, 0xFF4BA541);

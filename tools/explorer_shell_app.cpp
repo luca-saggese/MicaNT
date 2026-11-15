@@ -76,6 +76,7 @@ struct ShellState {
     bool themeGdiDrawReported{};
     bool themeGdiEditDrawReported{};
     bool themeTextDrawReported{};
+    bool taskbarThemePixelReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
     micant::um::imaging::ImageAllocator wallpaperAllocator{};
@@ -468,6 +469,13 @@ void redrawTaskbar() noexcept {
     }
     micant::explorer::DrawTaskbar(g.taskbarPixels, g.screenW, TASKBAR_H, TASKBAR_H,
                                   buttons, count, g.clockText, activeShellPalette());
+    if (!g.taskbarThemePixelReported && g.taskbarPixels) {
+        const auto palette = activeShellPalette();
+        if (g.taskbarPixels[5u * g.screenW + 4u] == palette.selected) {
+            PrintLine("[MicaNT Theme] Taskbar Start surface uses active theme pixel");
+            g.taskbarThemePixelReported = true;
+        }
+    }
     present(g.taskbar);
 }
 

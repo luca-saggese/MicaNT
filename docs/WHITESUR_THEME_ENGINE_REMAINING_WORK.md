@@ -147,6 +147,13 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 4. Explorer theme coverage
 
+- [x] The taskbar Start surface and its leading accent stripe now use the
+  active theme's selected and accent colors instead of fixed XP green. The
+  real Explorer taskbar DIB checks the Start surface pixel against the active
+  selected color and QEMU logged `Taskbar Start surface uses active theme
+  pixel` in `/private/tmp/micant-theme-taskbar-start-run/serial.log`.
+  Build/link and the theme pixel probe passed; the broader input suite later
+  stopped at the concurrent root-folder navigation test.
 - [ ] Route remaining fixed-color shell surfaces and text through the active
   theme model or UxTheme/GDI.
 - [ ] Capture and compare QEMU pixels for Explorer chrome, titlebar, toolbar,
