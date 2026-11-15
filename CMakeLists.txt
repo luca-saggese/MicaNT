@@ -465,7 +465,7 @@ if (MICANT_ENABLE_BAREMETAL)
     # headers out of the DLL's transitive include closure.
     add_library(uxtheme_boot SHARED EXCLUDE_FROM_ALL
         tools/dlls/uxtheme.cpp tools/dlls/native_stack_probe.cpp
-        kernel/ex/freestanding_memory.cpp)
+        kernel/ex/freestanding_memory.cpp tools/dlls/uxtheme.def)
     target_include_directories(uxtheme_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
     target_compile_definitions(uxtheme_boot PRIVATE MICANT_NATIVE_USERMODE MICANT_WIN32K_IMPORTS)
     target_compile_options(uxtheme_boot PRIVATE

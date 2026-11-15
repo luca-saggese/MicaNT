@@ -67,6 +67,13 @@ the evidence named here, not just declarations or a successful compile.
   That run built/linked the baremetal target and real DLL but timed out in the
   pre-desktop animated-cursor sleep path before the interactive suite; those
   extra query changes are not fully QEMU verified yet.
+- [x] The freestanding `uxtheme.dll` now exports every name in the existing
+  UxTheme export registry and ordinal 47, forwarding each to its bounded
+  implementation or explicit unsupported result. `qemu.py --check-explorer`
+  passed, and `llvm-readobj --coff-exports` listed the complete DLL table.
+  The subsequent QEMU boot reached Explorer and logged the UxTheme API probe,
+  then timed out before the desktop window class registered; this does not
+  pass the interactive runtime regression.
 - [ ] Audit every exported UxTheme function against its public signature,
   result codes, handle lifetime and documented unsupported cases.
 - [ ] Exercise queries and drawing from the actual freestanding `uxtheme.dll`

@@ -1,0 +1,3 @@
+LIBRARY uxtheme
+EXPORTS
+    ThemeOrdinal47 @47 NONAME
