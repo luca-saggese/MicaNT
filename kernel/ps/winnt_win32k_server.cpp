@@ -21,6 +21,8 @@ constexpr uint32_t kScreenWidth = 1024;
 constexpr uint32_t kScreenHeight = 768;
 constexpr size_t kScreenPixels =
     static_cast<size_t>(kScreenWidth) * kScreenHeight;
+// Explorer keeps backing DIBs for the desktop, taskbar, start menu and open
+// windows alive together. Reserve enough pixels for that complete shell set.
 constexpr size_t kPixelCapacity = 4u * 1024u * 1024u;
 constexpr size_t kDcCapacity = 32;
 constexpr size_t kBitmapCapacity = 16;
