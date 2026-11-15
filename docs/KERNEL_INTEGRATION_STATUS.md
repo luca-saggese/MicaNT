@@ -1872,6 +1872,11 @@ custom PE cursor resource, so that API path is linked but not yet runtime
 verified. Still open are persistent per-user themes, DPI-aware theme-size
 selection, secure-desktop authorization, and end-to-end Explorer cursor
 animation/context tests.
+The replaceable MiniMouse package now carries a bounded `cursor.map` from
+stock cursor IDs to CUR/ANI basenames; malformed entries fall back to the
+built-in map, and a missing selected asset falls back to its stock asset. This
+is package-level mapping, not per-user persistence: `userenv.dll` still has no
+token-to-profile lookup until a canonical per-SID profile manager exists.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
@@ -1883,3 +1888,4 @@ composition remains the active presentation path.
 | `c++ -std=c++23 -Iinclude -Itest /private/tmp/cursor_suite_test.cpp kernel/win32k/freestanding.cpp -o /private/tmp/cursor_suite_test && /private/tmp/cursor_suite_test` | Passed; CUR PNG/DIB and malformed fixtures, ANI sequence fixture and real MiniMouse CUR/ANI files, cursor handle lifecycle, Win32k state and compositor metadata checks |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-qemu-final-attempt` | Kernel and Explorer dependency closure built, but QEMU stopped before Explorer at the pre-existing Ring 3 process-syscall/ExHeap failure described above |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pe-qemu-final5` | Passed; modular UEFI boot, CPL3 compositor scanout, Explorer mouse/keyboard dispatch, window cleanup and five seconds of stable serial; custom PE cursor resource loading was not directly exercised |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-theme-qemu` | Passed; full modular boot, Explorer input/scanout/window cleanup and five seconds stable serial; cursor mapping compiled and package staged, though no dedicated theme-switch probe is present |

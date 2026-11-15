@@ -92,6 +92,116 @@ struct SharedCursorReservation {
         active = false;
     }
 };
+struct CursorThemeOverride {
+    uintptr_t id{};
+    std::array<char, 64> file{};
+};
+std::array<CursorThemeOverride, 32> g_cursorThemeOverrides{};
+size_t g_cursorThemeOverrideCount{};
+bool g_cursorThemeMapLoaded{};
+CursorMutex g_cursorThemeMapLock{};
+
+bool validSystemCursorId(uintptr_t id) noexcept {
+    constexpr uintptr_t ids[]{32512, 32513, 32514, 32515, 32516, 32631,
+        32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650, 32651};
+    for (uintptr_t value : ids) if (id == value) return true;
+    return false;
+}
+
+bool validCursorFileName(const char* value, size_t length) noexcept {
+    if (!length || length >= 64) return false;
+    for (size_t i = 0; i < length; ++i) {
+        const char c = value[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) return false;
+        if (c == '.' && i + 1 < length && value[i + 1] == '.') return false;
+    }
+    constexpr char cur[] = ".cur", ani[] = ".ani";
+    const auto endsWith = [length, value](const char* extension, size_t count) noexcept {
+        if (length < count) return false;
+        for (size_t i = 0; i < count; ++i) {
+            char a = value[length - count + i];
+            char b = extension[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + ('a' - 'A'));
+            if (a != b) return false;
+        }
+        return true;
+    };
+    return endsWith(cur, sizeof(cur) - 1) || endsWith(ani, sizeof(ani) - 1);
+}
+
+void loadCursorThemeMap() noexcept {
+    CursorLockGuard lock(g_cursorThemeMapLock);
+    if (g_cursorThemeMapLoaded) return;
+    g_cursorThemeMapLoaded = true;
+    wchar_t path[] = L"\\MicaNT\\System\\Cursors\\MiniMouse\\cursor.map";
+    imaging::ImageLimits limits{};
+    limits.maxEncodedBytes = 4096;
+    limits.maxPixels = 1;
+    limits.maxDecodedBytes = 4;
+    limits.maxIntermediateBytes = 4096;
+    imaging::ImageBuffer encoded{};
+    if (imaging::ReadIconSourceFile(path, encoded, imaging::NativeImageAllocator(), limits) !=
+        imaging::ImageStatus::Success) return;
+    std::array<CursorThemeOverride, 32> parsed{};
+    size_t count = 0, position = 0;
+    const auto bytes = encoded.span();
+    while (position < bytes.size()) {
+        size_t end = position;
+        while (end < bytes.size() && bytes[end] != '\n') ++end;
+        const size_t nextLine = end < bytes.size() ? end + 1 : bytes.size();
+        size_t begin = position;
+        while (begin < end && (bytes[begin] == ' ' || bytes[begin] == '\t' || bytes[begin] == '\r')) ++begin;
+        while (end > begin && (bytes[end - 1] == ' ' || bytes[end - 1] == '\t' || bytes[end - 1] == '\r')) --end;
+        if (begin < end && bytes[begin] != '#') {
+            uintptr_t id = 0;
+            size_t cursor = begin;
+            while (cursor < end && bytes[cursor] >= '0' && bytes[cursor] <= '9') {
+                const unsigned digit = bytes[cursor++] - '0';
+                if (id > (UINTPTR_MAX - digit) / 10) return;
+                id = id * 10 + digit;
+            }
+            if (cursor == begin || cursor == end ||
+                (bytes[cursor] != ' ' && bytes[cursor] != '\t')) return;
+            while (cursor < end && (bytes[cursor] == ' ' || bytes[cursor] == '\t')) ++cursor;
+            const size_t fileLength = end - cursor;
+            if (!validSystemCursorId(id) ||
+                !validCursorFileName(reinterpret_cast<const char*>(bytes.data() + cursor), fileLength) ||
+                count == parsed.size()) return;
+            for (size_t i = 0; i < count; ++i) if (parsed[i].id == id) return;
+            parsed[count].id = id;
+            for (size_t i = 0; i < fileLength; ++i)
+                parsed[count].file[i] = static_cast<char>(bytes[cursor + i]);
+            ++count;
+        }
+        position = nextLine;
+    }
+    g_cursorThemeOverrides = parsed;
+    g_cursorThemeOverrideCount = count;
+}
+
+void cursorThemeFile(uintptr_t id, const wchar_t* fallback, wchar_t (&output)[64]) noexcept {
+    loadCursorThemeMap();
+    const CursorThemeOverride* selected = nullptr;
+    {
+        CursorLockGuard lock(g_cursorThemeMapLock);
+        for (size_t i = 0; i < g_cursorThemeOverrideCount; ++i)
+            if (g_cursorThemeOverrides[i].id == id) { selected = &g_cursorThemeOverrides[i]; break; }
+        if (selected) {
+            size_t i = 0;
+            while (i + 1 < std::size(output) && selected->file[i]) {
+                output[i] = static_cast<wchar_t>(static_cast<unsigned char>(selected->file[i]));
+                ++i;
+            }
+            output[i] = L'\0';
+            return;
+        }
+    }
+    size_t i = 0;
+    while (i + 1 < std::size(output) && fallback[i]) { output[i] = fallback[i]; ++i; }
+    output[i] = L'\0';
+}
+
 uint64_t cursorClockMs() noexcept {
     return *reinterpret_cast<volatile const uint64_t*>(
         micant::UserSharedDataAddress + offsetof(micant::KUserSharedData, tickCountQuad));
@@ -684,13 +794,21 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         if (cursors[i].id != id) continue;
         static void* sharedHandles[std::size(cursors)]{};
         if (sharedHandles[i]) return sharedHandles[i];
-        wchar_t path[128] = L"\\MicaNT\\System\\Cursors\\MiniMouse\\";
-        size_t length{};
-        while (length < std::size(path) && path[length]) ++length;
-        for (const wchar_t* p = cursors[i].file; *p && length + 1 < std::size(path); ++p)
-            path[length++] = *p;
-        if (*cursors[i].file == L'\0' || length + 1 >= std::size(path)) return nullptr;
-        path[length] = L'\0';
+        wchar_t fileName[64]{};
+        cursorThemeFile(id, cursors[i].file, fileName);
+        const auto makePath = [](const wchar_t* file, wchar_t (&path)[128]) noexcept {
+            constexpr wchar_t prefix[] = L"\\MicaNT\\System\\Cursors\\MiniMouse\\";
+            size_t length = 0;
+            for (const wchar_t* p = prefix; *p; ++p) path[length++] = *p;
+            size_t fileLength = 0;
+            while (file[fileLength] && length + fileLength + 1 < std::size(path)) {
+                path[length + fileLength] = file[fileLength];
+                ++fileLength;
+            }
+            if (!fileLength || file[fileLength]) return false;
+            path[length + fileLength] = L'\0';
+            return true;
+        };
         using namespace micant::um;
         const auto allocator = imaging::NativeImageAllocator();
         imaging::ImageLimits limits{};
@@ -699,8 +817,16 @@ void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
         limits.maxDecodedBytes = 64ull * 1024 * 1024;
         limits.maxIntermediateBytes = 80ull * 1024 * 1024;
         imaging::ImageBuffer encoded{};
-        if (imaging::ReadIconSourceFile(path, encoded, allocator, limits) !=
-            imaging::ImageStatus::Success) return nullptr;
+        wchar_t path[128]{};
+        bool loaded = makePath(fileName, path) &&
+            imaging::ReadIconSourceFile(path, encoded, allocator, limits) == imaging::ImageStatus::Success;
+        if (!loaded) {
+            imaging::ImageBuffer fallback{};
+            if (!makePath(cursors[i].file, path) ||
+                imaging::ReadIconSourceFile(path, fallback, allocator, limits) !=
+                    imaging::ImageStatus::Success) return nullptr;
+            encoded = std::move(fallback);
+        }
         const auto bytes = encoded.span();
         if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[1] == 'I' &&
             bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'A' &&
