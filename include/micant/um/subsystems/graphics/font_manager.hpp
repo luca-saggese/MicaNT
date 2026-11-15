@@ -109,6 +109,7 @@ public:
             }
             uint32_t baseScalar = scalar, markScalar = 0;
             decomposeAccent(scalar, baseScalar, markScalar);
+            if (!baseScalar) continue; // Combining marks do not advance the pen.
             const truetype::FaceView* face = &primary_;
             uint16_t glyph = face->glyphIndex(baseScalar);
             truetype::GlyphMetrics gm{};
@@ -171,6 +172,9 @@ public:
         int32_t pen = x;
         const truetype::FaceView* previousFace = nullptr;
         uint16_t previousGlyph = 0;
+        const truetype::FaceView* baseFace = nullptr;
+        uint16_t baseGlyph = 0;
+        int32_t basePen = x;
         size_t cursor = 0;
         uint8_t mask[GlyphMaskSize * GlyphMaskSize]{};
         while (text[cursor]) {
@@ -185,10 +189,18 @@ public:
                 baseline += lineHeight;
                 previousFace = nullptr;
                 previousGlyph = 0;
+                baseFace = nullptr;
+                baseGlyph = 0;
                 continue;
             }
             uint32_t baseScalar = scalar, markScalar = 0;
             decomposeAccent(scalar, baseScalar, markScalar);
+            if (!baseScalar) {
+                if (!baseFace || !baseGlyph || !drawCombiningMark(*baseFace, baseGlyph,
+                        markScalar, pxEm, basePen, baseline, pixels, width, height,
+                        color, mask)) return false;
+                continue;
+            }
             const truetype::FaceView* selected = &primary_;
             uint16_t glyph = selected->glyphIndex(baseScalar);
             truetype::GlyphMetrics gm{};
@@ -219,6 +231,9 @@ public:
             if (!painted) return false;
             if (markScalar && !drawCombiningMark(*selected, glyph, markScalar, pxEm,
                     pen, baseline, pixels, width, height, color, mask)) return false;
+            baseFace = selected;
+            baseGlyph = glyph;
+            basePen = pen;
             const int32_t advance = scale(gm.advanceWidth, pxEm, selected->metrics().unitsPerEm);
             if (advance < 0 || pen > INT32_MAX - advance) return false;
             pen += advance;
@@ -393,8 +408,13 @@ private:
         case 0x00CC: base = 'I'; mark = 0x0300; break;
         case 0x00D2: base = 'O'; mark = 0x0300; break;
         case 0x00D9: base = 'U'; mark = 0x0300; break;
+        case 0x00E7: base = 'c'; mark = 0x0327; break;
+        case 0x00C7: base = 'C'; mark = 0x0327; break;
         case 0x0108: base = 'C'; mark = 0x0302; break;
         case 0x0109: base = 'c'; mark = 0x0302; break;
+        case 0x0300: case 0x0301: case 0x0302: case 0x0303:
+        case 0x0308: case 0x030A: case 0x0327:
+            base = 0; mark = scalar; break;
         default: base = scalar; mark = 0; break;
         }
     }
@@ -457,19 +477,41 @@ private:
         if (!markGlyph || !baseFace.glyphBounds(baseGlyph, bx0, by0, bx1, by1) ||
             !markFace->glyphBounds(markGlyph, mx0, my0, mx1, my1)) return false;
         const int32_t baseWidth = scale(bx1 - bx0, pxEm, baseFace.metrics().unitsPerEm);
-        const int32_t markWidth = scale(mx1 - mx0, pxEm, markFace->metrics().unitsPerEm);
-        int32_t markPen = pen + scale(bx0, pxEm, baseFace.metrics().unitsPerEm) +
-                          (baseWidth - markWidth) / 2 - scale(mx0, pxEm, markFace->metrics().unitsPerEm);
-        if (drawGlyph(*markFace, markGlyph, pxEm, markPen, baseline,
+        const auto positionedMark = [&](int16_t minX, int16_t maxX,
+                                        int16_t minY, int16_t maxY,
+                                        int32_t& markPen, int32_t& markBaseline) noexcept {
+            const int32_t markWidth = scale(maxX - minX, pxEm, markFace->metrics().unitsPerEm);
+            const int64_t penValue = static_cast<int64_t>(pen) +
+                scale(bx0, pxEm, baseFace.metrics().unitsPerEm) +
+                (static_cast<int64_t>(baseWidth) - markWidth) / 2 -
+                scale(minX, pxEm, markFace->metrics().unitsPerEm);
+            const int32_t gap = pxEm / 16 ? static_cast<int32_t>(pxEm / 16) : 1;
+            const int32_t baseEdge = markScalar == 0x0327
+                ? baseline - scale(by0, pxEm, baseFace.metrics().unitsPerEm)
+                : baseline - scale(by1, pxEm, baseFace.metrics().unitsPerEm);
+            const int32_t markEdge = markScalar == 0x0327
+                ? scale(maxY, pxEm, markFace->metrics().unitsPerEm)
+                : scale(minY, pxEm, markFace->metrics().unitsPerEm);
+            const int64_t baselineValue = markScalar == 0x0327
+                ? static_cast<int64_t>(baseEdge) + gap +
+                    markEdge
+                : static_cast<int64_t>(baseEdge) - gap + markEdge;
+            if (penValue < INT32_MIN || penValue > INT32_MAX ||
+                baselineValue < INT32_MIN || baselineValue > INT32_MAX) return false;
+            markPen = static_cast<int32_t>(penValue);
+            markBaseline = static_cast<int32_t>(baselineValue);
+            return true;
+        };
+        int32_t markPen{}, markBaseline{};
+        if (!positionedMark(mx0, mx1, my0, my1, markPen, markBaseline)) return false;
+        if (drawGlyph(*markFace, markGlyph, pxEm, markPen, markBaseline,
                       pixels, width, height, color, mask)) return true;
         if (markFace == &primary_ && fallback_.valid()) {
             markFace = &fallback_;
             markGlyph = markFace->glyphIndex(markScalar);
             if (!markGlyph || !markFace->glyphBounds(markGlyph, mx0, my0, mx1, my1)) return false;
-            const int32_t fallbackWidth = scale(mx1 - mx0, pxEm, markFace->metrics().unitsPerEm);
-            markPen = pen + scale(bx0, pxEm, baseFace.metrics().unitsPerEm) +
-                      (baseWidth - fallbackWidth) / 2 - scale(mx0, pxEm, markFace->metrics().unitsPerEm);
-            return drawGlyph(*markFace, markGlyph, pxEm, markPen, baseline,
+            if (!positionedMark(mx0, mx1, my0, my1, markPen, markBaseline)) return false;
+            return drawGlyph(*markFace, markGlyph, pxEm, markPen, markBaseline,
                              pixels, width, height, color, mask);
         }
         return false;

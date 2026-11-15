@@ -259,7 +259,7 @@ void redrawDesktop() noexcept {
     micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
                                   g.wallpaperPixels);
     if (g.fontReady) micant_gui::DrawStringClipped(g.desktopPixels, g.screenW,
-        g.screenH - TASKBAR_H, 420, 48, "MicaNT — Città, perché? Ĉ ƀ", rgb(255, 255, 255));
+        g.screenH - TASKBAR_H, 420, 48, "MicaNT — Città, perché? e\xCC\x81 Ĉ ƀ", rgb(255, 255, 255));
 
     present(g.desktop);
     redrawTaskbar();
@@ -332,6 +332,14 @@ void initializeSystemFonts() noexcept {
             PrintLine("[MicaNT FontProbe] GDI layout metrics read from selected TTF");
         } else {
             PrintLine("[MicaNT FontProbe] GDI TTF metric values inconsistent");
+        }
+        SIZE precomposedAccent{}, combiningAccent{};
+        if (GetTextExtentPoint32W(g.desktopDc, L"é", 1, &precomposedAccent) &&
+            GetTextExtentPoint32W(g.desktopDc, L"e\u0301", 2, &combiningAccent) &&
+            precomposedAccent.cx == combiningAccent.cx) {
+            PrintLine("[MicaNT FontProbe] Combining accent retains the base advance");
+        } else {
+            PrintLine("[MicaNT FontProbe] Combining accent layout failed");
         }
         const HFONT alternateFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
