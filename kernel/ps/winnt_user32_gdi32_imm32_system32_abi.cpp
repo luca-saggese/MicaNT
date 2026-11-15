@@ -15,6 +15,8 @@
 #include "micant/um/subsystems/winuser/ani_image.hpp"
 #include "micant/um/native/pe.hpp"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/native_gdi_api.h"
+#include "micant/shared/native_uxtheme_api.h"
 #endif
 #include "micant/shared/win32k_client.h"
 #if defined(BUILD_SYSTEM32_GDI32_DLL)
@@ -29,6 +31,15 @@ extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 #endif
 
 namespace micant::um::winnt_user32_gdi32_imm32_abi {
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+intptr_t User32_ButtonWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+void* User32_BeginPaint(void*, WinNtPaintStruct*) noexcept;
+int32_t User32_EndPaint(void*, const WinNtPaintStruct*) noexcept;
+intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+void* User32_SetFocus(void*) noexcept;
+intptr_t User32_DefWindowProcW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+#endif
 
 namespace {
 #if defined(BUILD_SYSTEM32_USER32_DLL)
@@ -65,6 +76,78 @@ private:
     CursorMutex& lock_;
 };
 std::array<AnimatedCursor, 16> g_animatedCursors{};
+struct ButtonState {
+    void* hwnd{};
+    void* parent{};
+    uintptr_t id{};
+    uint32_t state{};
+    uint32_t style{};
+    wchar_t text[128]{};
+};
+std::array<ButtonState, 64> g_buttons{};
+void* g_hotButton{};
+uint32_t g_buttonClassState{};
+constexpr uint32_t kButtonHot = 0x01;
+constexpr uint32_t kButtonPressed = 0x02;
+constexpr uint32_t kButtonFocused = 0x04;
+constexpr uint32_t kButtonDisabled = 0x08;
+constexpr uint32_t kButtonDefault = 0x10;
+constexpr uint32_t kWsDisabled = 0x08000000u;
+constexpr uint32_t kBsTypeMask = 0x0Fu;
+constexpr uint32_t kBsPushButton = 0u;
+constexpr uint32_t kBsDefPushButton = 1u;
+constexpr uint32_t kWmNcCreate = 0x0081u;
+constexpr uint32_t kWmDestroy = 0x0002u;
+constexpr uint32_t kWmNcDestroy = 0x0082u;
+constexpr uint32_t kWmPaint = 0x000Fu;
+constexpr uint32_t kWmEnable = 0x000Au;
+constexpr uint32_t kWmSetFocus = 0x0007u;
+constexpr uint32_t kWmKillFocus = 0x0008u;
+constexpr uint32_t kWmMouseMove = 0x0200u;
+constexpr uint32_t kWmLButtonDown = 0x0201u;
+constexpr uint32_t kWmLButtonUp = 0x0202u;
+constexpr uint32_t kWmKeyDown = 0x0100u;
+constexpr uint32_t kWmKeyUp = 0x0101u;
+constexpr uint32_t kWmMouseLeave = 0x02A3u;
+constexpr uint32_t kWmCommand = 0x0111u;
+constexpr uint32_t kBmGetState = 0x00F2u;
+constexpr uint32_t kBmSetState = 0x00F3u;
+constexpr uint32_t kBmSetStyle = 0x00F4u;
+constexpr uint32_t kBmClick = 0x00F5u;
+constexpr uint32_t kBmGetCheck = 0x00F0u;
+constexpr uint32_t kBnClicked = 0u;
+constexpr uint32_t kMkLButton = 0x0001u;
+constexpr uint32_t kVkSpace = 0x20u;
+constexpr uint32_t kDtCenter = 0x00000001u;
+constexpr uint32_t kDtVCenter = 0x00000004u;
+constexpr uint32_t kDtSingleLine = 0x00000020u;
+constexpr uint32_t kDtNoPrefix = 0x00000800u;
+constexpr uint32_t kDibRgb = 0u;
+constexpr int32_t kStockDefaultGuiFont = 17;
+constexpr uint32_t kColorWindowText = 0xFF202124u;
+constexpr uint32_t kColorButton = 0xFFF0F0F0u;
+constexpr uint32_t kColorButtonHot = 0xFFE5EEF9u;
+constexpr uint32_t kColorButtonPressed = 0xFFD7E4F2u;
+constexpr uint32_t kColorButtonDisabled = 0xFFE8E8E8u;
+constexpr uint32_t kColorBorder = 0xFF8A8A8Au;
+struct ButtonLock {
+    void lock() noexcept {
+        while (__atomic_exchange_n(&locked, 1u, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    void unlock() noexcept { __atomic_store_n(&locked, 0u, __ATOMIC_RELEASE); }
+    uint32_t locked{};
+};
+ButtonLock g_buttonLock{};
+struct ButtonLockGuard {
+    ButtonLock& lock;
+    explicit ButtonLockGuard(ButtonLock& value) noexcept : lock(value) { lock.lock(); }
+    ~ButtonLockGuard() { lock.unlock(); }
+};
+ButtonState* findButton(void* hwnd) noexcept {
+    for (auto& button : g_buttons) if (button.hwnd == hwnd && hwnd) return &button;
+    return nullptr;
+}
 struct SharedPeCursorCacheEntry {
     void* module{};
     void* cursor{};
@@ -1342,6 +1425,43 @@ void* User32_CreateWindowExW(
     void* hMenu,
     void* hInstance,
     void* lpParam) noexcept {
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    bool buttonClass = false;
+    if (reinterpret_cast<uintptr_t>(lpClassName) > UINT16_MAX) {
+        constexpr wchar_t name[] = L"BUTTON";
+        buttonClass = true;
+        for (size_t i = 0; i < std::size(name); ++i) {
+            wchar_t character = lpClassName[i];
+            if (character >= L'a' && character <= L'z') character -= L'a' - L'A';
+            if (character != name[i]) { buttonClass = false; break; }
+        }
+    }
+    if (buttonClass) {
+        const uint32_t type = dwStyle & kBsTypeMask;
+        if (type != kBsPushButton && type != kBsDefPushButton) {
+            setThreadLastError(87); // ERROR_INVALID_PARAMETER: unsupported BS_* type.
+            return nullptr;
+        }
+        uint32_t expected = 0;
+        if (__atomic_compare_exchange_n(&g_buttonClassState, &expected, 1u,
+                                        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            using RegisterFn = uint16_t (*)(const wchar_t*, void*);
+            const auto registerClass = Win32kProc<RegisterFn>("MicaWin32kRegisterClassW");
+            const uint16_t atom = registerClass
+                ? registerClass(L"BUTTON", reinterpret_cast<void*>(&User32_ButtonWndProc)) : 0;
+            __atomic_store_n(&g_buttonClassState, atom ? 2u : 0u, __ATOMIC_RELEASE);
+            if (!atom) return nullptr;
+        } else {
+            for (uint32_t spins = 0; spins < 1000000; ++spins) {
+                const uint32_t state = __atomic_load_n(&g_buttonClassState, __ATOMIC_ACQUIRE);
+                if (state == 2) break;
+                if (state == 0) return nullptr;
+                __asm__ __volatile__("pause" ::: "memory");
+                if (spins == 999999) return nullptr;
+            }
+        }
+    }
+#endif
     using Fn = void* (*)(uint32_t,const wchar_t*,const wchar_t*,uint32_t,int32_t,int32_t,int32_t,int32_t,void*,void*,void*,void*);
     auto fn=Win32kProc<Fn>("MicaWin32kCreateWindowExW");
     void* hwnd = fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
@@ -1491,6 +1611,362 @@ int32_t User32_EndPaint(void* hWnd, const WinNtPaintStruct* paint) noexcept {
     return presented && released;
 }
 
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+namespace {
+uint32_t buttonStateFor(void* hwnd) noexcept {
+    ButtonLockGuard guard(g_buttonLock);
+    const auto* button = findButton(hwnd);
+    return button ? button->state : kButtonDisabled;
+}
+
+void invalidateButton(void* hwnd) noexcept {
+    using PostFn = int32_t (*)(void*, uint32_t, uintptr_t, intptr_t);
+    const auto post = Win32kProc<PostFn>("MicaWin32kPostMessageW");
+    if (post) (void)post(hwnd, kWmPaint, 0, 0);
+}
+
+void leaveHotButton(void* except) noexcept {
+    void* previous{};
+    {
+        ButtonLockGuard guard(g_buttonLock);
+        if (!g_hotButton || g_hotButton == except) return;
+        previous = g_hotButton;
+        if (auto* button = findButton(previous)) {
+            button->state &= ~(kButtonHot | kButtonPressed);
+        }
+        g_hotButton = nullptr;
+    }
+    invalidateButton(previous);
+}
+
+void notifyButtonClicked(void* hwnd) noexcept {
+    ButtonState copy{};
+    {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* button = findButton(hwnd);
+        if (!button || (button->state & kButtonDisabled)) return;
+        copy = *button;
+    }
+    if (copy.parent) {
+        const uintptr_t command = (copy.id & 0xFFFFu) | (kBnClicked << 16);
+        (void)User32_SendMessageW(copy.parent, kWmCommand, command,
+                                  reinterpret_cast<intptr_t>(hwnd));
+    }
+}
+
+uint32_t colorRef(uint32_t argb) noexcept {
+    return ((argb >> 16) & 0xFFu) | (argb & 0x0000FF00u) |
+           ((argb & 0xFFu) << 16);
+}
+
+struct ButtonDibInfo {
+    uint32_t size{40};
+    int32_t width{}, height{};
+    uint16_t planes{1}, bitCount{32};
+    uint32_t compression{kDibRgb}, imageSize{};
+    int32_t xPixelsPerMeter{}, yPixelsPerMeter{};
+    uint32_t colorsUsed{}, colorsImportant{}, colorTable{};
+};
+struct ButtonTextExtent { int32_t cx{}, cy{}; };
+
+bool fillButtonRect(void* dc, const WinNtRect& rect, uint32_t color) noexcept {
+    if (auto* brush = CreateSolidBrush(colorRef(color))) {
+        const int32_t result = FillRect(dc, &rect, brush);
+        (void)DeleteObject(brush);
+        if (result) return true;
+    }
+    using FillFn = int32_t (*)(void*, const MicaWin32kRect*, uint32_t);
+    const auto fill = Win32kProc<FillFn>("MicaWin32kFillRect");
+    return fill && fill(dc, reinterpret_cast<const MicaWin32kRect*>(&rect),
+                        colorRef(color));
+}
+
+void drawButtonFallback(void* dc, int32_t width, int32_t height,
+                        const ButtonState& button) noexcept {
+    const uint32_t background = (button.state & kButtonDisabled) ? kColorButtonDisabled :
+        (button.state & kButtonPressed) ? kColorButtonPressed :
+        (button.state & kButtonHot) ? kColorButtonHot : kColorButton;
+    (void)fillButtonRect(dc, {0, 0, width, height}, background);
+    (void)fillButtonRect(dc, {0, 0, width, 1}, kColorBorder);
+    (void)fillButtonRect(dc, {0, height - 1, width, height}, kColorBorder);
+    (void)fillButtonRect(dc, {0, 0, 1, height}, kColorBorder);
+    (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
+}
+
+void drawButtonFocus(void* dc, int32_t width, int32_t height,
+                     uint32_t color) noexcept {
+    auto* brush = CreateSolidBrush(colorRef(color));
+    if (!brush) return;
+    constexpr int32_t inset = 3;
+    const WinNtRect top{inset, inset, width - inset, inset + 1};
+    const WinNtRect bottom{inset, height - inset - 1, width - inset, height - inset};
+    const WinNtRect left{inset, inset, inset + 1, height - inset};
+    const WinNtRect right{width - inset - 1, inset, width - inset, height - inset};
+    (void)FillRect(dc, &top, brush);
+    (void)FillRect(dc, &bottom, brush);
+    (void)FillRect(dc, &left, brush);
+    (void)FillRect(dc, &right, brush);
+    (void)DeleteObject(brush);
+}
+
+bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
+                  int32_t width, int32_t height) noexcept {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return false;
+    void* memoryDc = CreateCompatibleDC(nullptr);
+    if (!memoryDc) return false;
+    ButtonDibInfo info{};
+    info.width = width;
+    info.height = -height;
+    void* pixels{};
+    void* bitmap = CreateDIBSection(nullptr, &info, 0, &pixels, nullptr, 0);
+    if (!bitmap || !pixels) {
+        if (bitmap) (void)DeleteObject(bitmap);
+        (void)DeleteDC(memoryDc);
+        return false;
+    }
+    void* oldBitmap = SelectObject(memoryDc, bitmap);
+    void* stockFont = GetStockObject(kStockDefaultGuiFont);
+    void* oldFont = stockFont ? SelectObject(memoryDc, stockFont) : nullptr;
+    if (!oldBitmap || !oldFont) {
+        if (oldFont) (void)SelectObject(memoryDc, oldFont);
+        if (oldBitmap) (void)SelectObject(memoryDc, oldBitmap);
+        (void)DeleteObject(bitmap);
+        (void)DeleteDC(memoryDc);
+        return false;
+    }
+
+    const WinNtRect bounds{0, 0, width, height};
+    const int32_t themeState = (button.state & kButtonDisabled) ? 4 :
+        (button.state & kButtonPressed) ? 3 :
+        (button.state & kButtonHot) ? 2 :
+        (button.state & kButtonDefault) ? 5 : 1;
+    void* theme = OpenThemeData(hwnd, L"BUTTON");
+    bool backgroundDrawn = theme &&
+        DrawThemeBackground(theme, memoryDc, 1, themeState, &bounds, nullptr) == 0;
+    if (!backgroundDrawn) drawButtonFallback(memoryDc, width, height, button);
+
+    uint32_t textColor = (button.state & kButtonDisabled)
+        ? 0xFF777777u : kColorWindowText;
+    if (theme) {
+        uint32_t themedColor{};
+        if (GetThemeColor(theme, 1, themeState, 3803, &themedColor) == 0)
+            textColor = themedColor;
+    }
+    bool textDrawn = theme &&
+        DrawThemeText(theme, memoryDc, 1, themeState, button.text, -1,
+            kDtCenter | kDtVCenter | kDtSingleLine | kDtNoPrefix, 0, &bounds) == 0;
+    if (!textDrawn && button.text[0]) {
+        ButtonTextExtent extent{};
+        size_t textLength{};
+        while (textLength < std::size(button.text) && button.text[textLength]) ++textLength;
+        if (textLength < std::size(button.text) &&
+            GetTextExtentPoint32W(memoryDc, button.text,
+                static_cast<int32_t>(textLength), &extent) &&
+            extent.cx >= 0 && extent.cy > 0) {
+            (void)SetBkMode(memoryDc, 1);
+            (void)SetTextColor(memoryDc, colorRef(textColor));
+            const int32_t x = std::max(0, (width - extent.cx) / 2);
+            const int32_t y = std::max(0, (height - extent.cy) / 2);
+            (void)TextOutW(memoryDc, x, y, button.text,
+                           static_cast<int32_t>(textLength));
+        }
+    }
+    if (button.state & kButtonFocused) drawButtonFocus(memoryDc, width, height, textColor);
+    const int32_t copied = BitBlt(targetDc, 0, 0, width, height,
+                                   memoryDc, 0, 0, 0x00CC0020u);
+    if (theme) (void)CloseThemeData(theme);
+    (void)SelectObject(memoryDc, oldFont);
+    (void)SelectObject(memoryDc, oldBitmap);
+    const int32_t bitmapDeleted = DeleteObject(bitmap);
+    const int32_t dcDeleted = DeleteDC(memoryDc);
+    return copied && bitmapDeleted && dcDeleted;
+}
+} // namespace
+
+intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
+                              uintptr_t wParam, intptr_t lParam) noexcept {
+    if (message == kWmNcCreate) {
+        const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
+        if (!create || (static_cast<uint32_t>(create->style) & kBsTypeMask) > kBsDefPushButton)
+            return 0;
+        ButtonState initial{};
+        initial.hwnd = hwnd;
+        initial.parent = create->parent;
+        initial.id = reinterpret_cast<uintptr_t>(create->menu);
+        initial.style = static_cast<uint32_t>(create->style);
+        if (initial.style & kWsDisabled) initial.state |= kButtonDisabled;
+        if ((initial.style & kBsTypeMask) == kBsDefPushButton)
+            initial.state |= kButtonDefault;
+        if (create->title) {
+            size_t length{};
+            while (length < std::size(initial.text) - 1 && create->title[length]) {
+                initial.text[length] = create->title[length];
+                ++length;
+            }
+            if (create->title[length]) return 0;
+        }
+        ButtonLockGuard guard(g_buttonLock);
+        for (auto& entry : g_buttons) {
+            if (entry.hwnd) continue;
+            entry = initial;
+            return 1;
+        }
+        return 0;
+    }
+
+    if (message == kBmGetState) {
+        const uint32_t state = buttonStateFor(hwnd);
+        return ((state & kButtonPressed) ? 0x0004 : 0) |
+               ((state & kButtonFocused) ? 0x0008 : 0);
+    }
+    if (message == kBmGetCheck) return 0; // Push buttons are never checked.
+    if (message == kBmSetState) {
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* button = findButton(hwnd);
+            if (!button) return 0;
+            if (wParam) button->state |= kButtonPressed;
+            else button->state &= ~kButtonPressed;
+        }
+        invalidateButton(hwnd);
+        return 0;
+    }
+    if (message == kBmSetStyle) {
+        const uint32_t type = static_cast<uint32_t>(wParam) & kBsTypeMask;
+        if (type != kBsPushButton && type != kBsDefPushButton) return 0;
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* button = findButton(hwnd);
+            if (!button) return 0;
+            button->style = (button->style & ~kBsTypeMask) | type;
+            if (type == kBsDefPushButton) button->state |= kButtonDefault;
+            else button->state &= ~kButtonDefault;
+        }
+        if (lParam) invalidateButton(hwnd);
+        return 0;
+    }
+    if (message == kBmClick) {
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* button = findButton(hwnd);
+            if (!button || (button->state & kButtonDisabled)) return 0;
+            button->state |= kButtonPressed;
+        }
+        invalidateButton(hwnd);
+        notifyButtonClicked(hwnd);
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            if (auto* button = findButton(hwnd)) button->state &= ~kButtonPressed;
+        }
+        invalidateButton(hwnd);
+        return 0;
+    }
+
+    if (message == kWmNcDestroy || message == kWmDestroy) {
+        bool wasHot = false;
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* button = findButton(hwnd);
+            if (button) {
+                wasHot = g_hotButton == hwnd;
+                *button = {};
+            }
+            if (wasHot) g_hotButton = nullptr;
+        }
+        if (message == kWmNcDestroy) return 0;
+        return 0;
+    }
+
+    bool repaint = false;
+    bool click = false;
+    if (message == kWmMouseMove) leaveHotButton(hwnd);
+    if (message == kWmSetFocus || message == kWmKillFocus ||
+        message == kWmEnable || message == kWmMouseMove ||
+        message == kWmMouseLeave || message == kWmLButtonDown ||
+        message == kWmLButtonUp || message == kWmKeyDown || message == kWmKeyUp ||
+        message == 0x031Au || message == 0x001Au) {
+        ButtonLockGuard guard(g_buttonLock);
+        auto* button = findButton(hwnd);
+        if (!button) return 0;
+        const uint32_t oldState = button->state;
+        switch (message) {
+        case kWmSetFocus:
+            button->state |= kButtonFocused;
+            break;
+        case kWmKillFocus:
+            button->state &= ~(kButtonFocused | kButtonPressed);
+            break;
+        case kWmEnable:
+            if (wParam) button->state &= ~kButtonDisabled;
+            else button->state = (button->state | kButtonDisabled) & ~kButtonPressed;
+            break;
+        case kWmMouseMove:
+            g_hotButton = hwnd;
+            button->state |= kButtonHot;
+            if ((wParam & kMkLButton) && (button->state & kButtonPressed))
+                button->state |= kButtonPressed;
+            break;
+        case kWmMouseLeave:
+            button->state &= ~(kButtonHot | kButtonPressed);
+            if (g_hotButton == hwnd) g_hotButton = nullptr;
+            break;
+        case kWmLButtonDown:
+            if (!(button->state & kButtonDisabled)) {
+                button->state |= kButtonHot | kButtonPressed | kButtonFocused;
+                g_hotButton = hwnd;
+            }
+            break;
+        case kWmLButtonUp:
+            click = (button->state & kButtonPressed) &&
+                    !(button->state & kButtonDisabled);
+            button->state &= ~kButtonPressed;
+            break;
+        case kWmKeyDown:
+            if (wParam == kVkSpace && !(button->state & kButtonDisabled))
+                button->state |= kButtonPressed;
+            break;
+        case kWmKeyUp:
+            click = wParam == kVkSpace && (button->state & kButtonPressed) &&
+                    !(button->state & kButtonDisabled);
+            if (wParam == kVkSpace) button->state &= ~kButtonPressed;
+            break;
+        case 0x031Au: // WM_THEMECHANGED
+        case 0x001Au: // WM_SETTINGCHANGE
+            repaint = true;
+            break;
+        }
+        repaint |= oldState != button->state;
+    }
+    if (message == kWmLButtonDown) (void)User32_SetFocus(hwnd);
+    if (repaint) invalidateButton(hwnd);
+    if (message == kWmPaint) {
+        ButtonState button{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            const auto* current = findButton(hwnd);
+            if (!current) return 0;
+            button = *current;
+        }
+        WinNtPaintStruct paint{};
+        void* targetDc = User32_BeginPaint(hwnd, &paint);
+        if (!targetDc) return 0;
+        MicaWin32kRect client{};
+        using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
+        const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
+        const bool hasRect = getRect && getRect(hwnd, &client);
+        bool drawn = false;
+        if (hasRect && client.right > 0 && client.bottom > 0)
+            drawn = renderButton(hwnd, button, targetDc, client.right, client.bottom);
+        if (!drawn && hasRect && client.right > 0 && client.bottom > 0)
+            drawButtonFallback(targetDc, client.right, client.bottom, button);
+        (void)User32_EndPaint(hwnd, &paint);
+        return hasRect && client.right > 0 && client.bottom > 0;
+    }
+    if (click) notifyButtonClicked(hwnd);
+    return User32_DefWindowProcW(hwnd, message, wParam, lParam);
+}
+#endif
+
 intptr_t User32_DefWindowProcW(void* hWnd, uint32_t Msg, uintptr_t wParam, intptr_t lParam) noexcept {
     using Fn=intptr_t (*)(void*,uint32_t,uintptr_t,intptr_t);
     auto fn=Win32kProc<Fn>("MicaWin32kDefWindowProcW");
@@ -1552,6 +2028,16 @@ int32_t User32_TranslateMessage(const WinNtMsg* lpMsg) noexcept {
 
 intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
     if (!lpMsg) return 0;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (lpMsg->message == 0x0200u) {
+        bool buttonTarget = false;
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            buttonTarget = findButton(lpMsg->hwnd) != nullptr;
+        }
+        if (!buttonTarget) leaveHotButton(nullptr);
+    }
+#endif
     using Fn=intptr_t (*)(const MicaWin32kMessage*);
     auto fn=Win32kProc<Fn>("MicaWin32kDispatchMessageW");
     MicaWin32kMessage msg{lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam,lpMsg->time,{lpMsg->pt.x,lpMsg->pt.y}};

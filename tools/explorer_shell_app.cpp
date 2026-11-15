@@ -94,6 +94,8 @@ struct ShellState {
     bool commonControlsProgressReported{};
     bool themeBackgroundExReported{};
     HWND themeProgressProbe{};
+    HWND themeButtonProbe{};
+    bool themeButtonProbeReported{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -1558,6 +1560,27 @@ void openView(View view) noexcept {
     drawAppWindow(*app);
     redrawDesktop();
     present(app->hwnd);
+    if (view == View::MyComputer && !g.themeButtonProbe) {
+        constexpr uintptr_t kThemeButtonId = 0x771u;
+        g.themeButtonProbe = CreateWindowExW(0, L"BUTTON", L"Theme button",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 530, 300, 120, 40,
+            app->hwnd, reinterpret_cast<HMENU>(kThemeButtonId), nullptr, nullptr);
+        if (g.themeButtonProbe) {
+            ShowWindow(g.themeButtonProbe, SW_SHOW);
+            UpdateWindow(g.themeButtonProbe);
+            constexpr UINT kBmGetState = 0x00F2u;
+            constexpr UINT kBmClick = 0x00F5u;
+            const bool initialState = SendMessageW(g.themeButtonProbe,
+                kBmGetState, 0, 0) == 0;
+            (void)SendMessageW(g.themeButtonProbe, kBmClick, 0, 0);
+            if (initialState && g.themeButtonProbeReported)
+                PrintLine("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered");
+            else
+                PrintLine("[MicaNT Theme] Production User32 BUTTON state/notification mismatch");
+        } else {
+            PrintLine("[MicaNT Theme] Production User32 BUTTON creation failed");
+        }
+    }
 }
 
 void toggleStart() noexcept {
@@ -1602,6 +1625,11 @@ void updateClock() noexcept {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NCCREATE) return 1;
+    if (message == WM_COMMAND && reinterpret_cast<HWND>(lParam) == g.themeButtonProbe &&
+        LOWORD(wParam) == 0x771u && HIWORD(wParam) == BN_CLICKED) {
+        g.themeButtonProbeReported = true;
+        return 0;
+    }
     if (hwnd == g.desktop &&
         (message == 0x001A /* WM_SETTINGCHANGE */ ||
          message == 0x031A /* WM_THEMECHANGED */)) {

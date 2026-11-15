@@ -355,14 +355,11 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] Production comctl32 progress control initialized" in startup_serial:
+                if "[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in startup_serial:
                     break
                 time.sleep(0.1)
             else:
-                raise RuntimeError("Explorer did not initialize the production comctl32 progress control")
-            progress_screen = screen("theme-progress-control.ppm")
-            if pixel_at(progress_screen, 820, 70) == pixel_at(progress_screen, 960, 70):
-                raise RuntimeError("Progress control fill and background pixels were indistinguishable")
+                raise RuntimeError("Explorer did not verify the production comctl32 progress pixels")
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": 40}},
                 {"type": "rel", "data": {"axis": "y", "value": 20}},
@@ -393,6 +390,35 @@ def verify_mouse(
             else:
                 raise RuntimeError("Explorer did not dispatch Enter into an application window action")
             opened = wait_for_changed_screen(after, "app-window.ppm", 10000)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if "[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial:
+                    break
+                if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
+                    raise RuntimeError("Production User32 BUTTON state or notification failed")
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")
+            button_normal = screen("theme-button-normal.ppm")
+            move_to(590, 320)
+            button_hover = screen("theme-button-hover.ppm")
+            set_left_button(True)
+            button_pressed = screen("theme-button-pressed.ppm")
+            set_left_button(False)
+            def button_region_changed(left: bytes, right: bytes) -> int:
+                changed = 0
+                for y in range(300, 340):
+                    for x in range(530, 650):
+                        if pixel_at(left, x, y) != pixel_at(right, x, y):
+                            changed += 1
+                return changed
+            if button_region_changed(button_normal, button_hover) < 4:
+                raise RuntimeError("User32 BUTTON hover did not change its rendered pixels")
+            if button_region_changed(button_hover, button_pressed) < 4:
+                raise RuntimeError("User32 BUTTON pressed state did not change its rendered pixels")
+            # The first Explorer window is placed at (190,90); exercise its
+            # first drive row and the parent button before opening another view.
             def click_at(x: int, y: int) -> None:
                 move_to(x, y)
                 execute("input-send-event", {"events": [
@@ -404,7 +430,7 @@ def verify_mouse(
                 ]})
 
             # Render a static Control Panel row so theme text pixels are
-            # covered even when the filesystem root has no entries.
+            # covered even when the concurrent C:\ root enumeration is empty.
             click_at(40, 748)
             time.sleep(0.2)
             click_at(40, 562)
@@ -416,10 +442,42 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer Control Panel row missed the active theme text color")
-            # Close the second app window before the existing overlapping
-            # window test sends Enter to open its actual second window.
-            click_at(670, 115)
+            # Escape closes the focused Control Panel window without relying
+            # on titlebar geometry or screen scaling.
+            for down in (True, False):
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": down,
+                        "key": {"type": "qcode", "data": "esc"},
+                    },
+                }]})
             time.sleep(0.3)
+
+            serial = serial_path.read_text(encoding="utf-8", errors="replace")
+            if "[MicaNT Explorer] Initial filesystem directory is empty" not in serial:
+                opened_directory = False
+                for row_index in range(8):
+                    click_at(390, 218 + row_index * 26)
+                    deadline = time.monotonic() + 1.5
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                        if "[MicaNT Explorer] Filesystem directory enumerated after folder activation" in serial:
+                            opened_directory = True
+                            break
+                        time.sleep(0.1)
+                    if opened_directory:
+                        break
+                if not opened_directory:
+                    raise RuntimeError("Explorer folder row did not open from mouse input")
+                click_at(210, 150)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if "[MicaNT Explorer] Parent filesystem directory enumerated" in serial:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Explorer parent-folder button did not navigate upward")
             for down in (True, False):
                 execute("input-send-event", {"events": [{
                     "type": "key", "data": {
@@ -664,6 +722,16 @@ def verify_mouse(
                         brought_forward, "one-window-after-close.ppm", 5000)
             destroyed_count = 2
             for cycle in range(3):
+                # Closing the last app leaves no foreground target. Reactivate
+                # the desktop before sending Enter to open the next cycle.
+                move_to(500, 600)
+                execute("input-send-event", {"events": [
+                    {"type": "btn", "data": {"button": "left", "down": True}},
+                ]})
+                time.sleep(0.08)
+                execute("input-send-event", {"events": [
+                    {"type": "btn", "data": {"button": "left", "down": False}},
+                ]})
                 for down in (True, False):
                     execute("input-send-event", {"events": [{
                         "type": "key", "data": {
@@ -723,6 +791,7 @@ def verify_mouse(
                     desktop_light = wait_for_changed_screen(
                         desktop_light, "live-window-light.ppm", 5000)
                     light_title_pixel = pixel_at(desktop_light, 230, 126)
+                    light_start_surface_pixel = pixel_at(desktop_light, 90, 733)
 
                     def click_left() -> None:
                         set_left_button(True)
@@ -750,6 +819,8 @@ def verify_mouse(
                         raise RuntimeError("Runtime theme switch produced no scanout change")
                     if pixel_at(dark_screen, 230, 126) == light_title_pixel:
                         raise RuntimeError("Live titlebar pixel did not follow the Dark theme")
+                    if pixel_at(dark_screen, 90, 733) == light_start_surface_pixel:
+                        raise RuntimeError("Taskbar Start surface pixel did not follow the Dark theme")
 
                     moved_marker_count = serial_path.read_text(
                         encoding="utf-8", errors="replace").count(

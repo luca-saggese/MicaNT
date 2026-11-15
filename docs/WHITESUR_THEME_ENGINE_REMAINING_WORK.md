@@ -175,6 +175,18 @@ the evidence named here, not just declarations or a successful compile.
   Ring 3/DIB assertion and latest integrated --verify-input run all passed.
 - [ ] Connect actual production DLL renderers for buttons, checkboxes, radio
   buttons, textboxes, menus, tabs and scrollbars to UxTheme/GDI.
+- [x] The canonical `user32_boot` now registers `BUTTON` lazily and renders
+  `BS_PUSHBUTTON`/`BS_DEFPUSHBUTTON` through UxTheme/GDI, with a Base fallback
+  when theme/DC resources fail. It implements pressed/focus/disabled/hover
+  state, Space and mouse activation, `BM_GETSTATE`/`BM_GETCHECK`/`BM_SETSTATE`/
+  `BM_SETSTYLE`/`BM_CLICK`, and parent `WM_COMMAND/BN_CLICKED`; unsupported
+  `BS_*` types fail creation. Explorer's actual User32 import verified
+  `BM_GETSTATE`, `BM_CLICK`, and the parent notification. QEMU sampled the
+  control's DIB-backed screen pixels in normal (`#F0F0F0`), hover (`#E5EEF9`)
+  and pressed (`#D7E4F2`) states in
+  `/private/tmp/micant-theme-user32-button-run2`. Disabled/focus keyboard
+  transitions and cancellation after dragging outside still need dedicated
+  input probes; Win32k has no mouse-capture path yet.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
