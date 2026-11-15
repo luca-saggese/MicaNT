@@ -58,6 +58,11 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-uxtheme-failure-contract-run/serial.log`; QEMU input,
   window geometry, cleanup and stable boot passed in the same run. This closes
   one fabricated-success case, not the full export audit.
+- [x] Unsupported `BeginBufferedAnimation` clears both optional HDC outputs
+  before returning null. Explorer calls the freestanding DLL export with
+  sentinel outputs in Ring 3; QEMU logged the cleared outputs together with
+  `E_NOTIMPL` for the unsupported end/stop operations in
+  `/private/tmp/micant-uxtheme-buffer-output-run`.
 - [x] `BufferedPaintStopAllAnimations` now returns `E_NOTIMPL` and is exported
   by the actual freestanding DLL. `GetThemeMargins` clears its output on
   failure; `OpenThemeData`/`IsThemeActive` require a fresh valid Win32k

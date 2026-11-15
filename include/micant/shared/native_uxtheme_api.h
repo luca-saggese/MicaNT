@@ -47,6 +47,8 @@ MICANT_UXTHEME_API int32_t WINAPI GetThemeBackgroundExtent(MicaThemeHandle, void
                                                            const void*, void*);
 MICANT_UXTHEME_API int32_t WINAPI IsThemeActive(void);
 MICANT_UXTHEME_API int32_t WINAPI IsAppThemed(void);
+MICANT_UXTHEME_API void* WINAPI BeginBufferedAnimation(void*, void*, const void*, int32_t,
+                                                       void*, void*, void**, void**);
 MICANT_UXTHEME_API int32_t WINAPI EndBufferedAnimation(void*, int32_t);
 MICANT_UXTHEME_API int32_t WINAPI BufferedPaintStopAllAnimations(void*);
 

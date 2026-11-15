@@ -385,7 +385,9 @@ inline win32::HRESULT GetThemeTransitionDuration(HTHEME /*hTheme*/, int /*iPartI
     return detail::kNotImplemented;
 }
 
-inline HANAnimation BeginBufferedAnimation(win32::HWND /*hwnd*/, void* /*hdcTarget*/, const void* /*rcTarget*/, int /*dwFormat*/, void* /*pPaintParams*/, void* /*pAnimationParams*/, void* /*phdcFrom*/, void* /*phdcTo*/) noexcept {
+inline HANAnimation BeginBufferedAnimation(win32::HWND /*hwnd*/, void* /*hdcTarget*/, const void* /*rcTarget*/, int /*dwFormat*/, void* /*pPaintParams*/, void* /*pAnimationParams*/, void* phdcFrom, void* phdcTo) noexcept {
+    if (phdcFrom) *static_cast<void**>(phdcFrom) = nullptr;
+    if (phdcTo) *static_cast<void**>(phdcTo) = nullptr;
     return nullptr;
 }
 

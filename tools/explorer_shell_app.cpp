@@ -644,11 +644,16 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     PrintThemeWin32Error("[MicaNT Theme] margin right", static_cast<uint32_t>(rejectedMargins.cxRightWidth));
     PrintThemeWin32Error("[MicaNT Theme] margin top", static_cast<uint32_t>(rejectedMargins.cyTopHeight));
     PrintThemeWin32Error("[MicaNT Theme] margin bottom", static_cast<uint32_t>(rejectedMargins.cyBottomHeight));
+    void* animationFromDc = reinterpret_cast<void*>(1);
+    void* animationToDc = reinterpret_cast<void*>(1);
+    const auto animationBuffer = BeginBufferedAnimation(nullptr, nullptr, nullptr, 0,
+        nullptr, nullptr, &animationFromDc, &animationToDc);
     const int32_t unsupportedAnimation = EndBufferedAnimation(nullptr, 0);
     const int32_t unsupportedStop = BufferedPaintStopAllAnimations(nullptr);
-    if (unsupportedAnimation == static_cast<int32_t>(0x80004001u) &&
+    if (!animationBuffer && !animationFromDc && !animationToDc &&
+        unsupportedAnimation == static_cast<int32_t>(0x80004001u) &&
         unsupportedStop == static_cast<int32_t>(0x80004001u))
-        PrintLine("[MicaNT Theme] Unsupported buffered animation returns E_NOTIMPL");
+        PrintLine("[MicaNT Theme] Buffered animation failure outputs cleared; E_NOTIMPL surfaced");
     else
         PrintLine("[MicaNT Theme] Buffered animation failure contract mismatch");
     g.visualTheme = candidate;
