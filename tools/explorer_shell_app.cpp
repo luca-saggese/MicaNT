@@ -1118,6 +1118,30 @@ extern "C" void _start(const char* = nullptr) {
     PrintLine(windowClass.hCursor
         ? "[MicaNT Cursor] Explorer class arrow loaded"
         : "[MicaNT Cursor] Explorer class arrow load failed");
+    wchar_t animatedCursorPath[512]{};
+    size_t animatedPathCursor = 0;
+    constexpr wchar_t kBusyCursorPath[] =
+        L"\\System\\Cursors\\MiniMouse\\mini_mouse_busy.ani";
+    if (appendSystemRoot(animatedCursorPath, std::size(animatedCursorPath), animatedPathCursor) &&
+        appendWide(animatedCursorPath, std::size(animatedCursorPath), animatedPathCursor,
+                   kBusyCursorPath, std::size(kBusyCursorPath) - 1)) {
+        HCURSOR animatedCursor = static_cast<HCURSOR>(LoadImageW(nullptr, animatedCursorPath,
+            IMAGE_CURSOR, 24, 24, LR_LOADFROMFILE));
+        if (animatedCursor) {
+            SetCursor(animatedCursor);
+            for (unsigned frame = 0; frame < 4; ++frame) {
+                Sleep(40);
+                MSG pending{};
+                (void)PeekMessageW(&pending, nullptr, 0, 0, PM_NOREMOVE);
+            }
+            SetCursor(windowClass.hCursor);
+            PrintLine(DestroyCursor(animatedCursor)
+                ? "[MicaNT Cursor] ANI load, resize and release passed"
+                : "[MicaNT Cursor] ANI release failed");
+        } else {
+            PrintLine("[MicaNT Cursor] ANI load or resize failed");
+        }
+    }
     windowClass.lpszClassName = kClassName;
     if (!RegisterClassExW(&windowClass)) {
         for (;;) __asm__ __volatile__("pause");
