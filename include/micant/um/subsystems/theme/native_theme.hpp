@@ -228,10 +228,13 @@ struct NativeControlStyle {
     uint16_t minHeight{};
     uint16_t padding[4]{}; // top, right, bottom, left
     uint16_t fontSize{};
+    uint16_t fontWeight{400};
+    char fontFamily[32]{};
     uint8_t opacity{255};
+    bool fontItalic{};
     bool hasForeground{}, hasBackground{}, hasBorder{};
     bool hasBorderRadius{}, hasBorderWidth{}, hasMinWidth{}, hasMinHeight{};
-    bool hasPadding{}, hasFontSize{}, hasOpacity{};
+    bool hasPadding{}, hasFontSize{}, hasFontWeight{}, hasFontStyle{}, hasFontFamily{}, hasOpacity{};
 };
 
 struct NativeTheme {
@@ -257,6 +260,68 @@ inline bool parseCssLength(std::string_view text, uint16_t& output) noexcept {
     double number{}; bool percent{};
     if (!parseCssNumber(text, number, percent) || percent || number < 0.0 || number > 65535.0) return false;
     output = static_cast<uint16_t>(number + 0.5);
+    return true;
+}
+
+inline bool parseCssFontSize(std::string_view text, uint16_t& output) noexcept {
+    while (!text.empty() && isSpace(text.front())) text.remove_prefix(1);
+    while (!text.empty() && isSpace(text.back())) text.remove_suffix(1);
+    double scale = 1.0;
+    const bool pixels = text.size() >= 2 && equalAscii(text.substr(text.size() - 2), "px");
+    const bool points = text.size() >= 2 && equalAscii(text.substr(text.size() - 2), "pt");
+    if (pixels)
+        text.remove_suffix(2);
+    else if (points) {
+        text.remove_suffix(2);
+        scale = 96.0 / 72.0;
+    }
+    double number{}; bool percent{};
+    if (!parseCssNumber(text, number, percent) || percent || number < 0.0 ||
+        number * scale > 65535.0 || (!pixels && !points && number != 0.0)) return false;
+    output = static_cast<uint16_t>(number * scale + 0.5);
+    return true;
+}
+
+inline bool parseCssFontWeight(std::string_view text, uint16_t& output) noexcept {
+    if (equalAscii(text, "normal")) { output = 400; return true; }
+    if (equalAscii(text, "bold")) { output = 700; return true; }
+    double number{}; bool percent{};
+    if (!parseCssNumber(text, number, percent) || percent || number < 1.0 ||
+        number > 1000.0) return false;
+    const uint16_t weight = static_cast<uint16_t>(number + 0.5);
+    if (weight < 1 || weight > 1000 || number != weight) return false;
+    output = weight;
+    return true;
+}
+
+inline bool parseCssFontFamily(std::string_view text, char (&output)[32]) noexcept {
+    while (!text.empty() && isSpace(text.front())) text.remove_prefix(1);
+    if (text.empty()) return false;
+    if (text.front() == '\'' || text.front() == '"') {
+        const char quote = text.front();
+        text.remove_prefix(1);
+        const size_t closing = text.find(quote);
+        if (closing == std::string_view::npos) return false;
+        std::string_view fallback = text.substr(closing + 1);
+        while (!fallback.empty() && isSpace(fallback.front())) fallback.remove_prefix(1);
+        if (!fallback.empty() && fallback.front() != ',') return false;
+        text = text.substr(0, closing);
+    } else {
+        const size_t fallback = text.find(',');
+        if (fallback != std::string_view::npos) text = text.substr(0, fallback);
+        while (!text.empty() && isSpace(text.back())) text.remove_suffix(1);
+    }
+    if (text.empty() || text.size() >= 32) return false;
+    std::fill(std::begin(output), std::end(output), 0);
+    for (size_t index = 0; index < text.size(); ++index) {
+        const char character = text[index];
+        if (!((character >= 'a' && character <= 'z') ||
+              (character >= 'A' && character <= 'Z') ||
+              (character >= '0' && character <= '9') || character == ' ' ||
+              character == '-' || character == '_')) return false;
+        output[index] = character;
+    }
+    output[text.size()] = 0;
     return true;
 }
 
@@ -344,7 +409,7 @@ inline bool classifySimpleSelector(const CssSelector& selector, NativeControl& c
 
 enum class NativeProperty : uint8_t {
     Foreground, Background, BorderColor, BorderWidth, Radius, MinWidth, MinHeight,
-    Padding, FontSize, Opacity, Count,
+    Padding, FontSize, FontWeight, FontStyle, FontFamily, Opacity, Count,
 };
 
 struct CascadeRank {
@@ -383,6 +448,9 @@ inline bool buildNativeTheme(const CompiledCss& css, NativeTheme& output,
             else if (equalAscii(property, "min-height")) kind = NativeProperty::MinHeight;
             else if (equalAscii(property, "padding")) kind = NativeProperty::Padding;
             else if (equalAscii(property, "font-size")) kind = NativeProperty::FontSize;
+            else if (equalAscii(property, "font-weight")) kind = NativeProperty::FontWeight;
+            else if (equalAscii(property, "font-style")) kind = NativeProperty::FontStyle;
+            else if (equalAscii(property, "font-family")) kind = NativeProperty::FontFamily;
             else if (equalAscii(property, "opacity")) kind = NativeProperty::Opacity;
             else recognized = false;
             if (!recognized) { ++candidate.unsupportedProperties; continue; }
@@ -429,8 +497,23 @@ inline bool buildNativeTheme(const CompiledCss& css, NativeTheme& output,
                     if (valid) style.hasPadding = true;
                     break;
                 case NativeProperty::FontSize:
-                    valid = parseCssLength(value, length);
+                    valid = parseCssFontSize(value, length);
                     if (valid) { style.fontSize = length; style.hasFontSize = true; }
+                    break;
+                case NativeProperty::FontWeight:
+                    valid = parseCssFontWeight(value, length);
+                    if (valid) { style.fontWeight = length; style.hasFontWeight = true; }
+                    break;
+                case NativeProperty::FontStyle:
+                    valid = equalAscii(value, "normal") || equalAscii(value, "italic");
+                    if (valid) {
+                        style.fontItalic = equalAscii(value, "italic");
+                        style.hasFontStyle = true;
+                    }
+                    break;
+                case NativeProperty::FontFamily:
+                    valid = parseCssFontFamily(value, style.fontFamily);
+                    if (valid) style.hasFontFamily = true;
                     break;
                 case NativeProperty::Opacity: {
                     double number{}; bool percent{};
@@ -462,6 +545,13 @@ inline bool buildNativeTheme(const CompiledCss& css, NativeTheme& output,
             if (!style.hasMinHeight && normal.hasMinHeight) { style.minHeight = normal.minHeight; style.hasMinHeight = true; }
             if (!style.hasPadding && normal.hasPadding) { std::copy(std::begin(normal.padding), std::end(normal.padding), std::begin(style.padding)); style.hasPadding = true; }
             if (!style.hasFontSize && normal.hasFontSize) { style.fontSize = normal.fontSize; style.hasFontSize = true; }
+            if (!style.hasFontWeight && normal.hasFontWeight) { style.fontWeight = normal.fontWeight; style.hasFontWeight = true; }
+            if (!style.hasFontStyle && normal.hasFontStyle) { style.fontItalic = normal.fontItalic; style.hasFontStyle = true; }
+            if (!style.hasFontFamily && normal.hasFontFamily) {
+                std::copy(std::begin(normal.fontFamily), std::end(normal.fontFamily),
+                          std::begin(style.fontFamily));
+                style.hasFontFamily = true;
+            }
             if (!style.hasOpacity && normal.hasOpacity) { style.opacity = normal.opacity; style.hasOpacity = true; }
         }
     }
@@ -521,7 +611,11 @@ inline MicaThemeSnapshot makeThemeSnapshot(const NativeTheme& theme) noexcept {
         target.minHeight = source.minHeight;
         std::copy(std::begin(source.padding), std::end(source.padding), std::begin(target.padding));
         target.fontSize = source.fontSize;
+        target.fontWeight = source.fontWeight;
         target.opacity = source.opacity;
+        target.fontItalic = source.fontItalic ? 1 : 0;
+        std::copy(std::begin(source.fontFamily), std::end(source.fontFamily),
+                  std::begin(target.fontFamily));
         target.flags = (source.hasForeground ? MICANT_THEME_HAS_FOREGROUND : 0u) |
                        (source.hasBackground ? MICANT_THEME_HAS_BACKGROUND : 0u) |
                        (source.hasBorder ? MICANT_THEME_HAS_BORDER : 0u) |
@@ -531,6 +625,9 @@ inline MicaThemeSnapshot makeThemeSnapshot(const NativeTheme& theme) noexcept {
                        (source.hasMinHeight ? MICANT_THEME_HAS_MIN_HEIGHT : 0u) |
                        (source.hasPadding ? MICANT_THEME_HAS_PADDING : 0u) |
                        (source.hasFontSize ? MICANT_THEME_HAS_FONT_SIZE : 0u) |
+                       (source.hasFontWeight ? MICANT_THEME_HAS_FONT_WEIGHT : 0u) |
+                       (source.hasFontStyle ? MICANT_THEME_HAS_FONT_STYLE : 0u) |
+                       (source.hasFontFamily ? MICANT_THEME_HAS_FONT_FAMILY : 0u) |
                        (source.hasOpacity ? MICANT_THEME_HAS_OPACITY : 0u);
     }
     return snapshot;

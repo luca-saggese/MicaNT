@@ -154,6 +154,51 @@ inline void Test_NativeTheme_WhiteSurProgressDescendantsMapToProgressStates() {
                 "progressbar progress background and radius map to selected state");
 }
 
+inline void Test_NativeTheme_FontPropertiesCompileToSnapshotMetadata() {
+    using namespace micant::um::theme;
+    constexpr std::string_view css =
+        "button { font-family: 'Arial Black', sans-serif; font-family: 'Arial', sans-serif; font-size: 9pt; font-weight: 500; font-style: italic; }"
+        "button:hover { font-weight: bold; font-style: normal; }";
+    CompiledCss parsed{};
+    NativeTheme theme{};
+    TEST_ASSERT(compileGtkCss(css, parsed) == CssStatus::Success &&
+                buildNativeTheme(parsed, theme),
+                "supported CSS font properties compile to native styles");
+    const auto& normal = theme.style(NativeControl::Button, NativeVisualState::Normal);
+    const auto& hover = theme.style(NativeControl::Button, NativeVisualState::Hover);
+    TEST_ASSERT(normal.hasFontFamily && std::string_view(normal.fontFamily) == "Arial" &&
+                normal.hasFontSize && normal.fontSize == 12 && normal.hasFontWeight &&
+                normal.fontWeight == 500 && normal.hasFontStyle && normal.fontItalic,
+                "font family, point size, weight and style parse into the native style");
+    TEST_ASSERT(hover.hasFontSize && hover.fontSize == 12 && hover.hasFontWeight &&
+                hover.fontWeight == 700 && hover.hasFontStyle && !hover.fontItalic,
+                "font properties inherit individually across visual states");
+    const MicaThemeSnapshot snapshot = makeThemeSnapshot(theme);
+    const auto& packed = snapshot.styles[0];
+    TEST_ASSERT((packed.flags & (MICANT_THEME_HAS_FONT_SIZE |
+                                 MICANT_THEME_HAS_FONT_WEIGHT |
+                                 MICANT_THEME_HAS_FONT_STYLE |
+                                 MICANT_THEME_HAS_FONT_FAMILY)) ==
+                    (MICANT_THEME_HAS_FONT_SIZE |
+                     MICANT_THEME_HAS_FONT_WEIGHT |
+                     MICANT_THEME_HAS_FONT_STYLE |
+                     MICANT_THEME_HAS_FONT_FAMILY) &&
+                packed.fontSize == 12 && packed.fontWeight == 500 && packed.fontItalic == 1 &&
+                std::string_view(packed.fontFamily) == "Arial" &&
+                MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot)),
+                "font metadata crosses the versioned shared snapshot ABI");
+    TEST_ASSERT(compileGtkCss("button { font-style: oblique; }", parsed) == CssStatus::Success &&
+                buildNativeTheme(parsed, theme) &&
+                !theme.style(NativeControl::Button, NativeVisualState::Normal).hasFontStyle &&
+                theme.unsupportedProperties == 1,
+                "unsupported oblique fonts are counted without fabricated metadata");
+    TEST_ASSERT(compileGtkCss("button { font-size: 9; }", parsed) == CssStatus::Success &&
+                buildNativeTheme(parsed, theme) &&
+                !theme.style(NativeControl::Button, NativeVisualState::Normal).hasFontSize &&
+                theme.unsupportedProperties == 1,
+                "unitless nonzero CSS font sizes remain unsupported");
+}
+
 inline void Test_WhiteSur_RealProfilesCompileToNativeButtonStyles() {
     using namespace micant::um::theme;
     auto compileProfile = [](const char* path, NativeTheme& theme,

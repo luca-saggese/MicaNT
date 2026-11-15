@@ -145,11 +145,30 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-uxtheme-font-failure-output-run2/serial.log`. The full
   input suite later stopped at the concurrent root-folder navigation test;
   this records the focused runtime probe, not a passing full suite.
-- [ ] Add theme font query support from actual font metadata in the compiled
-  snapshot. `GetThemeFont` still fails explicitly while snapshots contain no
-  family/weight information and current WhiteSur node rules provide no
-  supported `font-size` value; `GetThemeSysFont` remains unsupported because
-  the native system-font source does not return real metrics.
+- [x] `GetThemeSysFont` reads the actual GDI `DEFAULT_GUI_FONT` through
+  `GetObjectW`; Explorer created an `HFONT` from the returned `LOGFONTW`, read
+  its metadata back, selected it into a memory DC and checked nonzero text
+  metrics. An invalid font ID returned `E_INVALIDARG` with a cleared output.
+  The full QEMU input/theme-switch run passed in
+  `/private/tmp/micant-theme-font-snapshot-v2-final`. System font roles 801–806 currently
+  share the one system GUI font exposed by GDI; separate per-role system
+  metrics are not available yet.
+- [x] GDI32 `GetObjectW` returns size/copy results for valid `HFONT` handles
+  using their actual requested family, weight, italic and point-size metadata;
+  invalid and non-font handles fail. Explorer verified the font round trip and
+  text metrics in the QEMU run above. Other GDI object types remain unsupported.
+- [x] Snapshot ABI v2 carries explicit CSS font-family, font-size,
+  font-weight and font-style metadata, with per-state inheritance.
+  `GetThemeFont` starts from the real GDI system font and overlays only fields
+  present in the selected compiled style. It returns `E_PROP_ID_UNSUPPORTED`
+  and clears `LOGFONTW` when that style contains no font metadata. Explorer
+  verified both paths via the real DLL, including a synthetic metadata
+  snapshot. The font-specific theme suite passed in a focused host harness.
+  Full QEMU input, window geometry and Light-to-Dark profile switching passed
+  in `/private/tmp/micant-theme-font-snapshot-v2-final`. WhiteSur's common button
+  rules currently omit explicit font declarations, so those queries correctly
+  report the property as unsupported. The source stylesheet declares no font
+  family; the actual GDI system GUI face supplies inherited family data.
 - [x] Implemented a bounded Buffered Paint lifecycle in the real `uxtheme.dll`:
   per-thread nested init/uninit, generation-tagged thread-owned handles,
   top-down 32bpp DIB buffers, one-shot discard/update, and failure cleanup.

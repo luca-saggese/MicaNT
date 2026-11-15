@@ -39,6 +39,8 @@ __declspec(dllimport) uint32_t __stdcall SetTextColor(void*, uint32_t);
 __declspec(dllimport) int32_t __stdcall SetBkMode(void*, int32_t);
 __declspec(dllimport) int32_t __stdcall MicaGdiPushClipRect(void*, const void*, void**);
 __declspec(dllimport) int32_t __stdcall MicaGdiPopClipRect(void*, void*);
+__declspec(dllimport) void* __stdcall GetStockObject(int32_t);
+__declspec(dllimport) int32_t __stdcall GetObjectW(void*, int32_t, void*);
 __declspec(dllimport) void* __stdcall CreateCompatibleDC(void*);
 __declspec(dllimport) int32_t __stdcall DeleteDC(void*);
 __declspec(dllimport) void* __stdcall CreateDIBSection(void*, const void*, uint32_t,
@@ -276,11 +278,52 @@ inline win32::HRESULT GetThemeColor(HTHEME hTheme, int iPartId, int iStateId, in
     return 0;
 }
 
-inline win32::HRESULT GetThemeFont(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPartId*/, int /*iStateId*/, int /*iPropId*/, void* pFont) noexcept {
-    // LOGFONTW is ABI-stable at 92 bytes on the supported Windows targets.
-    // Clear the caller's output before reporting the unsupported font query.
+inline win32::HRESULT GetThemeSysFont(HTHEME hTheme, int iFontId, void* plf) noexcept;
+
+inline win32::HRESULT GetThemeFont(HTHEME hTheme, void* /*hdc*/, int iPartId,
+                                   int iStateId, int iPropId, void* pFont) noexcept {
     if (pFont) std::memset(pFont, 0, 92);
+    if (!pFont) return detail::kInvalidArgument;
+    auto* handle = detail::lookup(hTheme);
+    if (!handle) return detail::kInvalidHandle;
+    if (iPartId != 1) return detail::kNotImplemented;
+    if (iPropId != 210) return detail::kNotImplemented; // TMT_FONT
+    const auto* fontStyle = detail::style(*handle, iStateId);
+    if (!fontStyle) return detail::kNotFound;
+    constexpr uint32_t fontFlags = MICANT_THEME_HAS_FONT_SIZE |
+        MICANT_THEME_HAS_FONT_WEIGHT | MICANT_THEME_HAS_FONT_STYLE |
+        MICANT_THEME_HAS_FONT_FAMILY;
+    if (!(fontStyle->flags & fontFlags)) return detail::kNotFound;
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+    const win32::HRESULT systemFontStatus = GetThemeSysFont(hTheme, 801, pFont);
+    if (systemFontStatus != 0) {
+        std::memset(pFont, 0, 92);
+        return systemFontStatus;
+    }
+    auto* bytes = static_cast<uint8_t*>(pFont);
+    if (fontStyle->flags & MICANT_THEME_HAS_FONT_SIZE) {
+        const int32_t height = -static_cast<int32_t>(fontStyle->fontSize);
+        std::memcpy(bytes, &height, sizeof(height));
+    }
+    if (fontStyle->flags & MICANT_THEME_HAS_FONT_WEIGHT) {
+        const int32_t weight = fontStyle->fontWeight;
+        std::memcpy(bytes + 16, &weight, sizeof(weight));
+    }
+    if (fontStyle->flags & MICANT_THEME_HAS_FONT_STYLE)
+        bytes[20] = fontStyle->fontItalic ? 1 : 0;
+    if (fontStyle->flags & MICANT_THEME_HAS_FONT_FAMILY) {
+        std::memset(bytes + 28, 0, 64);
+        for (size_t index = 0; index < sizeof(fontStyle->fontFamily) &&
+             fontStyle->fontFamily[index]; ++index) {
+            const uint16_t character = static_cast<uint8_t>(fontStyle->fontFamily[index]);
+            std::memcpy(bytes + 28 + index * sizeof(character), &character,
+                        sizeof(character));
+        }
+    }
+    return 0;
+#else
     return detail::kNotImplemented;
+#endif
 }
 
 inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, void* /*prc*/, int eSize, void* psz) noexcept {
@@ -605,9 +648,24 @@ inline win32::DWORD GetThemeSysColor(HTHEME hTheme, int iColorId) noexcept {
     return 0xFFFFFFFFu; // CLR_INVALID for system colors without a CSS mapping.
 }
 
-inline win32::HRESULT GetThemeSysFont(HTHEME /*hTheme*/, int /*iFontId*/, void* plf) noexcept {
+inline win32::HRESULT GetThemeSysFont(HTHEME hTheme, int iFontId, void* plf) noexcept {
     if (plf) std::memset(plf, 0, 92);
+    if (!plf) return detail::kInvalidArgument;
+    if (hTheme && !detail::lookup(hTheme)) return detail::kInvalidHandle;
+    // These are the six documented system font roles. The current native GDI
+    // font source exposes one real GUI stock font, so each role uses that
+    // system font until per-role system metrics are available.
+    if (iFontId < 801 || iFontId > 806) return detail::kInvalidArgument;
+#if defined(MICANT_UXTHEME_GDI_IMPORTS)
+    void* font = GetStockObject(17); // DEFAULT_GUI_FONT
+    if (!font || GetObjectW(font, 92, plf) != 92) {
+        std::memset(plf, 0, 92);
+        return detail::kFailure;
+    }
+    return 0;
+#else
     return detail::kNotImplemented;
+#endif
 }
 
 struct MARGINS {

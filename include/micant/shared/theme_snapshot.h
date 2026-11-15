@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 #define MICANT_THEME_SNAPSHOT_MAGIC 0x4D48544Du /* MTHM */
-#define MICANT_THEME_SNAPSHOT_VERSION 1u
+#define MICANT_THEME_SNAPSHOT_VERSION 2u
 #define MICANT_THEME_CONTROL_COUNT 15u
 #define MICANT_THEME_STATE_COUNT 8u
 #define MICANT_THEME_STYLE_COUNT (MICANT_THEME_CONTROL_COUNT * MICANT_THEME_STATE_COUNT)
@@ -20,6 +20,9 @@ enum MicaThemeStyleFlags {
     MICANT_THEME_HAS_PADDING = 1u << 7,
     MICANT_THEME_HAS_FONT_SIZE = 1u << 8,
     MICANT_THEME_HAS_OPACITY = 1u << 9,
+    MICANT_THEME_HAS_FONT_WEIGHT = 1u << 10,
+    MICANT_THEME_HAS_FONT_STYLE = 1u << 11,
+    MICANT_THEME_HAS_FONT_FAMILY = 1u << 12,
 };
 
 typedef struct MicaThemeStyleSnapshot {
@@ -32,8 +35,11 @@ typedef struct MicaThemeStyleSnapshot {
     uint16_t minHeight;
     uint16_t padding[4]; /* top, right, bottom, left */
     uint16_t fontSize;
+    uint16_t fontWeight;
     uint8_t opacity;
-    uint8_t reserved;
+    uint8_t fontItalic;
+    uint16_t reserved;
+    char fontFamily[32]; /* bounded ASCII family name, empty when inherited */
     uint32_t flags;
 } MicaThemeStyleSnapshot;
 
@@ -50,13 +56,13 @@ typedef struct MicaThemeSnapshot {
 } MicaThemeSnapshot;
 
 #ifdef __cplusplus
-static_assert(sizeof(MicaThemeStyleSnapshot) == 36);
+static_assert(sizeof(MicaThemeStyleSnapshot) == 72);
 static_assert(sizeof(MicaThemeSnapshot) ==
               24 + sizeof(MicaThemeStyleSnapshot) * MICANT_THEME_STYLE_COUNT);
 
 inline bool MicaThemeSnapshotIsValid(const MicaThemeSnapshot* snapshot,
                                      size_t byteLength) noexcept {
-    constexpr uint32_t knownFlags = (1u << 10) - 1u;
+    constexpr uint32_t knownFlags = (1u << 13) - 1u;
     if (!snapshot || byteLength != sizeof(MicaThemeSnapshot) ||
         snapshot->magic != MICANT_THEME_SNAPSHOT_MAGIC ||
         snapshot->version != MICANT_THEME_SNAPSHOT_VERSION ||
@@ -64,8 +70,22 @@ inline bool MicaThemeSnapshotIsValid(const MicaThemeSnapshot* snapshot,
         snapshot->totalSize != sizeof(MicaThemeSnapshot) ||
         snapshot->controlCount != MICANT_THEME_CONTROL_COUNT ||
         snapshot->stateCount != MICANT_THEME_STATE_COUNT) return false;
-    for (const auto& style : snapshot->styles)
-        if (style.flags & ~knownFlags) return false;
+    for (const auto& style : snapshot->styles) {
+        if (style.flags & ~knownFlags || style.reserved || style.fontItalic > 1) return false;
+        if ((style.flags & MICANT_THEME_HAS_FONT_WEIGHT) &&
+            (style.fontWeight < 1 || style.fontWeight > 1000)) return false;
+        if (!(style.flags & MICANT_THEME_HAS_FONT_STYLE) && style.fontItalic) return false;
+        bool familyTerminated = false;
+        for (char character : style.fontFamily) {
+            if (!character) familyTerminated = true;
+            else if (familyTerminated || !((character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= '0' && character <= '9') || character == ' ' ||
+                character == '-' || character == '_')) return false;
+        }
+        if ((style.flags & MICANT_THEME_HAS_FONT_FAMILY) ?
+            (!style.fontFamily[0] || !familyTerminated) : style.fontFamily[0] != 0) return false;
+    }
     return true;
 }
 #endif

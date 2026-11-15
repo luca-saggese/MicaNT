@@ -82,9 +82,14 @@ struct ShellState {
     HFONT uiFont{};
     bool fontReady{};
     MicaThemeSnapshot visualTheme{};
+    // Snapshot v2 exceeds 8 KiB. Keep transactional scratch off the small
+    // Explorer thread stack while loading and verifying compiled profiles.
+    MicaThemeSnapshot themeCandidate{};
+    MicaThemeSnapshot themeVerify{};
     bool visualThemeReady{};
     char themeProfile[96]{};
     bool themeGdiDrawReported{};
+    bool themeFontMetadataProbeReported{};
     bool themeGdiEditDrawReported{};
     bool themeTextDrawReported{};
     bool themeTextClipReported{};
@@ -948,9 +953,8 @@ bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
 
 void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool hadPrevious = g.visualThemeReady;
-    const MicaThemeSnapshot previousTheme = g.visualTheme;
     const auto restorePreviousSnapshot = [&]() noexcept {
-        if (hadPrevious) (void)MicaWin32kSetThemeSnapshot(&previousTheme);
+        if (hadPrevious) (void)MicaWin32kSetThemeSnapshot(&g.visualTheme);
     };
     wchar_t path[512]{};
     size_t cursor = 0, profileBytes = 0;
@@ -1006,7 +1010,8 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         path[cursor++] = profile[i] == '/' ? L'\\' : static_cast<wchar_t>(profile[i]);
     }
     if (!appendWide(path, std::size(path), cursor, L"\\native.style", 13)) return;
-    MicaThemeSnapshot candidate{};
+    MicaThemeSnapshot& candidate = g.themeCandidate;
+    std::memset(&candidate, 0, sizeof(candidate));
     size_t styleBytes = 0;
     if (!readBoundedFile(path, &candidate, sizeof(candidate), styleBytes)) {
         PrintLine("[MicaNT Theme] Compiled style snapshot could not be read");
@@ -1020,7 +1025,7 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] Win32k rejected the style snapshot");
         return;
     }
-    MicaThemeSnapshot published{};
+    MicaThemeSnapshot& published = g.themeVerify;
     if (!MicaWin32kGetThemeSnapshot(&published) ||
         std::memcmp(&candidate, &published, sizeof(candidate)) != 0) {
         restorePreviousSnapshot();
@@ -1078,6 +1083,38 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         : 0;
     bool themeFontOutputCleared = true;
     for (uint8_t value : themeFontOutput) themeFontOutputCleared &= value == 0;
+    LOGFONTW systemFont{};
+    const int32_t systemFontStatus = themeHandle
+        ? GetThemeSysFont(themeHandle, 801, &systemFont)
+        : static_cast<int32_t>(0x80070006u);
+    HFONT queriedFont = systemFontStatus == 0 ? CreateFontIndirectW(&systemFont) : nullptr;
+    LOGFONTW fontRoundTrip{};
+    const int32_t queriedFontBytes = queriedFont
+        ? GetObjectW(queriedFont, sizeof(fontRoundTrip), &fontRoundTrip) : 0;
+    const bool fontMetadataRoundTrip = queriedFontBytes == sizeof(fontRoundTrip) &&
+        fontRoundTrip.lfHeight == systemFont.lfHeight &&
+        fontRoundTrip.lfWeight == systemFont.lfWeight &&
+        fontRoundTrip.lfItalic == systemFont.lfItalic &&
+        std::memcmp(fontRoundTrip.lfFaceName, systemFont.lfFaceName,
+                    sizeof(systemFont.lfFaceName)) == 0;
+    LOGFONTW invalidSystemFont{};
+    std::memset(&invalidSystemFont, 0xA5, sizeof(invalidSystemFont));
+    const int32_t invalidSystemFontStatus = themeHandle
+        ? GetThemeSysFont(themeHandle, 999, &invalidSystemFont) : 0;
+    const auto* invalidFontBytes = reinterpret_cast<const uint8_t*>(&invalidSystemFont);
+    bool invalidFontCleared = true;
+    for (size_t index = 0; index < sizeof(invalidSystemFont); ++index)
+        invalidFontCleared &= invalidFontBytes[index] == 0;
+    HDC fontProbeDc = queriedFont ? CreateCompatibleDC(nullptr) : nullptr;
+    HGDIOBJ previousProbeFont = fontProbeDc && queriedFont
+        ? SelectObject(fontProbeDc, queriedFont) : nullptr;
+    TEXTMETRICW queriedFontMetrics{};
+    const bool fontMetricsRead = previousProbeFont &&
+        GetTextMetricsW(fontProbeDc, &queriedFontMetrics) &&
+        queriedFontMetrics.tmHeight > 0 && queriedFontMetrics.tmAscent > 0;
+    if (previousProbeFont) (void)SelectObject(fontProbeDc, previousProbeFont);
+    if (fontProbeDc) (void)DeleteDC(fontProbeDc);
+    if (queriedFont) (void)DeleteObject(queriedFont);
     MicaThemeMargins rejectedMargins{1, 2, 3, 4};
     const int32_t unsupportedMargin = themeHandle ? GetThemeMargins(themeHandle,
         nullptr, 1, 1, 0x7FFFFFFF, nullptr, &rejectedMargins) : 0;
@@ -1134,10 +1171,51 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] UxTheme TMT_BGTYPE reports borderfill");
     else
         PrintLine("[MicaNT Theme] UxTheme background enum query mismatch");
-    if (unsupportedFont == static_cast<int32_t>(0x80004001u) && themeFontOutputCleared)
+    if (unsupportedFont == static_cast<int32_t>(0x80070490u) && themeFontOutputCleared)
         PrintLine("[MicaNT Theme] Unsupported font query clears LOGFONTW output");
     else
         PrintLine("[MicaNT Theme] Unsupported font query output mismatch");
+    if (systemFontStatus == 0 && systemFont.lfHeight < 0 && systemFont.lfWeight >= 0 &&
+        fontMetadataRoundTrip && fontMetricsRead &&
+        invalidSystemFontStatus == static_cast<int32_t>(0x80070057u) && invalidFontCleared)
+        PrintLine("[MicaNT Theme] GetThemeSysFont returns GDI font metadata and metrics");
+    else
+        PrintLine("[MicaNT Theme] GetThemeSysFont or GDI font metadata mismatch");
+    if (!g.themeFontMetadataProbeReported) {
+        const MicaThemeStyleSnapshot originalButtonStyle = candidate.styles[0];
+        auto& fontQueryStyle = candidate.styles[0];
+        std::memcpy(fontQueryStyle.fontFamily, "Arial", 6);
+        fontQueryStyle.fontSize = 14;
+        fontQueryStyle.fontWeight = 600;
+        fontQueryStyle.fontItalic = 1;
+        fontQueryStyle.flags |= MICANT_THEME_HAS_FONT_SIZE |
+            MICANT_THEME_HAS_FONT_WEIGHT | MICANT_THEME_HAS_FONT_STYLE |
+            MICANT_THEME_HAS_FONT_FAMILY;
+        const bool fontSnapshotPublished = MicaWin32kSetThemeSnapshot(&candidate) &&
+            IsThemeActive();
+        MicaThemeHandle fontQueryTheme = fontSnapshotPublished
+            ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
+        uint8_t supportedThemeFont[92];
+        std::memset(supportedThemeFont, 0xA5, sizeof(supportedThemeFont));
+        const int32_t supportedThemeFontStatus = fontQueryTheme
+            ? GetThemeFont(fontQueryTheme, nullptr, 1, 1, 210, supportedThemeFont)
+            : static_cast<int32_t>(0x80070006u);
+        int32_t themeFontHeight{}, themeFontWeight{};
+        std::memcpy(&themeFontHeight, supportedThemeFont, sizeof(themeFontHeight));
+        std::memcpy(&themeFontWeight, supportedThemeFont + 16, sizeof(themeFontWeight));
+        const bool supportedThemeFontPassed = supportedThemeFontStatus == 0 &&
+            themeFontHeight == -14 && themeFontWeight == 600 && supportedThemeFont[20] == 1 &&
+            std::memcmp(supportedThemeFont + 28, L"Arial", sizeof(L"Arial")) == 0;
+        const bool fontQueryHandleClosed = fontQueryTheme && CloseThemeData(fontQueryTheme) == 0;
+        candidate.styles[0] = originalButtonStyle;
+        const bool fontSnapshotRestored = MicaWin32kSetThemeSnapshot(&candidate) &&
+            IsThemeActive();
+        g.themeFontMetadataProbeReported = supportedThemeFontPassed &&
+            fontQueryHandleClosed && fontSnapshotRestored;
+        PrintLine(g.themeFontMetadataProbeReported
+            ? "[MicaNT Theme] GetThemeFont combines CSS snapshot fields with the GDI system face"
+            : "[MicaNT Theme] GetThemeFont snapshot metadata query mismatch");
+    }
     if (unsupportedMargin == static_cast<int32_t>(0x80070490u) &&
         rejectedMargins.cxLeftWidth == 0 && rejectedMargins.cxRightWidth == 0 &&
         rejectedMargins.cyTopHeight == 0 && rejectedMargins.cyBottomHeight == 0)

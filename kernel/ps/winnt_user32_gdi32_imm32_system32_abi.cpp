@@ -2551,6 +2551,37 @@ void* Gdi32_GetStockObject(int32_t i) noexcept {
     return fn ? fn(i) : nullptr;
 }
 
+int32_t Gdi32_GetObjectW(void* handle, int32_t bufferBytes, void* output) noexcept {
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    GdiFontObject* font = FindGdiFont(handle);
+    if (!font || bufferBytes < 0) return 0;
+
+    GdiLogFontW logical{};
+    const auto& request = font->request;
+    const uint32_t emPixels = micant::um::graphics::truetype::pixelsFromPoints(
+        request.pointSize, request.dpi);
+    if (emPixels > static_cast<uint32_t>(INT32_MAX)) return 0;
+    logical.height = -static_cast<int32_t>(emPixels);
+    logical.weight = request.weight;
+    logical.italic = request.italic ? 1 : 0;
+    logical.charSet = 1; // DEFAULT_CHARSET
+    for (size_t i = 0; i < 31 && font->family[i]; ++i)
+        logical.faceName[i] = static_cast<wchar_t>(font->family[i]);
+
+    constexpr int32_t requiredBytes = static_cast<int32_t>(sizeof(logical));
+    if (!output) return requiredBytes;
+    if (!bufferBytes) return 0;
+    const int32_t copiedBytes = std::min(bufferBytes, requiredBytes);
+    std::memcpy(output, &logical, static_cast<size_t>(copiedBytes));
+    return copiedBytes;
+#else
+    (void)handle;
+    (void)bufferBytes;
+    (void)output;
+    return 0;
+#endif
+}
+
 void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
     if (!hdc || !h) return nullptr;
 #if defined(BUILD_SYSTEM32_GDI32_DLL)
@@ -3269,6 +3300,10 @@ __declspec(dllexport) int32_t BitBlt(void* hdc, int32_t x, int32_t y, int32_t cx
 }
 __declspec(dllexport) void* GetStockObject(int32_t i) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetStockObject(i);
+}
+__declspec(dllexport) int32_t GetObjectW(void* handle, int32_t bufferBytes, void* output) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetObjectW(
+        handle, bufferBytes, output);
 }
 __declspec(dllexport) void* SelectObject(void* hdc, void* h) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SelectObject(hdc, h);

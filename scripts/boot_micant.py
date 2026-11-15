@@ -364,7 +364,9 @@ def verify_mouse(
             while time.monotonic() < deadline:
                 startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
                 if ("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in startup_serial and
-                        "[MicaNT Theme] GetThemeSysColor resolves themed button face" in startup_serial):
+                        "[MicaNT Theme] GetThemeSysColor resolves themed button face" in startup_serial and
+                        "[MicaNT Theme] GetThemeSysFont returns GDI font metadata and metrics" in startup_serial and
+                        "[MicaNT Theme] GetThemeFont combines CSS snapshot fields with the GDI system face" in startup_serial):
                     break
                 time.sleep(0.1)
             else:

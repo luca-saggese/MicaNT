@@ -14,7 +14,7 @@
     "LightPurple": {
       "accent": "#9a57a3",
       "nativeStyle": "LightPurple/native.style",
-      "nativeStyleSha256": "00aa3c4db22927491a4468c33b8834dcca02a97f2fd1b5d54183b5250ef5a6a0",
+      "nativeStyleSha256": "127a9cfe8933620ea51fa7571425d1d581a2c94eb794ec8aca0793eca8eb3c65",
       "sourceVariant": "Light"
     }
   },
@@ -126,7 +126,7 @@
         "assets/thumbnail-frame.png"
       ],
       "nativeStyle": "Dark/native.style",
-      "nativeStyleSha256": "01e46f60904bfab77589c11f59ebdf1036e525f8b75f522636efb17f1e62e159",
+      "nativeStyleSha256": "a0082454187cf5570187120b6b9dcb713b55e7a6e36a47650bfccc476cae1914",
       "solid": false,
       "sourceGresourceSha256": "99240475a9d7a234fa8c84fabdef4c4b884af62d6830125e3167903b8f4905f2",
       "sourceReleaseTarSha256": "98ac7545ec5290b718875fdfbdd7f0f6b88126103d1eec259ec9fbf80be7b75f"
@@ -229,7 +229,7 @@
         "assets/thumbnail-frame.png"
       ],
       "nativeStyle": "Light/native.style",
-      "nativeStyleSha256": "9507b762379d81c599187ef1424f0edb4562b9bc1fe59bbfdd6889c2eb4c503b",
+      "nativeStyleSha256": "802b0367b53dd72c468487b31fc6f14ecc51e4f16e186a089da27e8a852a5fc7",
       "solid": false,
       "sourceGresourceSha256": "aeab157be82b641d9d062f9b0b2299c4ad8c7cb34a35201c2b5aef3083bf6703",
       "sourceReleaseTarSha256": "2635570e218afab2d34b0663287054f7b995b9f7f810e97410dcad389987d5ba"
@@ -330,7 +330,7 @@
         "assets/thumbnail-frame.png"
       ],
       "nativeStyle": "Solid/Dark/native.style",
-      "nativeStyleSha256": "22776b093925b7d002be5d4f911bec3504628ccceb86e97088068dfa508dc3c4",
+      "nativeStyleSha256": "151a084ef64445523a1dc8d49c9e6c287aab0f72dfe841c24b3776dce6042ccb",
       "solid": true,
       "sourceGresourceSha256": "0000d82dbdedcf3223f3fc69b16829c0e59d1bd5a141a4120d701c0964966bad",
       "sourceReleaseTarSha256": "80d0b4428a63e3d6b11932483c7d1fff74afa21a826a2f668a50fb31fc11c40b"
@@ -433,7 +433,7 @@
         "assets/thumbnail-frame.png"
       ],
       "nativeStyle": "Solid/Light/native.style",
-      "nativeStyleSha256": "eb031ef65b0610d07369b9b3b92a7ffb0204ebecfb814aa81febd1b695273449",
+      "nativeStyleSha256": "b8b3a5d30fba861f39130f7f79d0efaa89eea93185ae0e76a9ce4ca15ef32db0",
       "solid": true,
       "sourceGresourceSha256": "cf314a5ea4cc8814428af2a5a9d8e9e9cb4941fb5c74ef7e27144e7a4caaf920",
       "sourceReleaseTarSha256": "50ca872c44d28acfa9d43aa337981520ccc19b807dfc6b5293c7d8d9fe0f3a93"

@@ -29,6 +29,7 @@ MICANT_GDI32_API void* WINAPI CreateDIBSection(void*, const void*, uint32_t,
 MICANT_GDI32_API void* WINAPI SelectObject(void*, void*);
 MICANT_GDI32_API int32_t WINAPI DeleteObject(void*);
 MICANT_GDI32_API void* WINAPI GetStockObject(int32_t);
+MICANT_GDI32_API int32_t WINAPI GetObjectW(void*, int32_t, void*);
 MICANT_GDI32_API int32_t WINAPI FillRect(void*, const void*, void*);
 MICANT_GDI32_API int32_t WINAPI BitBlt(void*, int32_t, int32_t, int32_t, int32_t,
                                         void*, int32_t, int32_t, uint32_t);

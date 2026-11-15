@@ -458,6 +458,7 @@ int main(int argc, char* argv[]) {
         RUN_TEST(Test_GtkCss_FailurePreservesOutputAndReportsUnsupportedSyntax);
         RUN_TEST(Test_NativeTheme_ColorExpressionsAndControlCascade);
         RUN_TEST(Test_NativeTheme_WhiteSurProgressDescendantsMapToProgressStates);
+        RUN_TEST(Test_NativeTheme_FontPropertiesCompileToSnapshotMetadata);
         RUN_TEST(Test_WhiteSur_RealProfilesCompileToNativeButtonStyles);
         return (g_FailedTests == 0) ? 0 : 1;
     }
