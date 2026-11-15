@@ -1158,6 +1158,21 @@ extern "C" void _start(const char* = nullptr) {
         } else {
             PrintLine("[MicaNT Cursor] ANI load or resize failed");
         }
+        HCURSOR fileAnimatedCursor = LoadCursorFromFileW(animatedCursorPath);
+        if (fileAnimatedCursor) {
+            SetCursor(fileAnimatedCursor);
+            for (unsigned frame = 0; frame < 4; ++frame) {
+                Sleep(40);
+                MSG pending{};
+                (void)PeekMessageW(&pending, nullptr, 0, 0, PM_NOREMOVE);
+            }
+            SetCursor(windowClass.hCursor);
+            PrintLine(DestroyCursor(fileAnimatedCursor)
+                ? "[MicaNT Cursor] LoadCursorFromFileW ANI load and release passed"
+                : "[MicaNT Cursor] LoadCursorFromFileW ANI release failed");
+        } else {
+            PrintLine("[MicaNT Cursor] LoadCursorFromFileW ANI load failed");
+        }
     }
     windowClass.lpszClassName = kClassName;
     if (!RegisterClassExW(&windowClass)) {

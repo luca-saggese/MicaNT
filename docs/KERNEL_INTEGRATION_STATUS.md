@@ -1895,6 +1895,10 @@ token-to-profile lookup until a canonical per-SID profile manager exists.
 The documented `IDC_PEN`/`OCR_PEN` resource ID (32631) is now connected to its
 existing MiniMouse pen asset; Explorer loads and selects it from the theme map
 in the QEMU boot probe.
+Explorer also loads the staged `mini_mouse_busy.ani` through
+`LoadCursorFromFileW`, selects it during timed message polling, restores the
+class cursor, and destroys the resulting owned handle. This exercises the
+file-specific API path independently of the `LoadImageW` ANI resize probe.
 The compositor still recomposes and submits a complete frame from user mode;
 the driver-side dirty transfer reduces device traffic but is not an incremental
 desktop compositor. Device hardware cursor mode is also unimplemented; software
@@ -1915,3 +1919,4 @@ composition remains the active presentation path.
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-getmessage-fixed` | Passed with Explorer on blocking `GetMessageW`; mouse/keyboard extraction, Enter-triggered app window creation, scanout, cleanup and five seconds stable serial passed; the idle wait invokes the animation updater on each 10ms poll |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-ani-getmessage-runtime` | Passed; Explorer selected the ANI busy cursor during four queued `GetMessageW` polls, restored the normal cursor, then passed input dispatch, scanout, cleanup and five seconds of stable serial |
 | `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-pen-alias` | Passed; Explorer serial confirmed `IDC_PEN` loaded and selected from the system cursor map, followed by PE cursor and ANI probes, input dispatch, scanout, cleanup and five seconds stable serial |
+| `TMPDIR=/private/tmp python3 qemu.py --headless --cmake-build-dir /private/tmp/micant-cursor-qemu-build --timeout 240 --diagnostics-dir /private/tmp/micant-cursor-loadfromfile-ani` | Passed; Explorer serial confirmed `LoadCursorFromFileW` loaded and released the staged ANI cursor; ANI resize, PE resource selection, input dispatch, scanout, cleanup and five seconds stable serial also passed |
