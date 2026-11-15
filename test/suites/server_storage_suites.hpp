@@ -7603,11 +7603,11 @@ inline void Test_WinMerge_Visual_Diff_Subsystem() {
     TEST_ASSERT(micant::uxtheme::IsThemeActive() == 1, "IsThemeActive returns 1");
     TEST_ASSERT(micant::uxtheme::IsAppThemed() == 1, "IsAppThemed returns 1");
     micant::uxtheme::MARGINS margins{};
-    TEST_ASSERT(micant::uxtheme::GetThemeMargins(nullptr, nullptr, 0, 0, 0, nullptr, &margins) == 0, "GetThemeMargins succeeds");
-    TEST_ASSERT(margins.cxLeftWidth == 2 && margins.cyTopHeight == 2, "Theme margins verified");
+    TEST_ASSERT(micant::uxtheme::GetThemeMargins(nullptr, nullptr, 0, 0, 0, nullptr, &margins) == static_cast<int32_t>(0x80070006u), "GetThemeMargins rejects an invalid theme handle");
+    TEST_ASSERT(margins.cxLeftWidth == 0 && margins.cxRightWidth == 0 && margins.cyTopHeight == 0 && margins.cyBottomHeight == 0, "Failed theme margins query clears its output");
     int themeInt = -1;
-    TEST_ASSERT(micant::uxtheme::GetThemeInt(nullptr, 0, 0, 0, &themeInt) == 0 && themeInt == 0, "GetThemeInt succeeds");
-    TEST_ASSERT(micant::uxtheme::DrawThemeText(nullptr, nullptr, 0, 0, L"Text", 4, 0, 0, nullptr) == 0, "DrawThemeText succeeds");
+    TEST_ASSERT(micant::uxtheme::GetThemeInt(nullptr, 1, 1, 2403, &themeInt) == static_cast<int32_t>(0x80070006u) && themeInt == 0, "GetThemeInt clears its output and rejects an invalid theme handle");
+    TEST_ASSERT(micant::uxtheme::DrawThemeText(nullptr, nullptr, 0, 0, L"Text", 4, 0, 0, nullptr) == static_cast<int32_t>(0x80070057u), "DrawThemeText rejects invalid arguments");
     TEST_ASSERT(micant::uxtheme::IsThemeBackgroundPartiallyTransparent(nullptr, 0, 0) == 0, "IsThemeBackgroundPartiallyTransparent returns 0");
 
     uint32_t netErr = 99;
@@ -8675,9 +8675,9 @@ inline void Test_FileZilla_FtpSftp_And_SovereignNetworking_Suite() {
 
     int32_t contentRc[4] = {0, 0, 100, 100};
     int32_t extentRc[4] = {0, 0, 0, 0};
-    TEST_ASSERT(micant::uxtheme::GetThemeBackgroundExtent(nullptr, nullptr, 1, 1, contentRc, extentRc) == 0, "GetThemeBackgroundExtent must succeed");
-    TEST_ASSERT(extentRc[2] == 100 && extentRc[3] == 100, "Theme extent rect must match content rect");
-    TEST_ASSERT(micant::uxtheme::GetThemeSysColor(nullptr, 1) == 0x00FFFFFF, "GetThemeSysColor must return white");
+    TEST_ASSERT(micant::uxtheme::GetThemeBackgroundExtent(nullptr, nullptr, 1, 1, contentRc, extentRc) == static_cast<int32_t>(0x80070006u), "GetThemeBackgroundExtent rejects an invalid theme handle");
+    TEST_ASSERT(extentRc[0] == 0 && extentRc[1] == 0 && extentRc[2] == 0 && extentRc[3] == 0, "Failed theme extent query clears its output rect");
+    TEST_ASSERT(micant::uxtheme::GetThemeSysColor(nullptr, 1) == 0xFFFFFFFFu, "GetThemeSysColor reports CLR_INVALID when unsupported");
 
     // Stage 7: Winsock 2.0 WSA Event Synchronization
     auto hWsaEvent = micant::ws2_32::WSACreateEvent();

@@ -106,6 +106,15 @@ the evidence named here, not just declarations or a successful compile.
   this records the focused runtime probe, not a passing full suite.
 - [ ] Add font query and remaining text behaviors, and verify buffered paint
   lifecycle; unsupported variants must continue returning documented failures.
+- [x] UxTheme color, part-size, integer, background-content and background-extent
+  queries now clear caller outputs before returning an error. Explorer exercised
+  the real freestanding DLL imports with invalid handles and sentinel outputs;
+  QEMU logged `Failed UxTheme color, size, int and rect queries clear outputs`
+  in `/private/tmp/micant-theme-uxtheme-failure-output-run/serial.log`. Build
+  and the focused Ring 3 probe passed; the enclosing input suite still stops at
+  the unrelated parent-folder navigation check. Legacy hosted assertions that
+  expected synthetic query/draw success were corrected to expect documented
+  failure statuses and cleared outputs.
 
 ### 2. Win32 and common controls
 

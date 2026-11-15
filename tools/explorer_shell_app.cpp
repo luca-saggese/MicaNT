@@ -915,6 +915,45 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] UxTheme failed margin query clears its output");
     else
         PrintLine("[MicaNT Theme] UxTheme failed margin query output mismatch");
+    struct ThemeRect { int32_t left, top, right, bottom; };
+    uint32_t rejectedColor = 0xA5A5A5A5u;
+    int32_t rejectedSize[2]{static_cast<int32_t>(0xA5A5A5A5u),
+                            static_cast<int32_t>(0xA5A5A5A5u)};
+    int32_t rejectedInt = static_cast<int32_t>(0xA5A5A5A5u);
+    ThemeRect inputRect{0, 0, 100, 40};
+    ThemeRect rejectedContent{1, 2, 3, 4};
+    ThemeRect rejectedExtent{1, 2, 3, 4};
+    const int32_t invalidTheme = static_cast<int32_t>(0x80070006u);
+    const bool queryFailuresClearOutputs =
+        GetThemeColor(nullptr, 1, 1, 3802, &rejectedColor) == invalidTheme &&
+        rejectedColor == 0 &&
+        GetThemePartSize(nullptr, nullptr, 1, 1, nullptr, 0, rejectedSize) == invalidTheme &&
+        rejectedSize[0] == 0 && rejectedSize[1] == 0 &&
+        GetThemeInt(nullptr, 1, 1, 2403, &rejectedInt) == invalidTheme && rejectedInt == 0 &&
+        GetThemeBackgroundContentRect(nullptr, nullptr, 1, 1, &inputRect,
+                                      &rejectedContent) == invalidTheme &&
+        rejectedContent.left == 0 && rejectedContent.top == 0 &&
+        rejectedContent.right == 0 && rejectedContent.bottom == 0 &&
+        GetThemeBackgroundExtent(nullptr, nullptr, 1, 1, &inputRect,
+                                &rejectedExtent) == invalidTheme &&
+        rejectedExtent.left == 0 && rejectedExtent.top == 0 &&
+        rejectedExtent.right == 0 && rejectedExtent.bottom == 0;
+    rejectedContent = {1, 2, 3, 4};
+    rejectedExtent = {1, 2, 3, 4};
+    const int32_t invalidArgument = static_cast<int32_t>(0x80070057u);
+    const bool invalidRectQueriesClearOutputs =
+        GetThemeBackgroundContentRect(nullptr, nullptr, 1, 1, nullptr,
+                                      &rejectedContent) == invalidArgument &&
+        rejectedContent.left == 0 && rejectedContent.top == 0 &&
+        rejectedContent.right == 0 && rejectedContent.bottom == 0 &&
+        GetThemeBackgroundExtent(nullptr, nullptr, 1, 1, nullptr,
+                                &rejectedExtent) == invalidArgument &&
+        rejectedExtent.left == 0 && rejectedExtent.top == 0 &&
+        rejectedExtent.right == 0 && rejectedExtent.bottom == 0;
+    if (queryFailuresClearOutputs && invalidRectQueriesClearOutputs)
+        PrintLine("[MicaNT Theme] Failed UxTheme color, size, int and rect queries clear outputs");
+    else
+        PrintLine("[MicaNT Theme] Failed UxTheme query output contract mismatch");
     void* animationFromDc = reinterpret_cast<void*>(1);
     void* animationToDc = reinterpret_cast<void*>(1);
     const auto animationBuffer = BeginBufferedAnimation(nullptr, nullptr, nullptr, 0,

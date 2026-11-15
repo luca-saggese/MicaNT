@@ -177,6 +177,7 @@ inline win32::HRESULT CloseThemeData(HTHEME hTheme) noexcept {
 
 inline win32::HRESULT GetThemeColor(HTHEME hTheme, int iPartId, int iStateId, int iPropId, win32::DWORD* pColor) noexcept {
     if (!pColor) return detail::kInvalidArgument;
+    *pColor = 0;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
@@ -199,7 +200,11 @@ inline win32::HRESULT GetThemeFont(HTHEME /*hTheme*/, void* /*hdc*/, int /*iPart
 }
 
 inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, void* /*prc*/, int eSize, void* psz) noexcept {
-    if (!psz || eSize < 0 || eSize > 2) return detail::kInvalidArgument;
+    if (!psz) return detail::kInvalidArgument;
+    auto* size = reinterpret_cast<int32_t*>(psz);
+    size[0] = 0;
+    size[1] = 0;
+    if (eSize < 0 || eSize > 2) return detail::kInvalidArgument;
     if (eSize != 0) return detail::kNotImplemented; // TS_MIN only
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
@@ -213,19 +218,21 @@ inline win32::HRESULT GetThemePartSize(HTHEME hTheme, void* /*hdc*/, int iPartId
         height += style->padding[0] + style->padding[2];
     }
     if (!width && !height) return detail::kNotFound;
-    auto* size = reinterpret_cast<int32_t*>(psz);
     size[0] = width;
     size[1] = height;
     return 0;
 }
 
 inline win32::HRESULT GetThemeBackgroundContentRect(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, const void* pBoundingRect, void* pContentRect) noexcept {
-    if (!pBoundingRect || !pContentRect) return detail::kInvalidArgument;
+    if (!pContentRect) return detail::kInvalidArgument;
+    const MicaWin32kRect bounds = pBoundingRect
+        ? *static_cast<const MicaWin32kRect*>(pBoundingRect) : MicaWin32kRect{};
+    *static_cast<MicaWin32kRect*>(pContentRect) = {};
+    if (!pBoundingRect) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
     const auto* style = detail::style(*handle, iStateId);
-    const auto& bounds = *static_cast<const MicaWin32kRect*>(pBoundingRect);
     if (!style) return detail::kNotFound;
     if (bounds.right < bounds.left || bounds.bottom < bounds.top)
         return detail::kInvalidArgument;
@@ -419,12 +426,15 @@ inline win32::HRESULT BufferedPaintStopAllAnimations(win32::HWND /*hwnd*/) noexc
 }
 
 inline win32::HRESULT GetThemeBackgroundExtent(HTHEME hTheme, void* /*hdc*/, int iPartId, int iStateId, const void* pContentRect, void* pExtentRect) noexcept {
-    if (!pContentRect || !pExtentRect) return detail::kInvalidArgument;
+    if (!pExtentRect) return detail::kInvalidArgument;
+    const MicaWin32kRect content = pContentRect
+        ? *static_cast<const MicaWin32kRect*>(pContentRect) : MicaWin32kRect{};
+    *static_cast<MicaWin32kRect*>(pExtentRect) = {};
+    if (!pContentRect) return detail::kInvalidArgument;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
     const auto* style = detail::style(*handle, iStateId);
-    const auto& content = *static_cast<const MicaWin32kRect*>(pContentRect);
     if (!style) return detail::kNotFound;
     if (content.right < content.left || content.bottom < content.top)
         return detail::kInvalidArgument;
@@ -490,6 +500,7 @@ inline win32::HRESULT GetThemeMargins(HTHEME hTheme, void* /*hdc*/, int iPartId,
 
 inline win32::HRESULT GetThemeInt(HTHEME hTheme, int iPartId, int iStateId, int iPropId, int* piVal) noexcept {
     if (!piVal) return detail::kInvalidArgument;
+    *piVal = 0;
     auto* handle = detail::lookup(hTheme);
     if (!handle) return detail::kInvalidHandle;
     if (iPartId != 1) return detail::kNotImplemented;
