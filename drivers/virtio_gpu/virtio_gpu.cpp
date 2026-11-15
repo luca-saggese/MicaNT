@@ -278,6 +278,7 @@ struct alignas(4096) DeviceState {
     volatile uint32_t queueLock{};
     bool virglOffered{};
     bool virglActive{};
+    bool frameNeedsFullTransfer{};
     bool initialized{};
 };
 
@@ -765,27 +766,58 @@ bool presentFrame(void*, const uint32_t* pixels, uint32_t width, uint32_t height
     if (left + copyWidth > g_device.width) copyWidth = g_device.width - left;
     if (top + copyHeight > g_device.height) copyHeight = g_device.height - top;
     if (copyWidth <= 0 || copyHeight <= 0) return false;
+
+    int64_t dirtyLeft = copyWidth, dirtyTop = copyHeight;
+    int64_t dirtyRight = 0, dirtyBottom = 0;
+    const auto* frame = reinterpret_cast<const uint32_t*>(g_device.dma->frame);
     for (int64_t row = 0; row < copyHeight; ++row) {
         const uint32_t* src = pixels + (srcTop + row) * pitch + srcLeft;
-        uint32_t* dst = reinterpret_cast<uint32_t*>(g_device.dma->frame) + (top + row) * g_device.pitch + left;
-        for (int64_t col = 0; col < copyWidth; ++col) dst[col] = src[col];
+        const uint32_t* dst = frame + (top + row) * g_device.pitch + left;
+        for (int64_t col = 0; col < copyWidth; ++col) {
+            if (src[col] == dst[col]) continue;
+            if (col < dirtyLeft) dirtyLeft = col;
+            if (col + 1 > dirtyRight) dirtyRight = col + 1;
+            if (row < dirtyTop) dirtyTop = row;
+            if (row + 1 > dirtyBottom) dirtyBottom = row + 1;
+        }
+    }
+    if (dirtyRight <= dirtyLeft || dirtyBottom <= dirtyTop) {
+        if (!g_device.frameNeedsFullTransfer) return true;
+    }
+
+    for (int64_t row = dirtyTop; row < dirtyBottom; ++row) {
+        const uint32_t* src = pixels + (srcTop + row) * pitch + srcLeft + dirtyLeft;
+        uint32_t* dst = reinterpret_cast<uint32_t*>(g_device.dma->frame) +
+            (top + row) * g_device.pitch + left + dirtyLeft;
+        for (int64_t col = dirtyLeft; col < dirtyRight; ++col) dst[col - dirtyLeft] = src[col - dirtyLeft];
     }
     ioBarrier();
     if (g_device.virglActive) {
-        return transferResource3D(kVirglOutputResourceId,
+        const bool transferred = transferResource3D(kVirglOutputResourceId,
             reinterpret_cast<const uint32_t*>(g_device.dma->frame), g_device.width,
             g_device.height, g_device.pitch);
+        g_device.frameNeedsFullTransfer = !transferred;
+        return transferred;
     }
     CommandTransfer2D transfer{};
     initHeader(transfer.header, kCmdTransferToHost2D);
-    transfer.rect = {0, 0, g_device.width, g_device.height};
+    transfer.rect = g_device.frameNeedsFullTransfer
+        ? Rect{0, 0, g_device.width, g_device.height}
+        : Rect{static_cast<uint32_t>(left + dirtyLeft),
+               static_cast<uint32_t>(top + dirtyTop), static_cast<uint32_t>(dirtyRight - dirtyLeft),
+               static_cast<uint32_t>(dirtyBottom - dirtyTop)};
     transfer.resourceId = kResourceId;
-    if (!sendNoData(&transfer, sizeof(transfer))) return false;
+    if (!sendNoData(&transfer, sizeof(transfer))) {
+        g_device.frameNeedsFullTransfer = true;
+        return false;
+    }
     CommandFlush flush{};
     initHeader(flush.header, kCmdResourceFlush);
-    flush.rect = {0, 0, g_device.width, g_device.height};
+    flush.rect = transfer.rect;
     flush.resourceId = kResourceId;
-    return sendNoData(&flush, sizeof(flush));
+    const bool presented = sendNoData(&flush, sizeof(flush));
+    g_device.frameNeedsFullTransfer = !presented;
+    return presented;
 }
 
 } // namespace

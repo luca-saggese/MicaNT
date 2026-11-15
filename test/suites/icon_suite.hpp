@@ -8,6 +8,9 @@
 #include "micant/km/win32k/freestanding.hpp"
 #include "micant/shared/pixel_composite.h"
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 inline void Test_IcoDecoder_PngDibAndMalformedInputs() {
@@ -65,6 +68,8 @@ inline void Test_IcoDecoder_PngDibAndMalformedInputs() {
                  "ICO payload escaping the input is rejected");
 }
 
+inline void Test_MiniMouseCursorAssets();
+
 inline void Test_CurDecoder_PngHotspotAndMalformedInput() {
     using namespace micant::um::imaging;
     using namespace micant::um::winuser;
@@ -104,6 +109,41 @@ inline void Test_CurDecoder_PngHotspotAndMalformedInput() {
     auto truncated = cur; truncated.pop_back();
     TEST_ASSERT(DecodeCursorImage(truncated, 32, 32, image, allocator) != ImageStatus::Success,
                 "truncated CUR payload fails without publishing an image");
+    Test_MiniMouseCursorAssets();
+}
+
+inline void Test_MiniMouseCursorAssets() {
+    using namespace micant::um::imaging;
+    using namespace micant::um::winuser;
+    const ImageAllocator allocator{
+        nullptr,
+        [](void*, size_t bytes) noexcept -> void* { return std::malloc(bytes); },
+        [](void*, void* address, size_t) noexcept { std::free(address); },
+    };
+    constexpr const char* curNames[]{
+        "arrow", "beam", "cross", "ew", "helpsel", "link", "move",
+        "nesw", "ns", "nwse", "pen", "unavail", "up",
+    };
+    for (const char* name : curNames) {
+        std::ifstream file(std::string("System/Cursors/MiniMouse/mini_mouse_") + name + ".cur",
+                           std::ios::binary);
+        const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(file), {}};
+        CursorImage image{};
+        TEST_ASSERT(file.good() || file.eof(), "MiniMouse CUR fixture opens from system assets");
+        TEST_ASSERT(DecodeCursorImage(bytes, 0, 0, image, allocator) == ImageStatus::Success,
+                    "MiniMouse CUR fixture decodes through production cursor decoder");
+        TEST_ASSERT(image.hotX < image.image.width && image.hotY < image.image.height,
+                    "MiniMouse CUR hotspot remains inside its decoded frame");
+    }
+    for (const char* name : {"busy", "working"}) {
+        std::ifstream file(std::string("System/Cursors/MiniMouse/mini_mouse_") + name + ".ani",
+                           std::ios::binary);
+        const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(file), {}};
+        AniFileView animation{};
+        TEST_ASSERT(file.good() || file.eof(), "MiniMouse ANI fixture opens from system assets");
+        TEST_ASSERT(ParseAniFile(bytes, animation) == AniStatus::Success && animation.stepCount,
+                    "MiniMouse ANI fixture has a valid frame sequence and timing");
+    }
 }
 
 inline void Test_AniParser_SequenceRatesAndUnknownChunks() {
