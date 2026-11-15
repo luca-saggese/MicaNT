@@ -165,12 +165,22 @@ public:
     }
 
     [[nodiscard]] bool destroy(HICON handle) noexcept {
+        return destroyKind(handle, false);
+    }
+
+    [[nodiscard]] bool destroyCursor(HICON handle) noexcept {
+        return destroyKind(handle, true);
+    }
+
+private:
+    [[nodiscard]] bool destroyKind(HICON handle, bool cursor) noexcept {
         uint16_t slot{}; uint64_t generation{};
         if (!decode(handle, slot, generation)) return false;
         Allocation released{};
         lock();
         Record& record = records_[slot];
-        if (!record.active || record.generation != generation || record.shared) {
+        if (!record.active || record.generation != generation || record.shared ||
+            record.cursor != cursor) {
             unlock(); return false;
         }
         record.active = false; record.retired = true;
@@ -179,6 +189,8 @@ public:
         free(released);
         return true;
     }
+
+public:
 
     // Called by the owning module/cache when a shared icon source is retired.
     [[nodiscard]] bool releaseSharedAsset(HICON handle) noexcept {

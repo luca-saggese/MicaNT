@@ -14,5 +14,7 @@ void bindCompositorStore(MicaCompositorMetadataStore* store,
 void publishCompositorSurfaces() noexcept;
 bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept;
 bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept;
+micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
+                                uint64_t ownerProcessId) noexcept;
 
 } // namespace micant::win32k::freestanding

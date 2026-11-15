@@ -11,6 +11,7 @@
 #include "micant/um/subsystems/imaging/ico_decoder.hpp"
 #include "micant/um/subsystems/imaging/native_image_allocator.hpp"
 #include "micant/um/subsystems/winuser/icon_handle_table.hpp"
+#include "micant/um/subsystems/winuser/cursor_image.hpp"
 #include "micant/shared/native_nt_api.hpp"
 #endif
 #include "micant/shared/win32k_client.h"
@@ -51,6 +52,9 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kSetCursorPos);
     MICA_WIN32K_PROC(MicaWin32kClipCursor);
     MICA_WIN32K_PROC(MicaWin32kShowCursor);
+    MICA_WIN32K_PROC(MicaWin32kSetCursor);
+    MICA_WIN32K_PROC(MicaWin32kGetCursor);
+    MICA_WIN32K_PROC(MicaWin32kGetCursorInfo);
     MICA_WIN32K_PROC(MicaWin32kSetWindowIcon);
     MICA_WIN32K_PROC(MicaWin32kGetWindowIcon);
     MICA_WIN32K_PROC(MicaWin32kRegisterClassW);
@@ -259,8 +263,10 @@ struct RegisteredClassIcons {
     wchar_t name[MICANT_WIN32K_TEXT_CAPACITY]{};
     void* large{};
     void* small{};
+    void* cursor{};
     winuser::IconHandleTable::Lease largeLease{};
     winuser::IconHandleTable::Lease smallLease{};
+    winuser::IconHandleTable::Lease cursorLease{};
 };
 RegisteredClassIcons g_registeredClassIcons[64]{};
 struct RegisteredWindowClass { void* window{}; RegisteredClassIcons* icons{}; };
@@ -330,6 +336,138 @@ void* User32_CopyIcon(void* icon) noexcept {
         icon, micant::um::imaging::NativeImageAllocator());
 }
 
+void* User32_CopyCursor(void* cursor) noexcept {
+    return micant::um::winuser::ProcessIconHandles().copyCursor(
+        cursor, micant::um::imaging::NativeImageAllocator());
+}
+
+int32_t User32_DestroyCursor(void* cursor) noexcept {
+    return micant::um::winuser::ProcessIconHandles().destroyCursor(cursor) ? 1 : 0;
+}
+
+void* User32_LoadCursorW(void* instance, const wchar_t* name) noexcept {
+    constexpr uintptr_t IDC_ARROW = 32512;
+    if (instance || reinterpret_cast<uintptr_t>(name) != IDC_ARROW) return nullptr;
+    static void* sharedArrow{};
+    if (sharedArrow) return sharedArrow;
+    using namespace micant::um;
+    imaging::ImageFrame frame{};
+    frame.width = frame.height = 16; frame.stride = 64;
+    frame.format = imaging::PixelFormat::Bgra8Premultiplied;
+    const auto allocator = imaging::NativeImageAllocator();
+    if (!frame.pixels.allocate(16 * 16 * 4, allocator)) return nullptr;
+    constexpr uint16_t rows[16]{
+        0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
+        0xFF80,0xFCC0,0xCCC0,0x86C0,0x06C0,0x0360,0x0360,0x0000};
+    for (uint32_t y=0;y<16;++y) for (uint32_t x=0;x<16;++x) {
+        if (!(rows[y] & (0x8000u >> x))) continue;
+        const bool edge = x == 0 || y == 0 || !(rows[y] & (0x8000u >> (x-1))) ||
+            (y && !(rows[y-1] & (0x8000u >> x)));
+        const uint8_t c = edge ? 0 : 255;
+        const size_t p = (size_t(y)*16+x)*4;
+        frame.pixels[p]=frame.pixels[p+1]=frame.pixels[p+2]=c;
+        frame.pixels[p+3]=255;
+    }
+    sharedArrow = winuser::ProcessIconHandles().createCursor(std::move(frame), allocator, 0, 0, true);
+    return sharedArrow;
+}
+
+void* User32_LoadCursorA(void* instance, const char* name) noexcept {
+    constexpr uintptr_t IDC_ARROW = 32512;
+    const uintptr_t value = reinterpret_cast<uintptr_t>(name);
+    if (value <= UINT16_MAX) return User32_LoadCursorW(instance, reinterpret_cast<const wchar_t*>(value));
+    if (!name) return nullptr;
+    constexpr char arrow[] = "IDC_ARROW";
+    for (size_t i = 0; i < sizeof(arrow); ++i) {
+        char ch = name[i]; if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+        if (ch != arrow[i]) return nullptr;
+    }
+    return User32_LoadCursorW(instance, reinterpret_cast<const wchar_t*>(uintptr_t(IDC_ARROW)));
+}
+
+void* User32_SetCursor(void* cursor) noexcept {
+    using namespace micant::um::winuser;
+    IconHandleTable::Lease lease{};
+    if (cursor && !ProcessIconHandles().acquireCursor(cursor, lease)) return nullptr;
+    using Fn = void* (*)(void*, const uint32_t*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+    auto fn = Win32kProc<Fn>("MicaWin32kSetCursor");
+    if (!fn) return nullptr;
+    const auto* pixels = cursor ? reinterpret_cast<const uint32_t*>(lease.bitmap().pixels.data()) : nullptr;
+    const auto& bitmap = lease.bitmap();
+    void* previous = fn(cursor, pixels, cursor ? bitmap.width : 0,
+        cursor ? bitmap.height : 0, cursor ? bitmap.stride / 4 : 0,
+        cursor ? bitmap.hotX : 0, cursor ? bitmap.hotY : 0);
+    if (cursor || previous) {
+        IconHandleTable::Lease previousLease{};
+        if (previous && !ProcessIconHandles().acquireCursor(previous, previousLease)) return nullptr;
+    }
+    return previous;
+}
+
+void* User32_GetCursor() noexcept {
+    using Fn = void* (*)();
+    auto fn = Win32kProc<Fn>("MicaWin32kGetCursor");
+    void* cursor = fn ? fn() : nullptr;
+    micant::um::winuser::IconHandleTable::Lease lease{};
+    return cursor && micant::um::winuser::ProcessIconHandles().acquireCursor(cursor, lease)
+        ? cursor : nullptr;
+}
+
+int32_t User32_GetCursorInfo(void* information) noexcept {
+    if (!information) return 0;
+    struct CursorInfoLayout { uint32_t size, flags; void* cursor; WinNtPoint position; };
+    auto* output = static_cast<CursorInfoLayout*>(information);
+    if (output->size != sizeof(CursorInfoLayout)) return 0;
+    using Fn = int32_t (*)(MicaWin32kCursorInfo*);
+    auto fn = Win32kProc<Fn>("MicaWin32kGetCursorInfo");
+    MicaWin32kCursorInfo state{};
+    if (!fn || !fn(&state)) return 0;
+    output->flags = state.flags;
+    output->position = {state.position.x, state.position.y};
+    output->cursor = reinterpret_cast<void*>(state.cursorHandle);
+    if (output->cursor) {
+        micant::um::winuser::IconHandleTable::Lease lease{};
+        if (!micant::um::winuser::ProcessIconHandles().acquireCursor(output->cursor, lease))
+            output->cursor = nullptr;
+    }
+    return 1;
+}
+
+void* User32_CreateCursor(void*, int32_t hotX, int32_t hotY, int32_t width,
+                          int32_t height, const uint8_t* andPlane,
+                          const uint8_t* xorPlane) noexcept {
+    using namespace micant::um;
+    if (!andPlane || !xorPlane || width <= 0 || height <= 0 || width > 64 || height > 64 ||
+        hotX < 0 || hotY < 0 || hotX >= width || hotY >= height) return nullptr;
+    const uint64_t planeStride = ((uint64_t(width) + 31) / 32) * 4;
+    const uint64_t planeBytes = planeStride * static_cast<uint32_t>(height);
+    const uint64_t imageBytes = uint64_t(width) * static_cast<uint32_t>(height) * 4;
+    if (planeBytes > SIZE_MAX || imageBytes > 64u * 64u * 4u) return nullptr;
+    imaging::ImageFrame frame{};
+    frame.width = static_cast<uint32_t>(width);
+    frame.height = static_cast<uint32_t>(height);
+    frame.stride = static_cast<uint32_t>(width) * 4;
+    frame.format = imaging::PixelFormat::Bgra8Premultiplied;
+    const auto allocator = imaging::NativeImageAllocator();
+    if (!frame.pixels.allocate(static_cast<size_t>(imageBytes), allocator)) return nullptr;
+    for (int32_t y = 0; y < height; ++y) {
+        const int32_t sourceY = height - 1 - y;
+        for (int32_t x = 0; x < width; ++x) {
+            const uint8_t mask = static_cast<uint8_t>(0x80u >> (x & 7));
+            const bool andBit = (andPlane[static_cast<size_t>(sourceY) * planeStride + x / 8] & mask) != 0;
+            const bool xorBit = (xorPlane[static_cast<size_t>(sourceY) * planeStride + x / 8] & mask) != 0;
+            if (andBit && xorBit) return nullptr; // destination inversion needs a different overlay op.
+            const uint8_t alpha = andBit ? 0 : 255;
+            const uint8_t color = xorBit ? 255 : 0;
+            const size_t pixel = (static_cast<size_t>(y) * width + x) * 4;
+            frame.pixels[pixel] = frame.pixels[pixel+1] = frame.pixels[pixel+2] = color;
+            frame.pixels[pixel+3] = alpha;
+        }
+    }
+    return winuser::ProcessIconHandles().createCursor(std::move(frame), allocator,
+        static_cast<uint16_t>(hotX), static_cast<uint16_t>(hotY), false);
+}
+
 void* User32_CopyImage(void* image, uint32_t type, int32_t width, int32_t height,
                        uint32_t flags) noexcept {
     constexpr uint32_t ImageIcon = 1;
@@ -354,7 +492,7 @@ void* User32_LoadImageW(void* /*instance*/, const wchar_t* name, uint32_t type,
     using namespace micant::um;
     constexpr uint32_t LoadFromFile = 0x0010u;
     constexpr uint32_t DefaultSize = 0x0040u;
-    if (!name || !*name || type != 1u || desiredWidth < 0 || desiredHeight < 0 ||
+    if (!name || !*name || (type != 1u && type != 2u) || desiredWidth < 0 || desiredHeight < 0 ||
         !(flags & LoadFromFile) || (flags & ~(LoadFromFile | DefaultSize))) return nullptr;
     uint32_t width = static_cast<uint32_t>(desiredWidth);
     uint32_t height = static_cast<uint32_t>(desiredHeight);
@@ -367,12 +505,58 @@ void* User32_LoadImageW(void* /*instance*/, const wchar_t* name, uint32_t type,
     limits.maxPixels = 16ull * 1024 * 1024;
     limits.maxDecodedBytes = 64ull * 1024 * 1024;
     limits.maxIntermediateBytes = 80ull * 1024 * 1024;
+    if (type == 2u) {
+        imaging::ImageBuffer encoded{};
+        if (imaging::ReadIconSourceFile(name, encoded, imaging::NativeImageAllocator(), limits) !=
+            imaging::ImageStatus::Success) return nullptr;
+        winuser::CursorImage cursor{};
+        if (winuser::DecodeCursorImage(encoded.span(), width, height, cursor,
+                imaging::NativeImageAllocator(), limits) != imaging::ImageStatus::Success)
+            return nullptr;
+        uint32_t targetWidth = width ? width : cursor.image.width;
+        uint32_t targetHeight = height ? height : cursor.image.height;
+        if ((flags & DefaultSize) && !width && !height) targetWidth = targetHeight = 32;
+        if (!targetWidth || !targetHeight || targetWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+            targetHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        uint16_t hotX = cursor.hotX, hotY = cursor.hotY;
+        if (cursor.image.width != targetWidth || cursor.image.height != targetHeight) {
+            const uint32_t oldWidth = cursor.image.width, oldHeight = cursor.image.height;
+            imaging::ImageFrame scaled{};
+            if (imaging::ScaleIconFrame(cursor.image, targetWidth, targetHeight, scaled,
+                    imaging::NativeImageAllocator(), limits) != imaging::ImageStatus::Success)
+                return nullptr;
+            hotX = static_cast<uint16_t>(std::min<uint32_t>(targetWidth - 1,
+                (uint32_t(hotX) * targetWidth + oldWidth / 2) / oldWidth));
+            hotY = static_cast<uint16_t>(std::min<uint32_t>(targetHeight - 1,
+                (uint32_t(hotY) * targetHeight + oldHeight / 2) / oldHeight));
+            cursor.image = std::move(scaled);
+        }
+        return winuser::ProcessIconHandles().createCursor(std::move(cursor.image),
+            imaging::NativeImageAllocator(), hotX, hotY, false);
+    }
     imaging::ImageFrame frame{};
     const auto status = imaging::DecodeIconFile(name, frame,
         imaging::NativeImageAllocator(), width, height, limits);
     if (status != imaging::ImageStatus::Success) return nullptr;
     return winuser::ProcessIconHandles().create(std::move(frame),
         imaging::NativeImageAllocator(), false);
+}
+
+void* User32_LoadCursorFromFileW(const wchar_t* path) noexcept {
+    return User32_LoadImageW(nullptr, path, 2u, 0, 0, 0x0010u);
+}
+
+void* User32_LoadCursorFromFileA(const char* path) noexcept {
+    if (!path || reinterpret_cast<uintptr_t>(path) <= UINT16_MAX) return nullptr;
+    wchar_t wide[260]{};
+    size_t length = 0;
+    for (; path[length] && length + 1 < std::size(wide); ++length) {
+        const uint8_t ch = static_cast<uint8_t>(path[length]);
+        if (ch >= 0x80) return nullptr;
+        wide[length] = static_cast<wchar_t>(ch);
+    }
+    if (!length || path[length]) return nullptr;
+    return User32_LoadCursorFromFileW(wide);
 }
 
 void* User32_LoadImageA(void* instance, const char* name, uint32_t type,
@@ -500,8 +684,10 @@ uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
     if (classNameLength == MICANT_WIN32K_TEXT_CAPACITY) return 0;
     winuser::IconHandleTable::Lease classLargeLease{};
     winuser::IconHandleTable::Lease classSmallLease{};
+    winuser::IconHandleTable::Lease classCursorLease{};
     if ((wc->icon && !winuser::ProcessIconHandles().acquire(wc->icon, classLargeLease)) ||
-        (wc->smallIcon && !winuser::ProcessIconHandles().acquire(wc->smallIcon, classSmallLease)))
+        (wc->smallIcon && !winuser::ProcessIconHandles().acquire(wc->smallIcon, classSmallLease)) ||
+        (wc->cursor && !winuser::ProcessIconHandles().acquireCursor(wc->cursor, classCursorLease)))
         return 0;
 #endif
     using Fn=uint16_t (*)(const wchar_t*,void*);
@@ -512,8 +698,10 @@ uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
         for (size_t i = 0; i < classNameLength; ++i) iconSlot->name[i] = wc->className[i];
         iconSlot->name[classNameLength] = 0;
         iconSlot->large = wc->icon; iconSlot->small = wc->smallIcon;
+        iconSlot->cursor = wc->cursor;
         iconSlot->largeLease = std::move(classLargeLease);
         iconSlot->smallLease = std::move(classSmallLease);
+        iconSlot->cursorLease = std::move(classCursorLease);
     }
 #endif
     return atom;
@@ -705,7 +893,18 @@ intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
     using Fn=intptr_t (*)(const MicaWin32kMessage*);
     auto fn=Win32kProc<Fn>("MicaWin32kDispatchMessageW");
     MicaWin32kMessage msg{lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam,lpMsg->time,{lpMsg->pt.x,lpMsg->pt.y}};
-    return fn ? fn(&msg) : User32_DefWindowProcW(lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam);
+    const intptr_t result = fn ? fn(&msg)
+        : User32_DefWindowProcW(lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam);
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (lpMsg->message == 0x0020u && result == 0) {
+        if (auto* window = findRegisteredWindowClass(lpMsg->hwnd);
+            window && window->icons && window->icons->cursor) {
+            (void)User32_SetCursor(window->icons->cursor);
+            return 1;
+        }
+    }
+#endif
+    return result;
 }
 
 void User32_PostQuitMessage(int32_t exitCode) noexcept {
@@ -1438,10 +1637,42 @@ __declspec(dllexport) void* CopyImage(void* image, uint32_t type, int32_t cx,
 __declspec(dllexport) int32_t DestroyIcon(void* icon) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_DestroyIcon(icon);
 }
+__declspec(dllexport) void* CopyCursor(void* cursor) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CopyCursor(cursor);
+}
+__declspec(dllexport) int32_t DestroyCursor(void* cursor) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_DestroyCursor(cursor);
+}
+__declspec(dllexport) void* SetCursor(void* cursor) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetCursor(cursor);
+}
+__declspec(dllexport) void* GetCursor(void) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetCursor();
+}
+__declspec(dllexport) int32_t GetCursorInfo(void* information) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetCursorInfo(information);
+}
+__declspec(dllexport) void* CreateCursor(void* instance, int32_t hotX, int32_t hotY,
+    int32_t width, int32_t height, const uint8_t* andPlane, const uint8_t* xorPlane) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CreateCursor(
+        instance, hotX, hotY, width, height, andPlane, xorPlane);
+}
 __declspec(dllexport) void* LoadImageW(void* instance, const wchar_t* name,
     uint32_t type, int32_t cx, int32_t cy, uint32_t flags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadImageW(
         instance, name, type, cx, cy, flags);
+}
+__declspec(dllexport) void* LoadCursorFromFileW(const wchar_t* path) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadCursorFromFileW(path);
+}
+__declspec(dllexport) void* LoadCursorFromFileA(const char* path) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadCursorFromFileA(path);
+}
+__declspec(dllexport) void* LoadCursorW(void* instance, const wchar_t* name) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadCursorW(instance, name);
+}
+__declspec(dllexport) void* LoadCursorA(void* instance, const char* name) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadCursorA(instance, name);
 }
 __declspec(dllexport) void* LoadImageA(void* instance, const char* name,
     uint32_t type, int32_t cx, int32_t cy, uint32_t flags) {

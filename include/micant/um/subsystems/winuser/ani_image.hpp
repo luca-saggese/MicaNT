@@ -130,7 +130,8 @@ inline AniStatus ParseAniFile(std::span<const uint8_t> bytes, AniFileView& outpu
     }
     if (!haveHeader || !output.frameCount || output.frameCount != output.declaredFrames ||
         (haveRate && rateCount != output.declaredSteps) ||
-        (haveSequence && sequenceCount != output.declaredSteps)) return AniStatus::Malformed;
+        (haveSequence && sequenceCount != output.declaredSteps) ||
+        ((output.flags & 2u) != 0) != haveSequence) return AniStatus::Malformed;
     output.stepCount = static_cast<uint16_t>(output.declaredSteps);
     for (uint16_t i = 0; i < output.stepCount; ++i) {
         const uint32_t frame = haveSequence ? sequence[i] : i % output.frameCount;

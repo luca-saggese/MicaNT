@@ -3974,7 +3974,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             MicaWin32kInputEvent event{};
             if (pollMouseInput(event)) {
                 const bool clickQueued = win32k::freestanding::dispatchMouseInput(event);
-                if (clickQueued) publishCompositorSurfacesInCompositorSpace();
+                publishCompositorSurfacesInCompositorSpace();
                 auto* inputProcess = ke::KeGetCurrentProcess();
                 if (clickQueued && !explorerMouseClickObserved && inputProcess &&
                     inputProcess->processId() == g_explorerProcessId) {
@@ -4081,6 +4081,29 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
         }
         return status(resultStatus);
+    }
+    if (number == 0x87) {
+        MicaWin32kCursorImage image{};
+        const NtStatus copyStatus = ex::ExSafeCopyFromUser(
+            &image, reinterpret_cast<const void*>(first), sizeof(image));
+        if (copyStatus != NtStatus::Success) return status(copyStatus);
+        if (image.size != sizeof(image) ||
+            image.version != MICANT_WIN32K_CURSOR_IMAGE_VERSION)
+            return status(NtStatus::InvalidParameter);
+        auto* process = ke::KeGetCurrentProcess();
+        const uint64_t owner = process ? process->processId() : 0;
+        MicaWin32kRequest previous{};
+        previous.operation = MICANT_WIN32K_OP_GET_CURSOR_HANDLE;
+        NtStatus resultStatus = win32k::freestanding::dispatchRequest(previous, owner);
+        if (resultStatus != NtStatus::Success) return status(resultStatus);
+        resultStatus = win32k::freestanding::setCursorImage(image, owner);
+        if (resultStatus != NtStatus::Success) return status(resultStatus);
+        image.previousCursorHandle = previous.result;
+        publishCompositorSurfacesInCompositorSpace();
+        const auto* previousField = reinterpret_cast<const uint8_t*>(first) +
+            offsetof(MicaWin32kCursorImage, previousCursorHandle);
+        return status(ex::ExSafeCopyToUser(const_cast<uint8_t*>(previousField),
+            &image.previousCursorHandle, sizeof(image.previousCursorHandle)));
     }
     return status(NtStatus::NotSupported);
 }

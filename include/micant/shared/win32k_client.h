@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "micant/shared/compositor_surface.h"
 
 #if defined(MICANT_WIN32K_EXPORTS)
 #define MICANT_WIN32K_API __declspec(dllexport)
@@ -108,7 +109,9 @@ enum {
     MICANT_WIN32K_OP_GET_CURSOR_CLIP,
     MICANT_WIN32K_OP_SET_CURSOR_POS,
     MICANT_WIN32K_OP_SET_CURSOR_CLIP,
-    MICANT_WIN32K_OP_SHOW_CURSOR
+    MICANT_WIN32K_OP_SHOW_CURSOR,
+    MICANT_WIN32K_OP_GET_CURSOR_HANDLE,
+    MICANT_WIN32K_OP_GET_CURSOR_INFO
 };
 
 typedef struct MicaWin32kRequest {
@@ -182,6 +185,27 @@ MICANT_WIN32K_API int32_t MicaWin32kGetClipCursor(MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kSetCursorPos(int32_t, int32_t);
 MICANT_WIN32K_API int32_t MicaWin32kClipCursor(const MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kShowCursor(int32_t);
+MICANT_WIN32K_API void* MicaWin32kSetCursor(void*, const uint32_t*, uint32_t,
+    uint32_t, uint32_t, uint32_t, uint32_t);
+MICANT_WIN32K_API void* MicaWin32kGetCursor(void);
+
+typedef struct MicaWin32kCursorImage {
+    uint32_t size, version;
+    uint64_t cursorHandle;
+    uint32_t width, height, pitch, hotX, hotY;
+    uint32_t pixels[MICANT_COMPOSITOR_CURSOR_MAX_PIXELS];
+    uint64_t previousCursorHandle;
+} MicaWin32kCursorImage;
+
+typedef struct MicaWin32kCursorInfo {
+    uint32_t size, flags;
+    uint64_t cursorHandle;
+    MicaWin32kPoint position;
+} MicaWin32kCursorInfo;
+
+#define MICANT_WIN32K_CURSOR_IMAGE_VERSION 1u
+MICANT_WIN32K_API int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage*);
+MICANT_WIN32K_API int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo*);
 
 #ifdef __cplusplus
 }

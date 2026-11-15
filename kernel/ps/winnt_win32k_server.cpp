@@ -651,4 +651,51 @@ int32_t MicaWin32kShowCursor(int32_t show) {
     return static_cast<int32_t>(static_cast<int64_t>(value.result));
 }
 
+void* MicaWin32kSetCursor(void* cursor, const uint32_t* pixels, uint32_t width,
+                          uint32_t height, uint32_t pitch,
+                          uint32_t hotX, uint32_t hotY) {
+    if (cursor && (!pixels || !width || !height ||
+        width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION || pitch < width ||
+        hotX >= width || hotY >= height)) return nullptr;
+    MicaWin32kCursorImage image{};
+    image.size = sizeof(image);
+    image.version = MICANT_WIN32K_CURSOR_IMAGE_VERSION;
+    image.cursorHandle = reinterpret_cast<uint64_t>(cursor);
+    image.width = width; image.height = height;
+    image.pitch = cursor ? width : 0;
+    image.hotX = cursor ? hotX : 0; image.hotY = cursor ? hotY : 0;
+    if (cursor) {
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                image.pixels[static_cast<size_t>(y) * width + x] = pixels[static_cast<size_t>(y) * pitch + x];
+    }
+    if (MicaWin32kApplyCursorImage(&image) != 0)
+        return nullptr;
+    return reinterpret_cast<void*>(image.previousCursorHandle);
+}
+
+void* MicaWin32kGetCursor(void) {
+    MicaWin32kRequest value{};
+    return request(MICANT_WIN32K_OP_GET_CURSOR_HANDLE, value)
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
+int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage* image) {
+    if (!image) return -1;
+    return static_cast<int32_t>(micant::sys::invokeUserService(
+        0x87, reinterpret_cast<uint64_t>(image)));
+}
+
+int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo* output) {
+    if (!output) return 0;
+    MicaWin32kRequest value{};
+    if (!request(MICANT_WIN32K_OP_GET_CURSOR_INFO, value)) return 0;
+    output->size = sizeof(*output);
+    output->flags = value.flags;
+    output->cursorHandle = value.result;
+    output->position = {value.rect.left, value.rect.top};
+    return 1;
+}
+
 }

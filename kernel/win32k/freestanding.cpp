@@ -24,6 +24,7 @@ constexpr uint32_t kWmRButtonDown = 0x0204;
 constexpr uint32_t kWmRButtonUp = 0x0205;
 constexpr uint32_t kWmMButtonDown = 0x0207;
 constexpr uint32_t kWmMButtonUp = 0x0208;
+constexpr uint32_t kWmSetCursor = 0x0020;
 constexpr uint32_t kWmKeyDown = 0x0100;
 constexpr uint32_t kWmKeyUp = 0x0101;
 constexpr uint32_t kWmChar = 0x0102;
@@ -105,11 +106,38 @@ uint32_t g_messageTime{};
 uint64_t g_foregroundWindow{};
 uint64_t g_nextZOrder{};
 int32_t g_mouseX{-1}, g_mouseY{-1};
+bool g_mousePositionValid{};
 MicaWin32kRect g_cursorClip{0, 0, kScreenWidth, kScreenHeight};
 uint64_t g_cursorClipOwner{};
 int32_t g_cursorDisplayCount{1};
+uint64_t g_activeCursorHandle{};
+uint64_t g_activeCursorOwner{};
+uint32_t g_activeCursorWidth{16}, g_activeCursorHeight{16}, g_activeCursorPitch{16};
+uint32_t g_activeCursorHotX{}, g_activeCursorHotY{};
+uint32_t g_activeCursorPixels[MICANT_COMPOSITOR_CURSOR_MAX_PIXELS]{};
+bool g_defaultCursorInitialized{};
+constexpr uint16_t kDefaultArrowRows[16]{
+    0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
+    0xFF80,0xFCC0,0xCCC0,0x86C0,0x06C0,0x0360,0x0360,0x0000};
+
+void resetCursorImage() noexcept {
+    g_activeCursorHandle = 0;
+    g_activeCursorOwner = 0;
+    g_activeCursorWidth = g_activeCursorHeight = g_activeCursorPitch = 16;
+    g_activeCursorHotX = g_activeCursorHotY = 0;
+    for (size_t i = 0; i < 16 * 16; ++i) g_activeCursorPixels[i] = 0;
+    for (uint32_t y = 0; y < 16; ++y) for (uint32_t x = 0; x < 16; ++x) {
+        if (!(kDefaultArrowRows[y] & (0x8000u >> x))) continue;
+        const bool edge = x == 0 || y == 0 ||
+            !(kDefaultArrowRows[y] & (0x8000u >> (x - 1))) ||
+            (y && !(kDefaultArrowRows[y - 1] & (0x8000u >> x)));
+        g_activeCursorPixels[y * 16 + x] = edge ? 0xFF000000u : 0xFFFFFFFFu;
+    }
+}
 uint64_t g_captionCapture{};
 uint8_t g_pressedCaptionButton{};
+uint64_t g_cursorHitWindow{};
+int32_t g_cursorHitTest{};
 
 int32_t frameInset(const Window& window) noexcept {
     if (window.parent || (window.style & kWsChild)) return 0;
@@ -234,6 +262,30 @@ Window* topmostVisibleWindow() noexcept {
         if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
     }
     return topmost;
+}
+
+int32_t hitTestWindow(const Window& window, int32_t x, int32_t y) noexcept {
+    constexpr int32_t HTCLIENT = 1, HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11;
+    constexpr int32_t HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14;
+    constexpr int32_t HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+    const int32_t localX = x - window.x, localY = y - window.y;
+    const int32_t frame = frameInset(window);
+    if (frame >= 5 && (localX < frame || localX >= window.width - frame ||
+                       localY < frame || localY >= window.height - frame)) {
+        const bool left = localX < frame, right = localX >= window.width - frame;
+        const bool top = localY < frame, bottom = localY >= window.height - frame;
+        if (top && left) return HTTOPLEFT;
+        if (top && right) return HTTOPRIGHT;
+        if (bottom && left) return HTBOTTOMLEFT;
+        if (bottom && right) return HTBOTTOMRIGHT;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+        if (top) return HTTOP;
+        if (bottom) return HTBOTTOM;
+    }
+    const int32_t caption = captionHeight(window);
+    if (caption && localY < frame + caption) return HTCAPTION;
+    return HTCLIENT;
 }
 
 bool enqueueWindowMessage(const Window& window, uint32_t message,
@@ -570,6 +622,15 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             request.rect = g_cursorClip;
             request.result = 1;
             return NtStatus::Success;
+        case MICANT_WIN32K_OP_GET_CURSOR_HANDLE:
+            request.result = g_activeCursorOwner == ownerProcessId ? g_activeCursorHandle : 0;
+            return NtStatus::Success;
+        case MICANT_WIN32K_OP_GET_CURSOR_INFO:
+            request.rect.left = g_mousePositionValid ? g_mouseX : 0;
+            request.rect.top = g_mousePositionValid ? g_mouseY : 0;
+            request.flags = g_cursorDisplayCount >= 0 && g_mousePositionValid ? 1u : 0u;
+            request.result = g_activeCursorOwner == ownerProcessId ? g_activeCursorHandle : 0;
+            return NtStatus::Success;
         case MICANT_WIN32K_OP_SET_CURSOR_POS: {
             const int32_t requestedX = static_cast<int32_t>(request.args[0]);
             const int32_t requestedY = static_cast<int32_t>(request.args[1]);
@@ -580,6 +641,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (right <= left || bottom <= top) return NtStatus::InvalidParameter;
             g_mouseX = std::clamp(requestedX, left, right - 1);
             g_mouseY = std::clamp(requestedY, top, bottom - 1);
+            g_mousePositionValid = true;
             request.result = 1;
             return NtStatus::Success;
         }
@@ -668,6 +730,9 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             g_cursorClip = {0, 0, kScreenWidth, kScreenHeight};
             g_cursorClipOwner = 0;
         }
+        if (g_activeCursorOwner == ownerProcessId) {
+            resetCursorImage();
+        }
     }
     if (publish) publish();
 }
@@ -680,6 +745,7 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
     const int32_t x = std::clamp(event.x, left, std::max(left, right - 1));
     const int32_t y = std::clamp(event.y, top, std::max(top, bottom - 1));
+    g_mousePositionValid = true;
     const uint32_t previousButtons = g_mouseButtons;
     const uint32_t currentButtons = event.buttons & 0x07u;
     const bool moved = x != g_mouseX || y != g_mouseY;
@@ -687,6 +753,19 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     g_mouseX = x;
     g_mouseY = y;
     auto* target = topmostVisibleWindow(x, y);
+    const int32_t hitTest = target ? hitTestWindow(*target, x, y) : 0;
+    if (!target) {
+        g_cursorHitWindow = 0;
+        g_cursorHitTest = 0;
+    } else if (target->handle != g_cursorHitWindow || hitTest != g_cursorHitTest) {
+        const int64_t setCursorLParam = static_cast<int64_t>(
+            (static_cast<uint32_t>(kWmMouseMove) << 16) |
+            (static_cast<uint32_t>(hitTest) & 0xFFFFu));
+        if (!enqueueWindowMessage(*target, kWmSetCursor, target->handle,
+                                  setCursorLParam, x, y)) return false;
+        g_cursorHitWindow = target->handle;
+        g_cursorHitTest = hitTest;
+    }
     const bool leftPressed = !(previousButtons & 0x01u) && (currentButtons & 0x01u);
     const bool leftReleased = (previousButtons & 0x01u) && !(currentButtons & 0x01u);
     if (leftPressed && target) {
@@ -830,6 +909,10 @@ bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
 void bindCompositorStore(MicaCompositorMetadataStore* store,
                          void (*publishCallback)() noexcept) noexcept {
     StateLockGuard lock;
+    if (!g_defaultCursorInitialized) {
+        resetCursorImage();
+        g_defaultCursorInitialized = true;
+    }
     g_compositorStore = store;
     g_compositorPublishCallback = publishCallback;
 }
@@ -839,6 +922,22 @@ void publishCompositorSurfaces() noexcept {
     auto* store = g_compositorStore;
     if (!store) return;
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
+    auto& cursor = store->cursor;
+    cursor = {};
+    cursor.x = g_mousePositionValid ? g_mouseX : 0;
+    cursor.y = g_mousePositionValid ? g_mouseY : 0;
+    cursor.width = g_activeCursorWidth;
+    cursor.height = g_activeCursorHeight;
+    cursor.pitch = g_activeCursorPitch;
+    cursor.hotX = g_activeCursorHotX;
+    cursor.hotY = g_activeCursorHotY;
+    cursor.flags = (g_activeCursorWidth && g_activeCursorHeight
+        ? MICANT_COMPOSITOR_CURSOR_ACTIVE : 0u) |
+        (g_cursorDisplayCount >= 0 && g_mousePositionValid
+            ? MICANT_COMPOSITOR_CURSOR_VISIBLE : 0u);
+    if (g_activeCursorWidth && g_activeCursorHeight)
+        for (size_t i = 0; i < size_t(g_activeCursorPitch) * g_activeCursorHeight; ++i)
+            cursor.pixels[i] = g_activeCursorPixels[i];
     for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
         auto& info = store->surfaces[index];
         info = {};
@@ -868,6 +967,42 @@ void publishCompositorSurfaces() noexcept {
             info.title[character] = window.title[character];
     }
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
+}
+
+micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
+                                uint64_t ownerProcessId) noexcept {
+    if (!ownerProcessId || image.size != sizeof(image) ||
+        image.version != MICANT_WIN32K_CURSOR_IMAGE_VERSION) return NtStatus::InvalidParameter;
+    if (!image.cursorHandle) {
+        if (image.width || image.height || image.pitch || image.hotX || image.hotY)
+            return NtStatus::InvalidParameter;
+    } else if (!image.width || !image.height ||
+        image.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        image.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
+        image.pitch != image.width || image.hotX >= image.width || image.hotY >= image.height) {
+        return NtStatus::InvalidParameter;
+    }
+    for (size_t i = 0; i < size_t(image.pitch) * image.height; ++i) {
+        const uint32_t pixel = image.pixels[i];
+        const uint32_t alpha = pixel >> 24;
+        if (((pixel >> 16) & 0xFFu) > alpha || ((pixel >> 8) & 0xFFu) > alpha ||
+            (pixel & 0xFFu) > alpha) return NtStatus::InvalidParameter;
+    }
+    StateLockGuard lock;
+    g_activeCursorHandle = image.cursorHandle;
+    g_activeCursorOwner = image.cursorHandle ? ownerProcessId : 0;
+    if (image.cursorHandle) {
+        g_activeCursorWidth = image.width;
+        g_activeCursorHeight = image.height;
+        g_activeCursorPitch = image.pitch;
+        g_activeCursorHotX = image.hotX;
+        g_activeCursorHotY = image.hotY;
+        for (size_t i = 0; i < size_t(image.pitch) * image.height; ++i)
+            g_activeCursorPixels[i] = image.pixels[i];
+    } else {
+        resetCursorImage();
+    }
+    return NtStatus::Success;
 }
 
 } // namespace micant::win32k::freestanding

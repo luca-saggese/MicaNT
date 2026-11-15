@@ -85,6 +85,16 @@ inline void Test_CurDecoder_PngHotspotAndMalformedInput() {
     TEST_ASSERT(image.image.width == 1 && image.image.height == 1 &&
                 image.hotX == 0 && image.hotY == 0,
                 "CUR preserves its hotspot and decoded dimensions");
+    std::vector<uint8_t> dibCur(70, 0);
+    dibCur[2] = 2; dibCur[4] = 1;
+    dibCur[6] = 1; dibCur[7] = 1; dibCur[14] = 48; dibCur[18] = 22;
+    dibCur[22] = 40; dibCur[26] = 1; dibCur[30] = 2; dibCur[34] = 1;
+    dibCur[36] = 32;
+    dibCur[62] = 0x20; dibCur[63] = 0x40; dibCur[64] = 0x60; dibCur[65] = 0x80;
+    TEST_ASSERT(DecodeCursorImage(dibCur, 1, 1, image, allocator) == ImageStatus::Success &&
+                image.image.pixels[0] == 16 && image.image.pixels[1] == 32 &&
+                image.image.pixels[2] == 48 && image.image.pixels[3] == 128,
+                "CUR DIB decoding reuses the premultiplied icon image decoder");
     auto badType = cur; badType[2] = 1;
     TEST_ASSERT(DecodeCursorImage(badType, 32, 32, image, allocator) == ImageStatus::MalformedData,
                 "ICO input is not accepted as a cursor");
@@ -324,7 +334,8 @@ inline void Test_CursorHandles_HotspotAndTypedOwnership() {
                 iconLease.bitmap().hotX == 1 && iconLease.bitmap().width == 2,
                 "cursor copy preserves bitmap and hotspot");
     iconLease = {};
-    TEST_ASSERT(ProcessIconHandles().destroy(cursor) && ProcessIconHandles().destroy(copy),
+    TEST_ASSERT(!ProcessIconHandles().destroy(cursor) &&
+                ProcessIconHandles().destroyCursor(cursor) && ProcessIconHandles().destroyCursor(copy),
                 "owned cursors retire through the shared USER bitmap lifetime table");
     lease = {};
     ImageFrame bad{}; bad.width = bad.height = 1; bad.stride = 4;
@@ -375,6 +386,66 @@ inline void Test_Win32kCursorPositionClipAndVisibilityState() {
     request.args[0] = static_cast<uint64_t>(static_cast<int64_t>(-1));
     TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success && request.result == 1,
                 "ShowCursor decrements canonical visibility state");
+    MicaCompositorMetadataStore metadata{};
+    win32k::freestanding::bindCompositorStore(&metadata, nullptr);
+    MicaWin32kCursorImage image{};
+    image.size = sizeof(image); image.version = MICANT_WIN32K_CURSOR_IMAGE_VERSION;
+    image.cursorHandle = 0x435552534f52ull;
+    image.width = image.height = image.pitch = 1;
+    image.pixels[0] = 0x80800000u;
+    TEST_ASSERT(win32k::freestanding::setCursorImage(image, owner) == NtStatus::Success,
+                "Win32k accepts bounded cursor image data from its owner");
+    auto invalidImage = image;
+    invalidImage.pixels[0] = 0x808000FFu;
+    TEST_ASSERT(win32k::freestanding::setCursorImage(invalidImage, owner) == NtStatus::InvalidParameter,
+                "Win32k rejects non-premultiplied cursor pixels without replacing active state");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_HANDLE;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success &&
+                request.result == image.cursorHandle,
+                "current process sees its active cursor handle");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_HANDLE;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner + 1) == NtStatus::Success &&
+                request.result == 0,
+                "active cursor handles are not exposed to another process");
+    win32k::freestanding::publishCompositorSurfaces();
+    TEST_ASSERT(metadata.cursor.width == 1 && metadata.cursor.hotX == 0 &&
+                metadata.cursor.pixels[0] == image.pixels[0] &&
+                (metadata.cursor.flags & MICANT_COMPOSITOR_CURSOR_ACTIVE),
+                "compositor metadata receives the validated cursor overlay image");
+    win32k::freestanding::releaseProcess(owner);
+    win32k::freestanding::publishCompositorSurfaces();
+    request = {};
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_HANDLE;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success &&
+                request.result == 0 && metadata.cursor.width == 16 &&
+                (metadata.cursor.flags & MICANT_COMPOSITOR_CURSOR_ACTIVE),
+                "process teardown releases its cursor and restores the safe arrow");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_REGISTER_CLASS;
+    request.className[0] = 'C'; request.className[1] = 'U'; request.className[2] = 'R';
+    request.className[3] = 0; request.args[0] = 1;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success,
+                "Win32k registers a cursor test window class");
+    request = {};
+    request.operation = MICANT_WIN32K_OP_CREATE_WINDOW;
+    request.className[0] = 'C'; request.className[1] = 'U'; request.className[2] = 'R';
+    request.className[3] = 0; request.title[0] = 'T'; request.title[1] = 0;
+    request.args[1] = 0x10000000u; request.args[2] = 10; request.args[3] = 20;
+    request.args[4] = 100; request.args[5] = 80;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success && request.result,
+                "Win32k creates a visible cursor test window");
+    const MicaWin32kInputEvent hover{15, 25, 0, 2};
+    (void)win32k::freestanding::dispatchMouseInput(hover);
+    request = {};
+    request.operation = MICANT_WIN32K_OP_PEEK_MESSAGE;
+    request.args[1] = request.args[2] = 0x0020;
+    request.args[3] = 1;
+    TEST_ASSERT(win32k::freestanding::dispatchRequest(request, owner) == NtStatus::Success &&
+                request.result && request.messageId == 0x0020 && request.messageWParam &&
+                (request.messageLParam & 0xFFFF) == 1,
+                "mouse hit-test transition routes WM_SETCURSOR with HTCLIENT");
     request = {};
     request.operation = MICANT_WIN32K_OP_SET_CURSOR_CLIP;
     win32k::freestanding::releaseProcess(owner);

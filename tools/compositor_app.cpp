@@ -1,5 +1,6 @@
 #include "micant/shared/compositor_surface.h"
 #include "micant/shared/font8x8.hpp"
+#include "micant/shared/pixel_composite.h"
 #include "micant/shared/user_graphics.hpp"
 #include "micant/shared/user_syscall.hpp"
 
@@ -30,6 +31,7 @@ uint32_t blend(uint32_t source, uint32_t destination) noexcept {
     const uint32_t outAlpha = alpha + (((destination >> 24) * inverse + 127) / 255);
     return (outAlpha << 24) | (red << 16) | (green << 8) | blue;
 }
+
 
 void fillRect(int64_t left, int64_t top, int64_t right, int64_t bottom,
               uint32_t color, uint32_t width, uint32_t height) noexcept {
@@ -203,6 +205,29 @@ bool compose(const MicaCompositorMetadataStore& metadata,
                 const size_t destination = destinationRow + static_cast<size_t>(x);
                 g_frame[destination] = blend(surfaces[sourceRow + sourceX],
                                              g_frame[destination]);
+            }
+        }
+    }
+
+    const auto& cursor = metadata.cursor;
+    if ((cursor.flags & (MICANT_COMPOSITOR_CURSOR_ACTIVE | MICANT_COMPOSITOR_CURSOR_VISIBLE)) ==
+            (MICANT_COMPOSITOR_CURSOR_ACTIVE | MICANT_COMPOSITOR_CURSOR_VISIBLE) &&
+        cursor.width && cursor.height && cursor.width <= MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION &&
+        cursor.height <= MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION && cursor.pitch >= cursor.width &&
+        cursor.pitch <= MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION &&
+        cursor.hotX < cursor.width && cursor.hotY < cursor.height) {
+        const int64_t originX = static_cast<int64_t>(cursor.x) - cursor.hotX;
+        const int64_t originY = static_cast<int64_t>(cursor.y) - cursor.hotY;
+        for (uint32_t sy = 0; sy < cursor.height; ++sy) {
+            const int64_t dy = originY + sy;
+            if (dy < 0 || dy >= height) continue;
+            for (uint32_t sx = 0; sx < cursor.width; ++sx) {
+                const int64_t dx = originX + sx;
+                if (dx < 0 || dx >= width) continue;
+                const uint32_t source = cursor.pixels[static_cast<size_t>(sy) * cursor.pitch + sx];
+                const size_t destination = static_cast<size_t>(dy) * width + static_cast<size_t>(dx);
+                g_frame[destination] = micant::shared::graphics::PremultipliedSourceOver(
+                    source, g_frame[destination]);
             }
         }
     }

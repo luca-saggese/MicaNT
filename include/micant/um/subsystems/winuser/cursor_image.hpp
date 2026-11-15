@@ -53,10 +53,23 @@ inline imaging::ImageStatus DecodeCursorImage(
     }
 
     uint16_t selected{};
-    const auto selection = SelectIconDirectoryEntry(directory,
-        requestedWidth ? requestedWidth : 32, requestedHeight ? requestedHeight : 32,
-        32, selected);
-    if (selection != ImageStatus::Success) return selection;
+    const uint32_t wantedWidth = requestedWidth ? requestedWidth : 32;
+    const uint32_t wantedHeight = requestedHeight ? requestedHeight : 32;
+    uint64_t bestScore = UINT64_MAX;
+    bool found = false;
+    for (uint16_t i = 0; i < count; ++i) {
+        IconDirectoryEntry candidate{};
+        if (!directory.entry(i, candidate)) return ImageStatus::MalformedData;
+        const uint64_t shortfall = (candidate.width < wantedWidth
+            ? wantedWidth - candidate.width : 0) +
+            (candidate.height < wantedHeight ? wantedHeight - candidate.height : 0);
+        const uint64_t excess = (candidate.width > wantedWidth
+            ? candidate.width - wantedWidth : 0) +
+            (candidate.height > wantedHeight ? candidate.height - wantedHeight : 0);
+        const uint64_t score = shortfall ? (1ull << 48) + shortfall * 4096 : excess * 4096;
+        if (!found || score < bestScore) { found = true; bestScore = score; selected = i; }
+    }
+    if (!found) return ImageStatus::MalformedData;
     IconDirectoryEntry entry{};
     if (!directory.entry(selected, entry)) return ImageStatus::MalformedData;
     const uint8_t* record = file.data() + 6 + static_cast<size_t>(selected) * 16;
