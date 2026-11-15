@@ -1169,6 +1169,24 @@ int32_t Gdi32_GetTextMetricsW(void* hdc, GdiTextMetricW* output) noexcept {
     return 1;
 }
 
+uint32_t Gdi32_GetGlyphIndicesW(void* hdc, const wchar_t* text, int32_t count,
+        uint16_t* glyphIndices, uint32_t flags) noexcept {
+    constexpr uint32_t GdiError = 0xFFFFFFFFu;
+    constexpr uint32_t MarkMissing = 0x0001u;
+    if (count < 0 || count > 4096 || (flags & ~MarkMissing) ||
+        (count && (!text || !glyphIndices))) return GdiError;
+    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    if (!dc || !dc->font || !dc->font->active) return GdiError;
+    for (int32_t i = 0; i < count; ++i) {
+        const uint32_t scalar = static_cast<uint16_t>(text[i]);
+        if (scalar >= 0xD800u && scalar <= 0xDFFFu) return GdiError;
+        uint16_t glyph = dc->font->manager.glyphIndex(scalar);
+        if (!glyph && (flags & MarkMissing)) glyph = 0xFFFFu;
+        glyphIndices[i] = glyph;
+    }
+    return static_cast<uint32_t>(count);
+}
+
 int32_t Gdi32_EnumFontFamiliesExW(void* hdc, const GdiLogFontW* filter,
         GdiFontEnumProcW callback, intptr_t parameter, uint32_t flags) noexcept {
     constexpr uint32_t TrueTypeFontType = 0x0004;
@@ -1645,6 +1663,11 @@ __declspec(dllexport) int32_t GetTextExtentPoint32W(void* hdc, const wchar_t* te
 __declspec(dllexport) int32_t GetTextMetricsW(void* hdc,
         micant::um::winnt_user32_gdi32_imm32_abi::GdiTextMetricW* metrics) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetTextMetricsW(hdc, metrics);
+}
+__declspec(dllexport) uint32_t GetGlyphIndicesW(void* hdc, const wchar_t* text,
+        int32_t count, uint16_t* glyphIndices, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetGlyphIndicesW(
+        hdc, text, count, glyphIndices, flags);
 }
 __declspec(dllexport) int32_t EnumFontFamiliesExW(void* hdc,
         const micant::um::winnt_user32_gdi32_imm32_abi::GdiLogFontW* filter,

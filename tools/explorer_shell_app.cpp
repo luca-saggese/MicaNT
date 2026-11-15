@@ -341,6 +341,15 @@ void initializeSystemFonts() noexcept {
         } else {
             PrintLine("[MicaNT FontProbe] Combining accent layout failed");
         }
+        const wchar_t glyphProbeText[]{L'A', static_cast<wchar_t>(0x0378)};
+        WORD glyphProbe[2]{};
+        if (GetGlyphIndicesW(g.desktopDc, glyphProbeText, 2, glyphProbe,
+                GGI_MARK_NONEXISTING_GLYPHS) == 2 && glyphProbe[0] &&
+            glyphProbe[1] == 0xFFFFu) {
+            PrintLine("[MicaNT FontProbe] GDI glyph indices map TTF cmap and mark missing glyphs");
+        } else {
+            PrintLine("[MicaNT FontProbe] GDI glyph index lookup failed");
+        }
         const HFONT alternateFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Arial");

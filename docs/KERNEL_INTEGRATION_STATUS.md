@@ -1761,6 +1761,9 @@ TTF and switches the desktop DC at runtime from Segoe UI/Selawik to
 Arial/Liberation Sans; measured extents differ and the original face is then
 restored. `EnumFontFamiliesExW` enumerates the supported logical families and
 their installed TTF styles; the QEMU probe enumerates all four Arial styles.
+`GetGlyphIndicesW` maps through the selected face's cmap and marks missing BMP
+glyphs with `GGI_MARK_NONEXISTING_GLYPHS`; UTF-16 surrogate pairs are explicitly
+unsupported by this GDI entry point.
 Each raster manager also retains a bounded 32-mask glyph coverage cache in its
 owned workspace and releases it with the face. This is a bounded TrueType GDI
 subset: untransformed XY composite glyph components are now rasterized with
@@ -1802,3 +1805,4 @@ test now polls for a changed, stable desktop frame before input dispatch.
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-dwrite-final` | Passed; `dwrite.dll` built/staged and Explorer's CPL3 DirectWrite Arial metrics/cmap probe succeeded; Enter opened the app window, input dispatch and cleanup passed, and serial remained stable for five seconds |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-combining-qemu` | Passed; Explorer's decomposed `e` + acute layout matched precomposed `é` advance, TTF rendering used the combining sequence, DirectWrite probe passed, and input/scanout/cleanup completed |
 | `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-fallback-weight-qemu` | Passed after style-matched DejaVu fallback selection; DirectWrite, Explorer input, scanout and cleanup probes passed |
+| `python3 qemu.py --headless --diagnostics-dir /private/tmp/micant-glyph-indices-qemu` | Passed; `GetGlyphIndicesW` mapped `A`, flagged missing U+0378, and Explorer/DirectWrite/input/scanout/cleanup probes passed |
