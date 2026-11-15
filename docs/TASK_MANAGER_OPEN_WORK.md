@@ -14,9 +14,14 @@ requisiti completi in
   riga da delta bounded. QEMU passato: `process and thread CPU totals
   reconciled`, `process CPU times validated`, D1 e seriale stabile 5 s in
   `/private/tmp/micant-taskmgr-p1b-percent`; commit `9df2acc`.
-- [ ] **U1 — UI interattiva** — canvas fissa, senza navigazione/selezione.
-  Dipende da export Ring 3 User32 reali collegati a Win32k/compositor; audit
-  individua `tools/dlls/user32.cpp` e `tools/taskmgr_app.cpp` come entrypoint.
+- [ ] **U1 — UI interattiva** — in corso: Task Manager sta passando al percorso
+  nativo User32/GDI32 → Win32k, finestra HWND, `WM_PAINT`/`WM_SIZE` e pump input.
+  Primo boot ha fallito in fase SEC_IMAGE: l'import di Win32k incontrava un
+  DIB arena statico da 16 MiB per processo; ora limitato a 4 MiB. Build/link
+  bare-metal passati. QEMU 2 GiB completa il test Ps `finalizeNativeImages`,
+  ma scade prima dell'ingresso Task Manager (nessun marker `_start`); trovare
+  perché il thread non raggiunge l'entry. Restano resize adattivo, schede,
+  ricerca, selezione e grafico storico.
 - [ ] **D2 — End task dalla UI** — dipende da U1; selezione, conferma, errori
   accesso/uscita e azione tramite handle.
 - [ ] **S1/S2 — Hotkey e SAS** — nessun chord globale trusted; Winlogon, sessione,
@@ -33,9 +38,11 @@ requisiti completi in
 
 ## Punto di ripresa
 
-P1b è chiuso. Prossimo blocco U1: collegare il Task Manager al percorso nativo
-Win32k/User32; coordinare i file compositor condivisi già modificati da altri
-owner. La storia grafica bounded viene aggiunta con la vista Performance in U1.
+P1b è chiuso. U1 in corso: il codice HWND e GDI32 compila e linka; il QEMU più
+recente completa i self-test Ps ma il processo Task Manager non stampa il suo
+marker d'ingresso entro 90 s. Localizzare scheduling/entry prima di ampliare la
+UI. Le modifiche Win32k/compositor condivise restano escluse dal commit Task
+Manager.
 
 Audit paralleli: S1/S2 dipendono da sessione/autenticazione reali; P2 da
 accounting Mm/Ps; P3 da provider Io/NDIS/GPU; F1 da SCM/session/Userenv reali.
