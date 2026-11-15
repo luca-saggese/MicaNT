@@ -438,6 +438,7 @@ static int g_FailedTests = 0;
 #include "suites/hardware_suites.hpp"
 #include "suites/server_storage_suites.hpp"
 #include "suites/icon_suite.hpp"
+#include "suites/theme_suite.hpp"
 
 int main(int argc, char* argv[]) {
     if (argc > 1 && std::string(argv[1]) == "--icon") {
@@ -449,6 +450,12 @@ int main(int argc, char* argv[]) {
         RUN_TEST(Test_CursorHandles_HotspotAndTypedOwnership);
         RUN_TEST(Test_Win32kCursorPositionClipAndVisibilityState);
         RUN_TEST(Test_IconDrawing_PremultipliedSourceOver);
+        return (g_FailedTests == 0) ? 0 : 1;
+    }
+    if (argc > 1 && std::string(argv[1]) == "--theme") {
+        RUN_TEST(Test_GtkCss_BoundedRulesAndHexColors);
+        RUN_TEST(Test_GtkCss_GroupedSelectorsAndColorDefinitions);
+        RUN_TEST(Test_GtkCss_FailurePreservesOutputAndReportsUnsupportedSyntax);
         return (g_FailedTests == 0) ? 0 : 1;
     }
     if (argc > 1 && std::string(argv[1]) == "--apps") {
