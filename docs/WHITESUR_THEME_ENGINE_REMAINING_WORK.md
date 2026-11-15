@@ -139,6 +139,11 @@ the evidence named here, not just declarations or a successful compile.
   the unrelated parent-folder navigation check. Legacy hosted assertions that
   expected synthetic query/draw success were corrected to expect documented
   failure statuses and cleared outputs.
+- [x] Explorer closes a real DLL-created theme handle, then queries that stale
+  token. QEMU verified `ERROR_INVALID_HANDLE` and a cleared color output in
+  `/private/tmp/micant-theme-uxtheme-stale-handle-run/serial.log`. The focused
+  Ring 3 check passed after the baremetal build; the full input run again ended
+  at the unrelated parent-folder navigation assertion.
 
 ### 2. Win32 and common controls
 

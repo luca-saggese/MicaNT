@@ -942,12 +942,20 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const int32_t unsupportedMargin = themeHandle ? GetThemeMargins(themeHandle,
         nullptr, 1, 1, 0x7FFFFFFF, nullptr, &rejectedMargins) : 0;
     const bool closed = themeHandle && CloseThemeData(themeHandle) == 0;
+    uint32_t staleColor = 0xA5A5A5A5u;
+    const bool staleHandleRejected = closed &&
+        GetThemeColor(themeHandle, 1, 1, 3802, &staleColor) ==
+            static_cast<int32_t>(0x80070006u) && staleColor == 0;
     if (!queried || !closed) {
         restorePreviousSnapshot();
         PrintLine("[MicaNT Theme] UxTheme DLL handle/query path failed");
         return;
     }
     PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
+    if (staleHandleRejected)
+        PrintLine("[MicaNT Theme] Closed UxTheme handle rejected and output cleared");
+    else
+        PrintLine("[MicaNT Theme] Closed UxTheme handle remained usable");
     if (transparentQueryPassed && unsupportedBooleanFailed)
         PrintLine("[MicaNT Theme] UxTheme TMT_TRANSPARENT follows alpha and opacity");
     else
