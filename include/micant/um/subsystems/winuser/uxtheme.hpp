@@ -657,7 +657,8 @@ inline win32::HRESULT WINAPI GetThemeBool(HTHEME hTheme, int32_t iPartId,
 }
 
 inline win32::HRESULT WINAPI GetThemePropertyOrigin(HTHEME /*hTheme*/, int32_t /*iPartId*/, int32_t /*iStateId*/, int32_t /*iPropId*/, int32_t* pOrigin) noexcept {
-    if (pOrigin) *pOrigin = 4; // PO_NOTFOUND
+    if (!pOrigin) return detail::kInvalidArgument;
+    *pOrigin = 0;
     return detail::kNotImplemented;
 }
 

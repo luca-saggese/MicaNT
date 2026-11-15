@@ -919,6 +919,16 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool transparentQueryPassed = themeHandle &&
         GetThemeBool(themeHandle, 1, 1, 2203, &transparent) == 0 &&
         transparent == (buttonAlpha < 255u ? 1 : 0);
+    int32_t invalidDrawRect[4]{0, 0, 8, 8};
+    const int32_t dispatchFailureStatus = themeHandle
+        ? DrawThemeBackground(themeHandle, reinterpret_cast<void*>(1), 1, 1,
+                              invalidDrawRect, nullptr) : 0;
+    const bool dispatchFailureReported = themeHandle &&
+        dispatchFailureStatus == static_cast<int32_t>(0x80004005u);
+    int32_t unsupportedOrigin = 0x5A5A5A5A;
+    const bool unsupportedOriginFailed = themeHandle &&
+        GetThemePropertyOrigin(themeHandle, 1, 1, 4001, &unsupportedOrigin) ==
+            static_cast<int32_t>(0x80004001u) && unsupportedOrigin == 0;
     int32_t unsupportedBoolean = 1;
     const bool unsupportedBooleanFailed = themeHandle &&
         GetThemeBool(themeHandle, 1, 1, 0x7FFFFFFF, &unsupportedBoolean) ==
@@ -979,6 +989,14 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] UxTheme TMT_TRANSPARENT follows alpha and opacity");
     else
         PrintLine("[MicaNT Theme] UxTheme transparent boolean query mismatch");
+    if (dispatchFailureReported)
+        PrintLine("[MicaNT Theme] UxTheme GDI dispatch failure surfaces E_FAIL");
+    else
+        PrintLine("[MicaNT Theme] UxTheme GDI dispatch failure status mismatch");
+    if (unsupportedOriginFailed)
+        PrintLine("[MicaNT Theme] Unsupported property origin clears output");
+    else
+        PrintLine("[MicaNT Theme] Unsupported property origin output mismatch");
     if (backgroundTypeQueryPassed && unsupportedEnumFailed)
         PrintLine("[MicaNT Theme] UxTheme TMT_BGTYPE reports borderfill");
     else

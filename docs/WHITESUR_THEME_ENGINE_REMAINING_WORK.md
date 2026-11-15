@@ -81,15 +81,18 @@ the evidence named here, not just declarations or a successful compile.
   the standard and `DTBG_CLIPRECT` paths are now implemented and verified;
   other defined option flags fail explicitly. `qemu.py
   --check-explorer` passed, and `llvm-readobj --coff-exports` confirmed its
-  name and ordinal. Full QEMU reached both app windows and passed UxTheme/GDI
-  pixel probes, then failed the existing maximize caption hit-target assertion;
-  therefore the interactive regression remains unverified.
+  name and ordinal. An earlier full run passed UxTheme/GDI pixels but stopped
+  at the maximize caption hit-target assertion; the later integrated run
+  listed in Current baseline passed the complete input suite.
 - [x] Audited every freestanding UxTheme export wrapper against the local
   public/ReactOS declarations, including ordinal 47; no parameter-count or
   calling-convention mismatch was found. Bounded implementations and explicit
   `E_NOTIMPL`/null/false paths are listed in `uxtheme.hpp`. `GetThemeSysColor`
   currently supports no system-color ids (`CLR_INVALID`), and
   `GetThemePartSize` supports only `TS_MIN`; other variants remain unsupported.
+  `GetThemePropertyOrigin` also explicitly returns `E_NOTIMPL` and clears its
+  output; Explorer verified the status and sentinel clearing through the real
+  DLL import in the latest QEMU run.
   The real import/export probe and the integrated QEMU run passed. The audit
   also found that the process-local handle table has no lock, so concurrent
   calls still need synchronization if UxTheme is used from multiple threads.
