@@ -565,6 +565,22 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "taskmgr"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
+    if (MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+        target_compile_definitions(taskmgr_boot PRIVATE MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    endif()
+    add_executable(taskmgr_probe_boot EXCLUDE_FROM_ALL tools/taskmgr_probe_app.cpp)
+    target_include_directories(taskmgr_probe_boot PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_options(taskmgr_probe_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(taskmgr_probe_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+    )
+    set_target_properties(taskmgr_probe_boot PROPERTIES
+        OUTPUT_NAME "taskmgr_probe"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
     # The compositor is an independent, import-free Ring 3 image. Its shared
     # section views are installed by the kernel before either process starts.
     add_executable(compositor_boot EXCLUDE_FROM_ALL tools/compositor_app.cpp)

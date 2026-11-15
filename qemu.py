@@ -365,6 +365,7 @@ def main() -> int:
                 "comctl32_boot",
                 "explorer_runtime_boot",
                 "taskmgr_boot",
+                "taskmgr_probe_boot",
                 "compositor_boot",
             ]
         )

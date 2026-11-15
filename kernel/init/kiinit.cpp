@@ -2463,6 +2463,8 @@ micant::Handle g_explorerProcessHandle{};
 micant::Handle g_explorerProcessId{};
 micant::Handle g_taskmgrProcessHandle{};
 micant::Handle g_taskmgrProcessId{};
+micant::Handle g_taskmgrProbeProcessHandle{};
+micant::Handle g_taskmgrProbeProcessId{};
 micant::Handle g_compositorProcessHandle{};
 micant::Handle g_compositorProcessId{};
 micant::ps::EProcess* g_compositorProcessObject{};
@@ -2512,7 +2514,8 @@ uint32_t g_explorerApplicationWindowCount{};
 
 bool launchUserImageProcess(const char16_t* imageName,
                             micant::Handle& processHandle,
-                            micant::Handle& processId) noexcept {
+                            micant::Handle& processId,
+                            bool startSuspended = false) noexcept {
     using namespace micant;
     char16_t path[256]{};
     size_t directoryLength{};
@@ -2700,7 +2703,8 @@ bool launchUserImageProcess(const char16_t* imageName,
     }
     result = sys::NtCreateThreadExFromKernel(&thread, 0x001FFFFF, nullptr,
         processHandle, entryPoint, 0, 1, 0, 0, 0, nullptr);
-    if (result == NtStatus::Success) result = sys::NtResumeThread(thread, nullptr);
+    if (result == NtStatus::Success && !startSuspended)
+        result = sys::NtResumeThread(thread, nullptr);
     if (thread) {
         const auto threadClose = sys::NtClose(thread);
         if (result == NtStatus::Success && threadClose != NtStatus::Success) result = threadClose;
@@ -4402,6 +4406,13 @@ void pollKeyboardInput() noexcept {
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    if (!launchUserImageProcess(u"taskmgr_probe.exe", g_taskmgrProbeProcessHandle,
+                                g_taskmgrProbeProcessId, true))
+        stopWithError("[MicaNT Taskmgr] Process-action probe launch failed\r\n");
+    if (micant::sys::NtClose(g_taskmgrProbeProcessHandle) != micant::NtStatus::Success)
+        stopWithError("[MicaNT Taskmgr] Process-action probe handle close failed\r\n");
+    g_taskmgrProbeProcessHandle = 0;
+    serialWrite("[MicaNT Taskmgr] QEMU process-action probe launched\r\n");
     if (!launchUserImageProcess(u"taskmgr.exe", g_taskmgrProcessHandle,
                                 g_taskmgrProcessId))
         stopWithError("[MicaNT Taskmgr] Ring 3 process launch failed\r\n");

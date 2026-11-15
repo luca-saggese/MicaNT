@@ -285,6 +285,7 @@ struct ProcessObjectFactory {
         requiredThreadCount = 0;
         for (auto* process = registeredProcesses; process; process = process->cidNext_)
         {
+            if (process->isTerminating()) continue;
             ++requiredCount;
             for (auto* thread = process->threads_; thread; thread = thread->processNext)
                 if (thread->state != ke::ThreadState::Terminated) ++requiredThreadCount;
@@ -294,6 +295,7 @@ struct ProcessObjectFactory {
 
         size_t index = 0, threadIndex = 0;
         for (auto* process = registeredProcesses; process; process = process->cidNext_) {
+            if (process->isTerminating()) continue;
             auto& entry = output[index++];
             entry.processId = process->processId_;
             entry.parentProcessId = process->inheritedFromProcessId_;

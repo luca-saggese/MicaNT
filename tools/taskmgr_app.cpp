@@ -8,8 +8,10 @@
 
 #include "gui_common.hpp"
 #include "micant/shared/system_information.h"
+#include "micant/shared/ntdef.hpp"
+#include "micant/shared/syscall_numbers.hpp"
 
-extern "C" void* memset(void* destination, int value, size_t count) noexcept {
+extern "C" void* memset(void* destination, int value, size_t count) {
     auto* bytes = static_cast<uint8_t*>(destination);
     for (size_t i = 0; i < count; ++i) bytes[i] = static_cast<uint8_t>(value);
     return destination;
@@ -75,6 +77,74 @@ bool IsTaskmgrImageName(const micant::SystemProcessInformation& entry,
     }
     return true;
 }
+
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+bool ImageNameEquals(const micant::SystemProcessInformation& entry,
+                     const uint8_t* snapshot, uint32_t snapshotLength,
+                     const char16_t* expected) noexcept {
+    if (!entry.ImageName.Buffer || !entry.ImageName.Length ||
+        (entry.ImageName.Length & 1U) != 0) return false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(snapshot);
+    const uintptr_t buffer = entry.ImageName.Buffer;
+    if (buffer < base || buffer - base > snapshotLength ||
+        entry.ImageName.Length > snapshotLength - (buffer - base) ||
+        (buffer & (alignof(char16_t) - 1))) return false;
+    const auto* name = reinterpret_cast<const char16_t*>(buffer);
+    const size_t length = entry.ImageName.Length / sizeof(char16_t);
+    size_t expectedLength = 0;
+    while (expected[expectedLength]) ++expectedLength;
+    if (length != expectedLength) return false;
+    for (size_t i = 0; i < length; ++i) {
+        char16_t actual = name[i];
+        char16_t wanted = expected[i];
+        if (actual >= u'A' && actual <= u'Z') actual += u'a' - u'A';
+        if (wanted >= u'A' && wanted <= u'Z') wanted += u'a' - u'A';
+        if (actual != wanted) return false;
+    }
+    return true;
+}
+
+bool FindTaskmgrProbeProcess(const SnapshotView& snapshot, micant::Handle& processId) noexcept {
+    processId = 0;
+    if (!snapshot.available) return false;
+    uint32_t offset = 0;
+    for (uint32_t i = 0; i < snapshot.processCount; ++i) {
+        const auto* entry = reinterpret_cast<const micant::SystemProcessInformation*>(
+            snapshot.data + offset);
+        if (ImageNameEquals(*entry, snapshot.data, snapshot.length, u"taskmgr_probe.exe")) {
+            processId = static_cast<micant::Handle>(entry->UniqueProcessId);
+            return processId != 0;
+        }
+        if (!entry->NextEntryOffset) break;
+        offset += entry->NextEntryOffset;
+    }
+    return false;
+}
+
+bool TaskmgrProbeProcessExists(const SnapshotView& snapshot) noexcept {
+    micant::Handle processId{};
+    return FindTaskmgrProbeProcess(snapshot, processId);
+}
+
+uint32_t TerminateTaskmgrProbe(micant::Handle processId) noexcept {
+    micant::ClientId clientId{processId, 0};
+    micant::ObjectAttributes attributes{};
+    attributes.length = sizeof(attributes);
+    micant::Handle processHandle{};
+    constexpr uint32_t ProcessTerminateAccess = 0x0001;
+    const uint32_t openStatus = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        MICANT_SSN_NT_OPEN_PROCESS,
+        reinterpret_cast<uint64_t>(&processHandle),
+        ProcessTerminateAccess,
+        reinterpret_cast<uint64_t>(&attributes),
+        reinterpret_cast<uint64_t>(&clientId)));
+    if (openStatus != StatusSuccess || !processHandle) return openStatus;
+    const uint32_t status = static_cast<uint32_t>(micant::sys::invokeUserService(
+        0x002C, processHandle, 0)); // NtTerminateProcess
+    (void)micant::sys::invokeUserService(0x000F, processHandle); // NtClose
+    return status;
+}
+#endif
 
 uint32_t QueryProcessSnapshot(SnapshotView& result) noexcept {
     result.available = false;
@@ -304,6 +374,10 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
     bool reported = false;
     bool memoryReported = false;
     bool imageNameReported = false;
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    bool probeTerminationRequested = false;
+    bool probeTerminationReported = false;
+#endif
     while (true) {
         QueryProcessSnapshot(snapshot);
         const bool memoryAvailable = QueryAvailablePages(snapshot);
@@ -331,6 +405,25 @@ extern "C" void _start(const char* /*cmdLine*/ = nullptr) {
                 : "Task Manager: native process image name unavailable.");
             imageNameReported = true;
         }
+#if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+        if (!probeTerminationRequested) {
+            micant::Handle processId{};
+            if (FindTaskmgrProbeProcess(snapshot, processId)) {
+                PrintLine("Task Manager: authorized probe process found.");
+                const uint32_t terminateStatus = TerminateTaskmgrProbe(processId);
+                if (terminateStatus == StatusSuccess) {
+                    probeTerminationRequested = true;
+                } else {
+                    PrintLine("Task Manager: authorized process termination denied.");
+                    probeTerminationReported = true;
+                }
+            }
+        } else if (!probeTerminationReported && snapshot.available &&
+                   !TaskmgrProbeProcessExists(snapshot)) {
+            PrintLine("Task Manager: authorized process termination verified.");
+            probeTerminationReported = true;
+        }
+#endif
         RenderTaskManagerWindow(snapshot);
 
         // Relative NT interval: 1 second in 100 ns units. Wait through the
