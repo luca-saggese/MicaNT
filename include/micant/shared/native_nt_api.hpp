@@ -51,6 +51,13 @@ MICANT_NT_API_IMPORT micant::NtStatus NtQueryInformationFile(
     micant::Handle fileHandle, micant::IoStatusBlock* ioStatusBlock,
     void* fileInformation, uint32_t length,
     micant::FileInformationClass fileInformationClass) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtQueryDirectoryFile(
+    micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
+    void* apcContext, micant::IoStatusBlock* ioStatusBlock,
+    void* fileInformation, uint32_t length,
+    micant::FileInformationClass fileInformationClass,
+    bool returnSingleEntry, micant::UnicodeString* fileName,
+    bool restartScan) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtDeviceIoControlFile(
     micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
     void* apcContext, micant::IoStatusBlock* ioStatusBlock,

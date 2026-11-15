@@ -353,6 +353,24 @@ NtStatus IoQuerySystemDirectory(char16_t* output, size_t capacity, size_t& lengt
     return query ? query(context, output, capacity, length) : NtStatus::DeviceNotReady;
 }
 
+NtStatus IoQueryDirectoryFile(Handle fileHandle, bool restartScan,
+                              FileBothDirInformation* output) noexcept {
+    if (!output) return NtStatus::InvalidParameter;
+    FileObject* file{};
+    ob::ObjectHeader* reference{};
+    auto status = IoReferenceFileHandle(fileHandle, 0x0001u, file, reference);
+    if (status != NtStatus::Success) return status;
+    if (!file->isDirectory()) status = NtStatus::NotADirectory;
+    else {
+        if (restartScan) file->setDirectoryQueryIndex(0);
+        const size_t index = file->directoryQueryIndex();
+        status = file->queryDirectory(index, output);
+        if (status == NtStatus::Success) file->setDirectoryQueryIndex(index + 1);
+    }
+    ob::ObDereferenceObject(reference);
+    return status;
+}
+
 NtStatus IoOpenBackendFile(Handle* fileHandle, uint32_t desiredAccess,
                            std::u16string_view name, bool openIf,
                            bool* created, bool deferCreate) noexcept {

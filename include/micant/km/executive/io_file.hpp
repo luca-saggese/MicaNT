@@ -29,6 +29,8 @@ using FileWriteRoutine = NtStatus (*)(void* context, uint64_t offset,
                                       const void* buffer, size_t length,
                                       size_t* bytesWritten) noexcept;
 using FileFlushRoutine = NtStatus (*)(void* context) noexcept;
+using FileDirectoryQueryRoutine = NtStatus (*)(void* context, size_t index,
+                                               FileBothDirInformation* output) noexcept;
 using FileSizeRoutine = uint64_t (*)(void* context) noexcept;
 using FileCommitCreateRoutine = NtStatus (*)(void* context) noexcept;
 using FileReleaseRoutine = void (*)(void* context) noexcept;
@@ -75,6 +77,8 @@ struct FileBackend {
     // Optional ordered backend flush. Missing means IoFlushBuffersFile fails
     // with NotSupported; success must include all lower-layer flushes.
     FileFlushRoutine flush{};
+    FileDirectoryQueryRoutine queryDirectory{};
+    bool directory{};
 };
 
 class FileObject {
@@ -90,6 +94,18 @@ public:
 
     [[nodiscard]] uint64_t size() const noexcept {
         return backend_.querySize ? backend_.querySize(backend_.context) : backend_.size;
+    }
+    [[nodiscard]] bool isDirectory() const noexcept { return backend_.directory; }
+    [[nodiscard]] NtStatus queryDirectory(size_t index,
+        FileBothDirInformation* output) const noexcept {
+        if (!backend_.directory || !backend_.queryDirectory) return NtStatus::NotADirectory;
+        return backend_.queryDirectory(backend_.context, index, output);
+    }
+    [[nodiscard]] size_t directoryQueryIndex() const noexcept {
+        return directoryQueryIndex_.load(std::memory_order_relaxed);
+    }
+    void setDirectoryQueryIndex(size_t index) noexcept {
+        directoryQueryIndex_.store(index, std::memory_order_relaxed);
     }
     [[nodiscard]] NtStatus flush() const noexcept {
         if (!backend_.flush) return NtStatus::NotSupported;
@@ -230,6 +246,7 @@ public:
 
 private:
     FileBackend backend_{};
+    std::atomic<size_t> directoryQueryIndex_{0};
     std::atomic<bool> creationPending_{false};
     ob::ObjectHeader* completionReference_{};
     uintptr_t completionKey_{};
@@ -309,6 +326,8 @@ bool IoDeferPassiveObjectDelete(ob::ObjectHeader* header) noexcept;
 NtStatus IoUnregisterFileOpenRoutine(FileOpenRoutine open, void* context) noexcept;
 NtStatus IoRegisterSystemDirectoryRoutine(FileSystemDirectoryRoutine query, void* context) noexcept;
 NtStatus IoQuerySystemDirectory(char16_t* output, size_t capacity, size_t& length) noexcept;
+NtStatus IoQueryDirectoryFile(Handle fileHandle, bool restartScan,
+                              FileBothDirInformation* output) noexcept;
 NtStatus IoOpenBackendFile(Handle* fileHandle, uint32_t desiredAccess,
                            std::u16string_view name, bool openIf = false,
                            bool* created = nullptr, bool deferCreate = false) noexcept;

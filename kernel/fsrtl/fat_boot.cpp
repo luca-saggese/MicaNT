@@ -55,6 +55,7 @@ struct Mount;
 struct FileContext {
     Mount* owner{}; FatVolume* volume{}; FatDirEntry entry{}; bool inUse{};
     bool pendingCreate{}; size_t references{}; size_t imageReferences{};
+    bool directory{}; uint32_t directoryCluster{};
     void* imageControl{};
     bool (*retainControl)(void*) noexcept{};
     void (*releaseControl)(void*) noexcept{};
@@ -348,7 +349,12 @@ NtStatus findFile(FatVolume& volume, const char* path, FatDirEntry& result) noex
     const char* current = path;
     while (*current == '\\' || *current == '/') ++current;
     uint32_t directory = volume.RootCluster;
-    if (*current == 0) return NtStatus::InvalidParameter;
+    if (*current == 0) {
+        result = {};
+        result.Directory = true;
+        result.FirstCluster = volume.RootCluster;
+        return NtStatus::Success;
+    }
     for (;;) {
         char component[128]{};
         size_t length{};
@@ -787,7 +793,10 @@ bool convertPath(const char16_t* name, size_t length, char (&path)[kMaximumPath]
     if (!volume) return false;
     offset += 2;
     while (offset < length && (name[offset] == u'\\' || name[offset] == u'/')) ++offset;
-    if (offset == length) return false;
+    if (offset == length) {
+        path[0] = 0;
+        return true;
+    }
     size_t output{};
     size_t component{};
     for (size_t i = offset; i < length; ++i) {
@@ -1013,6 +1022,64 @@ void releaseFile(void* opaque) noexcept {
     }
     file = {};
 }
+
+NtStatus queryDirectoryEntry(void* opaque, size_t requestedIndex,
+                             FileBothDirInformation* output) noexcept {
+    if (!opaque || !output) return NtStatus::InvalidParameter;
+    Gate guard; if (!guard.held) return NtStatus::DeviceNotReady;
+    auto& file = *static_cast<FileContext*>(opaque);
+    if (!file.inUse || !file.directory || !file.owner || file.owner->offline || !file.volume)
+        return NtStatus::InvalidHandle;
+    current = file.owner;
+    uint32_t cluster = file.directoryCluster;
+    const uint32_t maxClusters = file.volume->DataClusterCount + 1;
+    size_t index = 0;
+    for (uint32_t traversed = 0; traversed < maxClusters; ++traversed) {
+        if (cluster < 2 || cluster - 2 >= file.volume->DataClusterCount) {
+            current = nullptr;
+            return NtStatus::DeviceDataError;
+        }
+        const uint32_t sectors = sectorsPerCluster(*file.volume);
+        uint32_t clusterLba{};
+        if (!clusterToLba(*file.volume, cluster, clusterLba) ||
+            !readVolume(*file.volume, clusterLba, sectors, g_clusterBuffer)) {
+            current = nullptr;
+            return NtStatus::DeviceDataError;
+        }
+        const size_t entryCount = static_cast<size_t>(sectors) * kSectorSize / 32;
+        for (size_t i = 0; i < entryCount; ++i) {
+            const uint8_t* item = g_clusterBuffer + i * 32;
+            if (item[0] == 0) { current = nullptr; return NtStatus::NoMoreFiles; }
+            if (item[0] == 0xE5 || item[11] == 0x0F || (item[11] & 0x08)) continue;
+            FatDirEntry entry{};
+            formatShortName(item, entry.ShortName, sizeof(entry.ShortName));
+            if (!entry.ShortName[0] || equalAsciiInsensitive(entry.ShortName, ".") ||
+                equalAsciiInsensitive(entry.ShortName, "..")) continue;
+            if (index++ != requestedIndex) continue;
+            *output = {};
+            for (size_t c = 0; entry.ShortName[c] && c < std::size(output->fileName) - 1; ++c)
+                output->fileName[c] = static_cast<wchar_t>(static_cast<uint8_t>(entry.ShortName[c]));
+            size_t nameLength = 0;
+            while (nameLength < std::size(output->fileName) && output->fileName[nameLength]) ++nameLength;
+            output->fileNameLength = static_cast<uint32_t>(nameLength * sizeof(wchar_t));
+            output->fileAttributes = (item[11] & 0x10u) ? 0x10u : 0x80u;
+            output->endOfFile.quadPart = loadLe32(item + 28);
+            output->allocationSize.quadPart = output->endOfFile.quadPart;
+            current = nullptr;
+            return NtStatus::Success;
+        }
+        uint32_t next{};
+        if (!readFatEntry(*file.volume, cluster, next)) {
+            current = nullptr;
+            return NtStatus::DeviceDataError;
+        }
+        if (next >= 0x0FFFFFF8u) { current = nullptr; return NtStatus::NoMoreFiles; }
+        cluster = next;
+    }
+    current = nullptr;
+    return NtStatus::DeviceDataError;
+}
+
 NtStatus openFile(uint64_t targetMount, std::u16string_view name, bool openIf, uint32_t desiredAccess,
                   io::FileBackend& backend) noexcept {
     backend = {}; Gate guard; if (!guard.held) return NtStatus::DeviceNotReady;
@@ -1069,7 +1136,22 @@ NtStatus openFile(uint64_t targetMount, std::u16string_view name, bool openIf, u
                 return NtStatus::AccessDenied;
             }
         }
-        if (entry.Directory) { current = nullptr; return NtStatus::FileIsADirectory; }
+        if (entry.Directory) {
+            FileContext* directory{};
+            for (auto& candidate : mount.files) if (!candidate.inUse) {
+                candidate = {&mount, volume, entry, true, false, 1, 0};
+                candidate.directory = true;
+                candidate.directoryCluster = entry.FirstCluster;
+                directory = &candidate;
+                break;
+            }
+            if (!directory) { current = nullptr; return NtStatus::NoMemory; }
+            backend = {directory, 0, name, readFile, releaseFile};
+            backend.queryDirectory = queryDirectoryEntry;
+            backend.directory = true;
+            current = nullptr;
+            return NtStatus::Success;
+        }
         if ((desiredAccess & 0x00000002u) && !mount.device->writable()) {
             current = nullptr;
             return NtStatus::MediaWriteProtected;

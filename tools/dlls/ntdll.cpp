@@ -1896,6 +1896,14 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtCreateFile(
     __asm__ __volatile__("movq %rcx, %r10\nmovl $0x55, %eax\nsyscall\nretq\n");
 }
 
+__attribute__((naked)) __declspec(dllexport) int32_t NtQueryDirectoryFile(
+    void* /*fileHandle*/, void* /*event*/, void* /*apcRoutine*/, void* /*apcContext*/,
+    void* /*ioStatusBlock*/, void* /*fileInformation*/, uint32_t /*length*/,
+    uint32_t /*fileInformationClass*/, uint8_t /*returnSingleEntry*/,
+    void* /*fileName*/, uint8_t /*restartScan*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\nmovl $0x35, %eax\nsyscall\nretq\n");
+}
+
 __attribute__((naked)) __declspec(dllexport) int32_t NtDeviceIoControlFile(
     void* /*fileHandle*/, void* /*event*/, void* /*apcRoutine*/, void* /*apcContext*/,
     void* /*ioStatusBlock*/, uint32_t /*ioControlCode*/, const void* /*inputBuffer*/,
