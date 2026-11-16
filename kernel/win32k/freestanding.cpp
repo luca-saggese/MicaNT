@@ -1018,7 +1018,11 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SHOW_WINDOW: {
-            auto* window = findWindow(request.args[0], ownerProcessId);
+            // ShowWindow is a public cross-process operation: the shell taskbar
+            // must be able to restore or minimize windows owned by applications.
+            // Keep destruction and other ownership-sensitive operations scoped
+            // to the caller, but resolve this HWND from the global window table.
+            auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t command = static_cast<int32_t>(request.args[1]);
             const bool wasVisible = window->visible;
