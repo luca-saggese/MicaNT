@@ -516,8 +516,13 @@ the evidence named here, not just declarations or a successful compile.
   failures, reload a valid Dark profile and then restore the original profile.
   QEMU confirmed both publications succeeded and the full interactive suite
   remained operational (`/private/tmp/micant-theme-point9-valid-recovery-1794806800`).
-- [ ] Add repeatable QEMU cases for missing package/profile, malformed CSS,
-  missing assets and bounded allocation/compile/render failure.
+- [x] Request a missing packaged desktop icon size, verify its load fails, and
+  compare the resulting built-in computer glyph pixel before restoring the
+  normal desktop. The same QEMU run continued through the input and
+  move/resize suite (`/private/tmp/micant-theme-point9-missing-icon-1794807056`).
+- [ ] Add repeatable QEMU cases for malformed CSS and bounded
+  allocation/compile/render failure; missing profile, invalid snapshot version
+  and missing icon asset are covered above.
 - [ ] For each case, verify Explorer, input, focus, move/resize and presentation
   stay operational and the previous valid theme or Base is rendered.
 - [ ] Restore the package and verify a later valid load succeeds.

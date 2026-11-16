@@ -1622,6 +1622,30 @@ void verifyAutomaticThemeBoundary() noexcept {
         : "[MicaNT Theme] Auto schedule boundary pixel probe failed");
 }
 
+void verifyMissingDesktopIconFallback() noexcept {
+    if (!g.desktopPixels || !g.desktop) {
+        PrintLine("[MicaNT Explorer] Missing icon fallback probe unavailable");
+        return;
+    }
+    using micant::explorer::IconId;
+    const auto* missing = loadPackagedIcon(IconId::Computer, 255);
+    const micant::explorer::DesktopIconSet icons{
+        iconImage(IconId::Computer, 255),
+        iconImage(IconId::Documents, 48),
+        iconImage(IconId::Network, 48),
+        iconImage(IconId::TrashEmpty, 48),
+    };
+    micant::explorer::DrawDesktop(g.desktopPixels, g.screenW,
+        g.screenH - TASKBAR_H, g.wallpaperPixels, &icons,
+        activeShellPalette().accentForeground);
+    const bool fallbackPixel = g.desktopPixels[34u * g.screenW + 27u] ==
+        micant_gui::PackBGRA(117, 199, 244);
+    redrawDesktop();
+    PrintLine(!missing && fallbackPixel
+        ? "[MicaNT Explorer] Missing icon fell back to the built-in desktop glyph"
+        : "[MicaNT Explorer] Missing icon fallback failed");
+}
+
 DWORD WINAPI themeScheduleWorker(void* context) noexcept {
     const HWND desktop = static_cast<HWND>(context);
     for (;;) {
@@ -3152,6 +3176,7 @@ extern "C" void _start(const char* = nullptr) {
     updateClock();
     verifyThemeChangeQueueRollback();
     verifyAutomaticThemeBoundary();
+    verifyMissingDesktopIconFallback();
     HCURSOR busyCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32514));
     if (busyCursor && g.desktop) {
         HCURSOR previousCursor = SetCursor(busyCursor);
