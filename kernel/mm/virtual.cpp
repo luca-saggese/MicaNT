@@ -247,6 +247,88 @@ NtStatus NtProtectVirtualMemory(Handle process, uintptr_t* base, size_t* regionS
 NtStatus NtQueryVirtualMemory(Handle process, uintptr_t baseAddress,
                               uint32_t informationClass, void* information,
                               size_t informationLength, size_t* returnLength) noexcept {
+    if (informationClass == 4) { // MemoryWorkingSetExInformation
+        constexpr size_t MaxQueryBytes = 1024 * 1024;
+        constexpr size_t BatchEntries = 128;
+        const auto* current = ke::KeGetCurrentThread();
+        const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
+        uint64_t flags{};
+        __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+        NtStatus result = NtStatus::Success;
+        if (!information || informationLength == 0 ||
+            informationLength % sizeof(MemoryWorkingSetExInformation) != 0)
+            result = NtStatus::InfoLengthMismatch;
+        else if (informationLength > MaxQueryBytes)
+            result = NtStatus::NotSupported;
+        if (result == NtStatus::Success && returnLength)
+            result = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(size_t), mode);
+
+        ps::EProcess* target{};
+        ob::ObjectHeader* reference{};
+        if (result == NtStatus::Success) {
+            result = process == InvalidHandleValue
+                ? ps::detail::referenceCurrentProcess(target, reference)
+                : ps::detail::referenceProcessHandle(process, 0x0400, target, reference);
+        }
+        ke::KAPC_STATE attach{};
+        const auto attachDepth = current ? current->processAttachDepth : 0;
+        bool attached = false;
+        const auto attachTarget = [&]() noexcept {
+            if (result != NtStatus::Success || target == ke::KeGetCurrentProcess()) return;
+            if (!current) { result = NtStatus::InvalidParameter; return; }
+            ke::KeStackAttachProcess(target, &attach);
+            attached = current->processAttachDepth == attachDepth + 1;
+            if (!attached) result = NtStatus::ProcessIsTerminating;
+        };
+        const auto detachTarget = [&]() noexcept {
+            if (!attached) return;
+            ke::KeUnstackDetachProcess(&attach);
+            attached = false;
+            if (current->processAttachDepth != attachDepth) __builtin_trap();
+        };
+        attachTarget();
+
+        MemoryWorkingSetExInformation batch[BatchEntries]{};
+        size_t completed = 0;
+        while (result == NtStatus::Success && completed < informationLength) {
+            const size_t bytes = informationLength - completed < sizeof(batch)
+                ? informationLength - completed : sizeof(batch);
+            auto* userBatch = reinterpret_cast<uint8_t*>(information) + completed;
+            detachTarget();
+            result = ex::ProbeForWrite(userBatch, bytes,
+                alignof(MemoryWorkingSetExInformation), mode);
+            if (result == NtStatus::Success)
+                result = ex::ExSafeCopyFromUser(batch, userBatch, bytes, mode);
+            attachTarget();
+            const size_t entries = bytes / sizeof(MemoryWorkingSetExInformation);
+            for (size_t i = 0; result == NtStatus::Success && i < entries; ++i) {
+                bool resident = false;
+                bool shared = false;
+                if (!currentAddressSpace().queryWorkingSetPage(batch[i].virtualAddress,
+                                                                resident, shared)) {
+                    result = NtStatus::InvalidParameter;
+                    break;
+                }
+                batch[i].virtualAttributes = resident ? (uint64_t{1} | (shared ? uint64_t{1} << 15 : 0)) : 0;
+            }
+            detachTarget();
+            if (result == NtStatus::Success)
+                result = ex::ProbeForWrite(userBatch, bytes,
+                    alignof(MemoryWorkingSetExInformation), mode);
+            if (result == NtStatus::Success)
+                result = ex::ExSafeCopyToUser(userBatch, batch, bytes, mode);
+            if (result == NtStatus::Success) completed += bytes;
+            attachTarget();
+        }
+        detachTarget();
+        if (result == NtStatus::Success && returnLength)
+            result = ex::ExSafeCopyToUser(returnLength, &informationLength,
+                                           sizeof(informationLength), mode);
+        detachTarget();
+        if (reference) ob::ObDereferenceObject(reference);
+        if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+        return result;
+    }
     struct MemoryBasicInformation64 {
         uintptr_t baseAddress;
         uintptr_t allocationBase;
@@ -260,7 +342,6 @@ NtStatus NtQueryVirtualMemory(Handle process, uintptr_t baseAddress,
         uint32_t padding;
     };
     static_assert(sizeof(MemoryBasicInformation64) == 48);
-    if (process != InvalidHandleValue) return NtStatus::NotSupported;
     if (informationClass != 0) return NtStatus::InvalidInfoClass;
     if (!information) return NtStatus::InvalidParameter;
     if (informationLength < sizeof(MemoryBasicInformation64)) return NtStatus::InfoLengthMismatch;
@@ -274,6 +355,30 @@ NtStatus NtQueryVirtualMemory(Handle process, uintptr_t baseAddress,
         result = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(size_t), mode);
     MemoryBasicInformation64 output{};
     mm::ProcessAddressSpace::QueryRegion region{};
+    ps::EProcess* target{};
+    ob::ObjectHeader* processReference{};
+    bool attached = false;
+    ke::KAPC_STATE attach{};
+    const auto attachDepth = current ? current->processAttachDepth : 0;
+    if (result == NtStatus::Success) {
+        if (process == InvalidHandleValue) {
+            result = ps::detail::referenceCurrentProcess(target, processReference);
+        } else {
+            // NtQueryVirtualMemory requires PROCESS_QUERY_INFORMATION. A
+            // handle carrying only PROCESS_QUERY_LIMITED_INFORMATION is not
+            // sufficient for address-space enumeration.
+            result = ps::detail::referenceProcessHandle(process, 0x0400, target,
+                                                        processReference);
+        }
+    }
+    if (result == NtStatus::Success && target && target != ke::KeGetCurrentProcess()) {
+        if (!current) result = NtStatus::InvalidParameter;
+        else {
+            ke::KeStackAttachProcess(target, &attach);
+            attached = current->processAttachDepth == attachDepth + 1;
+            if (!attached) result = NtStatus::ProcessIsTerminating;
+        }
+    }
     if (result == NtStatus::Success && !currentAddressSpace().queryRegion(baseAddress, region))
         result = NtStatus::InvalidParameter;
     if (result == NtStatus::Success) {
@@ -284,12 +389,18 @@ NtStatus NtQueryVirtualMemory(Handle process, uintptr_t baseAddress,
         output.state = region.state;
         output.protect = region.protect;
         output.type = region.type;
-        result = ex::ExSafeCopyToUser(information, &output, sizeof(output), mode);
     }
+    if (attached) {
+        ke::KeUnstackDetachProcess(&attach);
+        if (current->processAttachDepth != attachDepth) __builtin_trap();
+    }
+    if (result == NtStatus::Success)
+        result = ex::ExSafeCopyToUser(information, &output, sizeof(output), mode);
     if (result == NtStatus::Success && returnLength) {
         const size_t written = sizeof(output);
         result = ex::ExSafeCopyToUser(returnLength, &written, sizeof(written), mode);
     }
+    if (processReference) ob::ObDereferenceObject(processReference);
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
     return result;
 }

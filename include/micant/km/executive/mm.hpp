@@ -118,6 +118,7 @@ struct Mmpfn {
     uintptr_t pteAddress{0};
     uint32_t referenceCount{0};
     PageLocation location{PageLocation::FreePageList};
+    bool managed{false};
     bool modified{false};
     bool readInProgress{false};
     uint64_t flink{0};
@@ -159,6 +160,7 @@ private:
     PageList standbyList_{};
     PageList modifiedList_{};
     size_t activeCount_{0};
+    size_t managedCount_{0};
     ZeroPhysicalPageRoutine zeroPhysicalPage_{nullptr};
     CopyPhysicalPageRoutine copyPhysicalPage_{nullptr};
     ReadPhysicalPageRoutine readPhysicalPage_{nullptr};
@@ -227,6 +229,7 @@ private:
         standbyList_ = {};
         modifiedList_ = {};
         activeCount_ = 0;
+        managedCount_ = 0;
         for (size_t i = 0; i < entries_.size(); ++i) {
             entries_[i] = Mmpfn{};
             entries_[i].pfn = static_cast<uint64_t>(i);
@@ -355,6 +358,7 @@ public:
         ownedEntries_.resize(totalPages);
         entries_ = ownedEntries_;
         resetEntriesLocked();
+        managedCount_ = totalPages > 256 ? totalPages - 256 : 0;
         zeroPhysicalPage_ = nullptr;
         copyPhysicalPage_ = nullptr;
         readPhysicalPage_ = nullptr;
@@ -380,6 +384,14 @@ public:
         if (!validBootMemoryRanges(storage, availableRanges, zeroPhysicalPage)) {
             return NtStatus::InvalidParameter;
         }
+        uint64_t managedCount = 0;
+        for (const auto& range : availableRanges) {
+            const uint64_t first = range.firstPfn == 0 ? 1 : range.firstPfn;
+            const uint64_t count = range.firstPfn + range.pageCount - first;
+            if (count > UINT64_MAX - managedCount || managedCount + count > SIZE_MAX)
+                return NtStatus::InvalidParameter;
+            managedCount += count;
+        }
 #if !defined(MICANT_FREESTANDING)
         ownedEntries_.clear();
 #endif
@@ -388,10 +400,12 @@ public:
         copyPhysicalPage_ = copyPhysicalPage;
         readPhysicalPage_ = readPhysicalPage;
         resetEntriesLocked();
+        managedCount_ = static_cast<size_t>(managedCount);
         for (const auto& range : availableRanges) {
             const uint64_t end = range.firstPfn + range.pageCount;
             const uint64_t first = range.firstPfn == 0 ? 1 : range.firstPfn;
             for (uint64_t pfn = first; pfn < end; ++pfn) {
+                entries_[static_cast<size_t>(pfn)].managed = true;
                 insertTailLocked(freeList_, pfn, PageLocation::FreePageList);
             }
         }
@@ -664,6 +678,46 @@ public:
         Guard guard(*this);
         return activeCount_;
     }
+    [[nodiscard]] size_t getManagedCount() const noexcept {
+        Guard guard(*this);
+        return managedCount_;
+    }
+    [[nodiscard]] size_t getReservedCount() const noexcept {
+        Guard guard(*this);
+        size_t count = 0;
+        for (const auto& entry : entries_)
+            if (entry.managed && entry.location == PageLocation::ReservedPage) ++count;
+        return count;
+    }
+    [[nodiscard]] size_t getBadCount() const noexcept {
+        Guard guard(*this);
+        size_t count = 0;
+        for (const auto& entry : entries_)
+            if (entry.managed && entry.location == PageLocation::BadPageList) ++count;
+        return count;
+    }
+    [[nodiscard]] size_t getOtherManagedCount() const noexcept {
+        Guard guard(*this);
+        size_t count = 0;
+        for (const auto& entry : entries_) {
+            if (!entry.managed) continue;
+            switch (entry.location) {
+                case PageLocation::ZeroedPageList:
+                case PageLocation::FreePageList:
+                case PageLocation::StandbyPageList:
+                case PageLocation::ModifiedPageList:
+                case PageLocation::ActiveAndValid:
+                case PageLocation::BadPageList:
+                case PageLocation::ReservedPage:
+                    break;
+                case PageLocation::ModifiedNoWriteList:
+                case PageLocation::TransitionPage:
+                    ++count;
+                    break;
+            }
+        }
+        return count;
+    }
     [[nodiscard]] size_t snapshotActiveEntries(std::span<Mmpfn> destination) const noexcept {
         Guard guard(*this);
         size_t copied = 0;
@@ -691,6 +745,9 @@ public:
  */
 struct VirtualAddressDescriptor {
     struct CommitRange {
+        static void* operator new(size_t size, const std::nothrow_t&) noexcept;
+        static void operator delete(void* pointer) noexcept;
+        static void operator delete(void* pointer, const std::nothrow_t&) noexcept;
         uint64_t firstVpn{0};
         uint64_t lastVpn{0};
         uint64_t pfn{0};
@@ -1162,8 +1219,23 @@ struct WorkingSetList {
     size_t peakResidentPages{0};
     size_t commitCharge{0};
     size_t peakCommitCharge{0};
+    size_t peakVirtualBytes{0};
+    uint32_t pageFaultCount{0};
     size_t workingSetMinimum{50};
     size_t workingSetMaximum{1000};
+};
+
+struct ProcessMemoryAccounting {
+    uint64_t virtualBytes{};
+    uint64_t committedBytes{};
+    uint64_t privateCommitBytes{};
+    uint64_t privateResidentPages{};
+    uint64_t sharedResidentPages{};
+    uint64_t residentPages{};
+    uint64_t peakResidentPages{};
+    uint64_t peakCommitBytes{};
+    uint64_t peakVirtualBytes{};
+    uint32_t pageFaultCount{};
 };
 
 // ============================================================================
@@ -1426,6 +1498,7 @@ public:
             nextFreeAddress_ = targetAddr + alignedSize <= UserSpaceMax
                 ? targetAddr + alignedSize : UserSpaceMin;
         baseAddress = targetAddr;
+        updatePeakVirtualBytesLocked();
         return NtStatus::Success;
     }
 
@@ -1509,6 +1582,7 @@ public:
         workingSet_.commitCharge += mappedVad->commitCharge;
         workingSet_.peakCommitCharge = std::max(workingSet_.peakCommitCharge, workingSet_.commitCharge);
         workingSet_.peakResidentPages = std::max(workingSet_.peakResidentPages, workingSet_.residentPages);
+        updatePeakVirtualBytesLocked();
 
         if (baseAddress == 0)
             nextFreeAddress_ = targetAddr + alignedSize <= UserSpaceMax
@@ -1637,6 +1711,7 @@ public:
             workingSet_.residentPages += count;
             workingSet_.peakCommitCharge = std::max(workingSet_.peakCommitCharge, workingSet_.commitCharge);
             workingSet_.peakResidentPages = std::max(workingSet_.peakResidentPages, workingSet_.residentPages);
+            updatePeakVirtualBytesLocked();
             baseAddress = start;
             return NtStatus::Success;
         }
@@ -1698,6 +1773,7 @@ public:
         }
         workingSet_.peakCommitCharge = std::max(workingSet_.peakCommitCharge, workingSet_.commitCharge);
         workingSet_.peakResidentPages = std::max(workingSet_.peakResidentPages, workingSet_.residentPages);
+        updatePeakVirtualBytesLocked();
         baseAddress = start;
         return NtStatus::Success;
     }
@@ -2013,6 +2089,31 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool queryWorkingSetPage(uintptr_t address, bool& resident,
+                                           bool& shared) const noexcept {
+        resident = false;
+        shared = false;
+        if (address > UserSpaceMax) return false;
+        Guard lock(*this);
+        const auto* vad = vadTree_.find(address);
+        if (!vad) return true;
+        const uint64_t vpn = address >> PageShift4KB;
+#if defined(MICANT_FREESTANDING)
+        for (auto* page = vad->commitRanges.get(); page; page = page->next.get()) {
+            if (vpn < page->firstVpn || vpn > page->lastVpn) continue;
+            resident = page->pfn != 0;
+            shared = resident && !page->ownsPfn &&
+                (vad->isSectionView || page->sharedImagePage);
+            return true;
+        }
+#else
+        const auto it = vad->physicalPages.find(vpn);
+        resident = it != vad->physicalPages.end() && it->second != 0;
+        shared = resident && vad->isSectionView;
+#endif
+        return true;
+    }
+
     NtStatus setStackGuard(uintptr_t address, bool guarded) noexcept {
         Guard lock(*this);
         if (!backend_.guard || (address & PageMask4KB)) return NtStatus::InvalidParameter;
@@ -2239,6 +2340,7 @@ public:
      */
     NtStatus handlePageFault(uintptr_t faultingAddress, bool isWrite, bool isUser, bool isExecute) {
         Guard lock(*this);
+        if (workingSet_.pageFaultCount != UINT32_MAX) ++workingSet_.pageFaultCount;
         if (backend_.map) {
             if (!isUser || !isWrite || isExecute || !backend_.replace) return NtStatus::AccessViolation;
             return resolveCopyOnWriteLocked(faultingAddress);
@@ -2342,6 +2444,59 @@ public:
         }
         return pages;
     }
+    [[nodiscard]] bool queryProcessMemoryAccounting(ProcessMemoryAccounting& result) const noexcept {
+        Guard lock(*this);
+        result = {};
+        if (workingSet_.peakCommitCharge > UINT64_MAX / PageSize4KB)
+            return false;
+        result.residentPages = workingSet_.residentPages;
+        result.peakResidentPages = workingSet_.peakResidentPages;
+        result.peakCommitBytes = static_cast<uint64_t>(workingSet_.peakCommitCharge) * PageSize4KB;
+        result.peakVirtualBytes = workingSet_.peakVirtualBytes;
+        result.pageFaultCount = workingSet_.pageFaultCount;
+        for (uintptr_t address = vadTree_.firstAddress(); address;
+             address = vadTree_.nextAddress(address)) {
+            const auto* vad = vadTree_.find(address);
+            if (!vad) continue;
+            const uint64_t bytes = static_cast<uint64_t>(vad->size());
+            if (bytes > UINT64_MAX - result.virtualBytes) return false;
+            result.virtualBytes += bytes;
+            if (vad->commitCharge > UINT64_MAX / PageSize4KB) return false;
+            const uint64_t committed = static_cast<uint64_t>(vad->commitCharge) * PageSize4KB;
+            if (committed > UINT64_MAX - result.committedBytes) return false;
+            result.committedBytes += committed;
+            if (!vad->isSectionView || vad->privateImageView) {
+                if (committed > UINT64_MAX - result.privateCommitBytes) return false;
+                result.privateCommitBytes += committed;
+            }
+            for (auto* page = vad->commitRanges.get(); page; page = page->next.get()) {
+                const bool isShared = !page->ownsPfn &&
+                    ((vad->isSectionView && !vad->privateImageView) || page->sharedImagePage);
+                if (!isShared) continue;
+#if defined(MICANT_FREESTANDING)
+                // Commit metadata may outlive a PTE during transitions. Only
+                // PFN-backed entries are resident and count toward the shared
+                // working set.
+                if (!page->pfn) continue;
+                const uint64_t count = page->lastVpn - page->firstVpn + 1;
+                if (count > UINT64_MAX - result.sharedResidentPages) return false;
+                result.sharedResidentPages += count;
+#else
+                for (uint64_t vpn = page->firstVpn; vpn <= page->lastVpn; ++vpn) {
+                    const auto resident = vad->physicalPages.find(vpn);
+                    if (resident == vad->physicalPages.end() || !resident->second) continue;
+                    if (result.sharedResidentPages == UINT64_MAX) return false;
+                    ++result.sharedResidentPages;
+                    if (vpn == UINT64_MAX) return false;
+                }
+#endif
+            }
+        }
+        if (result.sharedResidentPages > result.residentPages) return false;
+        result.privateResidentPages = result.residentPages >= result.sharedResidentPages
+            ? result.residentPages - result.sharedResidentPages : 0;
+        return true;
+    }
     [[nodiscard]] uintptr_t getDirectoryTableBase() const noexcept { return directoryTableBase_; }
     void setDirectoryTableBase(uintptr_t cr3) noexcept { directoryTableBase_ = cr3; }
 
@@ -2379,6 +2534,20 @@ public:
     }
 
 private:
+    void updatePeakVirtualBytesLocked() noexcept {
+        uint64_t total = 0;
+        for (uintptr_t address = vadTree_.firstAddress(); address;
+             address = vadTree_.nextAddress(address)) {
+            const auto* vad = vadTree_.find(address);
+            if (!vad) continue;
+            const uint64_t bytes = static_cast<uint64_t>(vad->size());
+            if (bytes > UINT64_MAX - total) { total = UINT64_MAX; break; }
+            total += bytes;
+        }
+        if (total > workingSet_.peakVirtualBytes)
+            workingSet_.peakVirtualBytes = total > SIZE_MAX ? SIZE_MAX : static_cast<size_t>(total);
+    }
+
     NtStatus resolveCopyOnWriteLocked(uintptr_t address) noexcept {
         auto* vad = vadTree_.find(address);
         if (!vad || !vad->isSectionView || !vad->isImageView || vad->rollbackPending || !backend_.replace)
@@ -2723,6 +2892,7 @@ private:
         }
         if (!(type & MEM_COMMIT)) {
             baseAddress = start;
+            updatePeakVirtualBytesLocked();
             return NtStatus::Success;
         }
 
@@ -2779,6 +2949,7 @@ private:
             return failure;
         }
         baseAddress = start;
+        updatePeakVirtualBytesLocked();
         return NtStatus::Success;
     }
 
@@ -3066,6 +3237,8 @@ inline size_t MmFlushModifiedPageList() {
 // ============================================================================
 struct MM_SYSTEM_DIAGNOSTICS {
     size_t totalPhysicalPages{0};
+    size_t reservedPages{0};
+    size_t badPages{0};
     size_t activePages{0};
     size_t zeroedPages{0};
     size_t freePages{0};
@@ -3076,7 +3249,9 @@ struct MM_SYSTEM_DIAGNOSTICS {
 inline MM_SYSTEM_DIAGNOSTICS MmQuerySystemMemoryDiagnostics() {
     auto& pfnDb = PfnDatabase::get();
     MM_SYSTEM_DIAGNOSTICS diag{};
-    diag.totalPhysicalPages = pfnDb.getTotalPages();
+    diag.totalPhysicalPages = pfnDb.getManagedCount();
+    diag.reservedPages = pfnDb.getReservedCount();
+    diag.badPages = pfnDb.getBadCount();
     diag.activePages = pfnDb.getActiveCount();
     diag.zeroedPages = pfnDb.getZeroedCount();
     diag.freePages = pfnDb.getFreeCount();

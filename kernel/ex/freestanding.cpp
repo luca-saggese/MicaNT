@@ -363,6 +363,69 @@ void releaseMemory(void* pointer) noexcept {
 
 } // namespace
 
+namespace {
+
+using CommitRange = micant::mm::VirtualAddressDescriptor::CommitRange;
+std::atomic_flag g_commitRangePoolLock = ATOMIC_FLAG_INIT;
+void* g_commitRangeFreeList{};
+void* g_commitRangePoolPages{};
+
+void lockCommitRangePool() noexcept {
+    while (g_commitRangePoolLock.test_and_set(std::memory_order_acquire)) {}
+}
+
+void unlockCommitRangePool() noexcept {
+    g_commitRangePoolLock.clear(std::memory_order_release);
+}
+
+void addCommitRangePoolPage(void* page) noexcept {
+    *static_cast<void**>(page) = g_commitRangePoolPages;
+    g_commitRangePoolPages = page;
+    constexpr size_t alignment = alignof(CommitRange) > alignof(void*)
+        ? alignof(CommitRange) : alignof(void*);
+    constexpr size_t stride = (sizeof(CommitRange) + alignment - 1) & ~(alignment - 1);
+    uintptr_t cursor = (reinterpret_cast<uintptr_t>(page) + sizeof(void*) + alignment - 1) &
+        ~static_cast<uintptr_t>(alignment - 1);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(page) + 4000;
+    while (cursor <= end && stride <= end - cursor) {
+        *reinterpret_cast<void**>(cursor) = g_commitRangeFreeList;
+        g_commitRangeFreeList = reinterpret_cast<void*>(cursor);
+        cursor += stride;
+    }
+}
+
+} // namespace
+
+void* micant::mm::VirtualAddressDescriptor::CommitRange::operator new(
+    size_t size, const std::nothrow_t&) noexcept {
+    if (size != sizeof(CommitRange)) return nullptr;
+    lockCommitRangePool();
+    if (!g_commitRangeFreeList) {
+        unlockCommitRangePool();
+        void* page = allocateMemory(4000, kDefaultAlignment);
+        if (!page) return nullptr;
+        lockCommitRangePool();
+        addCommitRangePoolPage(page);
+    }
+    void* slot = g_commitRangeFreeList;
+    g_commitRangeFreeList = *static_cast<void**>(slot);
+    unlockCommitRangePool();
+    return slot;
+}
+
+void micant::mm::VirtualAddressDescriptor::CommitRange::operator delete(void* pointer) noexcept {
+    if (!pointer) return;
+    lockCommitRangePool();
+    *static_cast<void**>(pointer) = g_commitRangeFreeList;
+    g_commitRangeFreeList = pointer;
+    unlockCommitRangePool();
+}
+
+void micant::mm::VirtualAddressDescriptor::CommitRange::operator delete(
+    void* pointer, const std::nothrow_t&) noexcept {
+    CommitRange::operator delete(pointer);
+}
+
 namespace micant::ex {
 
 [[noreturn]] void stopBootstrapRuntime(const char* message) noexcept {

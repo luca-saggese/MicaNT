@@ -60,9 +60,11 @@ NtStatus NtQuerySystemInformation(
     constexpr uint32_t systemProcessInformationClass = 5;
     constexpr uint32_t systemPerformanceInformationClass = 2;
     constexpr uint32_t systemProcessorPerformanceInformationClass = 8;
+    constexpr uint32_t systemMemoryAccountingClass = SystemMemoryAccountingInformationClass;
     if (systemInformationClass != systemProcessInformationClass &&
         systemInformationClass != systemPerformanceInformationClass &&
-        systemInformationClass != systemProcessorPerformanceInformationClass)
+        systemInformationClass != systemProcessorPerformanceInformationClass &&
+        systemInformationClass != systemMemoryAccountingClass)
         return NtStatus::InvalidInfoClass;
 
     TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] NtQuerySystemInformation class accepted\r\n");
@@ -70,6 +72,37 @@ NtStatus NtQuerySystemInformation(
     auto* current = ke::KeGetCurrentThread();
     const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
     NtStatus status = NtStatus::Success;
+
+    if (systemInformationClass == systemMemoryAccountingClass) {
+        constexpr uint32_t required = sizeof(SystemMemoryAccountingInformation);
+        if (returnLength) {
+            status = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
+            if (status != NtStatus::Success) return status;
+            status = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+            if (status != NtStatus::Success) return status;
+        }
+        if (systemInformationLength < required) return NtStatus::InfoLengthMismatch;
+        if (!systemInformation) return NtStatus::AccessViolation;
+        status = ex::ProbeForWrite(systemInformation, required,
+            alignof(SystemMemoryAccountingInformation), mode);
+        if (status != NtStatus::Success) return status;
+        const auto diagnostics = mm::MmQuerySystemMemoryDiagnostics();
+        if (diagnostics.totalPhysicalPages == 0) return NtStatus::NotSupported;
+        SystemMemoryAccountingInformation report{};
+        report.availability = SystemMemoryManagedAvailable | SystemMemoryActiveAvailable |
+            SystemMemoryZeroedAvailable | SystemMemoryFreeAvailable |
+            SystemMemoryStandbyAvailable | SystemMemoryModifiedAvailable |
+            SystemMemoryReservedAvailable | SystemMemoryBadAvailable;
+        report.managedPages = diagnostics.totalPhysicalPages;
+        report.activePages = diagnostics.activePages;
+        report.zeroedPages = diagnostics.zeroedPages;
+        report.freePages = diagnostics.freePages;
+        report.standbyPages = diagnostics.standbyPages;
+        report.modifiedPages = diagnostics.modifiedPages;
+        report.reservedPages = diagnostics.reservedPages;
+        report.badPages = diagnostics.badPages;
+        return ex::ExSafeCopyToUser(systemInformation, &report, sizeof(report), mode);
+    }
 
     if (systemInformationClass == systemProcessorPerformanceInformationClass) {
         const auto snapshot = km::perf::QueryProcessorPerformanceSnapshot();
@@ -238,7 +271,13 @@ NtStatus NtQuerySystemInformation(
         record->HandleCount = snapshot[i].handleCount;
         record->WorkingSetSize = snapshot[i].workingSetBytes;
         record->PeakWorkingSetSize = snapshot[i].peakWorkingSetBytes;
-        record->PrivatePageCount = snapshot[i].privateCommitPages;
+        // The public record carries a byte count here, while Ps snapshots
+        // commit in pages. Preserve the ABI unit and fail instead of wrapping.
+        if (snapshot[i].privateCommitPages > UINTPTR_MAX / mm::PageSize4KB) {
+            delete[] records; delete[] snapshot; delete[] threads;
+            return NtStatus::NotSupported;
+        }
+        record->PrivatePageCount = snapshot[i].privateCommitPages * mm::PageSize4KB;
         if (snapshot[i].userTime100ns > static_cast<uint64_t>(INT64_MAX) ||
             snapshot[i].kernelTime100ns > static_cast<uint64_t>(INT64_MAX)) {
             delete[] records; delete[] snapshot; delete[] threads;

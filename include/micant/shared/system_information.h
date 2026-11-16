@@ -5,6 +5,60 @@
 
 namespace micant {
 
+// MicaNT extension carried by NtQuerySystemInformation. This is a versioned
+// diagnostic ABI, not a Windows SYSTEM_INFORMATION_CLASS. Fields without a
+// corresponding availability bit are intentionally unknown, not zero-valued.
+inline constexpr uint32_t SystemMemoryAccountingInformationClass = 0x1000;
+inline constexpr uint32_t SystemMemoryAccountingVersion = 1;
+enum SystemMemoryAccountingAvailability : uint32_t {
+    SystemMemoryManagedAvailable   = 1u << 0,
+    SystemMemoryActiveAvailable    = 1u << 1,
+    SystemMemoryZeroedAvailable    = 1u << 2,
+    SystemMemoryFreeAvailable      = 1u << 3,
+    SystemMemoryStandbyAvailable   = 1u << 4,
+    SystemMemoryModifiedAvailable  = 1u << 5,
+    SystemMemoryReservedAvailable  = 1u << 6,
+    SystemMemoryBadAvailable       = 1u << 7,
+};
+struct SystemMemoryAccountingInformation {
+    uint32_t version{SystemMemoryAccountingVersion};
+    uint32_t size{128};
+    uint32_t availability{};
+    uint32_t reserved{};
+    uint64_t managedPages{};
+    uint64_t activePages{};
+    uint64_t zeroedPages{};
+    uint64_t freePages{};
+    uint64_t standbyPages{};
+    uint64_t modifiedPages{};
+    uint64_t reservedPages{};
+    uint64_t badPages{};
+    uint64_t sharedPages{};
+    uint64_t pageTablePages{};
+    uint64_t kernelPages{};
+    uint64_t driverDmaPages{};
+    uint64_t compositorSurfacePages{};
+    uint64_t unattributedPages{};
+};
+static_assert(sizeof(SystemMemoryAccountingInformation) == 128);
+
+// AMD64 SYSTEM_BASIC_INFORMATION used by NtQuerySystemInformation class 0.
+struct SystemBasicInformation {
+    uint32_t reserved{};
+    uint32_t timerResolution{};
+    uint32_t pageSize{};
+    uint32_t numberOfPhysicalPages{};
+    uint32_t lowestPhysicalPageNumber{};
+    uint32_t highestPhysicalPageNumber{};
+    uint32_t allocationGranularity{};
+    uintptr_t minimumUserModeAddress{};
+    uintptr_t maximumUserModeAddress{};
+    uintptr_t activeProcessorsAffinityMask{};
+    int8_t numberOfProcessors{};
+    uint8_t padding[7]{};
+};
+static_assert(sizeof(SystemBasicInformation) == 64);
+
 // AMD64 SYSTEM_PROCESS_INFORMATION fixed record. Native callers append
 // NumberOfThreads SYSTEM_THREAD_INFORMATION records after this 256-byte part.
 struct SystemUnicodeString {

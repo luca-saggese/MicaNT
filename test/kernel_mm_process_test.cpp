@@ -23,9 +23,6 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
     using namespace micant::hal::amd64;
 
     auto& database = PfnDatabase::get();
-    const size_t active = database.getActiveCount();
-    const size_t available = database.getFreeCount() + database.getZeroedCount() +
-                             database.getStandbyCount();
     if (!verifyBootstrapManagedViewRollback()) return 21;
     if (!verifyProcessPagingRootRollback()) return 25;
     {
@@ -204,10 +201,16 @@ extern "C" int MicantTestMmProcessAddressSpace() noexcept {
         if (!destroyProcessPagingRoot(second) || !destroyProcessPagingRoot(first)) __builtin_trap();
         if (!valid) return 24;
     }
-
-    return database.getActiveCount() == active &&
-           database.getFreeCount() + database.getZeroedCount() +
-               database.getStandbyCount() == available ? 0 : 9;
+    uint64_t accounted = 0;
+    const uint64_t managed = database.getManagedCount();
+    const size_t locations[] = {database.getActiveCount(), database.getFreeCount(),
+        database.getZeroedCount(), database.getStandbyCount(), database.getModifiedCount(),
+        database.getReservedCount(), database.getBadCount(), database.getOtherManagedCount()};
+    for (const size_t count : locations) {
+        if (count > managed - accounted) return 9;
+        accounted += count;
+    }
+    return accounted == managed ? 0 : 9;
 }
 
 extern "C" int MicantTestMmManagedProtection() noexcept {

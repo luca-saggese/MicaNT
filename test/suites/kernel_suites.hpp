@@ -20305,7 +20305,7 @@ inline void Test_Horizon128_KernelGraphics_GopLinearFramebuffer_Userland_Blitter
     using namespace micant::bootvid;
 
     // 1. Structure Sizes and Alignment
-    TEST_ASSERT(sizeof(UserVideoInfo64) == 32, "UserVideoInfo64 size must be 32 bytes");
+    TEST_ASSERT(sizeof(UserVideoInfo64) == 36, "UserVideoInfo64 size must include backend query fields");
     TEST_ASSERT(sizeof(UserPresentSurfaceParams64) == 32, "UserPresentSurfaceParams64 size must be 32 bytes");
 
     // 2. Setup Virtual GOP Linear Framebuffer (1024x768 @ 32-bpp BGRA)

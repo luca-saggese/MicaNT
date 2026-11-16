@@ -11,6 +11,7 @@
 #include "micant/km/executive/io_file.hpp"
 #include "micant/shared/context.hpp"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/native_process_abi.hpp"
 #include "micant/km/win32k/freestanding.hpp"
 #include <algorithm>
 #include <cstring>
@@ -2279,7 +2280,8 @@ static NtStatus createProcessEx(Handle* processHandle, uint32_t desiredAccess,
     ObjectAttributes* attributes, Handle parentProcess, uint32_t flags,
     Handle section, Handle debugPort, Handle exceptionPort, bool inJob,
     mm::KPROCESSOR_MODE inputMode, mm::KPROCESSOR_MODE outputMode,
-    mm::KPROCESSOR_MODE securityMode) {
+    mm::KPROCESSOR_MODE securityMode, std::u16string_view imagePath = {},
+    std::u16string_view commandLine = {}, std::u16string_view currentDirectory = {}) {
     if (!processHandle || !parentProcess || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
         return NtStatus::InvalidParameter;
     const auto withInterruptsDisabled = [](auto&& operation) noexcept {
@@ -2383,6 +2385,8 @@ static NtStatus createProcessEx(Handle* processHandle, uint32_t desiredAccess,
         result = ps::detail::createProcessObject(child, childReference, objectSecurity, desiredAccess, &grantedAccess);
     if (result == NtStatus::Success)
         result = ps::detail::inheritProcessSecurityContext(*child, *parent);
+    if (result == NtStatus::Success && imageSection && !imagePath.empty())
+        result = child->setNativeProcessParameters(imagePath, commandLine, currentDirectory);
     if (result == NtStatus::Success && imageSection) {
         if (!hal::amd64::bootstrapSchedulerClockActive()) {
             // Before scheduling starts there is no attachable execution
@@ -2491,6 +2495,318 @@ NtStatus NtCreateProcessExCaptured(Handle* userProcessHandle, uint32_t desiredAc
                            section, debugPort, exceptionPort, inJob, mm::KernelMode, mm::UserMode, mm::UserMode);
 }
 
+NtStatus NtCreateUserProcess(Handle* userProcessHandle, Handle* userThreadHandle,
+    uint32_t processDesiredAccess, uint32_t threadDesiredAccess,
+    ObjectAttributes* userProcessAttributes, ObjectAttributes* userThreadAttributes,
+    uint32_t processFlags, uint32_t threadFlags, void* userProcessParameters,
+    shared::native_process::ProcessCreateInfo64* userCreateInfo,
+    PsAttributeList* userAttributeList) {
+    using namespace shared::native_process;
+    constexpr uint32_t ProcessCreateFlagsInheritHandles = 0x00000004u;
+    constexpr uint32_t ThreadCreateFlagsCreateSuspended = 0x00000001u;
+    constexpr size_t MaximumPathCharacters = 2048;
+    const auto* caller = ke::KeGetCurrentThread();
+    if (!caller || !caller->previousUserMode || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+        return NtStatus::InvalidDeviceState;
+
+    const auto withInterruptsDisabled = [](auto&& operation) noexcept {
+        uint64_t interruptFlags{};
+        __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(interruptFlags) : : "memory");
+        const auto result = operation();
+        if (interruptFlags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+        return result;
+    };
+    const auto safeCopyIn = [&](void* destination, const void* source, size_t size) noexcept {
+        return withInterruptsDisabled([&]() noexcept {
+            return ex::ExSafeCopyFromUser(destination, source, size, mm::UserMode);
+        });
+    };
+    const auto safeCopyOut = [&](void* destination, const void* source, size_t size) noexcept {
+        return withInterruptsDisabled([&]() noexcept {
+            return ex::ExSafeCopyToUser(destination, source, size, mm::UserMode);
+        });
+    };
+    const auto probeRead = [&](const void* address, size_t size, size_t alignment) noexcept {
+        return withInterruptsDisabled([&]() noexcept {
+            return ex::ProbeForRead(address, size, alignment, mm::UserMode);
+        });
+    };
+    const auto probeWrite = [&](void* address, size_t size, size_t alignment) noexcept {
+        return withInterruptsDisabled([&]() noexcept {
+            return ex::ProbeForWrite(address, size, alignment, mm::UserMode);
+        });
+    };
+    const auto overlaps = [](uintptr_t left, size_t leftSize,
+                             uintptr_t right, size_t rightSize) noexcept {
+        if (left > UINTPTR_MAX - leftSize || right > UINTPTR_MAX - rightSize) return true;
+        return left < right + rightSize && right < left + leftSize;
+    };
+
+    if (!userProcessHandle || !userThreadHandle || !userProcessParameters || !userCreateInfo ||
+        processDesiredAccess == 0 || threadDesiredAccess == 0 ||
+        (processFlags & ~ProcessCreateFlagsInheritHandles) ||
+        (threadFlags & ~ThreadCreateFlagsCreateSuspended)) return NtStatus::InvalidParameter;
+    if (userProcessHandle == userThreadHandle ||
+        overlaps(reinterpret_cast<uintptr_t>(userProcessHandle), sizeof(Handle),
+                 reinterpret_cast<uintptr_t>(userThreadHandle), sizeof(Handle)) ||
+        overlaps(reinterpret_cast<uintptr_t>(userProcessHandle), sizeof(Handle),
+                 reinterpret_cast<uintptr_t>(userCreateInfo), sizeof(*userCreateInfo)) ||
+        overlaps(reinterpret_cast<uintptr_t>(userThreadHandle), sizeof(Handle),
+                 reinterpret_cast<uintptr_t>(userCreateInfo), sizeof(*userCreateInfo)))
+        return NtStatus::InvalidParameter;
+
+    auto status = probeWrite(userProcessHandle, sizeof(Handle), alignof(Handle));
+    if (status == NtStatus::Success)
+        status = probeWrite(userThreadHandle, sizeof(Handle), alignof(Handle));
+    if (status == NtStatus::Success)
+        status = probeRead(userCreateInfo, sizeof(*userCreateInfo), alignof(uint64_t));
+    if (status == NtStatus::Success)
+        status = probeWrite(userCreateInfo, sizeof(*userCreateInfo), alignof(uint64_t));
+    if (status != NtStatus::Success) return status;
+
+    ProcessCreateInfo64 createInfo{};
+    status = safeCopyIn(&createInfo, userCreateInfo, sizeof(createInfo));
+    if (status != NtStatus::Success) return status;
+    if (createInfo.Size != sizeof(createInfo) || createInfo.State != CreateState::Initial)
+        return NtStatus::InvalidParameter;
+    if (createInfo.Data.Initial.InitFlags || createInfo.Data.Initial.AdditionalFileAccess)
+        return NtStatus::NotSupported;
+
+    if (userAttributeList) {
+        // This implementation supports no process attributes. In particular,
+        // callers that need image-name, parent, token, or output ClientId
+        // attributes must receive an explicit failure.
+        size_t totalLength{};
+        status = probeRead(userAttributeList, sizeof(totalLength), alignof(size_t));
+        if (status == NtStatus::Success)
+            status = safeCopyIn(&totalLength, userAttributeList, sizeof(totalLength));
+        if (status != NtStatus::Success) return status;
+        return NtStatus::NotSupported;
+    }
+
+    ObjectAttributes processAttributes{};
+    if (userProcessAttributes) {
+        status = probeRead(userProcessAttributes, sizeof(processAttributes), alignof(uint32_t));
+        if (status == NtStatus::Success)
+            status = safeCopyIn(&processAttributes, userProcessAttributes, sizeof(processAttributes));
+        if (status != NtStatus::Success) return status;
+        if (processAttributes.length != sizeof(processAttributes) || processAttributes.rootDirectory ||
+            processAttributes.objectName || processAttributes.securityDescriptor ||
+            processAttributes.securityQualityOfService ||
+            (processAttributes.attributes & ~OBJ_INHERIT)) return NtStatus::NotSupported;
+    }
+    ObjectAttributes threadAttributes{};
+    if (userThreadAttributes) {
+        status = probeRead(userThreadAttributes, sizeof(threadAttributes), alignof(uint32_t));
+        if (status == NtStatus::Success)
+            status = safeCopyIn(&threadAttributes, userThreadAttributes, sizeof(threadAttributes));
+        if (status != NtStatus::Success) return status;
+        if (threadAttributes.length != sizeof(threadAttributes) || threadAttributes.rootDirectory ||
+            threadAttributes.objectName || threadAttributes.securityDescriptor ||
+            threadAttributes.securityQualityOfService ||
+            (threadAttributes.attributes & ~OBJ_INHERIT)) return NtStatus::NotSupported;
+    }
+
+    ProcessParametersPrefix64 parameters{};
+    status = probeRead(userProcessParameters, sizeof(parameters), alignof(uint64_t));
+    if (status == NtStatus::Success)
+        status = safeCopyIn(&parameters, userProcessParameters, sizeof(parameters));
+    if (status != NtStatus::Success) return status;
+
+    const auto captureString = [&](const UnicodeString64& source,
+                                   std::unique_ptr<char16_t[]>& storage,
+                                   size_t& characters, bool required) noexcept -> NtStatus {
+        characters = 0;
+        storage.reset();
+        if ((source.Length & 1) || source.Length > source.MaximumLength ||
+            source.Length > MaximumPathCharacters * sizeof(char16_t) ||
+            (source.Length && !source.Buffer) || (!source.Length && required))
+            return NtStatus::InvalidParameter;
+        if (!source.Length) return NtStatus::Success;
+        auto copyStatus = probeRead(source.Buffer, source.Length, alignof(char16_t));
+        if (copyStatus != NtStatus::Success) return copyStatus;
+        characters = source.Length / sizeof(char16_t);
+        storage.reset(new (std::nothrow_t{}) char16_t[characters + 1]);
+        if (!storage) return NtStatus::NoMemory;
+        copyStatus = safeCopyIn(storage.get(), source.Buffer, source.Length);
+        if (copyStatus != NtStatus::Success) {
+            storage.reset();
+            return copyStatus;
+        }
+        for (size_t i = 0; i < characters; ++i) {
+            if (storage[i] == 0) return NtStatus::InvalidParameter;
+            if (storage[i] == u'/') storage[i] = u'\\';
+        }
+        storage[characters] = 0;
+        return NtStatus::Success;
+    };
+
+    std::unique_ptr<char16_t[]> imagePathStorage;
+    std::unique_ptr<char16_t[]> commandLineStorage;
+    std::unique_ptr<char16_t[]> currentDirectoryStorage;
+    size_t imagePathLength{}, commandLineLength{}, currentDirectoryLength{};
+    status = captureString(parameters.ImagePathName, imagePathStorage, imagePathLength, true);
+    if (status == NtStatus::Success)
+        status = captureString(parameters.CommandLine, commandLineStorage, commandLineLength, false);
+    if (status == NtStatus::Success)
+        status = captureString(parameters.CurrentDirectoryDosPath, currentDirectoryStorage,
+                               currentDirectoryLength, false);
+    if (status != NtStatus::Success) return status;
+    if (parameters.CurrentDirectoryHandle || parameters.DllPath.Length)
+        return NtStatus::NotSupported;
+    if (imagePathLength < 3 || imagePathStorage[1] != u':' || imagePathStorage[2] != u'\\')
+        return NtStatus::ObjectPathSyntaxBad;
+    if (currentDirectoryLength && (currentDirectoryLength < 3 ||
+        currentDirectoryStorage[1] != u':' || currentDirectoryStorage[2] != u'\\'))
+        return NtStatus::ObjectPathSyntaxBad;
+    if (!commandLineLength) {
+        commandLineStorage.reset(new (std::nothrow_t{}) char16_t[imagePathLength + 1]);
+        if (!commandLineStorage) return NtStatus::NoMemory;
+        std::memcpy(commandLineStorage.get(), imagePathStorage.get(),
+                    (imagePathLength + 1) * sizeof(char16_t));
+        commandLineLength = imagePathLength;
+    }
+
+    const auto imagePath = std::u16string_view(imagePathStorage.get(), imagePathLength);
+    const auto commandLine = std::u16string_view(commandLineStorage.get(), commandLineLength);
+    const auto currentDirectory = std::u16string_view(currentDirectoryStorage.get(), currentDirectoryLength);
+    Handle fileHandle{};
+    status = io::IoOpenBackendFile(&fileHandle, 0x0021u, imagePath);
+    if (status != NtStatus::Success) {
+        createInfo.State = CreateState::FailOnFileOpen;
+        const auto copyStatus = safeCopyOut(userCreateInfo, &createInfo, sizeof(createInfo));
+        return copyStatus == NtStatus::Success ? status : copyStatus;
+    }
+
+    Handle sectionHandle{};
+    status = NtCreateSectionFromKernel(&sectionHandle, section::SECTION_ALL_ACCESS, nullptr,
+        nullptr, mm::PAGE_EXECUTE_READ, section::SEC_FILE | section::SEC_IMAGE, fileHandle);
+    if (status != NtStatus::Success) {
+        createInfo.State = CreateState::FailOnSectionCreate;
+        createInfo.Data.FailSection.FileHandle = fileHandle;
+        const auto copyStatus = safeCopyOut(userCreateInfo, &createInfo, sizeof(createInfo));
+        if (copyStatus == NtStatus::Success) return status; // Ownership is returned in CreateInfo.
+        (void)NtClose(fileHandle);
+        return copyStatus;
+    }
+
+    if (currentDirectoryLength) {
+        Handle directoryHandle{};
+        status = io::IoOpenBackendFile(&directoryHandle, 0x0001u, currentDirectory);
+        if (status == NtStatus::Success) {
+            FileBothDirInformation firstEntry{};
+            status = io::IoQueryDirectoryFile(directoryHandle, true, &firstEntry);
+            if (status == NtStatus::NoMoreFiles) status = NtStatus::Success;
+            const auto closeStatus = NtClose(directoryHandle);
+            if (status == NtStatus::Success && closeStatus != NtStatus::Success) status = closeStatus;
+        }
+        if (status != NtStatus::Success) {
+            (void)NtClose(sectionHandle);
+            (void)NtClose(fileHandle);
+            return status;
+        }
+    }
+
+    Handle processHandle{};
+    status = createProcessEx(&processHandle, processDesiredAccess,
+        userProcessAttributes ? &processAttributes : nullptr, InvalidHandleValue,
+        processFlags, sectionHandle, 0, 0, false,
+        mm::KernelMode, mm::KernelMode, mm::KernelMode, imagePath, commandLine, currentDirectory);
+    if (status != NtStatus::Success) {
+        (void)NtClose(sectionHandle);
+        (void)NtClose(fileHandle);
+        return status;
+    }
+
+    ps::EProcess* child{};
+    ob::ObjectHeader* childReference{};
+    status = ps::detail::referenceProcessHandle(processHandle, 0, child, childReference);
+    uintptr_t startRoutine{};
+    if (status == NtStatus::Success && child && child->nativeImages()) {
+        const auto* mainImage = child->nativeImages()->module(0);
+        if (mainImage && mainImage->view.headers().optionalHeader.addressOfEntryPoint &&
+            mainImage->view.executableRva(mainImage->view.headers().optionalHeader.addressOfEntryPoint) &&
+            mainImage->base <= UINTPTR_MAX - mainImage->view.headers().optionalHeader.addressOfEntryPoint)
+            startRoutine = mainImage->base + mainImage->view.headers().optionalHeader.addressOfEntryPoint;
+        else status = NtStatus::InvalidImageFormat;
+    } else if (status == NtStatus::Success) status = NtStatus::InvalidImageFormat;
+    if (childReference) {
+        ob::ObDereferenceObject(childReference);
+        childReference = nullptr;
+    }
+
+    Handle threadHandle{};
+    ClientId clientId{};
+    if (status == NtStatus::Success) {
+        PsAttributeList threadAttributesForClient{};
+        threadAttributesForClient.totalLength = sizeof(size_t) + sizeof(PsAttribute);
+        threadAttributesForClient.attributes[0] = PsAttribute{
+            .attribute = PS_ATTRIBUTE_CLIENT_ID,
+            .size = sizeof(clientId),
+            .value = reinterpret_cast<uintptr_t>(&clientId),
+            .returnLength = nullptr
+        };
+        status = NtCreateThreadExFromKernel(&threadHandle, threadDesiredAccess,
+            userThreadAttributes ? &threadAttributes : nullptr, processHandle,
+            startRoutine, 0, ThreadCreateFlagsCreateSuspended, 0, 0, 0,
+            &threadAttributesForClient);
+    }
+    if (status == NtStatus::Success && !(threadFlags & ThreadCreateFlagsCreateSuspended))
+        status = NtResumeThread(threadHandle, nullptr);
+
+    if (status != NtStatus::Success) {
+        if (threadHandle) (void)NtClose(threadHandle);
+        (void)NtTerminateProcess(processHandle, status);
+        (void)NtClose(processHandle);
+        (void)NtClose(sectionHandle);
+        (void)NtClose(fileHandle);
+        createInfo.State = CreateState::Initial;
+        (void)safeCopyOut(userCreateInfo, &createInfo, sizeof(createInfo));
+        return status;
+    }
+
+    status = ps::detail::referenceProcessHandle(processHandle, 0, child, childReference);
+    if (status == NtStatus::Success && child) {
+        createInfo.State = CreateState::Success;
+        createInfo.Data.Success.FileHandle = fileHandle;
+        createInfo.Data.Success.SectionHandle = sectionHandle;
+        createInfo.Data.Success.UserProcessParametersNative = child->userProcessParametersAddress();
+        createInfo.Data.Success.PebAddressNative = child->userPebAddress();
+        ob::ObDereferenceObject(childReference);
+        childReference = nullptr;
+    } else {
+        if (childReference) ob::ObDereferenceObject(childReference);
+        (void)NtClose(threadHandle);
+        (void)NtTerminateProcess(processHandle, status);
+        (void)NtClose(processHandle);
+        (void)NtClose(sectionHandle);
+        (void)NtClose(fileHandle);
+        return status == NtStatus::Success ? NtStatus::InvalidHandle : status;
+    }
+
+    status = safeCopyOut(userProcessHandle, &processHandle, sizeof(processHandle));
+    if (status == NtStatus::Success)
+        status = safeCopyOut(userThreadHandle, &threadHandle, sizeof(threadHandle));
+    if (status == NtStatus::Success)
+        status = safeCopyOut(userCreateInfo, &createInfo, sizeof(createInfo));
+    if (status != NtStatus::Success) {
+        const Handle zero{};
+        (void)safeCopyOut(userProcessHandle, &zero, sizeof(zero));
+        (void)safeCopyOut(userThreadHandle, &zero, sizeof(zero));
+        createInfo.State = CreateState::Initial;
+        createInfo.Data.Success.FileHandle = 0;
+        createInfo.Data.Success.SectionHandle = 0;
+        (void)safeCopyOut(userCreateInfo, &createInfo, sizeof(createInfo));
+        (void)NtClose(threadHandle);
+        (void)NtTerminateProcess(processHandle, status);
+        (void)NtClose(processHandle);
+        (void)NtClose(sectionHandle);
+        (void)NtClose(fileHandle);
+        return status;
+    }
+    return NtStatus::Success;
+}
+
 // The syscall enters with the caller's address space active.  Capture and
 // publish user pointers under BSP exclusion; an Ob reference pins the target.
 NtStatus NtQueryInformationProcess(Handle handle, ProcessInformationClass informationClass,
@@ -2500,31 +2816,74 @@ NtStatus NtQueryInformationProcess(Handle handle, ProcessInformationClass inform
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     NtStatus result = NtStatus::Success;
-    const uint32_t required = sizeof(ProcessBasicInformation);
+    const bool queryVm = informationClass == ProcessInformationClass::ProcessVmCounters;
+    const uint32_t required = queryVm
+        ? (length == sizeof(ProcessVmCountersEx) ? sizeof(ProcessVmCountersEx)
+                                                 : sizeof(ProcessVmCounters))
+        : sizeof(ProcessBasicInformation);
     if (returnLength) result = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
-    if (result == NtStatus::Success && informationClass != ProcessInformationClass::ProcessBasicInformation)
+    if (result == NtStatus::Success && !queryVm &&
+        informationClass != ProcessInformationClass::ProcessBasicInformation)
         result = NtStatus::InvalidInfoClass;
-    if (result == NtStatus::Success && length < required) result = NtStatus::InfoLengthMismatch;
+    if (result == NtStatus::Success &&
+        (queryVm ? (length != sizeof(ProcessVmCounters) && length != sizeof(ProcessVmCountersEx))
+                 : length < required))
+        result = NtStatus::InfoLengthMismatch;
     if (result == NtStatus::Success) result = ex::ProbeForWrite(information, required, alignof(uintptr_t), mode);
     ps::EProcess* process{};
     ob::ObjectHeader* reference{};
     if (result == NtStatus::Success) {
         if (handle == InvalidHandleValue) result = ps::detail::referenceCurrentProcess(process, reference);
         else {
-            result = ps::detail::referenceProcessHandle(handle, 0x1000, process, reference);
-            if (result == NtStatus::AccessDenied)
+            if (queryVm) {
                 result = ps::detail::referenceProcessHandle(handle, 0x0400, process, reference);
+            } else {
+                result = ps::detail::referenceProcessHandle(handle, 0x1000, process, reference);
+                if (result == NtStatus::AccessDenied)
+                    result = ps::detail::referenceProcessHandle(handle, 0x0400, process, reference);
+            }
         }
     }
     if (result == NtStatus::Success) {
-        ProcessBasicInformation basic{};
-        basic.exitStatus = process->exitStatus();
-        basic.pebBaseAddress = process->userPebAddress();
-        basic.affinityMask = 1;
-        basic.basePriority = ke::PRIORITY_NORMAL;
-        basic.uniqueProcessId = process->processId();
-        basic.inheritedFromUniqueProcessId = process->inheritedFromProcessId();
-        result = ex::ExSafeCopyToUser(information, &basic, sizeof(basic), mode);
+        if (queryVm) {
+            mm::ProcessMemoryAccounting memory{};
+            if (!process->getAddressSpace().queryProcessMemoryAccounting(memory)) {
+                result = NtStatus::NotSupported;
+            }
+            if (memory.virtualBytes > UINTPTR_MAX || memory.committedBytes > UINTPTR_MAX ||
+                memory.peakVirtualBytes > UINTPTR_MAX ||
+                memory.peakResidentPages > UINTPTR_MAX / mm::PageSize4KB ||
+                memory.residentPages > UINTPTR_MAX / mm::PageSize4KB ||
+                memory.peakCommitBytes > UINTPTR_MAX || memory.privateCommitBytes > UINTPTR_MAX) {
+                result = NtStatus::NotSupported;
+            } else if (result == NtStatus::Success) {
+                ProcessVmCounters counters{};
+                counters.peakVirtualSize = static_cast<uintptr_t>(memory.peakVirtualBytes);
+                counters.virtualSize = static_cast<uintptr_t>(memory.virtualBytes);
+                counters.pageFaultCount = memory.pageFaultCount;
+                counters.peakWorkingSetSize = static_cast<uintptr_t>(memory.peakResidentPages * mm::PageSize4KB);
+                counters.workingSetSize = static_cast<uintptr_t>(memory.residentPages * mm::PageSize4KB);
+                counters.pagefileUsage = static_cast<uintptr_t>(memory.committedBytes);
+                counters.peakPagefileUsage = static_cast<uintptr_t>(memory.peakCommitBytes);
+                if (length == sizeof(ProcessVmCountersEx)) {
+                    ProcessVmCountersEx extended{};
+                    extended.counters = counters;
+                    extended.privateUsage = static_cast<uintptr_t>(memory.privateCommitBytes);
+                    result = ex::ExSafeCopyToUser(information, &extended, sizeof(extended), mode);
+                } else {
+                    result = ex::ExSafeCopyToUser(information, &counters, sizeof(counters), mode);
+                }
+            }
+        } else {
+            ProcessBasicInformation basic{};
+            basic.exitStatus = process->exitStatus();
+            basic.pebBaseAddress = process->userPebAddress();
+            basic.affinityMask = 1;
+            basic.basePriority = ke::PRIORITY_NORMAL;
+            basic.uniqueProcessId = process->processId();
+            basic.inheritedFromUniqueProcessId = process->inheritedFromProcessId();
+            result = ex::ExSafeCopyToUser(information, &basic, sizeof(basic), mode);
+        }
     }
     if (returnLength && (result == NtStatus::Success || result == NtStatus::InfoLengthMismatch)) {
         const auto copy = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);

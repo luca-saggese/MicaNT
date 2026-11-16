@@ -753,20 +753,34 @@ int32_t mountPartitions() noexcept {
     static constexpr uint8_t efiSystemGuid[16] = {
         0x28,0x73,0x2A,0xC1,0xF8,0x1F,0xD2,0x11,
         0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B};
-    static constexpr char driveLetters[3] = {'S', 'C', 'D'};
     bool mounted{};
     for (size_t i = 0; i < result.count && g_volumeCount < 3; ++i) {
         const Extent& extent = g_partitionExtents[i];
+        char drive = '\0';
         if (result.kind == TableKind::Mbr) {
             if (extent.mbrType != 0x0B && extent.mbrType != 0x0C && extent.mbrType != 0xEF)
                 continue;
+            static constexpr char mbrDriveLetters[] = {'C', 'D', 'E'};
+            drive = mbrDriveLetters[g_volumeCount];
         } else {
-            const bool recognized = std::memcmp(extent.typeGuid, basicDataGuid, 16) == 0 ||
-                                    std::memcmp(extent.typeGuid, efiSystemGuid, 16) == 0;
-            if (!recognized) continue;
+            if (std::memcmp(extent.typeGuid, efiSystemGuid, 16) == 0) {
+                // Keep the boot/EFI volume separate from the system volume.
+                drive = 'S';
+            } else if (std::memcmp(extent.typeGuid, basicDataGuid, 16) == 0) {
+                // The first mountable Basic Data partition is the Windows
+                // system volume regardless of whether an ESP was mountable.
+                drive = 'C';
+                for (char candidate = 'C'; candidate <= 'E'; ++candidate) {
+                    bool inUse = false;
+                    for (uint32_t mountedIndex = 0; mountedIndex < g_volumeCount; ++mountedIndex)
+                        inUse |= g_volumes[mountedIndex].Mounted &&
+                            g_volumes[mountedIndex].Drive == candidate;
+                    if (!inUse) { drive = candidate; break; }
+                }
+            } else continue;
         }
         if (mountVolume(g_volumes[g_volumeCount], extent.firstLba,
-                        extent.sectorCount, driveLetters[g_volumeCount])) {
+                        extent.sectorCount, drive)) {
             ++g_volumeCount;
             mounted = true;
         }

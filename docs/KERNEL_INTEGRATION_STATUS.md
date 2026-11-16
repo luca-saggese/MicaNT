@@ -1952,3 +1952,44 @@ avoiding writes through read-only identity aliases.
 This slice does not yet implement process actions, CPU accounting, navigable
 Win32 UI, secure keyboard launch, services, users, startup apps, or system
 independence from Explorer.
+
+## LuceOS process memory report and dump (2026-11-16)
+
+`procdump.exe` is built as a Ring 3 native application and uses the existing
+NTDLL process, virtual-memory, file, and system-information calls. The
+process-memory QEMU self-test now reports Explorer and compositor, verifies a
+known private page and commit delta, streams a dump to the mounted FAT volume
+in 64 KiB chunks, flushes it, and verifies cleanup/CRC evidence. The dump uses
+the documented versioned LUCDMP format; it is not a Windows minidump. Region
+enumeration after target termination is reported as partial with an explicit
+completion flag. Per-region working-set details that Mm cannot query remain
+`null`/unavailable instead of being presented as zero.
+
+The integration run exposed and fixed `NtQueryVirtualMemory` copying target
+region/working-set results while attached to the target address space. User
+buffers are now copied in the caller's address space, with the target attached
+only for address-space queries. `NtWriteFile` also truncates its ULONG length
+to the declared 32-bit ABI width. The QEMU app stages the output at
+`C:\PROCDMP.LUD` on the FAT32 system volume and uses sequential writes
+supported by the file backend. GPT EFI partitions retain S:, while the first
+mountable Basic Data partition now gets C: even if the EFI partition could not
+be mounted.
+
+| Command | Result |
+|---|---|
+| `python3 qemu.py --process-memory-selftest --memory 2048 --timeout 180 --headless --diagnostics-dir /private/tmp/micant-procdump-c-final` | Passed after drive-letter correction; bare-metal kernel linked, native user-mode boundary checks passed, procdump wrote/flushed `C:\PROCDMP.LUD`, completed Explorer/compositor reports and known-page read, and QEMU serial remained stable for five seconds. |
+| `python3 scripts/verify_kernel_architecture.py` | Passed; one canonical modular startup and no monolith build input. |
+| `python3 qemu.py --process-memory-selftest --theme-test --memory 2048 --timeout 180 --headless` | Not passed; procdump emitted an explicit partial report when `theme_test.exe` terminated during region enumeration, then the concurrent kernel `runUserThreads` self-test raised `#GP`. Do not treat this combined run as theme-target or full-suite verification. |
+| `python3 qemu.py --process-memory-selftest --memory 512 --timeout 180 --headless` | Not passed; desktop Explorer image startup exhausted its existing heap/allocation path before procdump launched. The successful integration run used 2 GiB. |
+
+One additional 2 GiB attempt stopped before procdump started with a bootstrap
+`#UD` in `queryPagingPermissions` during KUSER initialization; a subsequent
+identical run passed and reached the five-second stable-serial gate. The
+procdump path itself passed repeatedly, while this separate bootstrap
+intermittency remains visible in the evidence.
+
+The successful run verifies a stable procdump integration launch, not every
+item in the original process-memory specification. Atomic capture, timeout
+and cancellation policy, restricted-token denial, shared-section accounting,
+independent parsing of the emitted dump file, exact global PFN attribution,
+and the 512 MiB desktop boot remain unverified or incomplete.
