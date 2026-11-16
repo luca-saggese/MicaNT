@@ -469,6 +469,13 @@ the evidence named here, not just declarations or a successful compile.
   established Cm/Userenv/profile owner and access controls. Current work only
   resolves a SID-based profile path; it does not create the profile directory,
   enforce its ACL or persist preferences.
+- The concrete storage dependency is the canonical filesystem path: VFS
+  FAT32 open/create/read/write/directory operations still fall through to its
+  legacy in-memory entry map, and boot currently formats C: on a RAM disk at
+  each start. Cm is not a safe substitute: key handles are not caller-scoped,
+  `NtCreateKey` is absent, and `CmFlushKey` returns `NotSupported`. The next
+  storage work must wire mounted FAT32 I/O, provide boot-persistent backing,
+  then add token-aware profile ACL checks before preferences are saved.
 - [ ] Persist only after successful theme publication; test corrupt/missing
   settings, rollback, restart persistence and distinct settings for two users.
 
@@ -490,9 +497,10 @@ the evidence named here, not just declarations or a successful compile.
 - [x] Corrupt the snapshot version after reading a valid snapshot, reject it
   before publication, and verify that the previous complete snapshot remains
   active in QEMU (`/private/tmp/micant-theme-point7-malformed-snapshot-1794806550`).
-- [ ] Exercise `loadActiveVisualTheme` against a file that exists but contains
-  malformed compiled-style bytes; the direct invalid-version publication path
-  is covered, but no corrupt package fixture exists yet.
+- [x] Exercise `loadActiveVisualTheme` against a packaged file that exists but
+  contains malformed compiled-style bytes. Explorer rejected the snapshot and
+  retained its previous complete profile and Win32k snapshot; QEMU then passed
+  the full input/move/resize run (`/private/tmp/micant-theme-point7-corrupt-file-final5-2026-11-16`).
 
 ### 8. Compositor effects
 

@@ -989,6 +989,8 @@ void PrintThemeWin32Error(const char* prefix, uint32_t error) noexcept {
 
 bool themeProfileEquals(const char* left, const char* right) noexcept;
 void loadActiveVisualTheme(const char* selectedProfile) noexcept;
+bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
+                     size_t& bytesRead) noexcept;
 
 void verifyCurrentUserThemeProfilePath() noexcept {
     wchar_t profile[128]{};
@@ -1069,6 +1071,29 @@ void verifyThemeChangeQueueRollback() noexcept {
     PrintLine(validProfileRecovered && originalProfileRestored
         ? "[MicaNT Theme] Valid profile recovered and original theme restored"
         : "[MicaNT Theme] Valid profile recovery failed");
+
+    wchar_t stylePath[512]{};
+    size_t stylePathCursor = 0;
+    constexpr wchar_t styleSuffix[] =
+        L"\\System\\Themes\\WhiteSur\\Probe\\native.style";
+    const bool stylePathBuilt = appendSystemRoot(stylePath, std::size(stylePath),
+        stylePathCursor) && appendWide(stylePath, std::size(stylePath),
+        stylePathCursor, styleSuffix, std::size(styleSuffix) - 1);
+    size_t styleBytes = 0;
+    const bool malformedFixtureRead = stylePathBuilt &&
+        readBoundedFile(stylePath, &g.themeCandidate,
+        sizeof(g.themeCandidate), styleBytes) && styleBytes != 0 &&
+        !MicaThemeSnapshotIsValid(&g.themeCandidate, styleBytes);
+    if (malformedFixtureRead)
+        loadActiveVisualTheme("WhiteSur/Probe");
+    const bool malformedFileRollback = malformedFixtureRead &&
+        std::memcmp(g.themeProfile, previousProfile, sizeof(previousProfile)) == 0 &&
+        MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
+        std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
+                    sizeof(g.themeRollbackProbe)) == 0;
+    PrintLine(malformedFileRollback
+        ? "[MicaNT Theme] Malformed compiled-style file kept the previous complete theme"
+        : "[MicaNT Theme] Malformed compiled-style file rollback probe failed");
 }
 
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
