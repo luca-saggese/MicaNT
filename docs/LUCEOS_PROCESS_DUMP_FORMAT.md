@@ -5,6 +5,19 @@ diagnostic file. This is **not** a Windows minidump. All integers are little
 endian and records are emitted in order; consumers must stop at an incomplete
 record or EOF.
 
+`procdump.exe --top --output C:\\MicaNT\\processes.txt [--interval 2] [--count 5]`
+captures one process table per sample (one second by default; without `--count`
+it continues until the process is terminated),
+prints each table to the console, and writes the same tables to the output
+file. Use a new output path for each run because the current filesystem profile
+does not support truncating an existing report. Rows are sorted by resident working set and include PID, image name,
+thread and handle counts, resident working set, and private committed bytes.
+The process snapshot contains active, non-terminating processes. Working set
+is the kernel's per-process resident-page counter; private commit is virtual
+commit and must not be interpreted as resident RAM. The current process
+snapshot does not provide a reliable total virtual-size value, so the command
+does not report one.
+
 ## Header
 
 The 40-byte header is `LUCDMP1\0`, `uint32 version` (1), `uint32 headerSize`

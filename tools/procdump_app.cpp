@@ -27,6 +27,7 @@ extern "C" __declspec(dllimport) uint64_t NtWriteFile(
     void*, void*, void*, void*, IoStatusBlock*, const void*, uint32_t, void*, uint32_t*) noexcept;
 extern "C" __declspec(dllimport) int32_t NtFlushBuffersFile(void*, IoStatusBlock*) noexcept;
 extern "C" __declspec(dllimport) int32_t NtQuerySystemTime(LargeInteger*) noexcept;
+extern "C" __declspec(dllimport) int32_t NtDelayExecution(uint8_t, const LargeInteger*) noexcept;
 extern "C" __declspec(dllimport) int32_t NtTestAlert() noexcept;
 extern "C" __declspec(dllimport) int32_t NtAllocateVirtualMemory(
     void*, void**, uintptr_t, size_t*, uint32_t, uint32_t) noexcept;
@@ -51,7 +52,8 @@ constexpr uint32_t PageGuard = 0x100;
 constexpr uintptr_t UserSpaceMin = 0x10000;
 constexpr uintptr_t UserSpaceMax = 0x00007FFFFFFFFFFFULL;
 constexpr size_t PageSize = 4096;
-constexpr size_t MaxProcessSnapshot = 64 * 1024;
+constexpr size_t MaxProcessSnapshot = 1024 * 1024;
+constexpr size_t MaxTopProcesses = MaxProcessSnapshot / sizeof(SystemProcessInformation);
 constexpr size_t RegionBatchCount = 128;
 constexpr size_t DumpChunkBytes = 64 * 1024;
 constexpr uint64_t DumpMaxBytes = 512ULL * 1024 * 1024;
@@ -136,6 +138,7 @@ struct MemoryBasicInformation64 {
 static_assert(sizeof(MemoryBasicInformation64) == 48);
 
 uint8_t processSnapshot[MaxProcessSnapshot]{};
+SystemProcessInformation* topProcesses[MaxTopProcesses]{};
 MemoryWorkingSetExInformation workingSetBatch[RegionBatchCount]{};
 uint8_t dumpChunk[DumpChunkBytes]{};
 StackRange stackRanges[128]{};
@@ -307,7 +310,20 @@ void JsonString(const char16_t* value, uint16_t bytes) noexcept {
     WriteStd("\"", 1);
 }
 
-bool ParseCommandLine(uint32_t& pid, bool& json, bool& full, bool& mini,
+bool ParseDecimal(const char16_t* text, size_t count, uint32_t& value) noexcept {
+    if (!count) return false;
+    uint64_t parsed = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (text[i] < u'0' || text[i] > u'9') return false;
+        parsed = parsed * 10 + static_cast<uint64_t>(text[i] - u'0');
+        if (parsed > UINT32_MAX) return false;
+    }
+    value = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+bool ParseCommandLine(uint32_t& pid, bool& json, bool& full, bool& mini, bool& top,
+                      uint32_t& intervalSeconds, uint32_t& sampleCount,
                       char16_t* output, size_t outputCapacity) noexcept {
     shared::native_process::UnicodeString64 command{};
     if (!shared::native_process::currentCommandLine(command)) return false;
@@ -344,13 +360,46 @@ bool ParseCommandLine(uint32_t& pid, bool& json, bool& full, bool& mini,
             token[3] == u'u' && token[4] == u'l' && token[5] == u'l') full = true;
         if (tokenLength == 6 && token[0] == u'-' && token[1] == u'-' && token[2] == u'm' &&
             token[3] == u'i' && token[4] == u'n' && token[5] == u'i') mini = true;
+        if (tokenLength == 5 && token[0] == u'-' && token[1] == u'-' && token[2] == u't' &&
+            token[3] == u'o' && token[4] == u'p') top = true;
+        if ((tokenLength == 10 && token[0] == u'-' && token[1] == u'-' &&
+             token[2] == u'i' && token[3] == u'n' && token[4] == u't' && token[5] == u'e' &&
+             token[6] == u'r' && token[7] == u'v' && token[8] == u'a' && token[9] == u'l') ||
+            (tokenLength == 7 && token[0] == u'-' && token[1] == u'-' && token[2] == u'c' &&
+             token[3] == u'o' && token[4] == u'u' && token[5] == u'n' && token[6] == u't')) {
+            const bool isInterval = tokenLength == 10;
+            while (at < count && command.Buffer[at] == u' ') ++at;
+            const size_t numberStart = at;
+            while (at < count && command.Buffer[at] != u' ') ++at;
+            uint32_t parsed{};
+            if (!ParseDecimal(command.Buffer + numberStart, at - numberStart, parsed)) return false;
+            if (isInterval) {
+                if (!parsed || parsed > 3600) return false;
+                intervalSeconds = parsed;
+            } else {
+                if (parsed > 1000000) return false;
+                sampleCount = parsed;
+            }
+            continue;
+        }
+        if (tokenLength == 8 && token[0] == u'-' && token[1] == u'-' && token[2] == u'o' &&
+            token[3] == u'u' && token[4] == u't' && token[5] == u'p' && token[6] == u'u' && token[7] == u't') {
+            while (at < count && command.Buffer[at] == u' ') ++at;
+            const size_t pathStart = at;
+            while (at < count && command.Buffer[at] != u' ') ++at;
+            const size_t pathLength = at - pathStart;
+            if (!pathLength || pathLength >= outputCapacity) return false;
+            for (size_t i = 0; i < pathLength; ++i) output[i] = command.Buffer[pathStart + i];
+            output[pathLength] = 0;
+            continue;
+        }
         if (tokenLength && token[0] != u'-') {
             if (tokenLength >= outputCapacity) return false;
             for (size_t i = 0; i < tokenLength; ++i) output[i] = token[i];
             output[tokenLength] = 0;
         }
     }
-    return pid != 0;
+    return top || pid != 0;
 }
 
 bool FindProcessRecord(uint32_t pid, SystemProcessInformation*& found) noexcept {
@@ -368,6 +417,132 @@ bool FindProcessRecord(uint32_t pid, SystemProcessInformation*& found) noexcept 
         offset += record->NextEntryOffset;
     }
     return false;
+}
+
+void AppendMemory(Text& text, uint64_t bytes) noexcept {
+    text.number(bytes / (1024 * 1024));
+    text.append(" MiB (");
+    text.number(bytes / 1024);
+    text.append(" KiB)");
+}
+
+bool WriteTopLine(void* file, const Text& line) noexcept {
+    return WriteStd(line.data, line.length) && WriteFileAll(file, line.data, line.length);
+}
+
+bool CaptureTopSnapshot(void* file, uint64_t sample) noexcept {
+    uint32_t returned{};
+    const auto status = NtQuerySystemInformation(SystemProcessInformationClass,
+        processSnapshot, sizeof(processSnapshot), &returned);
+    if (status != 0 || returned > sizeof(processSnapshot)) {
+        Text error{};
+        error.append("procdump: process snapshot failed, NTSTATUS ");
+        error.hex(static_cast<uint32_t>(status)); error.append("\r\n");
+        (void)WriteTopLine(file, error);
+        return false;
+    }
+
+    size_t processCount = 0;
+    size_t offset = 0;
+    while (offset < returned) {
+        if (returned - offset < sizeof(SystemProcessInformation) ||
+            processCount == MaxTopProcesses) return false;
+        auto* process = reinterpret_cast<SystemProcessInformation*>(processSnapshot + offset);
+        topProcesses[processCount++] = process;
+        if (!process->NextEntryOffset) break;
+        if (process->NextEntryOffset < sizeof(SystemProcessInformation) ||
+            process->NextEntryOffset > returned - offset) return false;
+        offset += process->NextEntryOffset;
+    }
+
+    // Largest working sets first, as in a conventional top view.
+    for (size_t i = 1; i < processCount; ++i) {
+        auto* current = topProcesses[i];
+        size_t at = i;
+        while (at && topProcesses[at - 1]->WorkingSetSize < current->WorkingSetSize) {
+            topProcesses[at] = topProcesses[at - 1];
+            --at;
+        }
+        topProcesses[at] = current;
+    }
+
+    Text heading{};
+    heading.append("\r\nProcess memory snapshot "); heading.number(sample);
+    heading.append("  (resident working set and private commit)\r\n");
+    if (!WriteTopLine(file, heading)) return false;
+    Text columns{};
+    columns.append("PID       WS (resident)       Private commit      Threads Handles  Image\r\n");
+    if (!WriteTopLine(file, columns)) return false;
+
+    for (size_t i = 0; i < processCount; ++i) {
+        const auto& process = *topProcesses[i];
+        Text row{};
+        row.number(process.UniqueProcessId); row.append("  ");
+        AppendMemory(row, process.WorkingSetSize); row.append("  ");
+        AppendMemory(row, process.PrivatePageCount); row.append("  ");
+        row.number(process.NumberOfThreads); row.append("       ");
+        row.number(process.HandleCount); row.append("  ");
+        const auto* image = reinterpret_cast<const char16_t*>(process.ImageName.Buffer);
+        const size_t chars = process.ImageName.Length / sizeof(char16_t);
+        const uintptr_t nameAddress = reinterpret_cast<uintptr_t>(image);
+        const uintptr_t snapshotStart = reinterpret_cast<uintptr_t>(processSnapshot);
+        const bool nameValid = image && !(process.ImageName.Length & 1) &&
+            nameAddress >= snapshotStart && nameAddress <= snapshotStart + returned &&
+            process.ImageName.Length <= snapshotStart + returned - nameAddress;
+        if (!nameValid && process.ImageName.Length) row.append("<invalid image name>");
+        else if (!image || !chars) row.append("<system>");
+        else for (size_t j = 0; j < chars; ++j) {
+            const char16_t ch = image[j];
+            row.append(ch >= 0x20 && ch <= 0x7e ? static_cast<char>(ch) : '?');
+        }
+        row.append("\r\n");
+        if (!WriteTopLine(file, row)) return false;
+    }
+    return true;
+}
+
+bool RunTop(uint32_t intervalSeconds, uint32_t sampleCount,
+            const char16_t* outputPath) noexcept {
+    if (!outputPath || !outputPath[0]) return false;
+    size_t pathLength = 0;
+    while (outputPath[pathLength]) ++pathLength;
+    if (pathLength > (UINT16_MAX - sizeof(char16_t)) / sizeof(char16_t)) return false;
+    UnicodeString name{};
+    name.length = static_cast<uint16_t>(pathLength * sizeof(char16_t));
+    name.maximumLength = static_cast<uint16_t>(name.length + sizeof(char16_t));
+    name.buffer = const_cast<wchar_t*>(reinterpret_cast<const wchar_t*>(outputPath));
+    ObjectAttributes attributes{};
+    attributes.objectName = &name;
+    attributes.attributes = OBJ_CASE_INSENSITIVE;
+    void* file{};
+    IoStatusBlock iosb{};
+    const auto create = NtCreateFile(&file, 0x00100002u, &attributes, &iosb,
+        nullptr, 0, 7, 3, 0x20, nullptr, 0);
+    if (create != 0 || !file) {
+        Text error{};
+        error.append("procdump: cannot create output file, NTSTATUS ");
+        error.hex(static_cast<uint32_t>(create)); error.append("\r\n");
+        (void)WriteStd(error.data, error.length);
+        return false;
+    }
+
+    bool ok = true;
+    for (uint64_t sample = 1; ok && (!sampleCount || sample <= sampleCount); ++sample) {
+        ok = CaptureTopSnapshot(file, sample);
+        if (ok && (!sampleCount || sample < sampleCount)) {
+            const int64_t delayTicks = -static_cast<int64_t>(intervalSeconds) * 10'000'000;
+            LargeInteger delay{};
+            delay.quadPart = delayTicks;
+            ok = NtDelayExecution(0, &delay) == 0;
+        }
+        if (sample == UINT64_MAX) break;
+    }
+    IoStatusBlock flush{};
+    if (ok) ok = NtFlushBuffersFile(file, &flush) == 0;
+    NtClose(file);
+    if (ok) WriteLiteral("procdump: process snapshots written\r\n");
+    else WriteLiteral("procdump: process snapshot or output write failed\r\n");
+    return ok;
 }
 
 bool ImageNameEqualsAscii(const SystemProcessInformation& process, const char* name) noexcept {
@@ -1087,7 +1262,9 @@ bool ProcessMemorySelfTest() noexcept {
         (void)WriteStd(failure.data, failure.length);
         return false;
     }
-    processMemoryFailureStage = 15;
+    processMemoryFailureStage = 16;
+    if (!RunTop(1, 1, u"C:\\PROCTOP.TXT")) return false;
+    (void)WriteLiteral("[MicaNT ProcessMemoryTest] process top snapshot file passed\r\n");
     (void)WriteLiteral("[MicaNT ProcessMemoryTest] streamed dump, CRC, and release passed\r\n");
     return true;
 }
@@ -1113,11 +1290,26 @@ extern "C" void _start() noexcept {
     return;
 #else
     uint32_t pid{};
+    uint32_t intervalSeconds = 1;
+    uint32_t sampleCount = 0;
     bool json = false, full = false, mini = false;
+    bool top = false;
     char16_t output[260]{};
-    if (!ParseCommandLine(pid, json, full, mini, output, sizeof(output) / sizeof(output[0]))) {
-        WriteLiteral("usage: procdump --pid <id> --report [--json]\r\n");
+    if (!ParseCommandLine(pid, json, full, mini, top, intervalSeconds, sampleCount,
+            output, sizeof(output) / sizeof(output[0]))) {
+        WriteLiteral("usage: procdump --pid <id> --report [--json] | --top --output <path> [--interval seconds] [--count samples]\r\n");
         NtTerminateProcess(reinterpret_cast<void*>(InvalidHandleValue), static_cast<int32_t>(NtStatus::InvalidParameter));
+        return;
+    }
+    if (top) {
+        if (pid || full || mini || json || !output[0]) {
+            WriteLiteral("usage: procdump --top --output <path> [--interval seconds] [--count samples]\r\n");
+            NtTerminateProcess(reinterpret_cast<void*>(InvalidHandleValue), static_cast<int32_t>(NtStatus::InvalidParameter));
+            return;
+        }
+        const bool success = RunTop(intervalSeconds, sampleCount, output);
+        NtTerminateProcess(reinterpret_cast<void*>(InvalidHandleValue),
+            static_cast<int32_t>(success ? NtStatus::Success : NtStatus::Unsuccessful));
         return;
     }
     if (full || mini) {

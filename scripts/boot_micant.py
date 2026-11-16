@@ -1718,13 +1718,7 @@ def run_qemu(
         usb_proof.write_bytes(b"MicaNT USB mass-storage FAT32 post-EBS proof v1\n")
         tls_peer = M10TlsPeer(esp).start() if network_test else None
         fat_volume = temp / "ahci-fat32-volume.img"
-        if process_memory_selftest:
-            # Keep the disk containing PROCDMP.LUD outside TemporaryDirectory:
-            # the test runner removes that directory as soon as QEMU exits.
-            ahci_image = ROOT / "artifacts" / "process-memory" / "process-memory-dump-disk.img"
-            ahci_image.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            ahci_image = temp / "ahci-gpt-fat32.img"
+        ahci_image = temp / "ahci-gpt-fat32.img"
         create_fat32_image(esp, fat_volume)
         create_gpt_disk_image(fat_volume, ahci_image)
         log_directory = diagnostics_dir if diagnostics_dir is not None else temp
@@ -2095,6 +2089,13 @@ def run_qemu(
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
+                if process_memory_selftest and ahci_image.is_file():
+                    persistent_disk = ROOT / "artifacts" / "process-memory" / "process-memory-dump-disk.img"
+                    persistent_disk.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(ahci_image, persistent_disk)
+                    if diagnostics_dir is not None:
+                        shutil.copyfile(ahci_image,
+                            diagnostics_dir / "process-memory-dump-disk.img")
                 if network_peer is not None:
                     network_peer.close()
                 if tls_peer is not None:
