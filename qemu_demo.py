@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from qemu import choose_display, find_qemu
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -28,6 +30,15 @@ def main() -> int:
         elif argument.startswith("--display=") and argument.partition("=")[2] == "none":
             print("qemu_demo.py requires a visible QEMU display backend.", file=sys.stderr)
             return 2
+
+    has_display_override = any(
+        argument == "--display" or argument.startswith("--display=")
+        for argument in forwarded
+    )
+    if not has_display_override:
+        backend = choose_display(find_qemu(), None)
+        if backend in ("cocoa", "gtk"):
+            forwarded.extend(["--display", f"{backend},zoom-to-fit=on"])
 
     command = [sys.executable, str(ROOT / "qemu.py"), *forwarded]
     return subprocess.run(command, cwd=ROOT, check=False).returncode

@@ -3767,25 +3767,14 @@ inline BOOL CreateProcessW(
     STARTUPINFOW* /*lpStartupInfo*/,
     PROCESS_INFORMATION* lpProcessInformation
 ) noexcept {
-    std::wstring imgName;
-    if (lpApplicationName && *lpApplicationName) {
-        imgName = lpApplicationName;
-    } else if (lpCommandLine && *lpCommandLine) {
-        imgName = lpCommandLine;
-    } else {
-        return FALSE;
-    }
-
-    auto proc = ps::ProcessManager::get().createProcess(imgName);
-    if (!proc) return FALSE;
-
-    if (lpProcessInformation) {
-        lpProcessInformation->hProcess = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(proc->getPid()));
-        lpProcessInformation->hThread  = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x80000000ULL | proc->getPid()));
-        lpProcessInformation->dwProcessId = static_cast<DWORD>(proc->getPid());
-        lpProcessInformation->dwThreadId  = static_cast<DWORD>(1);
-    }
-    return TRUE;
+    (void)lpApplicationName;
+    (void)lpCommandLine;
+    if (lpProcessInformation) *lpProcessInformation = {};
+    // This legacy in-kernel facade is not a user-mode process-creation
+    // implementation. Production Kernel32 exports CreateProcessW through
+    // the NTDLL NtCreateUserProcess syscall path.
+    SetLastError(50); // ERROR_NOT_SUPPORTED
+    return FALSE;
 }
 
 inline BOOL CreateProcessA(

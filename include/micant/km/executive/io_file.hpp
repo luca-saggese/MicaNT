@@ -79,6 +79,10 @@ struct FileBackend {
     FileFlushRoutine flush{};
     FileDirectoryQueryRoutine queryDirectory{};
     bool directory{};
+    // Acquires a reference to an already-published immutable SEC_IMAGE
+    // control for this file stream. ObjectNameNotFound means cache miss.
+    NtStatus (*referenceImageControl)(void*, bool (*)(void*) noexcept,
+                                      void (*)(void*) noexcept, void**) noexcept{};
 };
 
 class FileObject {
@@ -126,6 +130,14 @@ public:
     void releaseImage() noexcept {
         if (backend_.acquireImage && backend_.releaseImage)
             backend_.releaseImage(backend_.context);
+    }
+    [[nodiscard]] NtStatus referenceImageControl(
+        bool (*retain)(void*) noexcept, void (*release)(void*) noexcept,
+        void** result) noexcept {
+        if (!result || !retain || !release) return NtStatus::InvalidParameter;
+        *result = nullptr;
+        if (!backend_.referenceImageControl) return NtStatus::ObjectNameNotFound;
+        return backend_.referenceImageControl(backend_.context, retain, release, result);
     }
     [[nodiscard]] NtStatus publishImageControl(void* candidate, bool (*retain)(void*) noexcept,
                                                void (*release)(void*) noexcept, void** result) noexcept {

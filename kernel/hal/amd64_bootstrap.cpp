@@ -22,6 +22,15 @@ extern "C" volatile bool g_ring3ProbeActive{};
 extern "C" volatile bool g_ring3ClockProbeActive{};
 extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
 
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+namespace micant::km::hid {
+void DebugValidateInputQueues(const char* stage) noexcept;
+}
+#define CMD_HID_VALIDATE(stage) micant::km::hid::DebugValidateInputQueues(stage)
+#else
+#define CMD_HID_VALIDATE(stage) ((void)0)
+#endif
+
 namespace {
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1263,6 +1272,7 @@ void MicantBootstrapDispatch(SyscallFrame* frame, const void* floatingState) noe
         if (g_log) g_log("[MicaNT Hal] Bootstrap syscall dispatcher is unset\r\n");
         stopOnTrap();
     }
+    CMD_HID_VALIDATE("SYSCALL dispatch entry");
     // A process can unmap or reprotect its own stack and code while a
     // syscall is active. Canonical user addresses are safe for IRET even if
     // their pages are absent: the ensuing CPL3 page fault belongs to that
@@ -1364,6 +1374,7 @@ void MicantBootstrapDispatch(SyscallFrame* frame, const void* floatingState) noe
     if (syscallThread) syscallThread->previousUserMode = previousUserMode;
     // Kernel callbacks may have switched threads; reestablish the captured
     // or NtContinue-selected user state before the epilogue performs SWAPGS.
+    CMD_HID_VALIDATE("SYSCALL dispatch return");
     restoreSyscallUserSegments(userSegments);
 }
 

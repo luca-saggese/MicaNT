@@ -34,6 +34,9 @@ namespace micant::um::winnt_user32_gdi32_imm32_abi {
 
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 extern "C" void MicaUser32MenuWindowDestroyed(void*) noexcept;
+extern "C" void* CreateFontW(int32_t, int32_t, int32_t, int32_t,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, const wchar_t*) noexcept;
 intptr_t User32_ButtonWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t User32_EditWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t User32_ScrollBarWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
@@ -157,8 +160,9 @@ constexpr uint32_t kBs3State = 5u;
 constexpr uint32_t kBsAuto3State = 6u;
 constexpr uint32_t kBsAutoRadioButton = 9u;
 constexpr uint32_t kWsGroup = 0x00020000u;
+constexpr uint32_t kEsPassword = 0x00000020u;
 constexpr uint32_t kEsReadOnly = 0x00000800u;
-constexpr uint32_t kEsUnsupportedMask = 0x000037FFu;
+constexpr uint32_t kEsUnsupportedMask = 0x000037DFu;
 constexpr uint32_t kEsControlMask = 0x00003FFFu;
 constexpr uint32_t kVkBack = 0x08u;
 constexpr uint32_t kWmChar = 0x0102u;
@@ -838,7 +842,13 @@ bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
     for (size_t index = 0; index < static_cast<size_t>(kMaxWidth) * kMaxHeight; ++index)
         pixels[index] = 0;
     void* oldBitmap = SelectObject(dc, bitmap);
-    void* font = GetStockObject(13); // DEFAULT_GUI_FONT, backed by GDI FontManager.
+    // WhiteSur's headerbar title uses the installed Segoe UI Semibold TTF
+    // (resolved by GDI's font catalog to Selawik-Semibold.ttf). Keep the
+    // stock GUI font as a failure fallback.
+    void* font = CreateFontW(-13, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
+                             L"Segoe UI Semibold");
+    const bool ownsFont = font != nullptr;
+    if (!font) font = GetStockObject(kStockDefaultGuiFont);
     void* oldFont = font ? SelectObject(dc, font) : nullptr;
     CaptionTextExtent extent{};
     const bool measured = oldBitmap && oldFont &&
@@ -870,6 +880,7 @@ bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
     }
     if (oldFont) (void)SelectObject(dc, oldFont);
     if (oldBitmap) (void)SelectObject(dc, oldBitmap);
+    if (ownsFont) (void)DeleteObject(font);
     (void)DeleteObject(bitmap);
     (void)DeleteDC(dc);
     if (!published) (void)clearTitle();
@@ -2518,6 +2529,13 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
     const WinNtRect bounds{0, 0, width, height};
     const int32_t themeState = (edit.state & kButtonDisabled) ? 4 :
         (edit.state & kButtonFocused) ? 5 : 1;
+    wchar_t displayText[std::size(edit.text)]{};
+    const wchar_t* text = edit.text;
+    if (edit.style & kEsPassword) {
+        for (size_t index = 0; index < edit.length; ++index)
+            displayText[index] = L'*';
+        text = displayText;
+    }
     void* theme = OpenThemeData(hwnd, L"EDIT");
     const bool themed = theme && DrawThemeBackground(theme, dc, 1, themeState,
                                                        &bounds, nullptr) == 0;
@@ -2541,7 +2559,12 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
     // bounded native snapshot does not model. Keep the focus state visible
     // with a two-pixel GDI ring while retaining UxTheme for the surface.
     if (edit.state & kButtonFocused) {
-        constexpr uint32_t kFocusRing = 0xFF4A90D9u;
+        uint32_t kFocusRing = 0xFF4A90D9u;
+        uint32_t themedFocus{};
+        if (theme &&
+            (GetThemeColor(theme, 1, themeState, 3801, &themedFocus) == 0 ||
+             GetThemeColor(theme, 1, 1, 3801, &themedFocus) == 0))
+            kFocusRing = 0xFF000000u | colorRef(themedFocus);
         (void)fillButtonRect(dc, {0, 0, width, 2}, kFocusRing);
         (void)fillButtonRect(dc, {0, height - 2, width, height}, kFocusRing);
         (void)fillButtonRect(dc, {0, 0, 2, height}, kFocusRing);
@@ -2571,7 +2594,7 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
             const int32_t previousMode = SetBkMode(dc, 1);
             textDrawn = previousColor != 0xFFFFFFFFu && previousMode > 0 &&
                 TextOutW(dc, textBounds.left, std::max(1, (height - 14) / 2),
-                         edit.text, edit.length) != 0;
+                         text, edit.length) != 0;
             if (previousMode > 0) (void)SetBkMode(dc, previousMode);
             if (previousColor != 0xFFFFFFFFu) (void)SetTextColor(dc, previousColor);
             textDrawn = (MicaGdiPopClipRect(dc, clipToken) != 0) && textDrawn;
@@ -2672,6 +2695,10 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
         (void)DeleteDC(memoryDc);
         return false;
     }
+    // DIB storage is not guaranteed to start transparent. Initialize the
+    // rounded-corner pixels so they reveal the parent instead of stale white.
+    std::fill_n(static_cast<uint32_t*>(pixels),
+                static_cast<size_t>(width) * static_cast<size_t>(height), 0u);
     void* oldBitmap = SelectObject(memoryDc, bitmap);
     void* stockFont = GetStockObject(kStockDefaultGuiFont);
     void* oldFont = stockFont ? SelectObject(memoryDc, stockFont) : nullptr;

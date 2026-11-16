@@ -532,6 +532,31 @@ struct ProcessBasicInformation {
     Handle inheritedFromUniqueProcessId{0};
 };
 
+// AMD64 VM_COUNTERS / VM_COUNTERS_EX returned for ProcessVmCounters (3).
+// Pool quota members are currently always zero because MicaNT has no
+// per-process pool quota charging path; memory values are provided by Mm.
+struct ProcessVmCounters {
+    uintptr_t peakVirtualSize{};
+    uintptr_t virtualSize{};
+    uint32_t pageFaultCount{};
+    uint32_t padding{};
+    uintptr_t peakWorkingSetSize{};
+    uintptr_t workingSetSize{};
+    uintptr_t quotaPeakPagedPoolUsage{};
+    uintptr_t quotaPagedPoolUsage{};
+    uintptr_t quotaPeakNonPagedPoolUsage{};
+    uintptr_t quotaNonPagedPoolUsage{};
+    uintptr_t pagefileUsage{};
+    uintptr_t peakPagefileUsage{};
+};
+
+struct ProcessVmCountersEx {
+    ProcessVmCounters counters{};
+    uintptr_t privateUsage{};
+};
+static_assert(sizeof(ProcessVmCounters) == 88);
+static_assert(sizeof(ProcessVmCountersEx) == 96);
+
 enum class ThreadInformationClass : uint32_t {
     ThreadBasicInformation = 0
 };
@@ -545,6 +570,14 @@ struct ThreadBasicInformation {
     int32_t basePriority{8};
 };
 static_assert(sizeof(ThreadBasicInformation) == 48);
+
+// PSAPI_WORKING_SET_EX_INFORMATION is the in/out record accepted by
+// NtQueryVirtualMemory(MemoryWorkingSetExInformation, 4).
+struct MemoryWorkingSetExInformation {
+    uintptr_t virtualAddress{};
+    uint64_t virtualAttributes{};
+};
+static_assert(sizeof(MemoryWorkingSetExInformation) == 16);
 
 #ifndef BCRYPTBUFFER_DEFINED
 #define BCRYPTBUFFER_DEFINED

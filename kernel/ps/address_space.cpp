@@ -23,6 +23,29 @@ extern "C" uint32_t MicantAmd64XsaveMask;
 extern "C" uint32_t MicantAmd64ExtendedSize;
 #endif
 
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+#define CMD_PS_TRACE(text) MicantNetbootSerialWrite(text)
+#define CMD_PS_TRACE_VALUE(label, value) do { \
+    MicantNetbootSerialWrite(label); \
+    MicantNetbootSerialWriteNumber(static_cast<uint64_t>(value)); \
+    MicantNetbootSerialWrite("\r\n"); \
+} while (0)
+#else
+#define CMD_PS_TRACE(text) ((void)0)
+#define CMD_PS_TRACE_VALUE(label, value) ((void)0)
+#endif
+
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+namespace micant::km::hid {
+void DebugValidateInputQueues(const char* stage) noexcept;
+}
+#define CMD_PS_VALIDATE_HID(stage) micant::km::hid::DebugValidateInputQueues(stage)
+#else
+#define CMD_PS_VALIDATE_HID(stage) ((void)0)
+#endif
+
 namespace micant::sys {
 NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& reference) noexcept;
 NtStatus mapBootstrapFileImageView(mm::ProcessAddressSpace& space, uintptr_t& base,
@@ -584,6 +607,7 @@ NtStatus EProcess::terminateCurrent(NtStatus exitStatus) noexcept {
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     auto* current = ke::KeGetCurrentThread();
+    CMD_PS_TRACE("[MicaNT PsTrace] terminateCurrent entered\r\n");
     NtStatus status = NtStatus::InvalidParameter;
     if (current && current->owningProcess == this && current->owningThread &&
         current->state == ke::ThreadState::Running && ke::KeGetCurrentIrql() == ke::PASSIVE_LEVEL) {
@@ -594,9 +618,11 @@ NtStatus EProcess::terminateCurrent(NtStatus exitStatus) noexcept {
         else
             status = requestTermination(exitStatus, current);
     }
+    CMD_PS_TRACE("[MicaNT PsTrace] terminateCurrent request returned\r\n");
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
     if (status != NtStatus::Success) return status;
     io::IoCancelProcessReads(*this);
+    CMD_PS_TRACE("[MicaNT PsTrace] process read cancellation returned\r\n");
     return current->owningThread->exitCurrent(exitStatus_);
 }
 
@@ -1555,6 +1581,8 @@ NtStatus EThread::exitCurrent(NtStatus status) noexcept {
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     auto* current = ke::KeGetCurrentThread();
+    CMD_PS_TRACE("[MicaNT PsTrace] exitCurrent entered\r\n");
+    CMD_PS_VALIDATE_HID("EThread exitCurrent entry");
     if (!thread_ || current != thread_.get() || current->state != ke::ThreadState::Running ||
         ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL || current->kernelApcDisable ||
         current->specialApcDisable || current->normalKernelApcActive ||
@@ -1586,7 +1614,11 @@ NtStatus EThread::exitCurrent(NtStatus status) noexcept {
             __asm__ __volatile__("sti" : : : "memory");
         // Io pins each request and its owners until cancellation completes.
         io::IoCancelThreadReads(*this);
+        CMD_PS_TRACE("[MicaNT PsTrace] thread read cancellation returned\r\n");
+        CMD_PS_VALIDATE_HID("EThread after IoCancelThreadReads");
         rundown = current->apcRundownComplete || ke::detail::rundownCurrentApcs();
+        CMD_PS_TRACE("[MicaNT PsTrace] APC rundown returned\r\n");
+        CMD_PS_VALIDATE_HID("EThread after APC rundown");
         __asm__ __volatile__("cli" : : : "memory");
     }
     if (!rundown) {
@@ -1599,12 +1631,26 @@ NtStatus EThread::exitCurrent(NtStatus status) noexcept {
     }
     ke::KfRaiseIrql(ke::DISPATCH_LEVEL);
     auto* next = ke::PriorityScheduler::get().selectNextThread();
+    CMD_PS_TRACE("[MicaNT PsTrace] successor selection returned\r\n");
+    CMD_PS_VALIDATE_HID("EThread after successor selection");
+    if (next) {
+        CMD_PS_TRACE_VALUE("[MicaNT PsTrace] next thread=", reinterpret_cast<uintptr_t>(next));
+        CMD_PS_TRACE_VALUE("[MicaNT PsTrace] next rip=", next->context.rip);
+        CMD_PS_TRACE_VALUE("[MicaNT PsTrace] next rsp=", next->context.rsp);
+        CMD_PS_TRACE_VALUE("[MicaNT PsTrace] next ext=", next->context.extendedState);
+        CMD_PS_TRACE_VALUE("[MicaNT PsTrace] next stack top=", next->kernelStackTop);
+        CMD_PS_TRACE_VALUE("[MicaNT PsTrace] next exec top=", next->kernelExecutionStackTop);
+    }
     if (next && current->kernelApcList.empty() && current->userApcList.empty() &&
         !current->queuedApcReferences && !current->pendingNormalCount &&
         !current->normalKernelApcActive && !current->apcRundownActive) {
         exitStatus_ = status;
         current->state = ke::ThreadState::Terminated;
-        if (ke::KiSwapContext(current, next)) __builtin_trap();
+        CMD_PS_TRACE("[MicaNT PsTrace] switching away from terminating thread\r\n");
+        const bool switched = ke::KiSwapContext(current, next);
+        CMD_PS_TRACE("[MicaNT PsTrace] terminating thread resumed after switch\r\n");
+        CMD_PS_VALIDATE_HID("EThread resumed after context switch");
+        if (switched) __builtin_trap();
     }
     // Rundown is irreversible: callbacks may have freed APC storage. A
     // missing successor or rejected context switch is a scheduler invariant

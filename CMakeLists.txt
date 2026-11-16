@@ -613,7 +613,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
     target_link_libraries(theme_test_boot PRIVATE
-        kernel32_boot user32_boot gdi32_boot win32k_boot uxtheme_boot comctl32_boot)
+        kernel32_boot user32_boot gdi32_boot win32k_boot uxtheme_boot comctl32_boot ntdll_boot)
     set_target_properties(theme_test_boot PROPERTIES
         OUTPUT_NAME "theme_test"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
@@ -989,7 +989,10 @@ if (MICANT_ENABLE_BAREMETAL)
         tools/dlls/native_stack_probe.cpp
         kernel/ex/freestanding_memory.cpp
     )
-    target_compile_definitions(kernel32_boot PRIVATE MICANT_FREESTANDING_KERNEL32)
+    target_compile_definitions(kernel32_boot PRIVATE
+        MICANT_FREESTANDING_KERNEL32
+        BUILD_SYSTEM32_KERNEL32_DLL
+    )
     target_compile_options(kernel32_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-emulated-tls

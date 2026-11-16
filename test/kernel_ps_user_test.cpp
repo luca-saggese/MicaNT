@@ -6,6 +6,9 @@
 #include <cstring>
 #include <span>
 
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+
 extern "C" {
 extern const uint8_t MicantPsUserProgramEnd[];
 __attribute__((naked, section(".uproc$a"))) void MicantPsUserProgram() noexcept {
@@ -29,7 +32,13 @@ __asm__(".section .uproc$z,\"xr\"\n.globl MicantPsUserProgramEnd\n"
 
 namespace {
 uint32_t g_userProcessFailureStage{};
-#define USER_PROCESS_FAIL(stage) do { g_userProcessFailureStage = (stage); return false; } while (0)
+#define USER_PROCESS_FAIL(stage) do { \
+    g_userProcessFailureStage = (stage); \
+    MicantNetbootSerialWrite("[MicaNT PsTrace] user-process probe failure stage="); \
+    MicantNetbootSerialWriteNumber(stage); \
+    MicantNetbootSerialWrite("\r\n"); \
+    return false; \
+} while (0)
 struct UserStart {
     micant::ke::KThread* boot;
     uintptr_t entry;
@@ -123,11 +132,28 @@ extern "C" bool MicantTestPsUserProcess() noexcept {
         const KIRQL oldIrql = KfRaiseIrql(DISPATCH_LEVEL);
         const bool switched = KiSwapContext(boot, next);
         KeLowerIrql(oldIrql);
-        if (!switched || KeGetCurrentThread() != boot || !process.isTerminating() ||
-            process.exitStatus() != NtStatus::AccessDenied || next->state != ThreadState::Terminated ||
-            cpu::cpuRdmsr(cpu::MSR_GS_BASE) != boot->tebAddress ||
-            scheduler.getReadyThreadCount() ||
-            !hal::amd64::switchProcessPagingRootByPhysical(process.getDirectoryTableBase())) USER_PROCESS_FAIL(10);
+        uint32_t switchFailure{};
+        if (!switched) switchFailure |= 1u << 0;
+        if (KeGetCurrentThread() != boot) switchFailure |= 1u << 1;
+        if (!process.isTerminating()) switchFailure |= 1u << 2;
+        if (process.exitStatus() != NtStatus::AccessDenied) switchFailure |= 1u << 3;
+        if (next->state != ThreadState::Terminated) switchFailure |= 1u << 4;
+        if (cpu::cpuRdmsr(cpu::MSR_GS_BASE) != boot->tebAddress) switchFailure |= 1u << 5;
+        // Other kernel threads can become runnable while this CPL3 probe is
+        // executing and being preempted. The handoff invariant is that the
+        // bootstrap thread itself was dequeued before it resumed.
+        if (boot->readyQueued) switchFailure |= 1u << 6;
+        if (!hal::amd64::switchProcessPagingRootByPhysical(process.getDirectoryTableBase())) switchFailure |= 1u << 7;
+        if (switchFailure) {
+            MicantNetbootSerialWrite("[MicaNT PsTrace] switch failure mask=");
+            MicantNetbootSerialWriteNumber(switchFailure);
+            MicantNetbootSerialWrite(" gs=");
+            MicantNetbootSerialWriteNumber(cpu::cpuRdmsr(cpu::MSR_GS_BASE));
+            MicantNetbootSerialWrite(" teb=");
+            MicantNetbootSerialWriteNumber(boot->tebAddress);
+            MicantNetbootSerialWrite("\r\n");
+            USER_PROCESS_FAIL(10);
+        }
         const bool tlsValue = userTeb->tlsSlots[0] == 0x123456789abcdef0ULL;
         if (!hal::amd64::switchProcessPagingRootByPhysical(previous) || !tlsValue ||
             thread.reap() != NtStatus::Success ||

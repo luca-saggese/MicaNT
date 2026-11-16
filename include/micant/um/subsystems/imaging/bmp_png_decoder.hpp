@@ -223,7 +223,12 @@ inline ImageStatus DecodePng(std::span<const uint8_t> in, ImageFrame& output,
     if(in.size()>limits.maxEncodedBytes)return ImageStatus::ImageTooLarge;
     if(in.size()<8)return ImageStatus::TruncatedInput;
     if(std::memcmp(in.data(),sig,8)!=0)return ImageStatus::UnknownFormat;
-    uint32_t width=0,height=0;uint8_t depth=0,color=0;bool haveHeader=false,haveEnd=false,havePalette=false;
+    uint32_t width=0,height=0;uint8_t depth=0,color=0;
+    bool haveHeader=false,haveEnd=false,havePalette=false,haveTransparency=false;
+    std::array<uint8_t, 768> palette{};
+    std::array<uint8_t, 256> paletteAlpha{};
+    uint32_t paletteEntries=0;
+    paletteAlpha.fill(255);
     uint64_t compressedBytes=0;
     size_t off=8;bool seenIdat=false,idatClosed=false;
     while(off<in.size()){
@@ -244,7 +249,7 @@ inline ImageStatus DecodePng(std::span<const uint8_t> in, ImageFrame& output,
             width=ReadBe32(data.data());height=ReadBe32(data.data()+4);depth=data[8];color=data[9];
             if(data[10]!=0||data[11]!=0||data[12]!=0)return ImageStatus::UnsupportedFeature;
             haveHeader=true;
-            if(depth!=8||(color!=2&&color!=6))return ImageStatus::UnsupportedFeature;
+            if(depth!=8||(color!=2&&color!=3&&color!=6))return ImageStatus::UnsupportedFeature;
             uint32_t stride{};size_t bytes{};if(!FrameSize(width,height,limits,stride,bytes))return ImageStatus::ImageTooLarge;
         }else if(std::memcmp(type,"IDAT",4)==0){
             if(!haveHeader||haveEnd||idatClosed)return ImageStatus::MalformedData;
@@ -254,7 +259,16 @@ inline ImageStatus DecodePng(std::span<const uint8_t> in, ImageFrame& output,
         }else if(std::memcmp(type,"IEND",4)==0){if(n!=0)return ImageStatus::MalformedData;haveEnd=true;off+=static_cast<size_t>(n)+8;break;
         }else if(std::memcmp(type,"PLTE",4)==0){
             if(!haveHeader||seenIdat||havePalette||n==0||n>768||n%3!=0)return ImageStatus::MalformedData;
+            if (color == 3 && n / 3 > 256) return ImageStatus::MalformedData;
+            std::memcpy(palette.data(), data.data(), n);
+            paletteEntries = n / 3;
             havePalette=true;
+        }else if(std::memcmp(type,"tRNS",4)==0){
+            if (!haveHeader || seenIdat || haveTransparency || color != 3 ||
+                !havePalette || n == 0 || n > paletteEntries)
+                return ImageStatus::MalformedData;
+            std::memcpy(paletteAlpha.data(), data.data(), n);
+            haveTransparency = true;
         }else {
             if(seenIdat)idatClosed=true;
             if(!haveHeader||(type[0]&0x20)==0)return ImageStatus::UnsupportedFeature;
@@ -262,9 +276,10 @@ inline ImageStatus DecodePng(std::span<const uint8_t> in, ImageFrame& output,
         off+=static_cast<size_t>(n)+8;
     }
     if(!haveHeader)return ImageStatus::MalformedData;
+    if(color==3&&!havePalette)return ImageStatus::MalformedData;
     if(compressedBytes==0||!haveEnd)return ImageStatus::TruncatedInput;
     if(off!=in.size())return ImageStatus::MalformedData;
-    const uint32_t channels=color==6?4:3;uint64_t rowBytes64{},rawSize64{};
+    const uint32_t channels=color==6?4:(color==3?1:3);uint64_t rowBytes64{},rawSize64{};
     if(!CheckedMul(width,channels,rowBytes64)||rowBytes64>UINT32_MAX||!CheckedMul(rowBytes64+1,height,rawSize64)||rawSize64>limits.maxIntermediateBytes||rawSize64>SIZE_MAX||compressedBytes>limits.maxIntermediateBytes-rawSize64)return ImageStatus::ImageTooLarge;
     uint64_t outputSize64{};
     if(!CheckedMul(width,height,outputSize64)||!CheckedMul(outputSize64,4,outputSize64)||
@@ -294,8 +309,22 @@ inline ImageStatus DecodePng(std::span<const uint8_t> in, ImageFrame& output,
     ImageFrame frame{};frame.width=width;frame.height=height;frame.stride=stride;frame.sourceFormat=ImageFormat::Png;
     if(!frame.pixels.allocate(bytes,allocator))return ImageStatus::OutOfMemory;
     for(uint32_t y=0;y<height;++y){const uint8_t* src=raw.data()+static_cast<size_t>(y)*(rowBytes+1)+1;uint8_t* dst=frame.pixels.data()+static_cast<size_t>(y)*stride;
-        for(uint32_t x=0;x<width;++x){const uint8_t r=src[x*channels],g=src[x*channels+1],b=src[x*channels+2],a=channels==4?src[x*channels+3]:255;dst[x*4]=Premul(b,a);dst[x*4+1]=Premul(g,a);dst[x*4+2]=Premul(r,a);dst[x*4+3]=a;}}
-    frame.sourceColor=ImageColorModel::Rgb;frame.bitsPerChannel=8;frame.sourceHadAlpha=channels==4;
+        for(uint32_t x=0;x<width;++x){
+            uint8_t r{},g{},b{},a=255;
+            if(color==3){
+                const uint8_t index=src[x];
+                if(index>=paletteEntries)return ImageStatus::MalformedData;
+                r=palette[index*3];g=palette[index*3+1];b=palette[index*3+2];
+                a=paletteAlpha[index];
+            }else{
+                r=src[x*channels];g=src[x*channels+1];b=src[x*channels+2];
+                if(color==6)a=src[x*channels+3];
+            }
+            dst[x*4]=Premul(b,a);dst[x*4+1]=Premul(g,a);
+            dst[x*4+2]=Premul(r,a);dst[x*4+3]=a;
+        }}
+    frame.sourceColor=ImageColorModel::Rgb;frame.bitsPerChannel=8;
+    frame.sourceHadAlpha=color==6||(color==3&&haveTransparency);
     output=std::move(frame);return ImageStatus::Success;
 }
 

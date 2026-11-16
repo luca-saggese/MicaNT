@@ -14,19 +14,126 @@
 #include <climits>
 #include <cstdint>
 
+extern "C" {
+int32_t __stdcall MicantUcrtAllocateVirtualMemory(
+    void** baseAddress, size_t* regionSize, uint32_t allocationType,
+    uint32_t protection) noexcept;
+int32_t __stdcall MicantUcrtFreeVirtualMemory(
+    void** baseAddress, size_t* regionSize, uint32_t freeType) noexcept;
+__declspec(dllimport) int32_t __stdcall NtWriteFile(
+    void* file, void* event, void* apcRoutine, void* apcContext,
+    void* ioStatus, const void* buffer, uint32_t length,
+    void* byteOffset, uint32_t* key) noexcept;
+}
+
 namespace {
 
-// Fixed per-module capacity; increase when Explorer surface demand requires it.
-micant::ucrt::BoundedArena<64u * 1024u * 1024u> g_nativeHeap{};
+class NativeVirtualHeap final {
+    struct Header {
+        uintptr_t cookie;
+        void* baseAddress;
+        size_t regionSize;
+        size_t requestedSize;
+        size_t alignment;
+    };
+    static constexpr uintptr_t Cookie = static_cast<uintptr_t>(0x4D6963614E54414Cull);
+    static constexpr uint32_t MemCommit = 0x00001000u;
+    static constexpr uint32_t MemReserve = 0x00002000u;
+    static constexpr uint32_t MemRelease = 0x00008000u;
+    static constexpr uint32_t PageReadWrite = 0x04u;
+    static constexpr int32_t StatusSuccess = 0;
+
+    static void zeroBytes(void* destination, size_t length) noexcept {
+        auto* bytes = static_cast<uint8_t*>(destination);
+        for (size_t i = 0; i < length; ++i) bytes[i] = 0;
+    }
+    static void copyBytes(void* destination, const void* source, size_t length) noexcept {
+        auto* output = static_cast<uint8_t*>(destination);
+        const auto* input = static_cast<const uint8_t*>(source);
+        for (size_t i = 0; i < length; ++i) output[i] = input[i];
+    }
+
+    [[nodiscard]] static uintptr_t makeCookie(const void* user, const Header& header) noexcept {
+        return Cookie ^ reinterpret_cast<uintptr_t>(user) ^
+            reinterpret_cast<uintptr_t>(header.baseAddress) ^ header.regionSize ^
+            header.requestedSize ^ header.alignment;
+    }
+    [[nodiscard]] static Header* findHeader(void* pointer) noexcept {
+        if (!pointer) return nullptr;
+        auto* header = reinterpret_cast<Header*>(static_cast<uint8_t*>(pointer) - sizeof(Header));
+        if (header->cookie != makeCookie(pointer, *header) || !header->baseAddress ||
+            !header->regionSize || header->requestedSize > header->regionSize ||
+            !header->alignment || (header->alignment & (header->alignment - 1)) != 0 ||
+            (reinterpret_cast<uintptr_t>(pointer) & (header->alignment - 1)) != 0 ||
+            reinterpret_cast<uintptr_t>(pointer) < reinterpret_cast<uintptr_t>(header->baseAddress) + sizeof(Header) ||
+            header->requestedSize > reinterpret_cast<uintptr_t>(header->baseAddress) + header->regionSize -
+                reinterpret_cast<uintptr_t>(pointer)) return nullptr;
+        return header;
+    }
+
+public:
+    [[nodiscard]] void* allocate(size_t size,
+                                 size_t alignment = alignof(std::max_align_t)) noexcept {
+        if (!size) size = 1;
+        if (!alignment || (alignment & (alignment - 1)) != 0) return nullptr;
+        if (alignment < alignof(std::max_align_t)) alignment = alignof(std::max_align_t);
+        if (size > SIZE_MAX - sizeof(Header) - (alignment - 1)) return nullptr;
+        size_t regionSize = size + sizeof(Header) + alignment - 1;
+        void* baseAddress{};
+        const int32_t status = MicantUcrtAllocateVirtualMemory(
+            &baseAddress, &regionSize, MemReserve | MemCommit, PageReadWrite);
+        if (status != StatusSuccess || !baseAddress) return nullptr;
+        const uintptr_t minimum = reinterpret_cast<uintptr_t>(baseAddress) + sizeof(Header);
+        const uintptr_t userAddress = (minimum + alignment - 1) & ~static_cast<uintptr_t>(alignment - 1);
+        auto* header = reinterpret_cast<Header*>(userAddress - sizeof(Header));
+        header->baseAddress = baseAddress;
+        header->regionSize = regionSize;
+        header->requestedSize = size;
+        header->alignment = alignment;
+        header->cookie = makeCookie(reinterpret_cast<void*>(userAddress), *header);
+        return reinterpret_cast<void*>(userAddress);
+    }
+
+    [[nodiscard]] void* allocateZeroed(size_t count, size_t size) noexcept {
+        if (size && count > SIZE_MAX / size) return nullptr;
+        const size_t bytes = count * size;
+        auto* memory = static_cast<uint8_t*>(allocate(bytes ? bytes : 1));
+        if (memory) zeroBytes(memory, bytes ? bytes : 1);
+        return memory;
+    }
+
+    void release(void* pointer) noexcept {
+        auto* header = findHeader(pointer);
+        if (!header) return;
+        void* baseAddress = header->baseAddress;
+        size_t regionSize{};
+        header->cookie = 0;
+        (void)MicantUcrtFreeVirtualMemory(&baseAddress, &regionSize, MemRelease);
+    }
+
+    [[nodiscard]] void* reallocate(void* pointer, size_t size) noexcept {
+        if (!pointer) return size ? allocate(size) : nullptr;
+        if (!size) {
+            release(pointer);
+            return nullptr;
+        }
+        auto* header = findHeader(pointer);
+        if (!header) return nullptr;
+        void* replacement = allocate(size, header->alignment);
+        if (!replacement) return nullptr;
+        copyBytes(replacement, pointer,
+            header->requestedSize < size ? header->requestedSize : size);
+        release(pointer);
+        return replacement;
+    }
+};
+
+NativeVirtualHeap g_nativeHeap{};
 
 }
 
 extern "C" {
 
-__declspec(dllimport) int32_t __stdcall NtWriteFile(
-    void* file, void* event, void* apcRoutine, void* apcContext,
-    void* ioStatus, const void* buffer, uint32_t length,
-    void* byteOffset, uint32_t* key) noexcept;
 __declspec(dllimport) int32_t __stdcall NtYieldExecution() noexcept;
 __declspec(dllimport) int32_t __stdcall NtTerminateProcess(void* process, int32_t status) noexcept;
 
@@ -912,7 +1019,7 @@ Horizon116UcrtbaseAuditReport WinNtUcrtbaseCoordinator::runUcrtbaseAudit() noexc
     // 3. Verify Memory Allocation, Realloc, and Free
     void* p = Ucrt_malloc(64);
     if (p) {
-        std::memset(p, 0xAB, 64);
+        memset(p, 0xAB, 64);
         void* p2 = Ucrt_realloc(p, 128);
         if (p2) {
             rep.heapAllocReallocFreeVerified = true;

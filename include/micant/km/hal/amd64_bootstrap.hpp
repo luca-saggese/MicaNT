@@ -84,6 +84,7 @@ uintptr_t reserveBootstrapKernelHeapRange(size_t pageCount) noexcept;
 bool releaseBootstrapKernelHeapRange(uintptr_t address, size_t pageCount) noexcept;
 bool mapBootstrapKernelHeapPage(uintptr_t address, uint64_t pfn) noexcept;
 bool unmapBootstrapKernelHeapPage(uintptr_t address) noexcept;
+bool protectBootstrapKernelImageRange(uint64_t physicalBase, size_t size) noexcept;
 // Bootstrap CR3 only; callbacks require the BSP with interrupts disabled.
 // The process backend uses canonical lower-half PML4 slots not reserved by
 // the bootstrap kernel (slots 133 through 255). This is address-space reach,

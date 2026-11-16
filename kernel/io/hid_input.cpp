@@ -7,6 +7,9 @@
 #include <cstring>
 #include <new>
 
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+
 namespace micant::km::hid {
 namespace {
 ke::SpinLock lock{};
@@ -23,7 +26,29 @@ io::DeviceObject* mouseDevice{};
 struct InputFileContext { io::DeviceObject* device{}; std::atomic<bool> closed{false}; };
 io::AsyncRead* asyncHead{};
 io::AsyncRead* asyncTail{};
+bool validateQueueState(size_t& head, size_t& count, const char* name,
+                        const char* stage) noexcept {
+    if (head < 256 && count <= 256) return true;
+    MicantNetbootSerialWrite("[MicaNT HID] Corrupt input queue state queue=");
+    MicantNetbootSerialWrite(name);
+    MicantNetbootSerialWrite(" stage=");
+    MicantNetbootSerialWrite(stage);
+    MicantNetbootSerialWrite(" head=");
+    MicantNetbootSerialWriteNumber(head);
+    MicantNetbootSerialWrite(" count=");
+    MicantNetbootSerialWriteNumber(count);
+    MicantNetbootSerialWrite("\r\n");
+    head = 0;
+    count = 0;
+    return false;
+}
+bool validateInputQueues(const char* stage) noexcept {
+    const bool keyboardValid = validateQueueState(keyHead, keyCount, "keyboard", stage);
+    const bool mouseValid = validateQueueState(mouseHead, mouseCount, "mouse", stage);
+    return keyboardValid && mouseValid;
+}
 void drainAsyncReads() noexcept {
+    (void)validateInputQueues("async-drain entry");
     io::AsyncRead* previous = nullptr;
     auto* request = asyncHead;
     while (request) {
@@ -56,6 +81,7 @@ void drainAsyncReads() noexcept {
             if (asyncTail == request) asyncTail = previous;
             request->driverNext = nullptr;
             io::IoCompleteAsyncRead(request, status, count);
+            (void)validateInputQueues("async-drain completion");
         } else previous = request;
         request = next;
     }
@@ -117,6 +143,7 @@ NtStatus readInput(void* context, uint64_t, void* output, size_t length, size_t*
     for (;;) {
         {
             ke::SpinLockGuard guard(lock);
+            (void)validateInputQueues("synchronous read");
             if (file->closed.load(std::memory_order_acquire) || io::IoCurrentReadCancelled()) return NtStatus::Cancelled;
             while (length - *done >= recordSize) {
                 if (device == keyboardDevice) {
@@ -138,6 +165,13 @@ NtStatus readInput(void* context, uint64_t, void* output, size_t length, size_t*
     }
 }
 }
+
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+void DebugValidateInputQueues(const char* stage) noexcept {
+    ke::SpinLockGuard guard(lock);
+    (void)validateInputQueues(stage);
+}
+#endif
 
 NtStatus initializeInputDevices() noexcept {
     if (keyboardReference || mouseReference) return NtStatus::Conflict;
@@ -181,11 +215,13 @@ void WINAPI KeyboardClassServiceCallback(io::DeviceObject*, KEYBOARD_INPUT_DATA*
     uint32_t count = 0;
     {
         ke::SpinLockGuard guard(lock);
+        (void)validateInputQueues("keyboard callback entry");
         if (static_cast<size_t>(end - first) > 256 - keyCount) return;
         while (first != end && keyCount < 256) {
             keyboard[(keyHead + keyCount++) % 256] = *first++;
             ++count;
         }
+        (void)validateInputQueues("keyboard callback write");
         drainAsyncReads();
     }
     if (consumed) *consumed = count;
@@ -198,11 +234,13 @@ void WINAPI MouseClassServiceCallback(io::DeviceObject*, MOUSE_INPUT_DATA* first
     uint32_t count = 0;
     {
         ke::SpinLockGuard guard(lock);
+        (void)validateInputQueues("mouse callback entry");
         if (static_cast<size_t>(end - first) > 256 - mouseCount) return;
         while (first != end && mouseCount < 256) {
             mouse[(mouseHead + mouseCount++) % 256] = *first++;
             ++count;
         }
+        (void)validateInputQueues("mouse callback write");
         drainAsyncReads();
     }
     if (consumed) *consumed = count;
@@ -210,11 +248,13 @@ void WINAPI MouseClassServiceCallback(io::DeviceObject*, MOUSE_INPUT_DATA* first
 }
 bool KbdClassPopInputData(KEYBOARD_INPUT_DATA& result) {
     ke::SpinLockGuard guard(lock);
+    if (!validateQueueState(keyHead, keyCount, "keyboard", "pop")) return false;
     if (!keyCount) return false;
     result = keyboard[keyHead]; keyHead = (keyHead + 1) % 256; --keyCount; return true;
 }
 bool MouClassPopInputData(MOUSE_INPUT_DATA& result) {
     ke::SpinLockGuard guard(lock);
+    if (!validateQueueState(mouseHead, mouseCount, "mouse", "pop")) return false;
     if (!mouseCount) return false;
     result = mouse[mouseHead]; mouseHead = (mouseHead + 1) % 256; --mouseCount; return true;
 }

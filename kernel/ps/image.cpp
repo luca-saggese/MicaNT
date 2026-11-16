@@ -659,12 +659,16 @@ NtStatus EProcess::cloneNativeMetadata(const EProcess& source) noexcept {
     }
     std::unique_ptr<char16_t[]> processPath;
     std::unique_ptr<char16_t[]> commandLine;
+    std::unique_ptr<char16_t[]> currentDirectory;
     if (!source.processImagePath_.empty() && !hal::amd64::bootstrapKernelRange(
             reinterpret_cast<uintptr_t>(source.processImagePath_.data()),
             source.processImagePath_.size() * sizeof(char16_t), false)) return NtStatus::InvalidParameter;
     if (!source.processCommandLine_.empty() && !hal::amd64::bootstrapKernelRange(
             reinterpret_cast<uintptr_t>(source.processCommandLine_.data()),
             source.processCommandLine_.size() * sizeof(char16_t), false)) return NtStatus::InvalidParameter;
+    if (!source.processCurrentDirectory_.empty() && !hal::amd64::bootstrapKernelRange(
+            reinterpret_cast<uintptr_t>(source.processCurrentDirectory_.data()),
+            source.processCurrentDirectory_.size() * sizeof(char16_t), false)) return NtStatus::InvalidParameter;
     if (!source.processImagePath_.empty()) {
         processPath.reset(new (std::nothrow_t{}) char16_t[source.processImagePath_.size()]);
         if (!processPath) return NtStatus::NoMemory;
@@ -674,6 +678,12 @@ NtStatus EProcess::cloneNativeMetadata(const EProcess& source) noexcept {
         commandLine.reset(new (std::nothrow_t{}) char16_t[source.processCommandLine_.size()]);
         if (!commandLine) return NtStatus::NoMemory;
         std::memcpy(commandLine.get(), source.processCommandLine_.data(), source.processCommandLine_.size() * sizeof(char16_t));
+    }
+    if (!source.processCurrentDirectory_.empty()) {
+        currentDirectory.reset(new (std::nothrow_t{}) char16_t[source.processCurrentDirectory_.size()]);
+        if (!currentDirectory) return NtStatus::NoMemory;
+        std::memcpy(currentDirectory.get(), source.processCurrentDirectory_.data(),
+                    source.processCurrentDirectory_.size() * sizeof(char16_t));
     }
     imageSet->finishClonedModules();
     ownedImageInputs_ = std::move(inputs);
@@ -687,8 +697,10 @@ NtStatus EProcess::cloneNativeMetadata(const EProcess& source) noexcept {
     userApiSetMapSize_ = source.userApiSetMapSize_;
     ownedImagePath_ = std::move(processPath);
     ownedCommandLine_ = std::move(commandLine);
+    ownedCurrentDirectory_ = std::move(currentDirectory);
     processImagePath_ = {ownedImagePath_.get(), source.processImagePath_.size()};
     processCommandLine_ = {ownedCommandLine_.get(), source.processCommandLine_.size()};
+    processCurrentDirectory_ = {ownedCurrentDirectory_.get(), source.processCurrentDirectory_.size()};
     processParametersConfigured_ = source.processParametersConfigured_;
     imageSectionBacked_ = source.imageSectionBacked_;
     for (size_t i = 0; i < count; ++i)
@@ -1042,7 +1054,8 @@ NtStatus EProcess::replaceMainImageFromSection(section::SectionObject& image,
             detail::UserMetadataWriter writer(
                 {reinterpret_cast<uint8_t*>(userProcessParameters_), mm::PageSize4KB},
                 userProcessParameters_, sizeof(*parameters));
-            if (!writer.append(processImagePath_, parameters->imagePathName) ||
+            if (!writer.append(processCurrentDirectory_, parameters->currentDirectory) ||
+                !writer.append(processImagePath_, parameters->imagePathName) ||
                 !writer.append({commandCopy ? commandCopy.get() : u"", commandLength}, parameters->commandLine))
                 return NtStatus::BufferTooSmall;
             ownedCommandLine_ = std::move(commandCopy);
@@ -1376,17 +1389,21 @@ void EProcess::captureProcessImageName(std::string_view name) noexcept {
 }
 
 NtStatus EProcess::setNativeProcessParameters(std::u16string_view imagePath,
-                                               std::u16string_view commandLine) noexcept {
+                                               std::u16string_view commandLine,
+                                               std::u16string_view currentDirectory) noexcept {
     if (!active(*this) || terminating_ || imagesFinalized_) return NtStatus::InvalidParameter;
     const size_t capacity = mm::PageSize4KB - sizeof(detail::UserProcessParameters);
     const auto bytes = [](std::u16string_view text) noexcept {
         return text.empty() ? size_t{0} : (text.size() + 1) * sizeof(char16_t);
     };
     if (imagePath.size() > capacity / sizeof(char16_t) || commandLine.size() > capacity / sizeof(char16_t) ||
-        bytes(imagePath) > capacity || bytes(commandLine) > capacity - bytes(imagePath))
+        currentDirectory.size() > capacity / sizeof(char16_t) ||
+        bytes(imagePath) > capacity || bytes(commandLine) > capacity - bytes(imagePath) ||
+        bytes(currentDirectory) > capacity - bytes(imagePath) - bytes(commandLine))
         return NtStatus::BufferTooSmall;
     processImagePath_ = imagePath;
     processCommandLine_ = commandLine;
+    processCurrentDirectory_ = currentDirectory;
     processParametersConfigured_ = true;
     return NtStatus::Success;
 }
@@ -1572,7 +1589,8 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
         detail::UserMetadataWriter writer(
             {reinterpret_cast<uint8_t*>(userProcessParameters_), mm::PageSize4KB},
             userProcessParameters_, sizeof(*parameters));
-        if (!writer.append(processImagePath_, parameters->imagePathName) ||
+        if (!writer.append(processCurrentDirectory_, parameters->currentDirectory) ||
+            !writer.append(processImagePath_, parameters->imagePathName) ||
             !writer.append(processCommandLine_, parameters->commandLine)) return NtStatus::BufferTooSmall;
     }
     const auto* mainImage = images_->module(0);
@@ -1596,6 +1614,7 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
     }
     processImagePath_ = {};
     processCommandLine_ = {};
+    processCurrentDirectory_ = {};
     imagesFinalized_ = true;
     return NtStatus::Success;
 }
@@ -1698,6 +1717,18 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         status = mapFileImageAtAvailableBase(addressSpace_, sectionImage,
             sectionObjectReference, view, mappedBase);
         if (status != NtStatus::Success) {
+            char failedModule[128]{};
+            const size_t failedModuleLength = moduleName.size() < sizeof(failedModule) - 1
+                ? moduleName.size() : sizeof(failedModule) - 1;
+            if (failedModuleLength)
+                std::memcpy(failedModule, moduleName.data(), failedModuleLength);
+            MicantNetbootSerialWrite("[MicaNT Ps] Failed dependency image module=");
+            MicantNetbootSerialWrite(failedModule);
+            MicantNetbootSerialWrite(" image-bytes=");
+            MicantNetbootSerialWriteNumber(sectionImage.getSize());
+            MicantNetbootSerialWrite(" status=");
+            MicantNetbootSerialWriteNumber(static_cast<uint32_t>(status));
+            MicantNetbootSerialWrite("\r\n");
             traceImageInitializationFailure("dependency section mapping", status);
             return status;
         }

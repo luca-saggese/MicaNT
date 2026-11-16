@@ -580,6 +580,15 @@ inline bool buildNativeTheme(const CompiledCss& css, NativeTheme& output,
             style.foreground = contrast(black, style.background) >= contrast(white, style.background) ? black : white;
         }
     }
+    auto& windowBackground = candidate.style(NativeControl::Window,
+                                               NativeVisualState::Normal);
+    if (!windowBackground.hasBackground) {
+        CssColor color{};
+        if (resolveCssColor("@theme_bg_color", css, currentColor, color, 0, accent)) {
+            windowBackground.background = color;
+            windowBackground.hasBackground = true;
+        }
+    }
     output = candidate;
     return true;
 }

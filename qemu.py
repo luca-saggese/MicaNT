@@ -476,6 +476,8 @@ def main() -> int:
             boot_command.append("--taskmgr-selftest")
         elif args.theme_test:
             boot_command.append("--theme-test")
+            if not args.headless:
+                boot_command.append("--interactive")
         elif args.cmd_test:
             boot_command.append("--cmd-test")
         elif args.crash_dump_selftest:

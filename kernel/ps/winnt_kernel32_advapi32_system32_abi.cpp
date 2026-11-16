@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include "micant/shared/ntdef.hpp"
+#include "micant/shared/native_process_abi.hpp"
 #include "micant/shared/system_time.hpp"
 #include "micant/um/subsystems/winbase/utf8_conversion.hpp"
 
@@ -22,6 +23,24 @@ __declspec(dllimport) int32_t __stdcall NtQueryVirtualMemory(
     void* process, const void* base, uint32_t informationClass,
     void* information, size_t informationLength, size_t* returnLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtWaitForSingleObject(
+    void* handle, uint8_t alertable, const int64_t* timeout) noexcept;
+__declspec(dllexport) void __stdcall SetLastError(uint32_t error) noexcept;
+__declspec(dllimport) int32_t __stdcall NtTerminateProcess(void* process, int32_t exitStatus) noexcept;
+__declspec(dllimport) void __stdcall RtlZeroMemory(void* destination, size_t length) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateUserProcess(
+    micant::Handle* processHandle, micant::Handle* threadHandle,
+    uint32_t processDesiredAccess, uint32_t threadDesiredAccess,
+    micant::ObjectAttributes* processAttributes, micant::ObjectAttributes* threadAttributes,
+    uint32_t processFlags, uint32_t threadFlags, void* processParameters,
+    micant::shared::native_process::ProcessCreateInfo64* createInfo,
+    micant::PsAttributeList* attributeList) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryInformationProcess(
+    void* process, uint32_t informationClass, void* information,
+    uint32_t informationLength, uint32_t* returnLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryInformationThread(
+    void* thread, uint32_t informationClass, void* information,
+    uint32_t informationLength, uint32_t* returnLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtCreateFile(
     micant::Handle* fileHandle, uint32_t desiredAccess,
     micant::ObjectAttributes* objectAttributes, micant::IoStatusBlock* ioStatusBlock,
@@ -318,6 +337,208 @@ __declspec(dllexport) void* __stdcall CreateFileW(
     return reinterpret_cast<void*>(handle);
 }
 
+struct Kernel32StartupInfoW {
+    uint32_t cb{};
+    wchar_t* reserved{};
+    wchar_t* desktop{};
+    wchar_t* title{};
+    uint32_t x{}, y{}, xSize{}, ySize{}, xCountChars{}, yCountChars{}, fillAttribute{}, flags{};
+    uint16_t showWindow{}, reserved2Size{};
+    uint8_t* reserved2{};
+    void* standardInput{};
+    void* standardOutput{};
+    void* standardError{};
+};
+struct Kernel32ProcessInformation {
+    void* process{};
+    void* thread{};
+    uint32_t processId{};
+    uint32_t threadId{};
+};
+static_assert(sizeof(Kernel32ProcessInformation) == 24);
+
+static bool CopyWideString(const wchar_t* input, wchar_t* output, size_t capacity,
+                           size_t& length) noexcept {
+    length = 0;
+    if (!input || !output || capacity == 0) return false;
+    while (length < capacity - 1 && input[length]) {
+        output[length] = input[length];
+        ++length;
+    }
+    if (input[length] != L'\0') return false;
+    output[length] = L'\0';
+    return true;
+}
+
+static bool IsAbsoluteDosPath(const wchar_t* path, size_t length) noexcept {
+    return length >= 3 && ((path[0] >= L'A' && path[0] <= L'Z') ||
+        (path[0] >= L'a' && path[0] <= L'z')) && path[1] == L':' &&
+        (path[2] == L'\\' || path[2] == L'/');
+}
+
+// The current native Ps path accepts a drive-absolute image path and a
+// bounded set of process parameters. Unsupported Win32 options are rejected
+// before creating any kernel objects.
+__declspec(dllexport) int32_t __stdcall CreateProcessW(
+    const wchar_t* applicationName, wchar_t* commandLine,
+    void* processSecurityAttributes, void* threadSecurityAttributes,
+    int32_t inheritHandles, uint32_t creationFlags, void* environment,
+    const wchar_t* currentDirectory, Kernel32StartupInfoW* startupInfo,
+    Kernel32ProcessInformation* processInformation) noexcept {
+    constexpr uint32_t CREATE_SUSPENDED = 0x00000004u;
+    constexpr uint32_t SUPPORTED_FLAGS = CREATE_SUSPENDED;
+    if (!processInformation || (creationFlags & ~SUPPORTED_FLAGS) || environment ||
+        inheritHandles || (startupInfo && (startupInfo->cb != sizeof(Kernel32StartupInfoW) ||
+        startupInfo->flags || startupInfo->reserved || startupInfo->reserved2Size ||
+        startupInfo->reserved2 || startupInfo->standardInput || startupInfo->standardOutput ||
+        startupInfo->standardError || startupInfo->desktop || startupInfo->title))) {
+        SetLastError(50);
+        return 0;
+    }
+    RtlZeroMemory(processInformation, sizeof(*processInformation));
+    wchar_t imagePath[2049];
+    size_t imageLength{};
+    if (applicationName && *applicationName) {
+        if (!CopyWideString(applicationName, imagePath, 2049, imageLength)) {
+            SetLastError(206); return 0;
+        }
+    } else if (commandLine && *commandLine) {
+        size_t i = 0;
+        while (commandLine[i] == L' ' || commandLine[i] == L'\t') ++i;
+        const bool quoted = commandLine[i] == L'"';
+        if (quoted) ++i;
+        const size_t begin = i;
+        while (commandLine[i] && (quoted ? commandLine[i] != L'"' :
+               (commandLine[i] != L' ' && commandLine[i] != L'\t'))) ++i;
+        imageLength = i - begin;
+        if (!imageLength || imageLength >= 2049) { SetLastError(87); return 0; }
+        for (size_t n = 0; n < imageLength; ++n) imagePath[n] = commandLine[begin + n];
+        imagePath[imageLength] = L'\0';
+    } else {
+        SetLastError(87); return 0;
+    }
+
+    wchar_t directory[2049];
+    size_t directoryLength{};
+    if (currentDirectory && *currentDirectory) {
+        if (!CopyWideString(currentDirectory, directory, 2049, directoryLength)) {
+            SetLastError(206); return 0;
+        }
+    } else {
+        micant::shared::native_process::UnicodeString64 current{};
+        if (micant::shared::native_process::currentDirectory(current) &&
+            current.Length / sizeof(wchar_t) < 2049) {
+            directoryLength = current.Length / sizeof(wchar_t);
+            for (size_t i = 0; i < directoryLength; ++i) directory[i] = current.Buffer[i];
+            directory[directoryLength] = L'\0';
+        }
+    }
+    if (directoryLength && !IsAbsoluteDosPath(directory, directoryLength)) {
+        SetLastError(87); return 0;
+    }
+    if (!IsAbsoluteDosPath(imagePath, imageLength)) {
+        if (!directoryLength || imageLength + directoryLength + 2 >= 2049) {
+            SetLastError(87); return 0;
+        }
+        wchar_t relative[2049];
+        for (size_t i = 0; i < imageLength; ++i) relative[i] = imagePath[i];
+        size_t joined = directoryLength;
+        if (directory[joined - 1] != L'\\' && directory[joined - 1] != L'/') directory[joined++] = L'\\';
+        for (size_t i = 0; i < imageLength; ++i) directory[joined + i] = relative[i];
+        imageLength += joined;
+        for (size_t i = 0; i < imageLength; ++i) imagePath[i] = directory[i];
+        imagePath[imageLength] = L'\0';
+    }
+
+    wchar_t commandStorage[4097];
+    size_t commandLength{};
+    if (commandLine && *commandLine) {
+        if (!CopyWideString(commandLine, commandStorage, 4097, commandLength)) {
+            SetLastError(206); return 0;
+        }
+    } else {
+        if (imageLength >= 4097) { SetLastError(206); return 0; }
+        for (; commandLength < imageLength; ++commandLength) commandStorage[commandLength] = imagePath[commandLength];
+        commandStorage[commandLength] = L'\0';
+    }
+
+    auto makeUnicode = [](micant::shared::native_process::UnicodeString64& value,
+                          const wchar_t* text, size_t length) noexcept {
+        value.Length = static_cast<uint16_t>(length * sizeof(wchar_t));
+        value.MaximumLength = static_cast<uint16_t>((length + 1) * sizeof(wchar_t));
+        value.Buffer = reinterpret_cast<const char16_t*>(text);
+    };
+    micant::shared::native_process::ProcessParametersPrefix64 parameters;
+    RtlZeroMemory(&parameters, sizeof(parameters));
+    parameters.MaximumLength = sizeof(parameters);
+    parameters.Length = sizeof(parameters);
+    parameters.Flags = 1;
+    makeUnicode(parameters.ImagePathName, imagePath, imageLength);
+    makeUnicode(parameters.CommandLine, commandStorage, commandLength);
+    if (directoryLength) makeUnicode(parameters.CurrentDirectoryDosPath, directory, directoryLength);
+
+    auto makeAttributes = [](void* security, micant::ObjectAttributes& attributes) noexcept {
+        attributes = {};
+        if (!security) return true;
+        struct SecurityAttributesPrefix { uint32_t length; void* descriptor; int32_t inherit; };
+        const auto* value = static_cast<const SecurityAttributesPrefix*>(security);
+        if (value->length != sizeof(SecurityAttributesPrefix) || value->descriptor) return false;
+        attributes.length = sizeof(attributes);
+        attributes.attributes = value->inherit ? micant::OBJ_INHERIT : 0;
+        return true;
+    };
+    micant::ObjectAttributes processAttributes{}, threadAttributes{};
+    if (!makeAttributes(processSecurityAttributes, processAttributes) ||
+        !makeAttributes(threadSecurityAttributes, threadAttributes)) {
+        SetLastError(50); return 0;
+    }
+    micant::shared::native_process::ProcessCreateInfo64 createInfo;
+    RtlZeroMemory(&createInfo, sizeof(createInfo));
+    createInfo.Size = sizeof(createInfo);
+    createInfo.State = micant::shared::native_process::CreateState::Initial;
+    micant::Handle process{}, thread{};
+    const int32_t status = NtCreateUserProcess(&process, &thread,
+        0x001F0FFFu, 0x001F03FFu,
+        processSecurityAttributes ? &processAttributes : nullptr,
+        threadSecurityAttributes ? &threadAttributes : nullptr,
+        0, (creationFlags & CREATE_SUSPENDED) ? 1u : 0u, &parameters,
+        &createInfo, nullptr);
+    if (status != 0) {
+        if (createInfo.State == micant::shared::native_process::CreateState::FailOnSectionCreate &&
+            createInfo.Data.FailSection.FileHandle)
+            (void)NtClose(reinterpret_cast<void*>(createInfo.Data.FailSection.FileHandle));
+        SetLastError(Win32ErrorFromNtStatus(status));
+        return 0;
+    }
+    const int32_t closeSection = NtClose(reinterpret_cast<void*>(createInfo.Data.Success.SectionHandle));
+    const int32_t closeImage = NtClose(reinterpret_cast<void*>(createInfo.Data.Success.FileHandle));
+    if (closeSection != 0 || closeImage != 0) {
+        (void)NtTerminateProcess(reinterpret_cast<void*>(process), closeSection != 0 ? closeSection : closeImage);
+        (void)NtClose(reinterpret_cast<void*>(thread));
+        (void)NtClose(reinterpret_cast<void*>(process));
+        SetLastError(Win32ErrorFromNtStatus(closeSection != 0 ? closeSection : closeImage));
+        return 0;
+    }
+    micant::ProcessBasicInformation processBasic{};
+    micant::ThreadBasicInformation threadBasic{};
+    const int32_t queryProcess = NtQueryInformationProcess(reinterpret_cast<void*>(process), 0,
+        &processBasic, sizeof(processBasic), nullptr);
+    const int32_t queryThread = queryProcess == 0 ? NtQueryInformationThread(
+        reinterpret_cast<void*>(thread), 0, &threadBasic, sizeof(threadBasic), nullptr) : queryProcess;
+    if (queryThread != 0) {
+        (void)NtTerminateProcess(reinterpret_cast<void*>(process), queryThread);
+        (void)NtClose(reinterpret_cast<void*>(thread));
+        (void)NtClose(reinterpret_cast<void*>(process));
+        SetLastError(Win32ErrorFromNtStatus(queryThread));
+        return 0;
+    }
+    processInformation->process = reinterpret_cast<void*>(process);
+    processInformation->thread = reinterpret_cast<void*>(thread);
+    processInformation->processId = static_cast<uint32_t>(processBasic.uniqueProcessId);
+    processInformation->threadId = static_cast<uint32_t>(threadBasic.clientId.uniqueThread);
+    return 1;
+}
+
 __declspec(dllexport) int32_t __stdcall ReadFile(
     void* file, void* buffer, uint32_t bytesToRead, uint32_t* bytesRead,
     void* overlapped) noexcept {
@@ -366,6 +587,50 @@ __declspec(dllexport) int32_t __stdcall CloseHandle(void* handle) noexcept {
     else if (static_cast<uint32_t>(status) == 0xC000000Du) error = 87; // ERROR_INVALID_PARAMETER
     SetLastError(error);
     return 0;
+}
+
+__declspec(dllexport) uint32_t __stdcall WaitForSingleObjectEx(
+    void* handle, uint32_t milliseconds, int32_t alertable) noexcept {
+    if (!handle) { SetLastError(6); return 0xFFFFFFFFu; }
+    int64_t timeout{};
+    const int64_t* timeoutPointer = nullptr;
+    if (milliseconds != 0xFFFFFFFFu) {
+        timeout = -static_cast<int64_t>(milliseconds) * 10000;
+        timeoutPointer = &timeout;
+    }
+    const int32_t status = NtWaitForSingleObject(handle, alertable ? 1 : 0, timeoutPointer);
+    if (status == 0) return 0;
+    if (static_cast<uint32_t>(status) == 0x00000102u) return 0x00000102u;
+    uint32_t error = 31;
+    if (static_cast<uint32_t>(status) == 0xC0000008u) error = 6;
+    else if (static_cast<uint32_t>(status) == 0xC0000022u) error = 5;
+    else if (static_cast<uint32_t>(status) == 0xC000000Du) error = 87;
+    SetLastError(error);
+    return 0xFFFFFFFFu;
+}
+
+__declspec(dllexport) uint32_t __stdcall WaitForSingleObject(
+    void* handle, uint32_t milliseconds) noexcept {
+    return WaitForSingleObjectEx(handle, milliseconds, 0);
+}
+
+__declspec(dllexport) int32_t __stdcall GetExitCodeProcess(
+    void* process, uint32_t* exitCode) noexcept {
+    if (!process || !exitCode) { SetLastError(87); return 0; }
+    micant::ProcessBasicInformation information{};
+    uint32_t returned{};
+    const int32_t status = NtQueryInformationProcess(process, 0, &information,
+        sizeof(information), &returned);
+    if (status != 0) {
+        uint32_t error = 31;
+        if (static_cast<uint32_t>(status) == 0xC0000008u) error = 6;
+        else if (static_cast<uint32_t>(status) == 0xC0000022u) error = 5;
+        else if (static_cast<uint32_t>(status) == 0xC000000Du) error = 87;
+        SetLastError(error);
+        return 0;
+    }
+    *exitCode = static_cast<uint32_t>(information.exitStatus);
+    return 1;
 }
 
 __declspec(dllexport) uint32_t __stdcall GetLastError() noexcept {

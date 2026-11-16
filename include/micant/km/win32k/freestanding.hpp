@@ -24,7 +24,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept;
 bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept;
 micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
                                 uint64_t ownerProcessId) noexcept;
-micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept;
+micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot,
+    const MicaThemeCaptionImageSet* captionImages = nullptr) noexcept;
 micant::NtStatus getThemeSnapshot(MicaThemeSnapshot& snapshot) noexcept;
 
 } // namespace micant::win32k::freestanding

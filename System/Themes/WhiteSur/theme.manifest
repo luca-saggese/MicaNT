@@ -126,7 +126,7 @@
         "assets/thumbnail-frame.png"
       ],
       "nativeStyle": "Dark/native.style",
-      "nativeStyleSha256": "a0082454187cf5570187120b6b9dcb713b55e7a6e36a47650bfccc476cae1914",
+      "nativeStyleSha256": "a506d2ee51f25f82561a56a40a966f7b4888200acf4ba035f5d63ec610346e96",
       "solid": false,
       "sourceGresourceSha256": "99240475a9d7a234fa8c84fabdef4c4b884af62d6830125e3167903b8f4905f2",
       "sourceReleaseTarSha256": "98ac7545ec5290b718875fdfbdd7f0f6b88126103d1eec259ec9fbf80be7b75f"
@@ -229,7 +229,7 @@
         "assets/thumbnail-frame.png"
       ],
       "nativeStyle": "Light/native.style",
-      "nativeStyleSha256": "802b0367b53dd72c468487b31fc6f14ecc51e4f16e186a089da27e8a852a5fc7",
+      "nativeStyleSha256": "a5be80c15e5116f02e6f93bbc33c46e738859084160732f085a61a04f8f1c282",
       "solid": false,
       "sourceGresourceSha256": "aeab157be82b641d9d062f9b0b2299c4ad8c7cb34a35201c2b5aef3083bf6703",
       "sourceReleaseTarSha256": "2635570e218afab2d34b0663287054f7b995b9f7f810e97410dcad389987d5ba"

@@ -18,6 +18,7 @@
 #define MICANT_COMPOSITOR_TITLE_MAX_HEIGHT 32u
 #define MICANT_COMPOSITOR_TITLE_MAX_PIXELS \
     (MICANT_COMPOSITOR_TITLE_MAX_WIDTH * MICANT_COMPOSITOR_TITLE_MAX_HEIGHT)
+#define MICANT_COMPOSITOR_WINDOW_SHADOW_EXTENT 6u
 #define MICANT_COMPOSITOR_SURFACE_PIXELS \
     (MICANT_COMPOSITOR_SCREEN_WIDTH * MICANT_COMPOSITOR_SCREEN_HEIGHT)
 #define MICANT_COMPOSITOR_SURFACE_PIXEL_CAPACITY \
@@ -42,7 +43,7 @@
 #define MICANT_COMPOSITOR_PIXELS_BASE (MICANT_COMPOSITOR_METADATA_BASE + 0x10000u)
 
 #define MICANT_COMPOSITOR_STORE_MAGIC 0x4D434F4Du /* MCOM */
-#define MICANT_COMPOSITOR_STORE_VERSION 5u
+#define MICANT_COMPOSITOR_STORE_VERSION 6u
 
 enum {
     MICANT_COMPOSITOR_SURFACE_ACTIVE = 0x01u,
@@ -77,6 +78,7 @@ typedef struct MicaCompositorCursorInfo {
 
 typedef struct MicaCompositorSurfaceInfo {
     uint64_t window;
+    uint64_t parentWindow;
     uint64_t ownerProcessId;
     int32_t x, y;
     uint32_t width, height, pitch;
@@ -107,6 +109,7 @@ typedef struct MicaCompositorMetadataStore {
     uint32_t reserved[3];
     uint64_t themeGeneration;
     MicaThemeSnapshot theme;
+    MicaThemeCaptionImageSet captionImageSet;
     uint64_t frameSequence;
     MicaCompositorSurfaceInfo surfaces[MICANT_COMPOSITOR_SURFACE_CAPACITY];
     MicaCompositorCursorInfo cursor;
@@ -118,6 +121,6 @@ typedef struct MicaCompositorMetadataStore {
 
 #ifdef __cplusplus
 static_assert(sizeof(MicaCompositorDirtyRect) == 16);
-static_assert(sizeof(MicaCompositorSurfaceInfo) == 288);
+static_assert(sizeof(MicaCompositorSurfaceInfo) == 296);
 static_assert(sizeof(MicaCompositorMetadataStore) <= MICANT_COMPOSITOR_METADATA_STORE_SIZE);
 #endif

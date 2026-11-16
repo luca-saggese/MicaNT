@@ -16,6 +16,31 @@
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
 #endif
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+namespace micant::km::hid {
+void DebugValidateInputQueues(const char* stage) noexcept;
+}
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+#define CMD_KE_VALIDATE_HID(stage) micant::km::hid::DebugValidateInputQueues(stage)
+#define CMD_KE_TRACE_THREAD_ACTION(action, thread) do { \
+    if ((thread) && ((thread)->terminationRequested || (thread)->terminationActive || \
+                     (thread)->state == ThreadState::Terminated)) { \
+        MicantNetbootSerialWrite("[MicaNT SchedulerTrace] " action " tid="); \
+        MicantNetbootSerialWriteNumber((thread)->tid); \
+        MicantNetbootSerialWrite(" state="); \
+        MicantNetbootSerialWriteNumber(static_cast<uint64_t>((thread)->state)); \
+        MicantNetbootSerialWrite(" queued="); \
+        MicantNetbootSerialWriteNumber((thread)->readyQueued ? 1 : 0); \
+        MicantNetbootSerialWrite(" termActive="); \
+        MicantNetbootSerialWriteNumber((thread)->terminationActive ? 1 : 0); \
+        MicantNetbootSerialWrite("\r\n"); \
+    } \
+} while (0)
+#else
+#define CMD_KE_VALIDATE_HID(stage) ((void)0)
+#define CMD_KE_TRACE_THREAD_ACTION(action, thread) ((void)0)
+#endif
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/ntstatus.hpp"
 #if defined(MICANT_FREESTANDING)
@@ -1100,6 +1125,7 @@ public:
     [[nodiscard]] bool readyKThread(KThread* thread) noexcept {
         if (!thread) return false;
         SpinLockGuard guard(lock_);
+        CMD_KE_TRACE_THREAD_ACTION("enqueue", thread);
         if (thread == KeGetCurrentThread() || thread->readyQueued ||
             (thread->state != ThreadState::Initialized &&
              thread->state != ThreadState::Ready &&
@@ -1153,6 +1179,7 @@ public:
             auto& queue = runQueues_[static_cast<size_t>(priority)];
             if (!queue.head) continue;
             KThread* thread = queue.head;
+            CMD_KE_TRACE_THREAD_ACTION("dequeue", thread);
             queue.head = thread->readyNext;
             if (!queue.head) queue.tail = nullptr;
             thread->readyNext = nullptr;
@@ -1173,7 +1200,7 @@ public:
     // Select only a strictly higher-priority runnable thread, preserving the
     // current quantum. Idle yields to any runnable thread, including priority 0.
     [[nodiscard]] KThread* selectHigherPriority(KThread* current) noexcept {
-        if (!current || current != KeGetCurrentThread()) return nullptr;
+        if (!current || current != KeGetCurrentThread() || current->terminationActive) return nullptr;
         SpinLockGuard guard(lock_);
         if (current->state != ThreadState::Running || current->readyQueued) return nullptr;
         const uint32_t currentPriority = std::min(current->priority, PRIORITY_REALTIME_MAX);
@@ -1193,6 +1220,7 @@ public:
                 return next;
             }
             auto& currentQueue = runQueues_[currentPriority];
+            CMD_KE_TRACE_THREAD_ACTION("preempt-enqueue", current);
             current->readyNext = nullptr;
             current->readyQueued = true;
             if (currentQueue.tail) currentQueue.tail->readyNext = current;
@@ -1207,7 +1235,7 @@ public:
     // priorities preempt at the tick; equal priorities rotate at quantum end.
     // cancelQuantumPreemption reverses a rejected context switch.
     [[nodiscard]] KThread* selectOnClockTick(KThread* current) noexcept {
-        if (!current || current != KeGetCurrentThread()) return nullptr;
+        if (!current || current != KeGetCurrentThread() || current->terminationActive) return nullptr;
         SpinLockGuard guard(lock_);
         if (current->state != ThreadState::Running || current->readyQueued) return nullptr;
         const bool expired = current->quantumRemaining <= 1;
@@ -1231,6 +1259,7 @@ public:
                 return next;
             }
             auto& currentQueue = runQueues_[currentPriority];
+            CMD_KE_TRACE_THREAD_ACTION("tick-enqueue", current);
             current->readyNext = nullptr;
             current->readyQueued = true;
             if (currentQueue.tail) currentQueue.tail->readyNext = current;
@@ -1460,6 +1489,7 @@ inline bool KiSwapContext(KThread* outgoing, KThread* incoming, bool prequeued =
     if (hardwareCr3 != incoming->directoryTableBase &&
         !hal::amd64::switchProcessPagingRootByPhysical(incoming->directoryTableBase)) return false;
     g_CurrentCpu.currentCr3 = incoming->directoryTableBase;
+    CMD_KE_VALIDATE_HID("KiSwapContext after CR3 switch");
     outgoing->syscallGsActive = hal::amd64::bootstrapSyscallGsActive();
     hal::amd64::saveBootstrapThreadSegments(outgoing->segments, outgoing->syscallGsActive);
     hal::amd64::restoreBootstrapThreadSegments(incoming->segments);
@@ -1468,6 +1498,7 @@ inline bool KiSwapContext(KThread* outgoing, KThread* incoming, bool prequeued =
     hal::amd64::setBootstrapThreadEntryStack(incoming->kernelStackTop, incomingUserGs,
                                             incoming->syscallGsActive, incoming->kernelStackBase,
                                             incoming->kernelExecutionStackTop);
+    CMD_KE_VALIDATE_HID("KiSwapContext after segment and stack update");
 
     if (outgoing->state == ThreadState::Running) {
         outgoing->state = ThreadState::Ready;
@@ -1477,7 +1508,9 @@ inline bool KiSwapContext(KThread* outgoing, KThread* incoming, bool prequeued =
     incoming->state = ThreadState::Running;
     if (outgoing->state == ThreadState::Terminated && outgoing->terminationNotify)
         outgoing->terminationNotify(outgoing->terminationContext);
-    return MicantAmd64SwitchContext(&outgoing->context, &incoming->context);
+    const bool switched = MicantAmd64SwitchContext(&outgoing->context, &incoming->context);
+    CMD_KE_VALIDATE_HID("KiSwapContext resumed");
+    return switched;
 #else
     (void)prequeued;
     // 1. In Windows NT, context switching occurs strictly at DISPATCH_LEVEL

@@ -3,6 +3,9 @@
 #include "micant/km/core/ke.hpp"
 #include "micant/km/core/clock_timer.hpp"
 
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+
 #if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
 namespace micant::sync::detail {
 
@@ -166,7 +169,38 @@ public:
             if (!head_) tail_ = nullptr;
             waiter->next = nullptr;
             waiter->satisfied = true;
-            if (!ke::PriorityScheduler::get().readyKThread(waiter->thread)) __builtin_trap();
+            auto* thread = waiter->thread;
+            const bool registeredWait = thread && waiter->event == this &&
+                thread->eventWaitObject == this && thread->eventWaitBlock == waiter;
+            const bool alreadyReadyForThisWait = registeredWait &&
+                thread != ke::KeGetCurrentThread() &&
+                thread->state == ke::ThreadState::Ready && thread->readyQueued &&
+                thread->eventWaitObject == this && thread->eventWaitBlock == waiter;
+            if (!registeredWait || (!alreadyReadyForThisWait &&
+                !ke::PriorityScheduler::get().readyKThread(thread))) {
+                MicantNetbootSerialWrite("[MicaNT Ke] Event set rejected waiter thread=");
+                MicantNetbootSerialWriteNumber(reinterpret_cast<uintptr_t>(thread));
+                MicantNetbootSerialWrite(" current=");
+                MicantNetbootSerialWriteNumber(reinterpret_cast<uintptr_t>(ke::KeGetCurrentThread()));
+                MicantNetbootSerialWrite(" event=");
+                MicantNetbootSerialWriteNumber(reinterpret_cast<uintptr_t>(this));
+                MicantNetbootSerialWrite(" registered=");
+                MicantNetbootSerialWriteNumber(registeredWait);
+                MicantNetbootSerialWrite(" waiterEvent=");
+                MicantNetbootSerialWriteNumber(waiter->event == this);
+                MicantNetbootSerialWrite(" state=");
+                MicantNetbootSerialWriteNumber(thread ? static_cast<uint32_t>(thread->state) : UINT32_MAX);
+                MicantNetbootSerialWrite(" queued=");
+                MicantNetbootSerialWriteNumber(thread && thread->readyQueued);
+                MicantNetbootSerialWrite(" tid=");
+                MicantNetbootSerialWriteNumber(thread ? thread->tid : 0);
+                MicantNetbootSerialWrite(" waitObject=");
+                MicantNetbootSerialWriteNumber(thread ? reinterpret_cast<uintptr_t>(thread->eventWaitObject) : 0);
+                MicantNetbootSerialWrite(" waitBlock=");
+                MicantNetbootSerialWriteNumber(thread ? reinterpret_cast<uintptr_t>(thread->eventWaitBlock) : 0);
+                MicantNetbootSerialWrite("\r\n");
+                __builtin_trap();
+            }
             if (!notification_) { signaled_ = false; break; }
         }
         if (flags & (uint64_t{1} << 9)) {
@@ -247,9 +281,11 @@ private:
                 waiter.satisfied = true;
             } else {
                 waiter.timedOut = true;
-                if (thread->state == ke::ThreadState::Waiting && thread->eventWaitBlock == &waiter) {
+                if (event->contains(waiter)) {
                     event->unlink(waiter);
-                    if (!ke::PriorityScheduler::get().readyKThread(thread)) __builtin_trap();
+                    if (thread->state == ke::ThreadState::Waiting &&
+                        thread->eventWaitObject == event && thread->eventWaitBlock == &waiter &&
+                        !ke::PriorityScheduler::get().readyKThread(thread)) __builtin_trap();
                 }
             }
         }
@@ -276,6 +312,11 @@ private:
             previous = item;
         }
         __builtin_trap();
+    }
+    [[nodiscard]] bool contains(const Waiter& waiter) const noexcept {
+        for (const Waiter* item = head_; item; item = item->next)
+            if (item == &waiter) return true;
+        return false;
     }
     bool notification_;
     bool signaled_;

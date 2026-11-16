@@ -21,9 +21,10 @@ constexpr uint32_t kScreenWidth = 1024;
 constexpr uint32_t kScreenHeight = 768;
 constexpr size_t kScreenPixels =
     static_cast<size_t>(kScreenWidth) * kScreenHeight;
-// Explorer keeps backing DIBs for the desktop, taskbar, start menu and open
-// windows alive together. Reserve enough pixels for that complete shell set.
-constexpr size_t kPixelCapacity = 4u * 1024u * 1024u;
+// Keep the fixed backing store bounded for the 512 MiB desktop profile. The
+// compositor owns scanout and window surfaces; this arena holds active GDI
+// DIBs only, with room for a desktop-sized bitmap and several smaller windows.
+constexpr size_t kPixelCapacity = 1536u * 1024u;
 constexpr size_t kDcCapacity = 32;
 constexpr size_t kBitmapCapacity = 32;
 constexpr uint64_t kHandleTag = 0x4D574B0000000000ULL;
@@ -757,7 +758,11 @@ int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
             const uint32_t outRed = (red * alpha + dstRed * inverse + 127u) / 255u;
             const uint32_t outGreen = (green * alpha + dstGreen * inverse + 127u) / 255u;
             const uint32_t outBlue = (blue * alpha + dstBlue * inverse + 127u) / 255u;
-            destination = 0xFF000000u | (outRed << 16) | (outGreen << 8) | outBlue;
+            const uint32_t dstAlpha = destination >> 24;
+            const uint32_t outAlpha = alpha +
+                (dstAlpha * inverse + 127u) / 255u;
+            destination = (outAlpha << 24) | (outRed << 16) |
+                (outGreen << 8) | outBlue;
         }
     }
     return 1;
@@ -900,10 +905,12 @@ int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo* output) {
     return 1;
 }
 
-int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot* snapshot) {
+int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot* snapshot,
+                                   const MicaThemeCaptionImageSet* captionImages) {
     if (!snapshot || !MicaThemeSnapshotIsValid(snapshot, sizeof(*snapshot))) return 0;
     MicaWin32kRequest value{};
     value.args[0] = reinterpret_cast<uint64_t>(snapshot);
+    value.args[1] = reinterpret_cast<uint64_t>(captionImages);
     return request(MICANT_WIN32K_OP_SET_THEME_SNAPSHOT, value) && value.result == 1;
 }
 

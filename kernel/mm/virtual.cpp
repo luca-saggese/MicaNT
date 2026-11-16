@@ -57,6 +57,12 @@ NtStatus publishSectionControl(void* context, void* candidate, bool (*retain)(vo
     return static_cast<ob::ObjectHeader*>(context)->as<io::FileObject>()->publishImageControl(
         candidate, retain, release, result);
 }
+NtStatus referenceSectionControl(void* context, bool (*retain)(void*) noexcept,
+                                 void (*release)(void*) noexcept, void** result) noexcept {
+    if (!context) return NtStatus::InvalidHandle;
+    return static_cast<ob::ObjectHeader*>(context)->as<io::FileObject>()->referenceImageControl(
+        retain, release, result);
+}
 }
 
 bool initializeBootstrapSectionServices() noexcept {
@@ -513,6 +519,7 @@ static NtStatus createSection(Handle* out, uint32_t access, ObjectAttributes* at
         section::SectionFileBacking backing{fileReference, fileObject->size(), fileObject->name(), acquireFileSection,
                                             releaseFileSection, readSectionFile, acquireSectionImage,
                                             releaseSectionImage, querySectionFileSize, publishSectionControl,
+                                            referenceSectionControl,
                                             fileObject->supportsImageControl()};
         object = new (body) section::SectionObject(maximumSize,
             section::SEC_FILE | section::SEC_IMAGE, protect, backing);

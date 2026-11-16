@@ -145,11 +145,11 @@ alignas(4096) static uint8_t s_ahciDmaBuffer[65536];       // 64 KB DMA Transfer
  */
 class BareMetalAhciController {
 public:
-    using MmioMapper = void* (*)(uint64_t physical, size_t size) noexcept;
-    using DmaTranslator = uint64_t (*)(const void* address, size_t length) noexcept;
-    using PciRead32 = bool (*)(uint8_t bus, uint8_t device, uint8_t function,
+    using MmioMapper = void* (*)(void* context, uint64_t physical, size_t size) noexcept;
+    using DmaTranslator = uint64_t (*)(void* context, const void* address, size_t length) noexcept;
+    using PciRead32 = bool (*)(void* context, uint8_t bus, uint8_t device, uint8_t function,
                               uint8_t offset, uint32_t& value) noexcept;
-    using PciWrite32 = bool (*)(uint8_t bus, uint8_t device, uint8_t function,
+    using PciWrite32 = bool (*)(void* context, uint8_t bus, uint8_t device, uint8_t function,
                                uint8_t offset, uint32_t value) noexcept;
 
 private:
@@ -177,6 +177,7 @@ private:
     uint8_t m_pciDevice{0};
     uint8_t m_pciFunction{0};
     uint64_t m_abarPhys{0};
+    uint64_t m_abarLength{};
     volatile uint32_t* m_abar{nullptr};
     bool     m_initialized{false};
     bool     m_port1Online{false};
@@ -185,6 +186,7 @@ private:
     uint64_t m_port1TotalSectors{0};
     bool m_supportsFlushCache{false};
     bool m_supportsFlushCacheExt{false};
+    void* m_callbackContext{};
     MmioMapper m_mmioMapper{};
     DmaTranslator m_dmaTranslator{};
     PciRead32 m_pciRead32{};
@@ -193,6 +195,16 @@ private:
     uint64_t m_crashDumpFirstLba{};
     uint64_t m_crashDumpSectorCount{};
     std::atomic_flag m_crashDumpWriteActive = ATOMIC_FLAG_INIT;
+    std::atomic_flag m_portCommandActive = ATOMIC_FLAG_INIT;
+    uint32_t m_lastReadFailureReason{};
+    struct PortCommandGuard {
+        std::atomic_flag& Flag;
+        bool Acquired;
+        explicit PortCommandGuard(std::atomic_flag& flag) noexcept
+            : Flag(flag), Acquired(!flag.test_and_set(std::memory_order_acquire)) {}
+        ~PortCommandGuard() { if (Acquired) Flag.clear(std::memory_order_release); }
+        explicit operator bool() const noexcept { return Acquired; }
+    };
 
 public:
     static BareMetalAhciController& get() noexcept {
@@ -204,20 +216,31 @@ public:
     [[nodiscard]] bool isPort1Online() const noexcept { return m_port1Online; }
     [[nodiscard]] uint64_t getAbarPhysical() const noexcept { return m_abarPhys; }
     [[nodiscard]] uint64_t getPort1TotalSectors() const noexcept { return m_port1TotalSectors; }
+    [[nodiscard]] uint32_t lastReadFailureReason() const noexcept { return m_lastReadFailureReason; }
     [[nodiscard]] const char* getDiskModel() const noexcept { return m_diskModel; }
 
     // Locate and validate the dedicated private GPT crash partition. This is
     // boot-time setup; the fatal writer below only uses the resulting fixed
     // extent and bounded polling AHCI commands.
-    bool configureCrashDumpRegion() noexcept {
+    bool configureCrashDumpRegionForCurrentDisk(uint32_t* failureStage) noexcept {
+        if (failureStage) *failureStage = 0;
         m_crashDumpFirstLba = 0;
         m_crashDumpSectorCount = 0;
-        if (!m_initialized || !m_port1Online || m_port1TotalSectors < 3) return false;
+        if (!m_initialized || !m_port1Online || m_port1TotalSectors < 3) {
+            if (failureStage) *failureStage = 1;
+            return false;
+        }
 
         alignas(4096) static uint8_t header[512];
         alignas(4096) static uint8_t array[65536];
-        if (!readSectors(1, 1, header) || std::memcmp(header, "EFI PART", 8) != 0)
+        if (!readSectors(1, 1, header)) {
+            if (failureStage) *failureStage = 2;
             return false;
+        }
+        if (std::memcmp(header, "EFI PART", 8) != 0) {
+            if (failureStage) *failureStage = 10;
+            return false;
+        }
         const uint32_t headerSize = readLe32(header + 12);
         const uint32_t expectedHeaderCrc = readLe32(header + 16);
         const uint64_t firstUsable = readLe64(header + 40);
@@ -230,12 +253,15 @@ public:
             readLe64(header + 32) != m_port1TotalSectors - 1 ||
             firstUsable > lastUsable || lastUsable >= m_port1TotalSectors ||
             !entryCount || entryCount > 128 || entrySize != 128 ||
-            entriesLba >= m_port1TotalSectors) return false;
+            entriesLba >= m_port1TotalSectors) {
+            if (failureStage) *failureStage = 3;
+            return false;
+        }
         uint8_t headerCopy[512];
         std::memcpy(headerCopy, header, sizeof(headerCopy));
         std::memset(headerCopy + 16, 0, 4);
         if ((crc32Bytes(headerCopy, headerSize) ^ 0xFFFFFFFFu) != expectedHeaderCrc)
-            return false;
+            { if (failureStage) *failureStage = 4; return false; }
         const uint64_t arrayBytes = static_cast<uint64_t>(entryCount) * entrySize;
         const uint64_t arraySectors = (arrayBytes + 511) / 512;
         if (!arraySectors || arraySectors > 128 ||
@@ -243,7 +269,7 @@ public:
             arraySectors > m_port1TotalSectors - entriesLba ||
             !readSectors(entriesLba, static_cast<uint16_t>(arraySectors), array) ||
             (crc32Bytes(array, static_cast<size_t>(arrayBytes)) ^ 0xFFFFFFFFu) !=
-                readLe32(header + 88)) return false;
+                readLe32(header + 88)) { if (failureStage) *failureStage = 5; return false; }
 
         static constexpr uint8_t crashTypeGuid[16] = {
             0x4c,0x55,0x43,0x44,0x4d,0x50,0x4f,0x53,
@@ -258,7 +284,10 @@ public:
             if (empty) continue;
             const uint64_t start = readLe64(entry + 32);
             const uint64_t end = readLe64(entry + 40);
-            if (start < firstUsable || end > lastUsable || end < start) return false;
+            if (start < firstUsable || end > lastUsable || end < start) {
+                if (failureStage) *failureStage = 6;
+                return false;
+            }
             for (uint32_t prior = 0; prior < i; ++prior) {
                 const uint8_t* previous = array + static_cast<size_t>(prior) * entrySize;
                 bool previousEmpty = true;
@@ -266,22 +295,58 @@ public:
                 if (previousEmpty) continue;
                 const uint64_t previousStart = readLe64(previous + 32);
                 const uint64_t previousEnd = readLe64(previous + 40);
-                if (start <= previousEnd && previousStart <= end) return false;
+                if (start <= previousEnd && previousStart <= end) {
+                    if (failureStage) *failureStage = 7;
+                    return false;
+                }
             }
             if (std::memcmp(entry, crashTypeGuid, sizeof(crashTypeGuid)) != 0) continue;
-            if (count) return false; // Ambiguous reserved extent.
+            if (count) { if (failureStage) *failureStage = 8; return false; }
             first = start;
             count = end - start + 1;
             crashEntryIndex = i;
         }
-        if (!count || crashEntryIndex == UINT32_MAX) return false;
+        if (!count || crashEntryIndex == UINT32_MAX) {
+            if (failureStage) *failureStage = 9;
+            return false;
+        }
         m_crashDumpFirstLba = first;
         m_crashDumpSectorCount = count;
         return true;
     }
 
+    bool configureCrashDumpRegion(uint32_t* failureStage = nullptr) noexcept {
+        if (failureStage) *failureStage = 0;
+        if (!m_abar || !m_initialized) {
+            if (failureStage) *failureStage = 1;
+            return false;
+        }
+        const uint8_t originalPort = m_dataPort;
+        const uint32_t implemented = m_abar[AHCI_REG_PI / 4];
+        uint32_t lastFailure{};
+        for (uint8_t port = 0; port < 32; ++port) {
+            if (!(implemented & (uint32_t{1} << port))) continue;
+            if (port != originalPort) {
+                m_port1Online = false;
+                m_dataPort = port;
+                if (!initPort(port)) continue;
+                m_port1Online = true;
+                if (!readDiskIdentify()) { m_port1Online = false; continue; }
+            }
+            if (configureCrashDumpRegionForCurrentDisk(&lastFailure)) return true;
+            m_crashDumpFirstLba = 0;
+            m_crashDumpSectorCount = 0;
+        }
+        if (failureStage) *failureStage = lastFailure ? lastFailure : 1;
+        return false;
+    }
+
     [[nodiscard]] uint64_t crashDumpCapacityBytes() const noexcept {
         return m_crashDumpSectorCount * 512;
+    }
+
+    [[nodiscard]] uint64_t crashDumpSectorCount() const noexcept {
+        return m_crashDumpSectorCount;
     }
 
     // Panic-only API: caller supplies a fixed, DMA-addressable buffer. No
@@ -300,19 +365,34 @@ public:
         return written;
     }
 
+    bool readCrashDumpSectors(uint64_t relativeLba, uint16_t sectorCount,
+                              void* destination) noexcept {
+        if (!m_crashDumpSectorCount || !sectorCount || !destination ||
+            relativeLba >= m_crashDumpSectorCount ||
+            sectorCount > m_crashDumpSectorCount - relativeLba ||
+            sectorCount > 128 || m_crashDumpFirstLba > UINT64_MAX - relativeLba)
+            return false;
+        return readSectors(m_crashDumpFirstLba + relativeLba,
+                           sectorCount, destination);
+    }
+
     NtStatus flushCrashDump() noexcept {
         return m_crashDumpSectorCount ? flushCache() : NtStatus::DeviceNotReady;
     }
 
     /** Discover and initialize an AHCI controller and its first SATA disk port. */
-    bool initialize(MmioMapper mmioMapper, DmaTranslator dmaTranslator,
-                    PciRead32 pciRead32, PciWrite32 pciWrite32) noexcept {
+    bool initialize(void* callbackContext, MmioMapper mmioMapper, DmaTranslator dmaTranslator,
+                    PciRead32 pciRead32, PciWrite32 pciWrite32,
+                    uint64_t abarLength) noexcept {
         if (m_initialized) return true;
-        if (!mmioMapper || !dmaTranslator || !pciRead32 || !pciWrite32) return false;
+        if (!mmioMapper || !dmaTranslator || !pciRead32 || !pciWrite32 || abarLength < 0x100)
+            return false;
+        m_callbackContext = callbackContext;
         m_mmioMapper = mmioMapper;
         m_dmaTranslator = dmaTranslator;
         m_pciRead32 = pciRead32;
         m_pciWrite32 = pciWrite32;
+        m_abarLength = abarLength;
         // Controller locations differ between the target C236 platform
         // (00:17.0) and Q35/ICH9 (00:1f.2), so select by PCI class instead
         // of assuming one chipset's BDF.
@@ -321,11 +401,11 @@ public:
           for (uint16_t device = 0; device < 32 && !foundController; ++device) {
             for (uint8_t function = 0; function < 8; ++function) {
                 uint32_t vendorDev{};
-                if (!m_pciRead32(static_cast<uint8_t>(bus), static_cast<uint8_t>(device),
+                if (!m_pciRead32(m_callbackContext, static_cast<uint8_t>(bus), static_cast<uint8_t>(device),
                                  function, 0x00, vendorDev)) return false;
                 if (static_cast<uint16_t>(vendorDev) == 0xFFFF) continue;
                 uint32_t classReg{};
-                if (!m_pciRead32(static_cast<uint8_t>(bus), static_cast<uint8_t>(device),
+                if (!m_pciRead32(m_callbackContext, static_cast<uint8_t>(bus), static_cast<uint8_t>(device),
                                  function, 0x08, classReg)) return false;
                 const uint8_t programmingInterface = static_cast<uint8_t>((classReg >> 8) & 0xFF);
                 const uint8_t subclass = static_cast<uint8_t>((classReg >> 16) & 0xFF);
@@ -344,30 +424,31 @@ public:
 
         // Read BAR5 (ABAR MMIO) from the discovered controller.
         uint32_t bar5{};
-        if (!m_pciRead32(m_pciBus, m_pciDevice, m_pciFunction, 0x24, bar5)) return false;
+        if (!m_pciRead32(m_callbackContext, m_pciBus, m_pciDevice, m_pciFunction, 0x24, bar5)) return false;
         const uint32_t barType = (bar5 >> 1) & 3u;
         if ((bar5 & 1u) != 0 || barType == 1u || barType == 3u || (bar5 & 8u) != 0)
             return false;
         uint64_t abarPhysical = bar5 & ~0xFULL;
         if (barType == 2u) {
             uint32_t bar6{};
-            if (!m_pciRead32(m_pciBus, m_pciDevice, m_pciFunction, 0x28, bar6)) return false;
+            if (!m_pciRead32(m_callbackContext, m_pciBus, m_pciDevice, m_pciFunction, 0x28, bar6)) return false;
             abarPhysical |= static_cast<uint64_t>(bar6) << 32;
         }
-        if (!abarPhysical || (abarPhysical & 0xF) != 0 || abarPhysical > UINT64_MAX - 0x1100)
+        if (!abarPhysical || (abarPhysical & 0xF) != 0 || abarPhysical > UINT64_MAX - m_abarLength)
             return false;
         m_abarPhys = abarPhysical;
 
         // Enable Bus Master, Memory Space, and I/O Space.
         uint32_t pciCmd{};
-        if (!m_pciRead32(m_pciBus, m_pciDevice, m_pciFunction, 0x04, pciCmd) ||
-            !m_pciWrite32(m_pciBus, m_pciDevice, m_pciFunction, 0x04,
+        if (!m_pciRead32(m_callbackContext, m_pciBus, m_pciDevice, m_pciFunction, 0x04, pciCmd) ||
+            !m_pciWrite32(m_callbackContext, m_pciBus, m_pciDevice, m_pciFunction, 0x04,
                           (pciCmd & 0xFFFFu) | 0x0006u))
             return false;
 
         // Map the register window through the kernel's uncached MMIO mapper.
         m_abar = static_cast<volatile uint32_t*>(
-            m_mmioMapper(m_abarPhys, 0x1100));
+            m_mmioMapper(m_callbackContext, m_abarPhys,
+                static_cast<size_t>(m_abarLength < 0x1100 ? m_abarLength : 0x1100)));
         if (!m_abar) return false;
 
         // 5. Ensure AHCI Enable (GHC.AE = 1)
@@ -381,6 +462,11 @@ public:
         // commonly attach the boot disk to port zero, while some systems use
         // port one; do not assume a physical connector number.
         uint32_t pi = m_abar[AHCI_REG_PI / 4];
+        uint32_t highestPort{};
+        for (uint32_t port = 0; port < 32; ++port)
+            if (pi & (uint32_t{1} << port)) highestPort = port + 1;
+        const uint64_t requiredBytes = 0x100 + uint64_t{highestPort} * 0x80;
+        if (!highestPort || requiredBytes > m_abarLength) return false;
         for (uint8_t port = 0; port < 32; ++port) {
             if ((pi & (uint32_t{1} << port)) == 0) continue;
             if (!initPort(port)) continue;
@@ -399,7 +485,8 @@ public:
 
 private:
     uint64_t dmaAddress(const void* address, size_t length) const noexcept {
-        const uint64_t physical = m_dmaTranslator ? m_dmaTranslator(address, length) : 0;
+        const uint64_t physical = m_dmaTranslator
+            ? m_dmaTranslator(m_callbackContext, address, length) : 0;
         if (!physical || (!m_supports64BitDma && physical > UINT32_MAX)) return 0;
         if (!m_supports64BitDma && length && length - 1 > UINT32_MAX - physical) return 0;
         return physical;
@@ -581,10 +668,13 @@ public:
      * @return true on DMA transfer success, false on fault/timeout.
      */
     bool readSectors(uint64_t lba, uint16_t sectorCount, void* dest) noexcept {
+        m_lastReadFailureReason = 0;
+        PortCommandGuard command(m_portCommandActive);
+        if (!command) { m_lastReadFailureReason = 1; return false; }
         if (!m_port1Online || !dest || sectorCount == 0 || sectorCount > 128 ||
             !m_port1TotalSectors || lba >= m_port1TotalSectors ||
             sectorCount > m_port1TotalSectors - lba) {
-            return false;
+            { m_lastReadFailureReason = 2; return false; }
         }
 
         volatile uint32_t* pRegs = getPortRegs(m_dataPort);
@@ -597,7 +687,7 @@ public:
 
         const size_t transferBytes = static_cast<size_t>(sectorCount) * 512;
         uint64_t bufPhys = dmaAddress(dest, transferBytes);
-        if (!bufPhys) return false;
+        if (!bufPhys) { m_lastReadFailureReason = 3; return false; }
         s_ahciCmdTable.prdt[0].dba  = static_cast<uint32_t>(bufPhys & 0xFFFFFFFF);
         s_ahciCmdTable.prdt[0].dbau = static_cast<uint32_t>((bufPhys >> 32) & 0xFFFFFFFF);
         s_ahciCmdTable.prdt[0].dbc  = static_cast<uint32_t>(transferBytes - 1);
@@ -635,11 +725,13 @@ public:
         }
 
         if (pRegs[PORT_REG_CI / 4] & 1) {
+            m_lastReadFailureReason = 4;
             return false; // Timeout
         }
 
         uint32_t tfd = pRegs[PORT_REG_TFD / 4];
         if (tfd & (1 | 0x20)) { // Error (bit 0) or Drive Fault (bit 5)
+            m_lastReadFailureReason = 5;
             return false;
         }
 
@@ -650,6 +742,8 @@ public:
      * @brief Direct 48-bit LBA Sector Write via AHCI Bus-Master DMA.
      */
     bool writeSectors(uint64_t lba, uint16_t sectorCount, const void* src) noexcept {
+        PortCommandGuard command(m_portCommandActive);
+        if (!command) return false;
         if (!m_port1Online || !src || sectorCount == 0 || sectorCount > 128 ||
             !m_port1TotalSectors || lba >= m_port1TotalSectors ||
             sectorCount > m_port1TotalSectors - lba) {
@@ -714,6 +808,8 @@ public:
     // one of the IDENTIFY FLUSH CACHE command bits; otherwise durability is
     // explicitly unavailable. This command has no data phase.
     NtStatus flushCache() noexcept {
+        PortCommandGuard command(m_portCommandActive);
+        if (!command) return NtStatus::DeviceBusy;
         if (!m_port1Online) return NtStatus::DeviceNotReady;
         if (!m_supportsFlushCacheExt && !m_supportsFlushCache)
             return NtStatus::NotSupported;

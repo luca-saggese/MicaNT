@@ -232,7 +232,13 @@ typedef struct MicaWin32kCursorInfo {
 #define MICANT_WIN32K_CURSOR_IMAGE_VERSION 1u
 MICANT_WIN32K_API int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage*);
 MICANT_WIN32K_API int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo*);
-MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(const MicaThemeSnapshot*);
+#ifdef __cplusplus
+MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(
+    const MicaThemeSnapshot*, const MicaThemeCaptionImageSet* = nullptr);
+#else
+MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(
+    const MicaThemeSnapshot*, const MicaThemeCaptionImageSet*);
+#endif
 MICANT_WIN32K_API int32_t MicaWin32kGetThemeSnapshot(MicaThemeSnapshot*);
 MICANT_WIN32K_API int32_t MicaWin32kSetTaskbarButtonBounds(
     void*, const MicaWin32kRect*);

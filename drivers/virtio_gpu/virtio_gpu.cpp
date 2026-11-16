@@ -48,6 +48,7 @@ constexpr uint32_t kCmdResourceAttachBacking = 0x0106;
 constexpr uint32_t kRespOkNoData = 0x1100;
 constexpr uint32_t kRespOkDisplayInfo = 0x1101;
 constexpr uint32_t kCmdCtxCreate = 0x0200;
+constexpr uint32_t kCmdCtxDestroy = 0x0201;
 constexpr uint32_t kCmdCtxAttachResource = 0x0202;
 constexpr uint32_t kCmdResourceCreate3D = 0x0204;
 constexpr uint32_t kCmdTransferToHost3D = 0x0205;
@@ -274,9 +275,11 @@ struct alignas(4096) DeviceState {
     uint32_t nextResourceId{100};
     uint64_t compositionFrame{};
     const KernelServices* services{};
+    DisplayDevice* display{};
     LayerResource layers[kMaxCompositionLayers]{};
     volatile uint32_t queueLock{};
     bool virglOffered{};
+    bool virglNegotiated{};
     bool virglActive{};
     bool frameNeedsFullTransfer{};
     bool frameContentsInitialized{};
@@ -417,8 +420,8 @@ bool initializeQueue(const PciLocation& location, const PciCaps& caps,
         return false;
     }
 
-    // VIRGL is optional: negotiate it when offered, while retaining VERSION_1
-    // and the 2D path so hosts without virglrenderer still work.
+    // VIRGL is optional. If the device advertises it but rejects the feature
+    // set, reset and negotiate VERSION_1 alone so the 2D display stays usable.
     g_device.virglOffered = (featuresLow & kVirtioGpuFeatureVirgl) != 0;
     mmioWrite<uint32_t>(g_device.common, 8, 0);
     mmioWrite<uint32_t>(g_device.common, 12, g_device.virglOffered ? kVirtioGpuFeatureVirgl : 0);
@@ -427,8 +430,35 @@ bool initializeQueue(const PciLocation& location, const PciCaps& caps,
     mmioWrite<uint8_t>(g_device.common, 20,
         kVirtioStatusAcknowledge | kVirtioStatusDriver | kVirtioStatusFeaturesOk);
     if ((mmioRead<uint8_t>(g_device.common, 20) & kVirtioStatusFeaturesOk) == 0) {
-        if (services.Log) services.Log(services.Context, "virtio_gpu.sys: device rejected negotiated feature set");
-        return false;
+        if (!g_device.virglOffered) {
+            if (services.Log) services.Log(services.Context,
+                "virtio_gpu.sys: device rejected VERSION_1 feature set");
+            return false;
+        }
+        if (services.Log) services.Log(services.Context,
+            "virtio_gpu.sys: VIRGL feature set rejected; retrying VirtIO 2D");
+        mmioWrite<uint8_t>(g_device.common, 20, 0);
+        for (uint32_t spin = 0; spin < 1000000u &&
+             mmioRead<uint8_t>(g_device.common, 20) != 0; ++spin) cpuRelax();
+        if (mmioRead<uint8_t>(g_device.common, 20) != 0) return false;
+        mmioWrite<uint8_t>(g_device.common, 20, kVirtioStatusAcknowledge);
+        mmioWrite<uint8_t>(g_device.common, 20,
+            kVirtioStatusAcknowledge | kVirtioStatusDriver);
+        mmioWrite<uint32_t>(g_device.common, 8, 0);
+        mmioWrite<uint32_t>(g_device.common, 12, 0);
+        mmioWrite<uint32_t>(g_device.common, 8, 1);
+        mmioWrite<uint32_t>(g_device.common, 12, kVirtioFeatureVersion1);
+        mmioWrite<uint8_t>(g_device.common, 20,
+            kVirtioStatusAcknowledge | kVirtioStatusDriver | kVirtioStatusFeaturesOk);
+        if ((mmioRead<uint8_t>(g_device.common, 20) & kVirtioStatusFeaturesOk) == 0) {
+            if (services.Log) services.Log(services.Context,
+                "virtio_gpu.sys: device rejected VirtIO 2D fallback features");
+            return false;
+        }
+        g_device.virglOffered = true;
+        g_device.virglNegotiated = false;
+    } else {
+        g_device.virglNegotiated = g_device.virglOffered;
     }
 
     mmioWrite<uint16_t>(g_device.common, 22, 0); // control queue
@@ -612,23 +642,37 @@ void destroyResource3D(uint32_t resourceId) {
 }
 
 bool setupVirgl() {
-    if (!g_device.virglOffered) return false;
+    if (!g_device.virglNegotiated) return false;
     CommandContextCreate context{};
     initHeader(context.header, kCmdCtxCreate);
     context.header.contextId = kVirglContextId;
     constexpr char contextName[] = "MicaNT Desktop Compositor";
     context.nameLength = sizeof(contextName) - 1;
     for (size_t i = 0; i < sizeof(contextName); ++i) context.name[i] = contextName[i];
-    if (!sendNoData(&context, sizeof(context))) return false;
+    if (!sendNoData(&context, sizeof(context))) {
+        CommandHeader destroy{};
+        initHeader(destroy, kCmdCtxDestroy);
+        destroy.contextId = kVirglContextId;
+        (void)sendNoData(&destroy, sizeof(destroy));
+        return false;
+    }
 
     if (!createResource3D(kVirglOutputResourceId, g_device.width, g_device.height,
                           reinterpret_cast<const uint32_t*>(g_device.dma->frame), g_device.pitch)) {
         destroyResource3D(kVirglOutputResourceId);
+        CommandHeader destroy{};
+        initHeader(destroy, kCmdCtxDestroy);
+        destroy.contextId = kVirglContextId;
+        (void)sendNoData(&destroy, sizeof(destroy));
         return false;
     }
     if (!transferResource3D(kVirglOutputResourceId,
             reinterpret_cast<const uint32_t*>(g_device.dma->frame), g_device.width, g_device.height, g_device.pitch)) {
         destroyResource3D(kVirglOutputResourceId);
+        CommandHeader destroy{};
+        initHeader(destroy, kCmdCtxDestroy);
+        destroy.contextId = kVirglContextId;
+        (void)sendNoData(&destroy, sizeof(destroy));
         return false;
     }
     CommandSetScanout scanout{};
@@ -638,6 +682,10 @@ bool setupVirgl() {
     scanout.resourceId = kVirglOutputResourceId;
     if (!sendNoData(&scanout, sizeof(scanout))) {
         destroyResource3D(kVirglOutputResourceId);
+        CommandHeader destroy{};
+        initHeader(destroy, kCmdCtxDestroy);
+        destroy.contextId = kVirglContextId;
+        (void)sendNoData(&destroy, sizeof(destroy));
         return false;
     }
     g_device.virglActive = true;
@@ -730,6 +778,7 @@ bool presentComposition(void*, const uint32_t* base, uint32_t width, uint32_t he
     if (!transferResource3D(kVirglOutputResourceId,
             reinterpret_cast<const uint32_t*>(g_device.dma->frame), width, height, g_device.pitch)) return false;
 
+    bool submittedComposition = false;
     for (uint32_t index = 0; index < layerCount; ++index) {
         const auto& layer = layers[index];
         if (!layer.Pixels || !layer.Width || !layer.Height || layer.Pitch < layer.Width ||
@@ -751,7 +800,11 @@ bool presentComposition(void*, const uint32_t* base, uint32_t width, uint32_t he
                 static_cast<uint32_t>(sourceY), static_cast<uint32_t>(destinationX),
                 static_cast<uint32_t>(destinationY), static_cast<uint32_t>(copyWidth),
                 static_cast<uint32_t>(copyHeight))) return false;
+        submittedComposition = true;
     }
+    if (submittedComposition && g_device.display)
+        __atomic_store_n(reinterpret_cast<uint32_t*>(&g_device.display->Backend),
+            static_cast<uint32_t>(DisplayBackend::VirglAccelerated), __ATOMIC_RELEASE);
     return true;
 }
 
@@ -926,9 +979,11 @@ extern "C" int32_t DriverEntry(micant::boot_driver::DriverObject* driver,
     }
     const bool hasVirglCompositor = setupVirgl();
     if (!hasVirglCompositor && services.Log) {
-        services.Log(services.Context, g_device.virglOffered
-            ? "virtio_gpu.sys: VirGL initialization failed; using VirtIO 2D scanout"
-            : "virtio_gpu.sys: VirGL not offered; using VirtIO 2D scanout");
+        services.Log(services.Context, !g_device.virglOffered
+            ? "virtio_gpu.sys: VIRGL not offered; using VirtIO 2D scanout"
+            : (!g_device.virglNegotiated
+                ? "virtio_gpu.sys: VIRGL negotiation rejected; using VirtIO 2D scanout"
+                : "virtio_gpu.sys: VIRGL setup failed; using VirtIO 2D scanout"));
     }
 
     driver->Flags |= DRIVER_FLAG_DISPLAY;
@@ -942,6 +997,9 @@ extern "C" int32_t DriverEntry(micant::boot_driver::DriverObject* driver,
     driver->Display->Context = &g_device;
     driver->Display->PresentFrame = presentFrame;
     driver->Display->PresentComposition = hasVirglCompositor ? presentComposition : nullptr;
+    driver->Display->Backend = hasVirglCompositor
+        ? DisplayBackend::Virgl : DisplayBackend::Virtio2D;
+    g_device.display = driver->Display;
     if (services.Log) services.Log(services.Context, "virtio_gpu.sys: VirtIO 1.0 2D scanout initialized");
     return STATUS_SUCCESS;
 }

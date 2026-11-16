@@ -45,7 +45,8 @@ public:
                              std::u16string_view fullPath = {}) noexcept;
     // The supplied strings are borrowed until image finalization.
     NtStatus setNativeProcessParameters(std::u16string_view imagePath,
-                                        std::u16string_view commandLine) noexcept;
+                                        std::u16string_view commandLine,
+                                        std::u16string_view currentDirectory = {}) noexcept;
     NtStatus finalizeNativeImages() noexcept;
     NtStatus initializeMainImageFromSection(section::SectionObject& image,
                                             ob::ObjectHeader* sectionReference) noexcept;
@@ -61,6 +62,7 @@ public:
         return {processImageName_, processImageNameLength_};
     }
     [[nodiscard]] uintptr_t userPebAddress() const noexcept { return userPeb_; }
+    [[nodiscard]] uintptr_t userProcessParametersAddress() const noexcept { return userProcessParameters_; }
     [[nodiscard]] bool nativeImagesFinalized() const noexcept { return imagesFinalized_; }
     [[nodiscard]] std::span<const pe::PeImageView64::TlsLayout> userTlsLayouts() const noexcept {
         return {userTlsLayouts_.get(), userTlsCount_};
@@ -129,6 +131,7 @@ private:
     std::unique_ptr<OwnedImageInput[]> ownedImageInputs_{};
     std::unique_ptr<char16_t[]> ownedImagePath_{};
     std::unique_ptr<char16_t[]> ownedCommandLine_{};
+    std::unique_ptr<char16_t[]> ownedCurrentDirectory_{};
     bool imagesFinalized_{false};
     bool imageStartupCallbacksStarted_{false};
     uintptr_t userPeb_{0};
@@ -141,6 +144,7 @@ private:
     std::array<std::u16string_view, 16> nativeImagePaths_{};
     std::u16string_view processImagePath_{};
     std::u16string_view processCommandLine_{};
+    std::u16string_view processCurrentDirectory_{};
     bool processParametersConfigured_{false};
     bool imageSectionBacked_{false};
     std::unique_ptr<pe::PeImageView64::TlsLayout[]> userTlsLayouts_{};

@@ -265,6 +265,11 @@ template<typename Initializer>
         }
         if (!g_releaseHeapRange(baseAddress, pageCount))
             stop("ExHeap: failed to return a partial kernel VA range; stopping\r\n");
+        logHexValue("ExHeap failed request bytes=", requestedSize);
+        logHexValue("ExHeap failed request pages=", pageCount);
+        logHexValue("ExHeap mapped before rollback=", mappedPages);
+        logHexValue("ExHeap PFNs available after rollback=",
+            database.getFreeCount() + database.getZeroedCount() + database.getStandbyCount());
         rejectAllocation("ExHeap: allocation rejected (physical pages unavailable)\r\n");
         return nullptr;
     }
@@ -366,31 +371,71 @@ void releaseMemory(void* pointer) noexcept {
 namespace {
 
 using CommitRange = micant::mm::VirtualAddressDescriptor::CommitRange;
+struct CommitRangePoolPage;
+struct CommitRangeSlot {
+    CommitRangeSlot* next;
+    CommitRangePoolPage* owner;
+    alignas(CommitRange) unsigned char object[sizeof(CommitRange)];
+};
+struct CommitRangePoolPage {
+    CommitRangePoolPage* next;
+    size_t slotCount;
+    size_t inUse;
+};
+
 std::atomic_flag g_commitRangePoolLock = ATOMIC_FLAG_INIT;
-void* g_commitRangeFreeList{};
-void* g_commitRangePoolPages{};
+CommitRangeSlot* g_commitRangeFreeList{};
+CommitRangePoolPage* g_commitRangePoolPages{};
 
-void lockCommitRangePool() noexcept {
+uint64_t lockCommitRangePool() noexcept {
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+#else
+    constexpr uint64_t flags = 0;
+#endif
     while (g_commitRangePoolLock.test_and_set(std::memory_order_acquire)) {}
+    return flags;
 }
 
-void unlockCommitRangePool() noexcept {
+void unlockCommitRangePool(uint64_t flags) noexcept {
     g_commitRangePoolLock.clear(std::memory_order_release);
+#if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+#else
+    (void)flags;
+#endif
 }
 
-void addCommitRangePoolPage(void* page) noexcept {
-    *static_cast<void**>(page) = g_commitRangePoolPages;
+void addCommitRangePoolPage(CommitRangePoolPage* page) noexcept {
+    page->next = g_commitRangePoolPages;
+    page->slotCount = 0;
+    page->inUse = 0;
     g_commitRangePoolPages = page;
-    constexpr size_t alignment = alignof(CommitRange) > alignof(void*)
-        ? alignof(CommitRange) : alignof(void*);
-    constexpr size_t stride = (sizeof(CommitRange) + alignment - 1) & ~(alignment - 1);
-    uintptr_t cursor = (reinterpret_cast<uintptr_t>(page) + sizeof(void*) + alignment - 1) &
-        ~static_cast<uintptr_t>(alignment - 1);
+
+    const uintptr_t start = (reinterpret_cast<uintptr_t>(page) + sizeof(*page) +
+        alignof(CommitRangeSlot) - 1) & ~static_cast<uintptr_t>(alignof(CommitRangeSlot) - 1);
     const uintptr_t end = reinterpret_cast<uintptr_t>(page) + 4000;
-    while (cursor <= end && stride <= end - cursor) {
-        *reinterpret_cast<void**>(cursor) = g_commitRangeFreeList;
-        g_commitRangeFreeList = reinterpret_cast<void*>(cursor);
-        cursor += stride;
+    for (uintptr_t cursor = start; cursor <= end && sizeof(CommitRangeSlot) <= end - cursor;
+         cursor += sizeof(CommitRangeSlot)) {
+        auto* slot = reinterpret_cast<CommitRangeSlot*>(cursor);
+        slot->owner = page;
+        slot->next = g_commitRangeFreeList;
+        g_commitRangeFreeList = slot;
+        ++page->slotCount;
+    }
+}
+
+void unlinkCommitRangePage(CommitRangePoolPage* page) noexcept {
+    auto** pageLink = &g_commitRangePoolPages;
+    while (*pageLink && *pageLink != page) pageLink = &(*pageLink)->next;
+    if (!*pageLink) stop("ExHeap: CommitRange pool page ownership lost; stopping\r\n");
+    *pageLink = page->next;
+
+    auto** slotLink = &g_commitRangeFreeList;
+    while (*slotLink) {
+        if ((*slotLink)->owner == page) *slotLink = (*slotLink)->next;
+        else slotLink = &(*slotLink)->next;
     }
 }
 
@@ -399,26 +444,40 @@ void addCommitRangePoolPage(void* page) noexcept {
 void* micant::mm::VirtualAddressDescriptor::CommitRange::operator new(
     size_t size, const std::nothrow_t&) noexcept {
     if (size != sizeof(CommitRange)) return nullptr;
-    lockCommitRangePool();
+    uint64_t flags = lockCommitRangePool();
     if (!g_commitRangeFreeList) {
-        unlockCommitRangePool();
-        void* page = allocateMemory(4000, kDefaultAlignment);
+        unlockCommitRangePool(flags);
+        auto* page = static_cast<CommitRangePoolPage*>(allocateMemory(4000, kDefaultAlignment));
         if (!page) return nullptr;
-        lockCommitRangePool();
+        flags = lockCommitRangePool();
         addCommitRangePoolPage(page);
     }
-    void* slot = g_commitRangeFreeList;
-    g_commitRangeFreeList = *static_cast<void**>(slot);
-    unlockCommitRangePool();
-    return slot;
+    auto* slot = g_commitRangeFreeList;
+    g_commitRangeFreeList = slot->next;
+    ++slot->owner->inUse;
+    unlockCommitRangePool(flags);
+    return slot->object;
 }
 
 void micant::mm::VirtualAddressDescriptor::CommitRange::operator delete(void* pointer) noexcept {
     if (!pointer) return;
-    lockCommitRangePool();
-    *static_cast<void**>(pointer) = g_commitRangeFreeList;
-    g_commitRangeFreeList = pointer;
-    unlockCommitRangePool();
+    auto* slot = reinterpret_cast<CommitRangeSlot*>(
+        static_cast<unsigned char*>(pointer) - offsetof(CommitRangeSlot, object));
+    CommitRangePoolPage* emptyPage{};
+    const uint64_t flags = lockCommitRangePool();
+    if (!slot->owner || slot->owner->inUse == 0)
+        stop("ExHeap: invalid CommitRange pool free; stopping\r\n");
+    auto* page = slot->owner;
+    --page->inUse;
+    if (page->inUse == 0) {
+        unlinkCommitRangePage(page);
+        emptyPage = page;
+    } else {
+        slot->next = g_commitRangeFreeList;
+        g_commitRangeFreeList = slot;
+    }
+    unlockCommitRangePool(flags);
+    if (emptyPage) releaseMemory(emptyPage);
 }
 
 void micant::mm::VirtualAddressDescriptor::CommitRange::operator delete(

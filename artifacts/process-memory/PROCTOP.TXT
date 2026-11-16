@@ -1,0 +1,7 @@
+
+Process memory snapshot 1  (resident working set and private commit)
+PID       WS (resident)       Private commit      Threads Handles  Image
+151  104 MiB (106840 KiB)  5 MiB (5400 KiB)  1       0  explorer.exe
+149  18 MiB (19180 KiB)  0 MiB (48 KiB)  1       0  compositor.exe
+153  1 MiB (1372 KiB)  0 MiB (48 KiB)  1       1  procdump.exe
+47  0 MiB (0 KiB)  0 MiB (0 KiB)  0       0  <system>

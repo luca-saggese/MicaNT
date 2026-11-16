@@ -14,6 +14,8 @@
 #include <cwchar>
 #include <cstdarg>
 #include <algorithm>
+#include <array>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "micant/shared/ntdef.hpp"
@@ -230,37 +232,471 @@ inline win32::BOOL GetComboBoxInfo(win32::HWND /*hwndCombo*/, COMBOBOXINFO* pcbi
 // 3. Menus & Accelerators
 // ----------------------------------------------------------------------------
 
-inline HMENU CreateMenu() noexcept { static uint64_t dummy = 0x3001; return reinterpret_cast<HMENU>(&dummy); }
-inline HMENU CreatePopupMenu() noexcept { static uint64_t dummy = 0x3002; return reinterpret_cast<HMENU>(&dummy); }
-inline HMENU LoadMenuW(HINSTANCE /*hInstance*/, const wchar_t* /*lpMenuName*/) noexcept { static uint64_t dummy = 0x3003; return reinterpret_cast<HMENU>(&dummy); }
-inline HMENU LoadMenuA(HINSTANCE /*hInstance*/, const char* /*lpMenuName*/) noexcept { static uint64_t dummy = 0x3004; return reinterpret_cast<HMENU>(&dummy); }
-inline win32::BOOL DestroyMenu(HMENU /*hMenu*/) noexcept { return win32::TRUE; }
-inline win32::BOOL AppendMenuA(HMENU /*hMenu*/, win32::UINT /*uFlags*/, UINT_PTR /*uIDNewItem*/, const char* /*lpNewItem*/) noexcept { return win32::TRUE; }
-inline win32::BOOL AppendMenuW(HMENU /*hMenu*/, win32::UINT /*uFlags*/, UINT_PTR /*uIDNewItem*/, const wchar_t* /*lpNewItem*/) noexcept { return win32::TRUE; }
-inline win32::BOOL InsertMenuW(HMENU /*hMenu*/, win32::UINT /*uPosition*/, win32::UINT /*uFlags*/, UINT_PTR /*uIDNewItem*/, const wchar_t* /*lpNewItem*/) noexcept { return win32::TRUE; }
-inline win32::BOOL InsertMenuItemW(HMENU /*hmenu*/, win32::UINT /*item*/, win32::BOOL /*fByPosition*/, const MENUITEMINFOW* /*lpmi*/) noexcept { return win32::TRUE; }
-inline win32::BOOL SetMenuItemInfoW(HMENU /*hmenu*/, win32::UINT /*item*/, win32::BOOL /*fByPosition*/, const MENUITEMINFOW* /*lpmii*/) noexcept { return win32::TRUE; }
-inline win32::BOOL GetMenuItemInfoW(HMENU /*hMenu*/, win32::UINT /*item*/, win32::BOOL /*fByPosition*/, MENUITEMINFOW* /*lpmii*/) noexcept { return win32::TRUE; }
-inline win32::BOOL ModifyMenuW(HMENU /*hMnu*/, win32::UINT /*uPosition*/, win32::UINT /*uFlags*/, UINT_PTR /*uIDNewItem*/, const wchar_t* /*lpNewItem*/) noexcept { return win32::TRUE; }
-inline win32::BOOL DeleteMenu(HMENU /*hMenu*/, win32::UINT /*uPosition*/, win32::UINT /*uFlags*/) noexcept { return win32::TRUE; }
-inline win32::BOOL RemoveMenu(HMENU /*hMenu*/, win32::UINT /*uPosition*/, win32::UINT /*uFlags*/) noexcept { return win32::TRUE; }
-inline HMENU GetMenu(win32::HWND /*hWnd*/) noexcept { return nullptr; }
-inline win32::BOOL SetMenu(win32::HWND /*hWnd*/, HMENU /*hMenu*/) noexcept { return win32::TRUE; }
-inline win32::BOOL DrawMenuBar(win32::HWND /*hWnd*/) noexcept { return win32::TRUE; }
-inline int GetMenuItemCount(HMENU /*hMenu*/) noexcept { return 0; }
-inline win32::UINT GetMenuItemID(HMENU /*hMenu*/, int /*nPos*/) noexcept { return 0; }
-inline int GetMenuStringW(HMENU /*hMenu*/, win32::UINT /*uIDItem*/, wchar_t* lpString, int cchMax, win32::UINT /*flags*/) noexcept {
-    if (lpString && cchMax > 0) lpString[0] = L'\0';
-    return 0;
+namespace menu_detail {
+constexpr size_t kMenuCapacity = 32;
+constexpr size_t kItemCapacity = 64;
+constexpr size_t kTextCapacity = 256;
+constexpr size_t kWindowAttachmentCapacity = 64;
+constexpr uintptr_t kHandleTag = sizeof(uintptr_t) == 8
+    ? uintptr_t{0x4D4E550000000000ull} : uintptr_t{0x4D4E0000u};
+constexpr win32::UINT kByPosition = 0x0400u;
+constexpr win32::UINT kPopup = 0x0010u;
+constexpr win32::UINT kSeparator = 0x0800u;
+constexpr win32::UINT kChecked = 0x0008u;
+constexpr win32::UINT kDisabled = 0x0003u;
+constexpr win32::UINT kGrayed = 0x0001u;
+constexpr win32::UINT kOwnerDraw = 0x0100u;
+constexpr win32::UINT kBreak = 0x0040u;
+constexpr win32::UINT kBarBreak = 0x0020u;
+constexpr win32::UINT kRadioCheck = 0x0200u;
+constexpr win32::UINT kDefault = 0x1000u;
+constexpr win32::UINT kHilite = 0x0080u;
+constexpr win32::UINT kBitmap = 0x0004u;
+constexpr win32::UINT kHelp = 0x4000u;
+constexpr win32::UINT kSystemMenu = 0x2000u;
+constexpr win32::UINT kUnsupportedFlags = kBitmap;
+constexpr uintptr_t kHandleIndexMask = ~kHandleTag;
+constexpr win32::UINT kMiimState = 0x00000001u;
+constexpr win32::UINT kMiimId = 0x00000002u;
+constexpr win32::UINT kMiimSubMenu = 0x00000004u;
+constexpr win32::UINT kMiimCheckmarks = 0x00000008u;
+constexpr win32::UINT kMiimType = 0x00000010u;
+constexpr win32::UINT kMiimData = 0x00000020u;
+constexpr win32::UINT kMiimString = 0x00000040u;
+constexpr win32::UINT kMiimBitmap = 0x00000080u;
+constexpr win32::UINT kSupportedMiim = kMiimState | kMiimId | kMiimSubMenu |
+    kMiimCheckmarks | kMiimType | kMiimData | kMiimString | kMiimBitmap;
+
+struct Item {
+    win32::UINT type{}, state{}, id{};
+    HMENU submenu{};
+    void* checkedBitmap{};
+    void* uncheckedBitmap{};
+    void* itemBitmap{};
+    win32::ULONG_PTR data{};
+    wchar_t text[kTextCapacity]{};
+};
+struct Menu { uintptr_t handle{}; uint16_t count{}; bool active{}; Item items[kItemCapacity]{}; };
+struct Attachment { HWND window{}; HMENU menu{}; };
+inline std::mutex g_lock;
+inline Menu g_menus[kMenuCapacity]{};
+inline Attachment g_attachments[kWindowAttachmentCapacity]{};
+inline uintptr_t g_nextHandle{1};
+
+inline HMENU makeHandle(uintptr_t index) noexcept {
+    return reinterpret_cast<HMENU>(kHandleTag | index);
 }
-inline win32::UINT GetMenuState(HMENU /*hMenu*/, win32::UINT /*uId*/, win32::UINT /*uFlags*/) noexcept { return 0; }
-inline HMENU GetSubMenu(HMENU /*hMenu*/, int /*nPos*/) noexcept { return nullptr; }
-inline win32::DWORD CheckMenuItem(HMENU /*hMenu*/, win32::UINT /*uIDCheckItem*/, win32::UINT /*uCheck*/) noexcept { return 0; }
-inline win32::BOOL CheckMenuRadioItem(HMENU /*hmenu*/, win32::UINT /*first*/, win32::UINT /*last*/, win32::UINT /*check*/, win32::UINT /*flags*/) noexcept { return win32::TRUE; }
-inline win32::BOOL EnableMenuItem(HMENU /*hMenu*/, win32::UINT /*uIDEnableItem*/, win32::UINT /*uEnable*/) noexcept { return win32::TRUE; }
-inline win32::BOOL SetMenuItemBitmaps(HMENU /*hMenu*/, win32::UINT /*uPosition*/, win32::UINT /*uFlags*/, void* /*hBitmapUnchecked*/, void* /*hBitmapChecked*/) noexcept { return win32::TRUE; }
-inline win32::BOOL TrackPopupMenu(HMENU /*hMenu*/, win32::UINT /*uFlags*/, int /*x*/, int /*y*/, int /*nReserved*/, win32::HWND /*hWnd*/, const RECT* /*prcRect*/) noexcept { return win32::TRUE; }
-inline win32::BOOL TrackPopupMenuEx(HMENU /*hMenu*/, win32::UINT /*uFlags*/, int /*x*/, int /*y*/, win32::HWND /*hWnd*/, void* /*lptpm*/) noexcept { return win32::TRUE; }
+inline Menu* find(HMENU handle) noexcept {
+    if (!handle) return nullptr;
+    for (auto& menu : g_menus)
+        if (menu.active && menu.handle == reinterpret_cast<uintptr_t>(handle)) return &menu;
+    return nullptr;
+}
+inline Menu* create() noexcept {
+    if (!g_nextHandle || (g_nextHandle & ~kHandleIndexMask)) return nullptr;
+    for (auto& menu : g_menus) {
+        if (menu.active) continue;
+        menu = {};
+        menu.handle = kHandleTag | g_nextHandle++;
+        menu.active = true;
+        return &menu;
+    }
+    return nullptr;
+}
+inline bool copyText(wchar_t (&target)[kTextCapacity], const wchar_t* source) noexcept {
+    target[0] = L'\0';
+    if (!source) return true;
+    size_t length = 0;
+    while (length < kTextCapacity && source[length]) ++length;
+    if (length == kTextCapacity) return false;
+    std::memcpy(target, source, (length + 1) * sizeof(wchar_t));
+    return true;
+}
+inline bool contains(HMENU root, HMENU target, size_t depth) noexcept {
+    auto* menu = find(root);
+    if (!menu || depth >= kMenuCapacity) return false;
+    if (root == target) return true;
+    for (size_t index = 0; index < menu->count; ++index)
+        if (menu->items[index].submenu &&
+            contains(menu->items[index].submenu, target, depth + 1)) return true;
+    return false;
+}
+inline int findItem(Menu& menu, win32::UINT item, bool byPosition) noexcept {
+    if (byPosition) return item < menu.count ? static_cast<int>(item) : -1;
+    for (size_t index = 0; index < menu.count; ++index)
+        if (menu.items[index].id == item) return static_cast<int>(index);
+    return -1;
+}
+inline bool setItem(Menu& menu, size_t index, win32::UINT flags,
+                    UINT_PTR idOrSubmenu, const wchar_t* text) noexcept {
+    if (index >= kItemCapacity || (flags & kUnsupportedFlags)) return false;
+    HMENU submenu = nullptr;
+    if (flags & kPopup) {
+        submenu = reinterpret_cast<HMENU>(idOrSubmenu);
+        const HMENU parent = reinterpret_cast<HMENU>(menu.handle);
+        if (!find(submenu) || contains(submenu, parent, 0)) return false;
+    }
+    Item item{};
+    item.type = (flags & (kSeparator | kBreak | kBarBreak | kRadioCheck |
+                          kOwnerDraw | kHelp | kSystemMenu));
+    item.state = flags & (kChecked | kDisabled | kGrayed | kDefault | kHilite);
+    item.id = (flags & kPopup) ? 0 : static_cast<win32::UINT>(idOrSubmenu);
+    item.submenu = submenu;
+    if (!(flags & kSeparator) && !copyText(item.text, text)) return false;
+    menu.items[index] = item;
+    if (index == menu.count) ++menu.count;
+    return true;
+}
+inline bool setInfo(Menu& parent, Item& item, const MENUITEMINFOW& info) noexcept {
+    if (info.fMask & ~kSupportedMiim) return false;
+    if ((info.fMask & kMiimSubMenu) && info.hSubMenu &&
+        (!find(info.hSubMenu) || contains(info.hSubMenu,
+            reinterpret_cast<HMENU>(parent.handle), 0))) return false;
+    Item updated = item;
+    if (info.fMask & kMiimType) updated.type = info.fType;
+    if (info.fMask & kMiimState) updated.state = info.fState;
+    if (info.fMask & kMiimId) updated.id = info.wID;
+    if (info.fMask & kMiimSubMenu) updated.submenu = info.hSubMenu;
+    if (info.fMask & kMiimCheckmarks) {
+        updated.checkedBitmap = info.hbmpChecked;
+        updated.uncheckedBitmap = info.hbmpUnchecked;
+    }
+    if (info.fMask & kMiimBitmap) updated.itemBitmap = info.hbmpItem;
+    if (info.fMask & kMiimData) updated.data = info.dwItemData;
+    if (info.fMask & kMiimString) {
+        if (!copyText(updated.text, info.dwTypeData)) return false;
+    }
+    item = updated;
+    return true;
+}
+inline bool destroyTree(HMENU handle, size_t depth) noexcept {
+    auto* menu = find(handle);
+    if (!menu || depth >= kMenuCapacity) return false;
+    const uintptr_t doomed = menu->handle;
+    for (size_t index = 0; index < menu->count; ++index) {
+        if (menu->items[index].submenu &&
+            !destroyTree(menu->items[index].submenu, depth + 1)) return false;
+    }
+    for (auto& parent : g_menus) {
+        if (!parent.active || &parent == menu) continue;
+        for (size_t index = 0; index < parent.count; ++index)
+            if (parent.items[index].submenu == handle)
+                parent.items[index].submenu = nullptr;
+    }
+    for (auto& attachment : g_attachments)
+        if (attachment.menu == reinterpret_cast<HMENU>(doomed)) attachment.menu = nullptr;
+    *menu = {};
+    return true;
+}
+inline win32::BOOL insertInfo(HMENU handle, win32::UINT item, bool byPosition,
+                               const MENUITEMINFOW* info) noexcept {
+    auto* menu = find(handle);
+    if (!menu || !info || info->cbSize < sizeof(MENUITEMINFOW) ||
+        menu->count == kItemCapacity || (byPosition && item > menu->count))
+        return win32::FALSE;
+    size_t index = menu->count;
+    if (byPosition) index = item;
+    else {
+        const int found = findItem(*menu, item, false);
+        if (found >= 0) index = static_cast<size_t>(found);
+        else return win32::FALSE;
+    }
+    for (size_t move = menu->count; move > index; --move)
+        menu->items[move] = menu->items[move - 1];
+    menu->items[index] = {};
+    if (!setInfo(*menu, menu->items[index], *info)) {
+        for (size_t move = index; move < menu->count; ++move)
+            menu->items[move] = menu->items[move + 1];
+        menu->items[menu->count] = {};
+        return win32::FALSE;
+    }
+    ++menu->count;
+    return win32::TRUE;
+}
+} // namespace menu_detail
+
+inline HMENU CreateMenu() noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::create();
+    return menu ? reinterpret_cast<HMENU>(menu->handle) : nullptr;
+}
+inline HMENU CreatePopupMenu() noexcept { return CreateMenu(); }
+inline HMENU LoadMenuW(HINSTANCE, const wchar_t*) noexcept { return nullptr; }
+inline HMENU LoadMenuA(HINSTANCE, const char*) noexcept { return nullptr; }
+inline win32::BOOL DestroyMenu(HMENU handle) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    return menu_detail::destroyTree(handle, 0) ? win32::TRUE : win32::FALSE;
+}
+inline win32::BOOL AppendMenuW(HMENU handle, win32::UINT flags, UINT_PTR item,
+                               const wchar_t* text) noexcept {
+    if (flags & (menu_detail::kByPosition | menu_detail::kOwnerDraw))
+        return win32::FALSE;
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    return menu && menu->count < menu_detail::kItemCapacity &&
+        menu_detail::setItem(*menu, menu->count, flags, item, text)
+        ? win32::TRUE : win32::FALSE;
+}
+inline win32::BOOL AppendMenuA(HMENU handle, win32::UINT flags, UINT_PTR item,
+                               const char* text) noexcept {
+    if (flags & (menu_detail::kBitmap | menu_detail::kOwnerDraw |
+                 menu_detail::kByPosition)) return win32::FALSE;
+    if (!text) return AppendMenuW(handle, flags, item, nullptr);
+    wchar_t converted[menu_detail::kTextCapacity]{};
+    size_t index = 0;
+    while (index < menu_detail::kTextCapacity && text[index]) {
+        const unsigned char ch = static_cast<unsigned char>(text[index]);
+        if (ch >= 0x80) return win32::FALSE;
+        converted[index] = static_cast<wchar_t>(ch);
+        ++index;
+    }
+    if (index == menu_detail::kTextCapacity) return win32::FALSE;
+    return AppendMenuW(handle, flags, item, converted);
+}
+inline win32::BOOL InsertMenuW(HMENU handle, win32::UINT position,
+                               win32::UINT flags, UINT_PTR item,
+                               const wchar_t* text) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || menu->count == menu_detail::kItemCapacity ||
+        (flags & (menu_detail::kUnsupportedFlags | menu_detail::kOwnerDraw)))
+        return win32::FALSE;
+    size_t insertion = position;
+    if (flags & menu_detail::kByPosition) {
+        if (insertion > menu->count) return win32::FALSE;
+    } else {
+        const int found = menu_detail::findItem(*menu, position, false);
+        if (found < 0) return win32::FALSE;
+        insertion = static_cast<size_t>(found);
+    }
+    for (size_t move = menu->count; move > insertion; --move)
+        menu->items[move] = menu->items[move - 1];
+    if (!menu_detail::setItem(*menu, insertion, flags & ~menu_detail::kByPosition, item, text)) {
+        for (size_t move = insertion; move < menu->count; ++move)
+            menu->items[move] = menu->items[move + 1];
+        menu->items[menu->count] = {};
+        return win32::FALSE;
+    }
+    ++menu->count;
+    return win32::TRUE;
+}
+inline win32::BOOL InsertMenuItemW(HMENU handle, win32::UINT item, win32::BOOL byPosition,
+                                   const MENUITEMINFOW* info) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    return menu_detail::insertInfo(handle, item, byPosition != 0, info);
+}
+inline win32::BOOL SetMenuItemInfoW(HMENU handle, win32::UINT item, win32::BOOL byPosition,
+                                    const MENUITEMINFOW* info) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || !info || info->cbSize < sizeof(MENUITEMINFOW)) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, item, byPosition != 0);
+    return index >= 0 && menu_detail::setInfo(*menu, menu->items[index], *info)
+        ? win32::TRUE : win32::FALSE;
+}
+inline win32::BOOL GetMenuItemInfoW(HMENU handle, win32::UINT item, win32::BOOL byPosition,
+                                    MENUITEMINFOW* info) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || !info || info->cbSize < sizeof(MENUITEMINFOW) ||
+        (info->fMask & ~menu_detail::kSupportedMiim)) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, item, byPosition != 0);
+    if (index < 0) return win32::FALSE;
+    const auto& stored = menu->items[index];
+    if (info->fMask & menu_detail::kMiimType) info->fType = stored.type;
+    if (info->fMask & menu_detail::kMiimState) info->fState = stored.state;
+    if (info->fMask & menu_detail::kMiimId) info->wID = stored.id;
+    if (info->fMask & menu_detail::kMiimSubMenu) info->hSubMenu = stored.submenu;
+    if (info->fMask & menu_detail::kMiimCheckmarks) {
+        info->hbmpChecked = stored.checkedBitmap;
+        info->hbmpUnchecked = stored.uncheckedBitmap;
+    }
+    if (info->fMask & menu_detail::kMiimBitmap) info->hbmpItem = stored.itemBitmap;
+    if (info->fMask & menu_detail::kMiimData) info->dwItemData = stored.data;
+    if (info->fMask & menu_detail::kMiimString) {
+        size_t length = 0;
+        while (stored.text[length]) ++length;
+        const size_t capacity = info->cch;
+        if (info->dwTypeData && capacity) {
+            const size_t copied = std::min(length, capacity - 1);
+            std::memcpy(info->dwTypeData, stored.text, copied * sizeof(wchar_t));
+            info->dwTypeData[copied] = L'\0';
+        }
+        info->cch = static_cast<win32::UINT>(length);
+    }
+    return win32::TRUE;
+}
+inline win32::BOOL ModifyMenuW(HMENU handle, win32::UINT position, win32::UINT flags,
+                               UINT_PTR id, const wchar_t* text) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, position,
+        (flags & menu_detail::kByPosition) != 0);
+    if (flags & menu_detail::kOwnerDraw) return win32::FALSE;
+    return index >= 0 && menu_detail::setItem(*menu, static_cast<size_t>(index),
+        flags & ~menu_detail::kByPosition, id, text) ? win32::TRUE : win32::FALSE;
+}
+inline win32::BOOL DeleteMenu(HMENU handle, win32::UINT item, win32::UINT flags) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, item, (flags & menu_detail::kByPosition) != 0);
+    if (index < 0) return win32::FALSE;
+    const HMENU submenu = menu->items[index].submenu;
+    for (size_t move = static_cast<size_t>(index); move + 1 < menu->count; ++move)
+        menu->items[move] = menu->items[move + 1];
+    menu->items[--menu->count] = {};
+    return !submenu || menu_detail::destroyTree(submenu, 0) ? win32::TRUE : win32::FALSE;
+}
+inline win32::BOOL RemoveMenu(HMENU handle, win32::UINT item, win32::UINT flags) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, item, (flags & menu_detail::kByPosition) != 0);
+    if (index < 0) return win32::FALSE;
+    for (size_t move = static_cast<size_t>(index); move + 1 < menu->count; ++move)
+        menu->items[move] = menu->items[move + 1];
+    menu->items[--menu->count] = {};
+    return win32::TRUE;
+}
+inline HMENU GetMenu(HWND window) noexcept {
+    if (!window) return nullptr;
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    for (const auto& attachment : menu_detail::g_attachments)
+        if (attachment.window == window) return attachment.menu;
+    return nullptr;
+}
+inline win32::BOOL SetMenu(HWND window, HMENU handle) noexcept {
+    if (!window) return win32::FALSE;
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    if (handle && !menu_detail::find(handle)) return win32::FALSE;
+    menu_detail::Attachment* freeSlot = nullptr;
+    for (auto& attachment : menu_detail::g_attachments) {
+        if (attachment.window == window) {
+            attachment.menu = handle;
+            if (!handle) attachment = {};
+            return win32::TRUE;
+        }
+        if (!attachment.window && !freeSlot) freeSlot = &attachment;
+    }
+    if (!handle) return win32::TRUE;
+    if (!freeSlot) return win32::FALSE;
+    *freeSlot = {window, handle};
+    return win32::TRUE;
+}
+inline win32::BOOL DrawMenuBar(HWND) noexcept { return win32::FALSE; }
+inline int GetMenuItemCount(HMENU handle) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    return menu ? menu->count : -1;
+}
+inline win32::UINT GetMenuItemID(HMENU handle, int position) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || position < 0 || static_cast<size_t>(position) >= menu->count ||
+        menu->items[position].submenu) return static_cast<win32::UINT>(-1);
+    return menu->items[position].id;
+}
+inline int GetMenuStringW(HMENU handle, win32::UINT item, wchar_t* output,
+                          int capacity, win32::UINT flags) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || (capacity > 0 && !output)) return 0;
+    const int index = menu_detail::findItem(*menu, item,
+        (flags & menu_detail::kByPosition) != 0);
+    if (index < 0) return 0;
+    const auto& text = menu->items[index].text;
+    size_t length = 0;
+    while (text[length]) ++length;
+    if (capacity > 0) {
+        const size_t copied = std::min(length, static_cast<size_t>(capacity - 1));
+        std::memcpy(output, text, copied * sizeof(wchar_t));
+        output[copied] = L'\0';
+        return static_cast<int>(copied);
+    }
+    return static_cast<int>(length);
+}
+inline win32::UINT GetMenuState(HMENU handle, win32::UINT item, win32::UINT flags) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return static_cast<win32::UINT>(-1);
+    const int index = menu_detail::findItem(*menu, item,
+        (flags & menu_detail::kByPosition) != 0);
+    if (index < 0) return static_cast<win32::UINT>(-1);
+    const auto& selected = menu->items[index];
+    const win32::UINT childCount = selected.submenu
+        ? static_cast<win32::UINT>(menu_detail::find(selected.submenu)->count) : 0u;
+    return selected.state | selected.type | (childCount << 8);
+}
+inline HMENU GetSubMenu(HMENU handle, int position) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || position < 0 || static_cast<size_t>(position) >= menu->count) return nullptr;
+    return menu->items[position].submenu;
+}
+inline win32::DWORD CheckMenuItem(HMENU handle, win32::UINT item, win32::UINT check) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return static_cast<win32::DWORD>(-1);
+    const int index = menu_detail::findItem(*menu, item,
+        (check & menu_detail::kByPosition) != 0);
+    if (index < 0) return static_cast<win32::DWORD>(-1);
+    const auto previous = menu->items[index].state;
+    menu->items[index].state = (previous & ~menu_detail::kChecked) |
+        (check & menu_detail::kChecked);
+    return previous;
+}
+inline win32::BOOL CheckMenuRadioItem(HMENU handle, win32::UINT first,
+    win32::UINT last, win32::UINT check, win32::UINT flags) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu || first > last || check < first || check > last) return win32::FALSE;
+    const bool byPosition = (flags & menu_detail::kByPosition) != 0;
+    const int firstIndex = menu_detail::findItem(*menu, first, byPosition);
+    const int lastIndex = menu_detail::findItem(*menu, last, byPosition);
+    if (firstIndex < 0 || lastIndex < firstIndex) return win32::FALSE;
+    for (int index = firstIndex; index <= lastIndex; ++index) {
+        auto& item = menu->items[index];
+        if (byPosition || (item.id >= first && item.id <= last))
+            item.state = (item.state & ~menu_detail::kChecked) |
+                ((byPosition ? static_cast<win32::UINT>(index) : item.id) == check
+                    ? menu_detail::kChecked : 0u);
+    }
+    return win32::TRUE;
+}
+inline win32::BOOL EnableMenuItem(HMENU handle, win32::UINT item,
+                                  win32::UINT enable) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, item,
+        (enable & menu_detail::kByPosition) != 0);
+    if (index < 0) return win32::FALSE;
+    menu->items[index].state = (menu->items[index].state & ~menu_detail::kDisabled) |
+        (enable & menu_detail::kDisabled);
+    return win32::TRUE;
+}
+inline win32::BOOL SetMenuItemBitmaps(HMENU handle, win32::UINT item, win32::UINT flags,
+    void* checked, void* unchecked) noexcept {
+    std::lock_guard<std::mutex> guard(menu_detail::g_lock);
+    auto* menu = menu_detail::find(handle);
+    if (!menu) return win32::FALSE;
+    const int index = menu_detail::findItem(*menu, item,
+        (flags & menu_detail::kByPosition) != 0);
+    if (index < 0) return win32::FALSE;
+    menu->items[index].checkedBitmap = checked;
+    menu->items[index].uncheckedBitmap = unchecked;
+    return win32::TRUE;
+}
+inline win32::BOOL TrackPopupMenu(HMENU, win32::UINT, int, int, int,
+                                  HWND, const RECT*) noexcept {
+    return win32::FALSE;
+}
+inline win32::BOOL TrackPopupMenuEx(HMENU, win32::UINT, int, int,
+                                    HWND, void*) noexcept {
+    return win32::FALSE;
+}
 inline win32::BOOL GetMenuBarInfo(win32::HWND /*hwnd*/, win32::LONG /*idObject*/, win32::LONG /*idItem*/, MENUBARINFO* pmbi) noexcept {
     if (!pmbi) return win32::FALSE;
     pmbi->rcBar = RECT{0, 0, 800, 24};

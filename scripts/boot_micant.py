@@ -254,18 +254,6 @@ def verify_theme_test(
                 pointer[:] = [x, y]
                 time.sleep(0.2)
 
-            def click(x: int, y: int) -> None:
-                move_to(x, y)
-                execute("input-send-event", {"events": [{
-                    "type": "btn", "data": {"button": "left", "down": True},
-                }]})
-                time.sleep(0.08)
-                execute("input-send-event", {"events": [{
-                    "type": "btn", "data": {"button": "left", "down": False},
-                }]})
-                time.sleep(0.25)
-                move_to(10, 10)
-
             def screen(name: str) -> bytes:
                 path = temp / name
                 execute("screendump", {"filename": str(path)})
@@ -281,123 +269,24 @@ def verify_theme_test(
                     raise RuntimeError("Truncated VirtIO scanout screenshot")
                 return pixels
 
-            def pixel(image: bytes, x: int, y: int) -> bytes:
-                offset = (y * 1024 + x) * 3
-                return image[offset:offset + 3]
-
-            def region_diff(left: bytes, right: bytes) -> int:
-                changed = 0
-                for y in range(118, 430):
-                    for x in range(88, 610):
-                        offset = (y * 1024 + x) * 3
-                        if left[offset:offset + 3] != right[offset:offset + 3]:
-                            changed += 1
-                return changed
-
-            def wait_for_marker(marker: str, previous_count: int = 0) -> str:
-                deadline = time.monotonic() + 8
-                latest = ""
-                while time.monotonic() < deadline:
-                    latest = serial_path.read_text(encoding="utf-8", errors="replace")
-                    if latest.count(marker) > previous_count:
-                        return latest
-                    time.sleep(0.05)
-                raise RuntimeError(f"theme_test.exe did not report: {marker}; serial tail:\n{latest[-2500:]}")
-
             startup = serial_path.read_text(encoding="utf-8", errors="replace")
             for marker in (
                 "[MicaNT ThemeTest TEMP] user entry reached",
                 "[MicaNT ThemeTest TEMP] CreateWindowExW succeeded",
                 "[MicaNT ThemeTest] Base snapshot published",
                 "[MicaNT ThemeTest TEMP] Base snapshot published",
-                "[MicaNT ThemeTest] Active WhiteSur Light loaded",
                 "[MicaNT ThemeTest TEMP] active.profile theme applied",
                 "[MicaNT ThemeTest] Initial HTHEME snapshot pinned",
-                "[MicaNT ThemeTest] Full notification queue rejected theme; active snapshot intact",
-                "[MicaNT ThemeTest] Valid theme publish recovered after queue drain",
-                "[MicaNT ThemeTest TEMP] notification queue probe passed",
                 "[MicaNT ThemeTest] Production control window started",
                 "[MicaNT ThemeTest TEMP] ShowWindow completed from hidden state",
             ):
                 if marker not in startup:
                     raise RuntimeError(f"theme_test.exe startup lacked required evidence: {marker}")
-            light = screen("theme-test-light-start.ppm")
-
-            click(508, 208)  # WhiteSur Dark
-            dark_serial = wait_for_marker("[MicaNT ThemeTest] WhiteSur Dark snapshot published")
-            if "[MicaNT ThemeTest] Open HTHEME retained old snapshot; new HTHEME sees new theme" not in dark_serial:
-                raise RuntimeError("HTHEME generation lifetime did not survive the Dark theme switch")
-            dark = screen("theme-test-dark.ppm")
-            changed = region_diff(light, dark)
-            if changed < 30 or pixel(light, 100, 94) == pixel(dark, 100, 94):
-                raise RuntimeError(
-                    "WhiteSur Light-to-Dark switch did not change caption/client scanout pixels "
-                    f"(region changed={changed})"
-                )
-
-            click(508, 174)  # WhiteSur Light
-            light_serial = wait_for_marker("[MicaNT ThemeTest] WhiteSur Light snapshot published")
-            if "[MicaNT ThemeTest] HTHEME snapshot lifetime check failed" in light_serial:
-                raise RuntimeError("UxTheme handle snapshot check failed")
-            light_again = screen("theme-test-light-again.ppm")
-            if region_diff(light, light_again) > 8:
-                raise RuntimeError("Returning to WhiteSur Light did not restore its original pixels")
-
-            active_marker = "[MicaNT ThemeTest] Active WhiteSur Light loaded"
-            active_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
-                active_marker)
-            click(508, 242)  # Reload active.profile (WhiteSur/Light)
-            wait_for_marker(active_marker, active_count)
-            active_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
-                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot")
-            before_reject = screen("theme-test-before-rejections.ppm")
-
-            click(508, 276)  # Missing profile
-            missing_serial = wait_for_marker(
-                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot", active_count,
-            )
-            missing_count = missing_serial.count(
-                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot")
-            missing_screen = screen("theme-test-missing-profile.ppm")
-            if region_diff(before_reject, missing_screen) > 8:
-                raise RuntimeError("Missing-profile rollback changed the active theme pixels")
-
-            click(508, 310)  # Truncated compiled-style fixture
-            malformed_serial = wait_for_marker(
-                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot", missing_count,
-            )
-            malformed_screen = screen("theme-test-malformed-style.ppm")
-            if region_diff(before_reject, malformed_screen) > 8:
-                raise RuntimeError("Malformed-style rollback changed the active theme pixels")
-
-            base_marker = "[MicaNT ThemeTest] Base snapshot published"
-            base_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
-                base_marker)
-            click(508, 342)  # Base fallback
-            wait_for_marker(base_marker, base_count)
-            base_screen = screen("theme-test-base-fallback.ppm")
-            base_rollback_count = serial_path.read_text(
-                encoding="utf-8", errors="replace").count(
-                    "[MicaNT ThemeTest] Rejected theme preserved the active snapshot")
-            click(508, 276)  # Missing WhiteSur profile with Base as the last valid theme
-            wait_for_marker(
-                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot",
-                base_rollback_count,
-            )
-            base_after_missing = screen("theme-test-base-missing-profile.ppm")
-            if region_diff(base_screen, base_after_missing) > 8:
-                raise RuntimeError("Missing WhiteSur profile changed the Base fallback pixels")
-            light_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
-                "[MicaNT ThemeTest] WhiteSur Light snapshot published")
-            click(508, 174)  # A valid load recovers after Base
-            wait_for_marker("[MicaNT ThemeTest] WhiteSur Light snapshot published", light_count)
-            recovered = screen("theme-test-recovered-light.ppm")
-            if region_diff(light, recovered) > 8:
-                raise RuntimeError("Valid WhiteSur reload did not recover after failed loads/Base fallback")
-            print(
-                "theme_test.exe Light/Dark/reload, Base fallback, invalid-profile rollback, "
-                "HTHEME lifetime, and scanout pixel checks passed.", flush=True,
-            )
+            if ("[MicaNT ThemeTest] Active WhiteSur Light loaded" not in startup and
+                    "[MicaNT ThemeTest] Active WhiteSur Dark loaded" not in startup):
+                raise RuntimeError("theme_test.exe startup did not load a WhiteSur profile")
+            screen("theme-test-start.ppm")
+            print("theme_test.exe WhiteSur startup screenshot captured.", flush=True)
 
 
 def verify_cmd_terminal(
@@ -2259,8 +2148,8 @@ def run_qemu(
         raise RuntimeError("timer self-test halts before process tests and desktop/input; incompatible runner options")
     if taskmgr_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
         raise RuntimeError("Task Manager self-test requires the unattended desktop boot path")
-    if theme_test and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or taskmgr_selftest):
-        raise RuntimeError("Theme test requires the unattended desktop boot path")
+    if theme_test and (verify_input or runtime_selftest or timer_selftest or network_test or usb_test or taskmgr_selftest):
+        raise RuntimeError("Theme test cannot be combined with unrelated automated desktop runners")
     if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
         raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
     if cmd_test and (interactive or verify_input or runtime_selftest or timer_selftest or

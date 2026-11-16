@@ -740,6 +740,22 @@ public:
                     info->pitch = m_displayDevice->Pitch;
                     info->bpp = 32;
                     info->pixelFormat = m_displayDevice->PixelFormat;
+                    const auto backend = static_cast<boot_driver::DisplayBackend>(
+                        __atomic_load_n(reinterpret_cast<const uint32_t*>(
+                            &m_displayDevice->Backend), __ATOMIC_ACQUIRE));
+                    info->transportBackend = backend == boot_driver::DisplayBackend::Virtio2D
+                        ? static_cast<uint32_t>(DisplayTransportBackend::Virtio2D)
+                        : (backend == boot_driver::DisplayBackend::Virgl ||
+                           backend == boot_driver::DisplayBackend::VirglAccelerated)
+                            ? static_cast<uint32_t>(DisplayTransportBackend::Virgl)
+                            : backend == boot_driver::DisplayBackend::Gop
+                                ? static_cast<uint32_t>(DisplayTransportBackend::Gop)
+                                : static_cast<uint32_t>(DisplayTransportBackend::Unknown);
+                    info->compositionBackend = backend == boot_driver::DisplayBackend::VirglAccelerated
+                        ? static_cast<uint32_t>(DisplayCompositionBackend::VirglAccelerated)
+                        : backend == boot_driver::DisplayBackend::Virgl
+                            ? static_cast<uint32_t>(DisplayCompositionBackend::VirglAvailable)
+                            : static_cast<uint32_t>(DisplayCompositionBackend::Software);
                     info->physicalBase = 0; // Device scanout is not CPU-addressable framebuffer memory.
                 } else if (m_videoDriver && m_videoDriver->isInitialized()) {
                     info->width = m_videoDriver->getWidth();
@@ -747,6 +763,8 @@ public:
                     info->pitch = m_videoDriver->getPitch();
                     info->bpp = 32;
                     info->pixelFormat = m_videoDriver->getPixelFormat();
+                    info->transportBackend = static_cast<uint32_t>(DisplayTransportBackend::Unknown);
+                    info->compositionBackend = static_cast<uint32_t>(DisplayCompositionBackend::Software);
                     info->physicalBase = reinterpret_cast<uint64_t>(m_videoDriver->getRawBuffer());
                 } else {
                     info->width = 1024;
@@ -754,6 +772,8 @@ public:
                     info->pitch = 1024;
                     info->bpp = 32;
                     info->pixelFormat = 1;
+                    info->transportBackend = static_cast<uint32_t>(DisplayTransportBackend::Unknown);
+                    info->compositionBackend = static_cast<uint32_t>(DisplayCompositionBackend::Software);
                     info->physicalBase = 0;
                 }
                 return micant::NtStatus::Success;

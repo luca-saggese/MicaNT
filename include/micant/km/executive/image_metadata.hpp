@@ -19,15 +19,31 @@ struct UserUnicodeString {
 };
 
 struct UserProcessParameters {
-    uint8_t reserved1[16]{};
-    uint64_t reserved2[10]{};
+    uint32_t maximumLength{sizeof(UserProcessParameters)};
+    uint32_t length{sizeof(UserProcessParameters)};
+    uint32_t flags{1}; // RTL_USER_PROC_PARAMS_NORMALIZED
+    uint32_t debugFlags{};
+    uint64_t consoleHandle{};
+    uint32_t consoleFlags{};
+    uint32_t paddingBeforeStandardHandles{};
+    uint64_t standardInput{};
+    uint64_t standardOutput{};
+    uint64_t standardError{};
+    UserUnicodeString currentDirectory{};
+    uint64_t currentDirectoryHandle{};
+    UserUnicodeString dllPath{};
     UserUnicodeString imagePathName{};
     UserUnicodeString commandLine{};
 };
 
 static_assert(sizeof(UserUnicodeString) == 16);
+static_assert(offsetof(UserProcessParameters, maximumLength) == 0x00);
+static_assert(offsetof(UserProcessParameters, consoleHandle) == 0x10);
+static_assert(offsetof(UserProcessParameters, currentDirectory) == 0x38);
+static_assert(offsetof(UserProcessParameters, dllPath) == 0x50);
 static_assert(offsetof(UserProcessParameters, imagePathName) == 0x60);
 static_assert(offsetof(UserProcessParameters, commandLine) == 0x70);
+static_assert(sizeof(UserProcessParameters) == 0x80);
 
 class UserMetadataWriter {
 public:

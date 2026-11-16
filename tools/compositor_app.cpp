@@ -26,7 +26,7 @@ namespace {
 
 uint32_t g_frame[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
 constexpr int64_t kWindowEffectRadiusLimit = 32;
-constexpr int64_t kWindowShadowExtent = 6;
+constexpr int64_t kWindowShadowExtent = MICANT_COMPOSITOR_WINDOW_SHADOW_EXTENT;
 constexpr int64_t kWindowBlurRadius = 2;
 uint32_t g_windowCornerBackdrop[4][kWindowEffectRadiusLimit *
                                    kWindowEffectRadiusLimit]{};
@@ -227,12 +227,12 @@ void fillRect(int64_t left, int64_t top, int64_t right, int64_t bottom,
     for (int64_t y = top; y < bottom; ++y) {
         auto* row = g_frame + static_cast<size_t>(y) * width +
             static_cast<size_t>(left);
-        if (g_windowDrawOpacity == 255) {
+        const uint32_t colorAlpha = color >> 24;
+        const uint32_t alpha = (colorAlpha * g_windowDrawOpacity + 127u) / 255u;
+        if (alpha == 255) {
             for (size_t x = 0; x < rowWidth; ++x) row[x] = color;
-        } else {
-            const uint32_t source =
-                (static_cast<uint32_t>(g_windowDrawOpacity) << 24) |
-                (color & 0x00FFFFFFu);
+        } else if (alpha) {
+            const uint32_t source = (alpha << 24) | (color & 0x00FFFFFFu);
             for (size_t x = 0; x < rowWidth; ++x)
                 row[x] = blend(source, row[x]);
         }
@@ -397,10 +397,14 @@ void applyWindowCornerMask(int64_t left, int64_t top,
     const int64_t radiusSquared = radius * radius;
     for (int64_t y = 0; y < radius; ++y) {
         for (int64_t x = 0; x < radius; ++x) {
-            const int64_t centerX = 2 * x + 1 - 2 * radius;
-            const int64_t centerY = 2 * y + 1 - 2 * radius;
-            if (centerX * centerX + centerY * centerY <= 4 * radiusSquared)
-                continue;
+            const int64_t leftCenterX = 2 * x + 1 - 2 * radius;
+            const int64_t rightCenterX = 2 * x + 1;
+            const int64_t topCenterY = 2 * y + 1 - 2 * radius;
+            const int64_t bottomCenterY = 2 * y + 1;
+            const int64_t centerX[4]{leftCenterX, rightCenterX,
+                                     leftCenterX, rightCenterX};
+            const int64_t centerY[4]{topCenterY, topCenterY,
+                                     bottomCenterY, bottomCenterY};
             const size_t offset = static_cast<size_t>(
                 y * kWindowEffectRadiusLimit + x);
             const int64_t px[4]{left + x, right - radius + x,
@@ -408,6 +412,9 @@ void applyWindowCornerMask(int64_t left, int64_t top,
             const int64_t py[4]{top + y, top + y,
                                 bottom - radius + y, bottom - radius + y};
             for (size_t corner = 0; corner < 4; ++corner) {
+                if (centerX[corner] * centerX[corner] +
+                    centerY[corner] * centerY[corner] <= 4 * radiusSquared)
+                    continue;
                 if (px[corner] < g_composeClip.left ||
                     px[corner] >= g_composeClip.right ||
                     py[corner] < g_composeClip.top ||
@@ -436,10 +443,11 @@ void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
             {
                 auto& destination = g_frame[static_cast<size_t>(py) * width +
                     static_cast<size_t>(px)];
-                if (g_windowDrawOpacity == 255) destination = color;
-                else destination = blend(
-                    (static_cast<uint32_t>(g_windowDrawOpacity) << 24) |
-                    (color & 0x00FFFFFFu), destination);
+                const uint32_t alpha =
+                    ((color >> 24) * g_windowDrawOpacity + 127u) / 255u;
+                if (alpha == 255) destination = color;
+                else if (alpha) destination = blend(
+                    (alpha << 24) | (color & 0x00FFFFFFu), destination);
             }
         }
     }
@@ -512,6 +520,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         size_t index;
     };
     OrderedSurface ordered[MICANT_COMPOSITOR_SURFACE_CAPACITY];
+    constexpr uint32_t kWsChild = 0x40000000u;
     size_t count = 0;
     for (size_t index = 0; index < metadata.surfaceCapacity; ++index) {
         const auto& surface = metadata.surfaces[index];
@@ -544,11 +553,20 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         constexpr uint32_t kWsDlgFrame = 0x00400000u;
         constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
         constexpr uint32_t kWsThickFrame = 0x00040000u;
-        constexpr uint32_t kWsChild = 0x40000000u;
         const bool topLevel = (surface.style & kWsChild) == 0;
+        // Child HWND pixels with a parent are folded into the top-level
+        // window's client pass below. Parentless child-style probe surfaces
+        // remain ordinary layers for the compositor self-check.
+        if (!topLevel && surface.parentWindow) continue;
+        const bool validWindowStyle = topLevel && windowStyle && windowStyle->flags;
+        const int64_t themedFrame = validWindowStyle &&
+            (windowStyle->flags & MICANT_THEME_HAS_BORDER_WIDTH) &&
+            windowStyle->borderWidth >= 1 && windowStyle->borderWidth <= 16
+                ? windowStyle->borderWidth : 0;
         const int64_t sourceFrame = !topLevel ? 0 :
-            ((surface.style & kWsThickFrame) ? 5 :
-             ((surface.style & (kWsBorder | kWsDlgFrame)) ? 1 : 0));
+            ((surface.style & kWsThickFrame) ? std::max<int64_t>(themedFrame, 5) :
+             ((surface.style & (kWsBorder | kWsDlgFrame))
+                ? (themedFrame ? themedFrame : 1) : 0));
         const int64_t sourceCaption = topLevel && (surface.style & kWsCaption)
             ? (normalHeaderbar && (normalHeaderbar->flags & MICANT_THEME_HAS_MIN_HEIGHT) &&
                normalHeaderbar->minHeight >= 24 && normalHeaderbar->minHeight <= 96
@@ -574,7 +592,6 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         const int64_t sourceClientHeight = surface.height - sourceFrame * 2 - sourceCaption;
         if (clientWidth <= 0 || clientHeight <= 0) continue;
 
-        const bool validWindowStyle = topLevel && windowStyle && windowStyle->flags;
         const uint8_t opacity = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_OPACITY)
             ? windowStyle->opacity : 255u;
@@ -585,6 +602,15 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         int64_t radius = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_RADIUS)
             ? windowStyle->borderRadius : 0;
+        // WhiteSur's decoration selector specifies 12px corners, but Snapshot
+        // v2 has no decoration control. Keep Base square and use the CSS value
+        // only when the active theme provides a real headerbar style.
+        const bool hasThemedHeaderbar = themeValid && normalHeaderbar &&
+            (normalHeaderbar->flags & MICANT_THEME_HAS_BACKGROUND);
+        if (!radius && hasThemedHeaderbar &&
+            !(surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED))
+            radius = 12;
+        if (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) radius = 0;
         if (!topLevel || !frame) radius = 0;
         if (radius > kWindowEffectRadiusLimit) radius = kWindowEffectRadiusLimit;
         if (radius * 2 > windowWidth) radius = windowWidth / 2;
@@ -616,32 +642,71 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             uint32_t titleColor = foreground ? 0xFFF5F8FCu : 0xFFDCE3EAu;
             uint32_t buttonColor = foreground ? 0xFF376D9Au : 0xFF75818Cu;
             uint32_t closeColor = foreground ? 0xFFC84753u : 0xFF916A70u;
+            const uint32_t bodyColor = validWindowStyle &&
+                (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+                ? windowStyle->background : 0xFFFFFFFFu;
             if (captionBackgroundStyle &&
                 (captionBackgroundStyle->flags & MICANT_THEME_HAS_BACKGROUND)) {
-                captionColor = captionBackgroundStyle->background | 0xFF000000u;
-                frameColor = (captionBorderStyle &&
+                captionColor = captionBackgroundStyle->background;
+                const uint32_t captionLuma =
+                    (((captionColor >> 16) & 0xFFu) * 299u +
+                     ((captionColor >> 8) & 0xFFu) * 587u +
+                     (captionColor & 0xFFu) * 114u) / 1000u;
+                frameColor = (validWindowStyle &&
+                    (windowStyle->flags & MICANT_THEME_HAS_BORDER))
+                    ? windowStyle->border
+                    : (captionBorderStyle &&
                     (captionBorderStyle->flags & MICANT_THEME_HAS_BORDER))
-                    ? captionBorderStyle->border | 0xFF000000u
-                    : (foreground ? 0xFF9B9B9Bu : 0xFFB0B0B0u);
+                    ? captionBorderStyle->border
+                    : blend((captionLuma >= 128u ? 31u : 32u) << 24,
+                            bodyColor);
                 buttonColor = captionColor;
                 closeColor = captionColor;
             }
             if (captionForegroundStyle &&
                 (captionForegroundStyle->flags & MICANT_THEME_HAS_FOREGROUND))
-                titleColor = captionForegroundStyle->foreground | 0xFF000000u;
+                titleColor = captionForegroundStyle->foreground;
             if (normalButton && (normalButton->flags & MICANT_THEME_HAS_BACKGROUND)) {
-                buttonColor = normalButton->background | 0xFF000000u;
+                buttonColor = normalButton->background;
                 closeColor = buttonColor;
             }
             if (frame) {
+                const bool hasWindowStrokeWidth = validWindowStyle &&
+                    (windowStyle->flags & MICANT_THEME_HAS_BORDER_WIDTH) &&
+                    windowStyle->borderWidth >= 1 && windowStyle->borderWidth <= 16;
+                const bool hasHeaderbarStrokeWidth = captionBorderStyle &&
+                    (captionBorderStyle->flags & MICANT_THEME_HAS_BORDER_WIDTH) &&
+                    captionBorderStyle->borderWidth >= 1 &&
+                    captionBorderStyle->borderWidth <= 16;
+                const int64_t stroke = std::min<int64_t>(frame,
+                    hasWindowStrokeWidth ? windowStyle->borderWidth :
+                    hasHeaderbarStrokeWidth ? captionBorderStyle->borderWidth : 1);
+                // The resize inset remains five pixels, but only the theme's
+                // border width is drawn as a stroke. Its remaining area joins
+                // the titlebar or client fill instead of becoming a dark slab.
                 fillRect(windowLeft, windowTop, windowRight,
-                         windowTop + frame, frameColor, width, height);
+                         windowTop + frame, captionColor, width, height);
                 fillRect(windowLeft, windowBottom - frame, windowRight,
-                         windowBottom, frameColor, width, height);
+                         windowBottom, bodyColor, width, height);
                 fillRect(windowLeft, windowTop + frame, windowLeft + frame,
-                         windowBottom - frame, frameColor, width, height);
+                         windowBottom - frame, bodyColor, width, height);
                 fillRect(windowRight - frame, windowTop + frame, windowRight,
-                         windowBottom - frame, frameColor, width, height);
+                         windowBottom - frame, bodyColor, width, height);
+                // Resolve translucent theme borders over their adjacent themed
+                // surface before drawing the visible stroke.
+                const uint32_t bodyStroke = (frameColor & 0xFF000000u) == 0xFF000000u
+                    ? frameColor : blend(frameColor, bodyColor);
+                const uint32_t captionStroke =
+                    (frameColor & 0xFF000000u) == 0xFF000000u
+                    ? frameColor : blend(frameColor, captionColor);
+                fillRect(windowLeft, windowTop, windowRight,
+                         windowTop + stroke, captionStroke, width, height);
+                fillRect(windowLeft, windowBottom - stroke, windowRight,
+                         windowBottom, bodyStroke, width, height);
+                fillRect(windowLeft, windowTop + stroke, windowLeft + stroke,
+                         windowBottom - stroke, bodyStroke, width, height);
+                fillRect(windowRight - stroke, windowTop + stroke, windowRight,
+                         windowBottom - stroke, bodyStroke, width, height);
             }
             if (caption) {
                 fillRect(windowLeft + frame, windowTop + frame,
@@ -661,6 +726,24 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                         (surface.flags & MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_HOVER) &&
                         ((surface.flags & MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_MASK) >>
                          MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT) == button;
+                    const bool inactive = !foreground;
+                    const uint32_t imageState = pressed ? 2u : hovered
+                        ? (inactive ? 4u : 1u) : (inactive ? 3u : 0u);
+                    const uint32_t imageIndex = (button == 3 ? 0u :
+                        button == 1 ? 5u :
+                        ((surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) ? 15u : 10u)) +
+                        imageState;
+                    bool drewImage = false;
+                    const MicaThemeCaptionImage* captionImage = imageIndex <
+                        MICANT_THEME_CAPTION_IMAGE_COUNT
+                            && metadata.captionImageSet.generation ==
+                                metadata.themeGeneration
+                            ? &metadata.captionImageSet.images[imageIndex] : nullptr;
+                    const bool hasCaptionImage = captionImage && captionImage->width &&
+                        captionImage->height &&
+                        captionImage->stride >= captionImage->width &&
+                        captionImage->width <= MICANT_THEME_CAPTION_IMAGE_SIZE &&
+                        captionImage->height <= MICANT_THEME_CAPTION_IMAGE_SIZE;
                     const uint32_t state = pressed ? 2u : hovered ? 1u :
                         foreground ? 0u : 7u;
                     const auto* buttonStyle = themeValid
@@ -683,7 +766,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                         (buttonStyle->flags & MICANT_THEME_HAS_FOREGROUND))
                         glyph = blend(applyOpacity(buttonStyle->foreground),
                                        captionColor);
-                    if (buttonStyle &&
+                    if (!hasCaptionImage && buttonStyle &&
                         (buttonStyle->flags & MICANT_THEME_HAS_BORDER)) {
                         const uint32_t borderColor = blend(
                             applyOpacity(buttonStyle->border), background);
@@ -691,11 +774,39 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                  borderColor, width, height);
                         fillRect(buttonLeft + 1, buttonTop + 1, buttonRight - 1,
                                  buttonBottom - 1, background, width, height);
-                    } else {
+                    } else if (!hasCaptionImage) {
                         fillRect(buttonLeft, buttonTop, buttonRight, buttonBottom,
                                  background, width, height);
                     }
-                    return glyph;
+                    if (hasCaptionImage) {
+                        const int64_t imageLeft = buttonLeft +
+                            (buttonRight - buttonLeft - captionImage->width) / 2;
+                        const int64_t imageTop = windowTop + frame +
+                            (caption - captionImage->height) / 2;
+                        for (uint32_t row = 0; row < captionImage->height; ++row) {
+                            const int64_t y = imageTop + row;
+                            if (y < g_composeClip.top || y >= g_composeClip.bottom ||
+                                y < 0 || y >= height) continue;
+                            for (uint32_t column = 0; column < captionImage->width; ++column) {
+                                const int64_t x = imageLeft + column;
+                                if (x < g_composeClip.left || x >= g_composeClip.right ||
+                                    x < 0 || x >= width) continue;
+                                const uint32_t source = applyPremultipliedOpacity(
+                                    metadata.captionImageSet.pixels[imageIndex][
+                                        static_cast<size_t>(row) * captionImage->stride + column],
+                                    opacity);
+                                if (source >> 24) {
+                                    const size_t destination = static_cast<size_t>(y) * width +
+                                        static_cast<size_t>(x);
+                                    g_frame[destination] =
+                                        micant::shared::graphics::PremultipliedSourceOver(
+                                            source, g_frame[destination]);
+                                }
+                            }
+                        }
+                        drewImage = true;
+                    }
+                    return drewImage ? 0u : glyph;
                 };
                 if (caption >= 12 && windowWidth >= 96) {
                     const uint32_t minimizeGlyph = drawCaptionButton(
@@ -707,12 +818,12 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
 
                     const int64_t iconTop = windowTop + frame + (caption - 22) / 2;
                     const bool maximized = (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) != 0;
-                    drawControlIcon(1, false, closeLeft - 58, iconTop,
-                                    minimizeGlyph, width, height);
-                    drawControlIcon(2, maximized, closeLeft - 29, iconTop,
-                                    maximizeGlyph, width, height);
-                    drawControlIcon(3, false, closeLeft, iconTop,
-                                    closeGlyph, width, height);
+                    if (minimizeGlyph) drawControlIcon(1, false, closeLeft - 58, iconTop,
+                                                       minimizeGlyph, width, height);
+                    if (maximizeGlyph) drawControlIcon(2, maximized, closeLeft - 29, iconTop,
+                                                       maximizeGlyph, width, height);
+                    if (closeGlyph) drawControlIcon(3, false, closeLeft, iconTop,
+                                                   closeGlyph, width, height);
 
                     const int64_t titleLimit = closeLeft - 66;
                     const size_t surfaceSlot = ordered[index].index;
@@ -819,6 +930,14 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         const int64_t right = clientRight < clip.right ? clientRight : clip.right;
         const int64_t bottom = clientBottom < clip.bottom ? clientBottom : clip.bottom;
         if (right <= clipLeft || bottom <= clipTop) continue;
+        const bool hasClientBackground = validWindowStyle &&
+            (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND);
+        if (hasClientBackground || !blurWindow) {
+            const uint32_t clientBackground = hasClientBackground
+                ? windowStyle->background : 0xFFFFFFFFu;
+            fillRect(left, top, clientRight, clientBottom,
+                     clientBackground, width, height);
+        }
         if (blurWindow)
             applyWindowBackdropBlur(left, top, clientRight, clientBottom,
                                     opacity, width, height);
@@ -860,6 +979,50 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                     if (source >> 24)
                         destination[x] = micant::shared::graphics::PremultipliedSourceOver(
                             source, destination[x]);
+                }
+            }
+        }
+        const int64_t parentClientRight = left + clientWidth;
+        const int64_t parentClientBottom = top + clientHeight;
+        for (size_t childIndex = 0; childIndex < count; ++childIndex) {
+            const auto& child = *ordered[childIndex].info;
+            if (!(child.style & kWsChild) || !child.parentWindow ||
+                child.ownerProcessId != surface.ownerProcessId ||
+                !(child.flags & MICANT_COMPOSITOR_SURFACE_VISIBLE)) continue;
+            const MicaCompositorSurfaceInfo* ancestor = &child;
+            for (size_t depth = 0; ancestor && ancestor->parentWindow &&
+                 depth < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++depth) {
+                const uint64_t parentHandle = ancestor->parentWindow;
+                ancestor = nullptr;
+                for (size_t lookup = 0; lookup < count; ++lookup) {
+                    if (ordered[lookup].info->window == parentHandle) {
+                        ancestor = ordered[lookup].info;
+                        break;
+                    }
+                }
+            }
+            if (!ancestor || ancestor->window != surface.window) continue;
+            const int64_t childLeft = child.x;
+            const int64_t childTop = child.y;
+            const int64_t childRight = childLeft + child.width;
+            const int64_t childBottom = childTop + child.height;
+            const int64_t drawLeft = std::max({childLeft, left, clip.left});
+            const int64_t drawTop = std::max({childTop, top, clip.top});
+            const int64_t drawRight = std::min({childRight, parentClientRight, clip.right});
+            const int64_t drawBottom = std::min({childBottom, parentClientBottom, clip.bottom});
+            if (drawRight <= drawLeft || drawBottom <= drawTop) continue;
+            for (int64_t y = drawTop; y < drawBottom; ++y) {
+                const size_t sourceRow = child.pixelOffset +
+                    static_cast<size_t>(y - childTop) * child.pitch;
+                uint32_t* destination = g_frame + static_cast<size_t>(y) * width +
+                    static_cast<size_t>(drawLeft);
+                for (int64_t x = drawLeft; x < drawRight; ++x) {
+                    const uint32_t source = surfaces[sourceRow +
+                        static_cast<size_t>(x - childLeft)];
+                    if (source >> 24)
+                        destination[x - drawLeft] =
+                            micant::shared::graphics::PremultipliedSourceOver(
+                                source, destination[x - drawLeft]);
                 }
             }
         }
@@ -992,11 +1155,16 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
     }
 
     damage.count = metadata.dirtyRegionCount;
-    const bool shadowEnabled =
-        MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme)) &&
-        (metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].flags &
-         MICANT_THEME_HAS_RADIUS) &&
-        metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].borderRadius != 0;
+    const bool themeValid =
+        MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme));
+    const auto& windowStyle =
+        metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT];
+    const auto& headerbarStyle =
+        metadata.theme.styles[13u * MICANT_THEME_STATE_COUNT];
+    const bool shadowEnabled = themeValid &&
+        (((windowStyle.flags & MICANT_THEME_HAS_RADIUS) &&
+          windowStyle.borderRadius != 0) ||
+         (headerbarStyle.flags & MICANT_THEME_HAS_BACKGROUND));
     for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
         const auto& dirty = metadata.dirtyRegions[index];
         const int64_t margin = shadowEnabled ? kWindowShadowExtent : 0;

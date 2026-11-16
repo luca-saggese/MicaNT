@@ -188,12 +188,26 @@ uint64_t g_cursorHitWindow{};
 int32_t g_cursorHitTest{};
 MicaCompositorMetadataStore* g_compositorStore{};
 MicaThemeSnapshot g_themeSnapshot{};
+MicaThemeCaptionImageSet g_themeCaptionImageSet{};
 uint64_t g_themeGeneration{};
+
+Window* findWindowAny(uint64_t handle) noexcept;
 
 int32_t frameInset(const Window& window) noexcept {
     if (window.parent || (window.style & kWsChild)) return 0;
-    if (window.style & kWsThickFrame) return 5;
-    return (window.style & (kWsBorder | kWsDlgFrame)) ? 1 : 0;
+    constexpr size_t windowStyleIndex = 14u * MICANT_THEME_STATE_COUNT;
+    const auto& style = g_themeSnapshot.styles[windowStyleIndex];
+    const int32_t themedWidth =
+        MicaThemeSnapshotIsValid(&g_themeSnapshot, sizeof(g_themeSnapshot)) &&
+        (style.flags & MICANT_THEME_HAS_BORDER_WIDTH) &&
+        style.borderWidth >= 1 && style.borderWidth <= 16
+            ? style.borderWidth : 0;
+    // Keep a usable native resize target even when the theme uses a one-pixel
+    // visual stroke. A wider explicit theme border can widen the target.
+    if (window.style & kWsThickFrame)
+        return themedWidth > 5 ? themedWidth : 5;
+    return (window.style & (kWsBorder | kWsDlgFrame))
+        ? (themedWidth ? themedWidth : 1) : 0;
 }
 
 int32_t captionHeight(const Window& window) noexcept {
@@ -206,6 +220,39 @@ int32_t captionHeight(const Window& window) noexcept {
         headerbar.minHeight >= 24 && headerbar.minHeight <= 96)
         return headerbar.minHeight;
     return 28;
+}
+
+bool windowScreenOrigin(const Window& window, int64_t& screenX,
+                        int64_t& screenY) noexcept {
+    screenX = 0;
+    screenY = 0;
+    const Window* current = &window;
+    for (size_t depth = 0; depth < kWindowCapacity; ++depth) {
+        screenX += current->x;
+        screenY += current->y;
+        if (!current->parent) {
+            return screenX >= INT32_MIN && screenX <= INT32_MAX &&
+                screenY >= INT32_MIN && screenY <= INT32_MAX;
+        }
+        const auto* parent = findWindowAny(current->parent);
+        if (!parent || parent->ownerProcessId != current->ownerProcessId)
+            return false;
+        screenX += frameInset(*parent);
+        screenY += frameInset(*parent) + captionHeight(*parent);
+        current = parent;
+    }
+    return false;
+}
+
+bool hasVisibleAncestors(const Window& window) noexcept {
+    const Window* current = &window;
+    for (size_t depth = 0; current->parent && depth < kWindowCapacity; ++depth) {
+        const auto* parent = findWindowAny(current->parent);
+        if (!parent || !parent->active || !parent->visible || parent->iconic ||
+            parent->ownerProcessId != current->ownerProcessId) return false;
+        current = parent;
+    }
+    return current->parent == 0;
 }
 
 void clearPendingDamage() noexcept {
@@ -263,9 +310,15 @@ void markDamageFull() noexcept {
 
 void markWindowBounds(const Window& window) noexcept {
     if (!window.active || !window.visible || window.iconic) return;
-    const int64_t left = window.x;
-    const int64_t top = window.y;
-    markDamageRect(left, top, left + window.width, top + window.height);
+    int64_t left{}, top{};
+    if (!windowScreenOrigin(window, left, top)) return;
+    // The compositor's themed shadow extends beyond the HWND bounds. Include
+    // that apron when a window moves, hides, minimizes, or is destroyed so its
+    // old shadow pixels are repainted from the desktop and lower windows.
+    constexpr int64_t shadow = MICANT_COMPOSITOR_WINDOW_SHADOW_EXTENT;
+    markDamageRect(left - shadow, top - shadow,
+                   left + window.width + shadow,
+                   top + window.height + shadow);
 }
 
 void markCursorBounds(int32_t x, int32_t y) noexcept {
@@ -295,11 +348,12 @@ void markCaptionButtonBounds(const Window& window, uint8_t button) noexcept {
         left = closeLeft;
         right = static_cast<int64_t>(window.width) - frame - 2;
     }
-    const int64_t top = window.y + frame + 3;
-    const int64_t bottom = window.y + frame + caption - 3;
+    int64_t screenX{}, screenY{};
+    if (!windowScreenOrigin(window, screenX, screenY)) return;
+    const int64_t top = screenY + frame + 3;
+    const int64_t bottom = screenY + frame + caption - 3;
     if (left >= right || top >= bottom) return;
-    markDamageRect(static_cast<int64_t>(window.x) + left, top,
-                   static_cast<int64_t>(window.x) + right, bottom);
+    markDamageRect(screenX + left, top, screenX + right, bottom);
 }
 
 void markWindowClientDamage(Window& window, int64_t left, int64_t top,
@@ -329,10 +383,12 @@ void markWindowClientDamage(Window& window, int64_t left, int64_t top,
     }
     ++window.contentGeneration;
     if (!window.contentGeneration) ++window.contentGeneration;
-    markDamageRect(static_cast<int64_t>(window.x) + frame + left,
-        static_cast<int64_t>(window.y) + frame + caption + top,
-        static_cast<int64_t>(window.x) + frame + right,
-        static_cast<int64_t>(window.y) + frame + caption + bottom);
+    int64_t screenX{}, screenY{};
+    if (!windowScreenOrigin(window, screenX, screenY)) return;
+    markDamageRect(screenX + frame + left,
+        screenY + frame + caption + top,
+        screenX + frame + right,
+        screenY + frame + caption + bottom);
 }
 
 bool beginWindowWriter(Window& window, uint64_t processId) noexcept {
@@ -510,9 +566,12 @@ uint64_t nextZOrder() noexcept {
 Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
     Window* topmost{};
     for (auto& window : g_windows) {
-        const int64_t localX = static_cast<int64_t>(x) - window.x;
-        const int64_t localY = static_cast<int64_t>(y) - window.y;
-        if (!window.active || !window.visible || window.iconic || localX < 0 ||
+        int64_t originX{}, originY{};
+        if (!windowScreenOrigin(window, originX, originY)) continue;
+        const int64_t localX = static_cast<int64_t>(x) - originX;
+        const int64_t localY = static_cast<int64_t>(y) - originY;
+        if (!window.active || !window.visible || window.iconic ||
+            !hasVisibleAncestors(window) || localX < 0 ||
             localY < 0 || localX >= window.width || localY >= window.height) continue;
         if (!topmost || visibleOrder(window) > visibleOrder(*topmost)) topmost = &window;
     }
@@ -522,7 +581,8 @@ Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
 Window* topmostVisibleWindow() noexcept {
     Window* topmost{};
     for (auto& window : g_windows) {
-        if (!window.active || !window.visible || window.iconic) continue;
+        if (!window.active || !window.visible || window.iconic ||
+            !hasVisibleAncestors(window)) continue;
         if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
     }
     return topmost;
@@ -541,7 +601,10 @@ int32_t hitTestWindow(const Window& window, int32_t x, int32_t y) noexcept {
     constexpr int32_t HTCLIENT = 1, HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11;
     constexpr int32_t HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14;
     constexpr int32_t HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
-    const int32_t localX = x - window.x, localY = y - window.y;
+    int64_t originX{}, originY{};
+    if (!windowScreenOrigin(window, originX, originY)) return 0;
+    const int32_t localX = static_cast<int32_t>(static_cast<int64_t>(x) - originX);
+    const int32_t localY = static_cast<int32_t>(static_cast<int64_t>(y) - originY);
     const int32_t frame = frameInset(window);
     if (frame >= 5 && (localX < frame || localX >= window.width - frame ||
                        localY < frame || localY >= window.height - frame)) {
@@ -1025,6 +1088,20 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t command = static_cast<int32_t>(request.args[1]);
+            if (command && !window->parent &&
+                window->compositorSlot == UINT32_MAX) {
+                bool occupied[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+                for (const auto& candidate : g_windows)
+                    if (candidate.active && candidate.compositorSlot <
+                        MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                        occupied[candidate.compositorSlot] = true;
+                size_t slot = 0;
+                while (slot < MICANT_COMPOSITOR_SURFACE_CAPACITY && occupied[slot])
+                    ++slot;
+                if (slot == MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                    return NtStatus::InsufficientResources;
+                window->compositorSlot = static_cast<uint32_t>(slot);
+            }
             const bool wasVisible = window->visible;
             const bool wasIconic = window->iconic;
             const bool minimize = command == kSwShowMinimized || command == kSwMinimize;
@@ -1062,8 +1139,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS: {
-            auto* window = findWindow(request.args[0], ownerProcessId);
-            if (!window) return NtStatus::InvalidHandle;
+            auto* window = findWindowAny(request.args[0]);
+            if (!window || window->parent) return NtStatus::InvalidHandle;
             const auto& bounds = request.rect;
             if (bounds.left < 0 || bounds.top < 0 ||
                 bounds.right > kScreenWidth || bounds.bottom > kScreenHeight ||
@@ -1169,12 +1246,10 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::Success;
         case MICANT_WIN32K_OP_GET_CLIENT_RECT:
         case MICANT_WIN32K_OP_GET_WINDOW_RECT: {
-            const auto* window = findWindow(request.args[0], ownerProcessId);
+            const auto* window = request.operation == MICANT_WIN32K_OP_GET_WINDOW_RECT
+                ? findWindowAny(request.args[0])
+                : findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
-            if (request.operation == MICANT_WIN32K_OP_GET_WINDOW_RECT &&
-                (window->x > INT32_MAX - window->width ||
-                 window->y > INT32_MAX - window->height))
-                return NtStatus::InvalidParameter;
             if (request.operation == MICANT_WIN32K_OP_GET_CLIENT_RECT) {
                 const int32_t frame = frameInset(*window);
                 const int32_t caption = captionHeight(*window);
@@ -1182,20 +1257,29 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                     window->width > frame * 2 ? window->width - frame * 2 : 1,
                     window->height > frame * 2 + caption
                         ? window->height - frame * 2 - caption : 1};
-            } else request.rect = MicaWin32kRect{window->x, window->y,
-                    window->x + window->width, window->y + window->height};
+            } else {
+                int64_t screenX{}, screenY{};
+                if (!windowScreenOrigin(*window, screenX, screenY) ||
+                    screenX > INT32_MAX - window->width ||
+                    screenY > INT32_MAX - window->height)
+                    return NtStatus::InvalidParameter;
+                request.rect = MicaWin32kRect{
+                    static_cast<int32_t>(screenX), static_cast<int32_t>(screenY),
+                    static_cast<int32_t>(screenX + window->width),
+                    static_cast<int32_t>(screenY + window->height)};
+            }
             request.result = 1;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_ENUM_WINDOWS: {
             for (const auto& window : g_windows) {
-                if (!window.active || window.ownerProcessId != ownerProcessId || window.parent) continue;
+                if (!window.active || window.parent) continue;
                 request.windowHandles[request.result++] = window.handle;
             }
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_GET_WINDOW_TEXT: {
-            const auto* window = findWindow(request.args[0], ownerProcessId);
+            const auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             copyText(request.text, window->title);
             while (request.result < MICANT_WIN32K_TEXT_CAPACITY &&
@@ -1205,13 +1289,13 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_IS_WINDOW_VISIBLE: {
-            const auto* window = findWindow(request.args[0], ownerProcessId);
+            const auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             request.result = window->visible;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_IS_ICONIC: {
-            const auto* window = findWindow(request.args[0], ownerProcessId);
+            const auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             request.result = window->iconic;
             return NtStatus::Success;
@@ -1496,11 +1580,17 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const uint64_t oldCursorHitWindow = g_cursorHitWindow;
     const int32_t oldCursorHitTest = g_cursorHitTest;
     auto* oldHover = findWindowAny(oldCursorHitWindow);
-    const uint8_t oldHoveredButton = oldHover && oldMouseValid
-        ? captionButtonAt(*oldHover, oldMouseX - oldHover->x,
-                          oldMouseY - oldHover->y) : 0;
-    const uint8_t newHoveredButton = target
-        ? captionButtonAt(*target, x - target->x, y - target->y) : 0;
+    int64_t oldHoverX{}, oldHoverY{}, targetX{}, targetY{};
+    const bool oldHoverOrigin = oldHover &&
+        windowScreenOrigin(*oldHover, oldHoverX, oldHoverY);
+    const bool targetOrigin = target &&
+        windowScreenOrigin(*target, targetX, targetY);
+    const uint8_t oldHoveredButton = oldHover && oldMouseValid && oldHoverOrigin
+        ? captionButtonAt(*oldHover, oldMouseX - static_cast<int32_t>(oldHoverX),
+                          oldMouseY - static_cast<int32_t>(oldHoverY)) : 0;
+    const uint8_t newHoveredButton = target && targetOrigin
+        ? captionButtonAt(*target, x - static_cast<int32_t>(targetX),
+                          y - static_cast<int32_t>(targetY)) : 0;
     if (oldCursorHitWindow != (target ? target->handle : 0) ||
         oldCursorHitTest != hitTest || oldHoveredButton != newHoveredButton) {
         if (oldHover) markCaptionButtonBounds(*oldHover, oldHoveredButton);
@@ -1541,9 +1631,11 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         // click lands on its top-level client window.
         if (!target->parent && g_focusedWindow != target->handle)
             (void)setFocusedWindow(target);
+        int64_t targetX{}, targetY{};
+        if (!windowScreenOrigin(*target, targetX, targetY)) return false;
         const uint8_t button = captionButtonAt(*target,
-            static_cast<int32_t>(static_cast<int64_t>(x) - target->x),
-            static_cast<int32_t>(static_cast<int64_t>(y) - target->y));
+            static_cast<int32_t>(static_cast<int64_t>(x) - targetX),
+            static_cast<int32_t>(static_cast<int64_t>(y) - targetY));
         if (button) {
             g_captionCapture = target->handle;
             g_pressedCaptionButton = button;
@@ -1629,8 +1721,10 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     // caption before publishing WM_MOUSEMOVE / button messages to the app.
     const int32_t clientFrame = frameInset(*routeTarget);
     const int32_t clientCaption = captionHeight(*routeTarget);
-    const auto localX64 = static_cast<int64_t>(x) - routeTarget->x - clientFrame;
-    const auto localY64 = static_cast<int64_t>(y) - routeTarget->y - clientFrame - clientCaption;
+    int64_t routeX{}, routeY{};
+    if (!windowScreenOrigin(*routeTarget, routeX, routeY)) return false;
+    const auto localX64 = static_cast<int64_t>(x) - routeX - clientFrame;
+    const auto localY64 = static_cast<int64_t>(y) - routeY - clientFrame - clientCaption;
     const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
     const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
@@ -1712,6 +1806,7 @@ void publishCompositorSurfaces() noexcept {
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_ACQ_REL);
     if (store->themeGeneration != g_themeGeneration) {
         store->theme = g_themeSnapshot;
+        store->captionImageSet = g_themeCaptionImageSet;
         store->themeGeneration = g_themeGeneration;
     }
     auto& cursor = store->cursor;
@@ -1742,16 +1837,25 @@ void publishCompositorSurfaces() noexcept {
         if (!windowPointer) continue;
         const auto& window = *windowPointer;
         if (!window.active) continue;
+        int64_t screenX{}, screenY{};
+        if (!windowScreenOrigin(window, screenX, screenY)) continue;
         info.window = window.handle;
+        info.parentWindow = window.parent;
         info.ownerProcessId = window.ownerProcessId;
-        info.x = window.x;
-        info.y = window.y;
+        info.x = static_cast<int32_t>(screenX);
+        info.y = static_cast<int32_t>(screenY);
         info.width = static_cast<uint32_t>(window.width);
         info.height = static_cast<uint32_t>(window.height);
         info.pitch = MICANT_COMPOSITOR_SCREEN_WIDTH;
         info.zOrder = static_cast<uint32_t>(visibleOrder(window));
+        const uint8_t hoveredCaptionButton = g_cursorHitWindow == window.handle
+            ? captionButtonAt(window,
+                g_mouseX - static_cast<int32_t>(screenX),
+                g_mouseY - static_cast<int32_t>(screenY)) : 0;
+        const bool visibleThroughParents = window.visible &&
+            (!window.parent || hasVisibleAncestors(window));
         info.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
-            (window.visible ? MICANT_COMPOSITOR_SURFACE_VISIBLE : 0u) |
+            (visibleThroughParents ? MICANT_COMPOSITOR_SURFACE_VISIBLE : 0u) |
             (window.iconic ? MICANT_COMPOSITOR_SURFACE_ICONIC : 0u) |
             (window.handle == g_foregroundWindow
                 ? MICANT_COMPOSITOR_SURFACE_FOREGROUND : 0u) |
@@ -1761,12 +1865,9 @@ void publishCompositorSurfaces() noexcept {
                     (static_cast<uint32_t>(g_pressedCaptionButton) <<
                      MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_SHIFT)
                 : 0u) |
-            ((g_cursorHitWindow == window.handle &&
-              captionButtonAt(window, g_mouseX - window.x,
-                              g_mouseY - window.y) != 0)
+            (hoveredCaptionButton
                 ? MICANT_COMPOSITOR_SURFACE_CAPTION_BUTTON_HOVER |
-                    (static_cast<uint32_t>(captionButtonAt(
-                        window, g_mouseX - window.x, g_mouseY - window.y)) <<
+                    (static_cast<uint32_t>(hoveredCaptionButton) <<
                      MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT)
                 : 0u);
         info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
@@ -1909,9 +2010,12 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
     return NtStatus::Success;
 }
 
-micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
+micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot,
+    const MicaThemeCaptionImageSet* captionImages) noexcept {
     if (!MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot)))
         return NtStatus::InvalidParameter;
+    if (captionImages && !MicaThemeCaptionImageSetIsValid(
+            captionImages, sizeof(*captionImages))) return NtStatus::InvalidParameter;
     StateLockGuard lock;
     constexpr uint32_t kWmThemeChanged = 0x031A;
     size_t activeWindows = 0;
@@ -1921,8 +2025,10 @@ micant::NtStatus setThemeSnapshot(const MicaThemeSnapshot& snapshot) noexcept {
     if (freeMessageSlots < activeWindows) return NtStatus::InsufficientResources;
 
     markDamageFull();
-    g_themeSnapshot = snapshot;
     if (++g_themeGeneration == 0) ++g_themeGeneration;
+    g_themeSnapshot = snapshot;
+    g_themeCaptionImageSet = captionImages ? *captionImages : MicaThemeCaptionImageSet{};
+    g_themeCaptionImageSet.generation = g_themeGeneration;
     for (const auto& window : g_windows) {
         if (window.active && !enqueueWindowMessage(window, kWmThemeChanged, 0, 0))
             return NtStatus::InsufficientResources;

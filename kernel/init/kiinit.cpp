@@ -2679,6 +2679,9 @@ uint32_t g_explorerApplicationWindowCount{};
 uint64_t g_explorerApplicationWindowHandles[MICANT_WIN32K_WINDOW_CAPACITY]{};
 std::atomic_flag g_userSurfaceImageCopyLock = ATOMIC_FLAG_INIT;
 uint32_t g_userSurfaceImageCopyBuffer[MICANT_COMPOSITOR_TITLE_MAX_PIXELS]{};
+std::atomic_flag g_userThemeSnapshotCopyLock = ATOMIC_FLAG_INIT;
+MicaThemeSnapshot g_userThemeSnapshotCopy{};
+MicaThemeCaptionImageSet g_userThemeCaptionImageSetCopy{};
 struct UserSurfaceImageCopyGuard {
     UserSurfaceImageCopyGuard() noexcept {
         while (g_userSurfaceImageCopyLock.test_and_set(std::memory_order_acquire))
@@ -2686,6 +2689,15 @@ struct UserSurfaceImageCopyGuard {
     }
     ~UserSurfaceImageCopyGuard() noexcept {
         g_userSurfaceImageCopyLock.clear(std::memory_order_release);
+    }
+};
+struct UserThemeSnapshotCopyGuard {
+    UserThemeSnapshotCopyGuard() noexcept {
+        while (g_userThemeSnapshotCopyLock.test_and_set(std::memory_order_acquire))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    ~UserThemeSnapshotCopyGuard() noexcept {
+        g_userThemeSnapshotCopyLock.clear(std::memory_order_release);
     }
 };
 
@@ -4481,11 +4493,26 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                                                &request, sizeof(request)));
         }
         if (request.operation == MICANT_WIN32K_OP_SET_THEME_SNAPSHOT) {
-            MicaThemeSnapshot snapshot{};
+            UserThemeSnapshotCopyGuard copyGuard;
             const NtStatus themeCopyStatus = ex::ExSafeCopyFromUser(
-                &snapshot, reinterpret_cast<const void*>(request.args[0]), sizeof(snapshot));
+                &g_userThemeSnapshotCopy,
+                reinterpret_cast<const void*>(request.args[0]),
+                sizeof(g_userThemeSnapshotCopy));
             if (themeCopyStatus != NtStatus::Success) return status(themeCopyStatus);
-            const NtStatus themeStatus = win32k::freestanding::setThemeSnapshot(snapshot);
+            g_userThemeCaptionImageSetCopy = {};
+            if (request.args[1]) {
+                const NtStatus pixelCopyStatus = ex::ExSafeCopyFromUser(
+                    &g_userThemeCaptionImageSetCopy,
+                    reinterpret_cast<const void*>(request.args[1]),
+                    sizeof(g_userThemeCaptionImageSetCopy));
+                if (pixelCopyStatus != NtStatus::Success) return status(pixelCopyStatus);
+                if (!MicaThemeCaptionImageSetIsValid(&g_userThemeCaptionImageSetCopy,
+                        sizeof(g_userThemeCaptionImageSetCopy)))
+                    return status(NtStatus::InvalidParameter);
+            }
+            const NtStatus themeStatus = win32k::freestanding::setThemeSnapshot(
+                g_userThemeSnapshotCopy, request.args[1]
+                    ? &g_userThemeCaptionImageSetCopy : nullptr);
             if (themeStatus != NtStatus::Success) return status(themeStatus);
             request.result = 1;
             publishCompositorSurfacesInCompositorSpace();
@@ -4493,11 +4520,13 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                                                &request, sizeof(request)));
         }
         if (request.operation == MICANT_WIN32K_OP_GET_THEME_SNAPSHOT) {
-            MicaThemeSnapshot snapshot{};
-            const NtStatus themeStatus = win32k::freestanding::getThemeSnapshot(snapshot);
+            UserThemeSnapshotCopyGuard copyGuard;
+            const NtStatus themeStatus = win32k::freestanding::getThemeSnapshot(
+                g_userThemeSnapshotCopy);
             if (themeStatus != NtStatus::Success) return status(themeStatus);
             const NtStatus copyStatus = ex::ExSafeCopyToUser(
-                reinterpret_cast<void*>(request.args[0]), &snapshot, sizeof(snapshot));
+                reinterpret_cast<void*>(request.args[0]),
+                &g_userThemeSnapshotCopy, sizeof(g_userThemeSnapshotCopy));
             if (copyStatus != NtStatus::Success) return status(copyStatus);
             request.result = 1;
             return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),

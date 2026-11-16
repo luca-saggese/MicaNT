@@ -745,9 +745,11 @@ public:
  */
 struct VirtualAddressDescriptor {
     struct CommitRange {
+#if defined(MICANT_FREESTANDING)
         static void* operator new(size_t size, const std::nothrow_t&) noexcept;
         static void operator delete(void* pointer) noexcept;
         static void operator delete(void* pointer, const std::nothrow_t&) noexcept;
+#endif
         uint64_t firstVpn{0};
         uint64_t lastVpn{0};
         uint64_t pfn{0};
@@ -1729,9 +1731,11 @@ public:
             page->maximumProtection = pageMaximumProtections ? pageMaximumProtections[i] :
                 (pageProtections ? pageProtections[i] : maxProtection);
             if (!page->pfn) { failure = NtStatus::InvalidParameter; break; }
-            if (imageView && (privateImageView || (!page->sharedImagePage &&
-                             (page->protection == PAGE_READWRITE ||
-                              page->protection == PAGE_EXECUTE_READWRITE)))) {
+            const bool writableImagePage = imageView && !privateImageView &&
+                !page->sharedImagePage &&
+                (page->protection == PAGE_READWRITE ||
+                 page->protection == PAGE_EXECUTE_READWRITE);
+            if (imageView && privateImageView && page->pfn) {
                 auto& db = PfnDatabase::get();
                 const uint64_t privatePfn = db.allocatePage(true);
                 if (!privatePfn || !db.zeroAllocatedPage(privatePfn)) {
@@ -1747,8 +1751,13 @@ public:
                 page->pfn = privatePfn;
                 page->ownsPfn = true;
             }
+            page->copyOnWriteArmed = writableImagePage;
+            const uint32_t hardwareProtection = writableImagePage
+                ? (page->protection == PAGE_EXECUTE_READWRITE
+                    ? PAGE_EXECUTE_READ : PAGE_READONLY)
+                : page->protection;
             if (!page->pfn || !backend_.map(backend_.context, start + i * PageSize4KB,
-                                            page->pfn, page->protection)) {
+                                            page->pfn, hardwareProtection)) {
                 if (page->ownsPfn) PfnDatabase::get().freePage(page->pfn);
                 failure = NtStatus::Unsuccessful;
                 break;
@@ -2343,6 +2352,8 @@ public:
         if (workingSet_.pageFaultCount != UINT32_MAX) ++workingSet_.pageFaultCount;
         if (backend_.map) {
             if (!isUser || !isWrite || isExecute || !backend_.replace) return NtStatus::AccessViolation;
+            auto* vad = vadTree_.find(faultingAddress);
+            if (!vad || !vad->isImageView) return NtStatus::AccessViolation;
             return resolveCopyOnWriteLocked(faultingAddress);
         }
 #if defined(MICANT_FREESTANDING)

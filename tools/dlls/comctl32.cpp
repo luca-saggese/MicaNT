@@ -158,6 +158,8 @@ __declspec(dllimport) void* OpenThemeData(void*, const wchar_t*);
 __declspec(dllimport) int32_t CloseThemeData(void*);
 __declspec(dllimport) int32_t DrawThemeBackground(void*, void*, int32_t, int32_t,
                                                   const Rect*, const Rect*);
+__declspec(dllimport) int32_t GetThemeColor(void*, int32_t, int32_t, int32_t,
+                                             uint32_t*);
 __declspec(dllimport) int32_t DrawThemeText(void*, void*, int32_t, int32_t,
         const wchar_t*, int32_t, uint32_t, uint32_t, const Rect*);
 __declspec(dllimport) intptr_t SendMessageW(void*, uint32_t, uintptr_t, intptr_t);
@@ -287,12 +289,22 @@ intptr_t ProgressBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         return 0;
     }
 
+    // Progress trough colors can carry alpha in the theme snapshot. Seed the
+    // control with the themed window surface before UxTheme blends that color.
+    uint32_t baseSurface = kDefaultBackColor;
+    void* windowTheme = OpenThemeData(hwnd, L"WINDOW");
+    uint32_t themedSurface{};
+    if (windowTheme && GetThemeColor(windowTheme, 1, 1, 3802,
+                                     &themedSurface) == 0)
+        baseSurface = themedSurface;
+    (void)fillWithColor(hdc, bounds, baseSurface);
+
     void* theme = OpenThemeData(hwnd, L"PROGRESS");
     bool backgroundDrawn = theme &&
         DrawThemeBackground(theme, hdc, kProgressBarPart, 1, &bounds, nullptr) == 0;
     if (!backgroundDrawn) {
-        const uint32_t back = snapshot.hasBackgroundColor
-            ? snapshot.backgroundColor : kDefaultBackColor;
+        uint32_t back = snapshot.hasBackgroundColor
+            ? snapshot.backgroundColor : baseSurface;
         (void)fillWithColor(hdc, bounds, back);
     }
 
@@ -309,13 +321,21 @@ intptr_t ProgressBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                 fillDrawn = DrawThemeBackground(theme, hdc, kProgressBarPart,
                     kProgressFillState, &fill, &bounds) == 0;
             if (!fillDrawn) {
-                const uint32_t bar = snapshot.hasBarColor
+                uint32_t bar = snapshot.hasBarColor
                     ? snapshot.barColor : kDefaultBarColor;
+                uint32_t themedBar{};
+                if (!snapshot.hasBarColor && theme &&
+                    (GetThemeColor(theme, kProgressBarPart, kProgressFillState,
+                                   3802, &themedBar) == 0 ||
+                     GetThemeColor(theme, kProgressBarPart, kProgressFillState,
+                                   3803, &themedBar) == 0))
+                    bar = themedBar;
                 (void)fillWithColor(hdc, fill, bar);
             }
         }
     }
     if (theme) (void)CloseThemeData(theme);
+    if (windowTheme) (void)CloseThemeData(windowTheme);
     (void)EndPaint(hwnd, &paint);
     return 0;
 }
@@ -578,8 +598,14 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         (void)EndPaint(hwnd, &paint);
         return 0;
     }
-    bool painted = fillWithColor(hdc, bounds, 0x00F0F0F0u);
     void* theme = OpenThemeData(hwnd, L"TAB");
+    uint32_t clientColor = 0x00F0F0F0u;
+    if (theme) {
+        uint32_t themedClientColor{};
+        if (GetThemeColor(theme, 1, 1, 3802, &themedClientColor) == 0)
+            clientColor = themedClientColor;
+    }
+    bool painted = fillWithColor(hdc, bounds, clientColor);
     const int32_t tabWidth = std::max<int32_t>(1,
         (bounds.right - bounds.left) / std::max<int32_t>(1, snapshot.count));
     const int32_t tabHeight = std::min<int32_t>(28, bounds.bottom - bounds.top);
@@ -593,8 +619,10 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         const bool themed = theme &&
             DrawThemeBackground(theme, hdc, 1, state, &tab, nullptr) == 0;
         if (!themed) {
-            const uint32_t color = snapshot.selected == index ? 0x00FFFFFFu
-                : snapshot.enabled ? 0x00F0F0F0u : 0x00E0E0E0u;
+            uint32_t color = snapshot.selected == index ? 0x00FFFFFFu : clientColor;
+            uint32_t themedColor{};
+            if (theme && GetThemeColor(theme, 1, state, 3802, &themedColor) == 0)
+                color = themedColor;
             painted &= fillWithColor(hdc, tab, color);
         }
         Rect text{tab.left + 6, tab.top + 2, tab.right - 6, tab.bottom - 2};
@@ -606,8 +634,12 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                 label, length, 0x00000001u | 0x00000020u | 0x00000800u,
                 0, &text) == 0;
             if (!themedText) {
-                const uint32_t oldColor = SetTextColor(hdc,
-                    snapshot.enabled ? 0x00000000u : 0x00808080u);
+                uint32_t textColor = snapshot.enabled ? 0x00000000u : 0x00808080u;
+                uint32_t themedTextColor{};
+                if (theme && GetThemeColor(theme, 1, state, 3803,
+                                           &themedTextColor) == 0)
+                    textColor = themedTextColor;
+                const uint32_t oldColor = SetTextColor(hdc, textColor);
                 const int32_t oldMode = SetBkMode(hdc, 1);
                 const int32_t textX = text.left + std::max(0,
                     ((text.right - text.left) - length * 8) / 2);

@@ -103,6 +103,8 @@ struct SectionFileBacking {
     uint64_t (*querySize)(void*) noexcept{};
     NtStatus (*publishControl)(void*, void*, bool (*)(void*) noexcept,
                                void (*)(void*) noexcept, void**) noexcept{};
+    NtStatus (*referenceControl)(void*, bool (*)(void*) noexcept,
+                                 void (*)(void*) noexcept, void**) noexcept{};
     bool sharedControlSupported{};
 };
 
@@ -111,10 +113,15 @@ class SectionObject {
         std::atomic<size_t> references{1};
         size_t pageCount{0};
         uint64_t* pfns{nullptr};
+        uintptr_t imageBase{0};
+        size_t imageSize{0};
+        std::unique_ptr<uint32_t[]> pageProtections{};
+        std::unique_ptr<uint32_t[]> imageViewProtections{};
+        std::unique_ptr<uint8_t[]> sharedImagePages{};
 
         ~Backing() {
             for (size_t i = 0; i < pageCount; ++i)
-                mm::PfnDatabase::get().freePage(pfns[i]);
+                if (pfns[i]) mm::PfnDatabase::get().freePage(pfns[i]);
             delete[] pfns;
         }
 
@@ -213,6 +220,49 @@ public:
         if (file.querySize) fileBacking_.size = file.size = file.querySize(file.context);
         if (!file.size) { status_ = NtStatus::InvalidImageFormat; return; }
         if (file.size > SIZE_MAX) { status_ = NtStatus::SectionTooBig; return; }
+        if (file.referenceControl) {
+            void* cachedControl{};
+            const auto cacheStatus = file.referenceControl(
+                file.context, Backing::acquire, Backing::release, &cachedControl);
+            if (cacheStatus == NtStatus::Success) {
+                auto* cached = static_cast<Backing*>(cachedControl);
+                if (!cached || !cached->imageSize || !cached->pageCount || !cached->pfns ||
+                    !cached->pageProtections || !cached->imageViewProtections ||
+                    !cached->sharedImagePages) {
+                    if (cached) Backing::release(cached);
+                    status_ = NtStatus::InvalidImageFormat;
+                    return;
+                }
+                if (maximumSize && maximumSize < cached->imageSize) {
+                    Backing::release(cached);
+                    status_ = NtStatus::SectionTooBig;
+                    return;
+                }
+                pageProtections_.reset(new (std::nothrow_t{}) uint32_t[cached->pageCount]);
+                imageViewProtections_.reset(new (std::nothrow_t{}) uint32_t[cached->pageCount]);
+                sharedImagePages_.reset(new (std::nothrow_t{}) uint8_t[cached->pageCount]);
+                if (!pageProtections_ || !imageViewProtections_ || !sharedImagePages_) {
+                    Backing::release(cached);
+                    status_ = NtStatus::NoMemory;
+                    return;
+                }
+                std::memcpy(pageProtections_.get(), cached->pageProtections.get(),
+                            cached->pageCount * sizeof(uint32_t));
+                std::memcpy(imageViewProtections_.get(), cached->imageViewProtections.get(),
+                            cached->pageCount * sizeof(uint32_t));
+                std::memcpy(sharedImagePages_.get(), cached->sharedImagePages.get(),
+                            cached->pageCount * sizeof(uint8_t));
+                backing_ = cached;
+                maximumSize_ = cached->imageSize;
+                imageBase_ = cached->imageBase;
+                return;
+            }
+            if (cacheStatus != NtStatus::ObjectNameNotFound &&
+                cacheStatus != NtStatus::NotFound) {
+                status_ = cacheStatus;
+                return;
+            }
+        }
         std::unique_ptr<uint8_t[]> bytes(new (std::nothrow_t{}) uint8_t[static_cast<size_t>(file.size)]);
         if (!bytes) { status_ = NtStatus::NoMemory; return; }
         size_t total{};
@@ -476,15 +526,41 @@ public:
         // The process loader binds imports while using a private writable
         // staging view. The section itself retains the PE protections, even
         // when the import directory shares a page with executable code.
+        // All raw-file validation and section-table reads are complete. Keep
+        // the file object and its image lease as the source for later reads,
+        // and release this temporary file-sized buffer before allocating the
+        // image PFNs. Retaining both raw bytes and the mapped image here can
+        // exceed the boot profile's physical-memory budget for large system
+        // DLLs.
+        bytes.reset();
         auto* backing = new (std::nothrow_t{}) Backing;
         if (!backing) { status_ = NtStatus::NoMemory; return; }
-        backing->pfns = new (std::nothrow_t{}) uint64_t[pageCount];
+        backing->imageBase = optional.imageBase;
+        backing->imageSize = maximumSize_;
+        backing->pageProtections.reset(new (std::nothrow_t{}) uint32_t[pageCount]);
+        backing->imageViewProtections.reset(new (std::nothrow_t{}) uint32_t[pageCount]);
+        backing->sharedImagePages.reset(new (std::nothrow_t{}) uint8_t[pageCount]);
+        if (!backing->pageProtections || !backing->imageViewProtections ||
+            !backing->sharedImagePages) {
+            delete backing;
+            status_ = NtStatus::NoMemory;
+            return;
+        }
+        std::memcpy(backing->pageProtections.get(), pageProtections_.get(),
+                    pageCount * sizeof(uint32_t));
+        std::memcpy(backing->imageViewProtections.get(), imageViewProtections_.get(),
+                    pageCount * sizeof(uint32_t));
+        std::memcpy(backing->sharedImagePages.get(), sharedImagePages_.get(),
+                    pageCount * sizeof(uint8_t));
+        backing->pfns = new (std::nothrow_t{}) uint64_t[pageCount]{};
         if (!backing->pfns) { delete backing; status_ = NtStatus::NoMemory; return; }
         auto& db = mm::PfnDatabase::get();
+        backing->pageCount = pageCount;
         for (size_t page = 0; page < pageCount; ++page) {
+            const auto* source = mapped.get() + page * mm::PageSize4KB;
             const uint64_t pfn = db.allocatePage(true);
             if (!pfn) { delete backing; status_ = NtStatus::NoMemory; return; }
-            backing->pfns[backing->pageCount++] = pfn;
+            backing->pfns[page] = pfn;
             if (!db.zeroAllocatedPage(pfn)) { delete backing; status_ = NtStatus::Unsuccessful; return; }
             // PFN pages may lie in firmware ranges whose identity map is
             // read-only. Copy through the HAL's supervisor physical aperture
@@ -492,11 +568,11 @@ public:
             auto* destination = hal::amd64::mapBootstrapPhysicalPage(
                 pfn << mm::PageShift4KB);
             if (!destination) { delete backing; status_ = NtStatus::Unsuccessful; return; }
-            const auto* source = mapped.get() + page * mm::PageSize4KB;
             for (size_t byte = 0; byte < mm::PageSize4KB; ++byte)
                 destination[byte] = source[byte];
             hal::amd64::releaseBootstrapPhysicalPage();
         }
+        mapped.reset();
         if (file.publishControl) {
             void* selected{};
             status_ = file.publishControl(file.context, backing, Backing::acquire,
@@ -508,9 +584,6 @@ public:
         }
         backing_ = backing;
         imageBase_ = static_cast<uintptr_t>(optional.imageBase);
-        // The loader must parse the same bytes that produced the section's
-        // physical pages, even if the underlying file changes afterwards.
-        imageFileBytes_ = std::move(bytes);
     }
 
     ~SectionObject() {
@@ -557,13 +630,11 @@ public:
     NtStatus readFile(uint64_t offset, void* buffer, size_t length, size_t* bytesRead) const noexcept {
         if (!bytesRead || (length && !buffer)) return NtStatus::InvalidParameter;
         *bytesRead = 0;
-        if (!fileReferenceHeld_ || !imageFileBytes_) return NtStatus::InvalidHandle;
+        if (!fileReferenceHeld_ || !fileBacking_.read) return NtStatus::InvalidHandle;
         if (offset >= fileBacking_.size || !length) return NtStatus::Success;
         const size_t available = static_cast<size_t>(fileBacking_.size - offset);
         const size_t count = length < available ? length : available;
-        std::memcpy(buffer, imageFileBytes_.get() + static_cast<size_t>(offset), count);
-        *bytesRead = count;
-        return NtStatus::Success;
+        return fileBacking_.read(fileBacking_.context, offset, buffer, count, bytesRead);
     }
     [[nodiscard]] SectionBackingReference getBackingReference() const noexcept {
         if (!backing_) return {};
@@ -585,7 +656,6 @@ private:
     SectionFileBacking fileBacking_{};
     bool imageLeaseHeld_{};
     bool fileReferenceHeld_{};
-    std::unique_ptr<uint8_t[]> imageFileBytes_{};
     std::unique_ptr<uint32_t[]> pageProtections_{};
     std::unique_ptr<uint32_t[]> imageViewProtections_{};
     std::unique_ptr<uint8_t[]> sharedImagePages_{};

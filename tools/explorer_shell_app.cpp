@@ -22,6 +22,7 @@
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/theme_snapshot.h"
+#include "micant/um/subsystems/theme/window_decoration_assets.hpp"
 #include "micant/shared/native_uxtheme_api.h"
 #include "gui_common.hpp"
 #define MICANT_USERENV_NO_EXPORT_REGISTRATION
@@ -93,6 +94,8 @@ struct ShellState {
     MicaThemeSnapshot themeCandidate{};
     MicaThemeSnapshot themeVerify{};
     MicaThemeSnapshot themeRollbackProbe{};
+    MicaThemeCaptionImageSet visualThemeCaptionImages{};
+    MicaThemeCaptionImageSet themeCandidateCaptionImages{};
     bool visualThemeReady{};
     char themeProfile[96]{};
     bool themeAuto{};
@@ -1143,7 +1146,8 @@ bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
 void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     const bool hadPrevious = g.visualThemeReady;
     const auto restorePreviousSnapshot = [&]() noexcept {
-        if (hadPrevious) (void)MicaWin32kSetThemeSnapshot(&g.visualTheme);
+        if (hadPrevious) (void)MicaWin32kSetThemeSnapshot(
+            &g.visualTheme, &g.visualThemeCaptionImages);
     };
     wchar_t path[512]{};
     size_t cursor = 0, profileBytes = 0;
@@ -1210,7 +1214,17 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         PrintLine("[MicaNT Theme] Compiled style snapshot rejected");
         return;
     }
-    if (!MicaWin32kSetThemeSnapshot(&candidate)) {
+    if (cursor < 13) return;
+    cursor -= 13;
+    path[cursor] = L'\0';
+    bool dark = false;
+    for (size_t index = 0; index + 3 < profileBytes; ++index)
+        if (profile[index] == 'D' && profile[index + 1] == 'a' &&
+            profile[index + 2] == 'r' && profile[index + 3] == 'k') dark = true;
+    micant::um::theme::LoadWhiteSurCaptionImages(
+        g.themeCandidateCaptionImages, path, dark);
+    if (!appendWide(path, std::size(path), cursor, L"\\native.style", 13)) return;
+    if (!MicaWin32kSetThemeSnapshot(&candidate, &g.themeCandidateCaptionImages)) {
         PrintLine("[MicaNT Theme] Win32k rejected the style snapshot");
         return;
     }
@@ -1380,7 +1394,8 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
         fontQueryStyle.flags |= MICANT_THEME_HAS_FONT_SIZE |
             MICANT_THEME_HAS_FONT_WEIGHT | MICANT_THEME_HAS_FONT_STYLE |
             MICANT_THEME_HAS_FONT_FAMILY;
-        const bool fontSnapshotPublished = MicaWin32kSetThemeSnapshot(&candidate) &&
+        const bool fontSnapshotPublished = MicaWin32kSetThemeSnapshot(
+            &candidate, &g.visualThemeCaptionImages) &&
             IsThemeActive();
         MicaThemeHandle fontQueryTheme = fontSnapshotPublished
             ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
@@ -1397,7 +1412,8 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
             std::memcmp(supportedThemeFont + 28, L"Arial", sizeof(L"Arial")) == 0;
         const bool fontQueryHandleClosed = fontQueryTheme && CloseThemeData(fontQueryTheme) == 0;
         candidate.styles[0] = originalButtonStyle;
-        const bool fontSnapshotRestored = MicaWin32kSetThemeSnapshot(&candidate) &&
+        const bool fontSnapshotRestored = MicaWin32kSetThemeSnapshot(
+            &candidate, &g.visualThemeCaptionImages) &&
             IsThemeActive();
         g.themeFontMetadataProbeReported = supportedThemeFontPassed &&
             fontQueryHandleClosed && fontSnapshotRestored;
@@ -1463,6 +1479,7 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     else
         PrintLine("[MicaNT Theme] Buffered animation failure contract mismatch");
     g.visualTheme = candidate;
+    g.visualThemeCaptionImages = g.themeCandidateCaptionImages;
     g.visualThemeReady = true;
     for (size_t i = 0; i < profileBytes; ++i) g.themeProfile[i] = profile[i];
     g.themeProfile[profileBytes] = '\0';
@@ -2701,6 +2718,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (hwnd == g.desktop && message == WM_THEME_SCHEDULE_TICK) {
         updateClock();
         updateAutomaticTheme();
+        redrawTaskbar();
         return 0;
     }
     if (message == WM_COMMAND && reinterpret_cast<HWND>(lParam) == g.themeButtonProbe &&
