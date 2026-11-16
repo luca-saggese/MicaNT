@@ -252,7 +252,8 @@ void drawControlIcon(uint8_t kind, bool maximized, int64_t left,
 
 bool composeRegion(const MicaCompositorMetadataStore& metadata,
                    const uint32_t* surfaces, ScreenRect clip,
-                   const AnimationFrame* animationFrames) noexcept {
+                   const AnimationFrame* animationFrames,
+                   const uint32_t* decorPixels) noexcept {
     const uint32_t width = metadata.screenWidth;
     const uint32_t height = metadata.screenHeight;
     if (width != MICANT_COMPOSITOR_SCREEN_WIDTH ||
@@ -273,10 +274,10 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
              width, height);
 
     struct OrderedSurface {
-        const MicaCompositorSurfaceInfo* info{};
-        size_t index{};
+        const MicaCompositorSurfaceInfo* info;
+        size_t index;
     };
-    OrderedSurface ordered[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+    OrderedSurface ordered[MICANT_COMPOSITOR_SURFACE_CAPACITY];
     size_t count = 0;
     for (size_t index = 0; index < metadata.surfaceCapacity; ++index) {
         const auto& surface = metadata.surfaces[index];
@@ -289,9 +290,9 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             !surface.window || !surface.width || !surface.height ||
             surface.width > width || surface.height > height ||
             surface.pitch < surface.width ||
-            surface.pixelOffset > MICANT_COMPOSITOR_PIXEL_STORE_SIZE / sizeof(uint32_t) ||
+            surface.pixelOffset > MICANT_COMPOSITOR_SURFACE_PIXEL_CAPACITY ||
             static_cast<uint64_t>(surface.pitch) * surface.height >
-                MICANT_COMPOSITOR_PIXEL_STORE_SIZE / sizeof(uint32_t) - surface.pixelOffset)
+                MICANT_COMPOSITOR_SURFACE_PIXEL_CAPACITY - surface.pixelOffset)
             continue;
         size_t insertion = count;
         while (insertion && ordered[insertion - 1].info->zOrder > surface.zOrder) {
@@ -447,13 +448,92 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                     drawControlIcon(3, false, closeLeft, iconTop,
                                     closeGlyph, width, height);
 
-                    int64_t titleX = windowLeft + frame + 9;
                     const int64_t titleLimit = closeLeft - 66;
-                    const int64_t titleY = windowTop + frame + (caption - 8) / 2;
-                    for (size_t character = 0; character < 63 && surface.title[character] &&
-                         titleX + 8 <= titleLimit; ++character, titleX += 8)
-                        drawGlyph(titleX, titleY, surface.title[character],
-                                  titleColor, width, height);
+                    const size_t surfaceSlot = ordered[index].index;
+                    const uint64_t iconSlotBegin = MICANT_COMPOSITOR_ICON_PIXEL_OFFSET +
+                        static_cast<uint64_t>(surfaceSlot) * MICANT_COMPOSITOR_ICON_TYPES *
+                            MICANT_COMPOSITOR_ICON_MAX_PIXELS;
+                    const uint64_t iconSlotEnd = iconSlotBegin +
+                        static_cast<uint64_t>(MICANT_COMPOSITOR_ICON_TYPES) *
+                            MICANT_COMPOSITOR_ICON_MAX_PIXELS;
+                    const uint64_t iconEnd = static_cast<uint64_t>(surface.iconPixelOffset) +
+                        (surface.iconHeight ? static_cast<uint64_t>(surface.iconHeight - 1) *
+                            surface.iconStride + surface.iconWidth : 0);
+                    const bool validIcon = surface.iconGeneration &&
+                        surface.iconWidth && surface.iconHeight &&
+                        surface.iconWidth <= MICANT_COMPOSITOR_ICON_MAX_DIMENSION &&
+                        surface.iconHeight <= MICANT_COMPOSITOR_ICON_MAX_DIMENSION &&
+                        surface.iconStride >= surface.iconWidth &&
+                        surface.iconPixelOffset >= iconSlotBegin && iconEnd <= iconSlotEnd &&
+                        iconEnd <= MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE / sizeof(uint32_t);
+                    int64_t titleX = windowLeft + frame + 9;
+                    if (validIcon) {
+                        const int64_t iconLeft = titleX;
+                        const int64_t iconTop = windowTop + frame +
+                            (caption - static_cast<int64_t>(surface.iconHeight)) / 2;
+                        for (uint32_t row = 0; row < surface.iconHeight; ++row) {
+                            const int64_t y = iconTop + row;
+                            if (y < g_composeClip.top || y >= g_composeClip.bottom ||
+                                y < 0 || y >= height) continue;
+                            for (uint32_t column = 0; column < surface.iconWidth; ++column) {
+                                const int64_t x = iconLeft + column;
+                                if (x >= titleLimit || x < g_composeClip.left ||
+                                    x >= g_composeClip.right || x < 0 || x >= width) continue;
+                                const uint32_t source = decorPixels[surface.iconPixelOffset +
+                                    static_cast<size_t>(row) * surface.iconStride + column];
+                                if (source >> 24)
+                                    g_frame[static_cast<size_t>(y) * width +
+                                        static_cast<size_t>(x)] = blend(source,
+                                            g_frame[static_cast<size_t>(y) * width +
+                                                static_cast<size_t>(x)]);
+                            }
+                        }
+                        titleX += surface.iconWidth + 8;
+                    }
+
+                    const uint64_t titleSlotBegin = MICANT_COMPOSITOR_TITLE_PIXEL_OFFSET +
+                        static_cast<uint64_t>(surfaceSlot) * MICANT_COMPOSITOR_TITLE_MAX_PIXELS;
+                    const uint64_t titleSlotEnd = titleSlotBegin +
+                        MICANT_COMPOSITOR_TITLE_MAX_PIXELS;
+                    const uint64_t titleEnd = static_cast<uint64_t>(surface.titlePixelOffset) +
+                        (surface.titleHeight ? static_cast<uint64_t>(surface.titleHeight - 1) *
+                            surface.titleStride + surface.titleWidth : 0);
+                    const bool validTitle = surface.titleGeneration && surface.titleWidth &&
+                        surface.titleHeight &&
+                        surface.titleWidth <= MICANT_COMPOSITOR_TITLE_MAX_WIDTH &&
+                        surface.titleHeight <= MICANT_COMPOSITOR_TITLE_MAX_HEIGHT &&
+                        surface.titleStride >= surface.titleWidth &&
+                        surface.titlePixelOffset == titleSlotBegin &&
+                        titleEnd <= titleSlotEnd &&
+                        titleEnd <= MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE / sizeof(uint32_t);
+                    if (validTitle) {
+                        const int64_t titleTop = windowTop + frame +
+                            (caption - static_cast<int64_t>(surface.titleHeight)) / 2;
+                        for (uint32_t row = 0; row < surface.titleHeight; ++row) {
+                            const int64_t y = titleTop + row;
+                            if (y < g_composeClip.top || y >= g_composeClip.bottom ||
+                                y < 0 || y >= height) continue;
+                            for (uint32_t column = 0; column < surface.titleWidth; ++column) {
+                                const int64_t x = titleX + column;
+                                if (x >= titleLimit) break;
+                                if (x < g_composeClip.left || x >= g_composeClip.right ||
+                                    x < 0 || x >= width) continue;
+                                const uint32_t coverage = decorPixels[surface.titlePixelOffset +
+                                    static_cast<size_t>(row) * surface.titleStride + column] >> 24;
+                                if (!coverage) continue;
+                                const uint32_t glyph = (coverage << 24) | (titleColor & 0x00FFFFFFu);
+                                const size_t destination = static_cast<size_t>(y) * width +
+                                    static_cast<size_t>(x);
+                                g_frame[destination] = blend(glyph, g_frame[destination]);
+                            }
+                        }
+                    } else {
+                        const int64_t titleY = windowTop + frame + (caption - 8) / 2;
+                        for (size_t character = 0; character < 63 && surface.title[character] &&
+                             titleX + 8 <= titleLimit; ++character, titleX += 8)
+                            drawGlyph(titleX, titleY, surface.title[character],
+                                      titleColor, width, height);
+                    }
                 }
             }
         }
@@ -631,9 +711,11 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
 bool composeDamageRegions(const MicaCompositorMetadataStore& metadata,
                           const uint32_t* surfaces,
                           const AnimationFrame* frames,
+                          const uint32_t* decorPixels,
                           const DamageSet& damage) noexcept {
     for (size_t index = 0; index < damage.count; ++index)
-        if (!composeRegion(metadata, surfaces, damage.regions[index], frames))
+        if (!composeRegion(metadata, surfaces, damage.regions[index], frames,
+                           decorPixels))
             return false;
     return true;
 }
@@ -663,8 +745,39 @@ extern "C" void _start() noexcept {
         MICANT_COMPOSITOR_METADATA_BASE);
     const auto* pixels = reinterpret_cast<const uint32_t*>(
         MICANT_COMPOSITOR_PIXELS_BASE);
+    const auto* decorPixels = reinterpret_cast<const uint32_t*>(
+        MICANT_COMPOSITOR_DECOR_PIXELS_BASE);
     constexpr char startupMessage[] = "[MicaNT Compositor] Ring 3 compositor entered\r\n";
     print(startupMessage, sizeof(startupMessage) - 1);
+    micant::um::UserVideoInfo64 displayInfo{};
+    if (micant::sys::invokeUserService(0x80,
+            reinterpret_cast<uint64_t>(&displayInfo)) == 0) {
+        const auto transport = static_cast<micant::um::DisplayTransportBackend>(
+            displayInfo.transportBackend);
+        const auto composition = static_cast<micant::um::DisplayCompositionBackend>(
+            displayInfo.compositionBackend);
+        if (transport == micant::um::DisplayTransportBackend::Virtio2D &&
+            composition == micant::um::DisplayCompositionBackend::Software) {
+            constexpr char message[] = "[MicaNT Compositor] Backend: SOFTWARE_COMPOSITOR + VIRTIO_2D_SCANOUT\r\n";
+            print(message, sizeof(message) - 1);
+        } else if (transport == micant::um::DisplayTransportBackend::Virgl &&
+                   composition == micant::um::DisplayCompositionBackend::VirglAccelerated) {
+            constexpr char message[] = "[MicaNT Compositor] Backend: VIRGL_ACCELERATED\r\n";
+            print(message, sizeof(message) - 1);
+        } else if (transport == micant::um::DisplayTransportBackend::Virgl) {
+            constexpr char message[] = "[MicaNT Compositor] Backend: VirGL available; software composition active\r\n";
+            print(message, sizeof(message) - 1);
+        } else if (transport == micant::um::DisplayTransportBackend::Gop) {
+            constexpr char message[] = "[MicaNT Compositor] Backend: GOP_FALLBACK + SOFTWARE_COMPOSITOR\r\n";
+            print(message, sizeof(message) - 1);
+        } else {
+            constexpr char message[] = "[MicaNT Compositor] Backend query returned unknown transport\r\n";
+            print(message, sizeof(message) - 1);
+        }
+    } else {
+        constexpr char unavailable[] = "[MicaNT Compositor] Backend capability query failed\r\n";
+        print(unavailable, sizeof(unavailable) - 1);
+    }
     uint64_t previous = UINT64_MAX;
     bool metadataObserved = false;
     bool invalidHeaderReported = false;
@@ -744,12 +857,14 @@ extern "C" void _start() noexcept {
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) != sequence)
             continue;
         if (composed)
-            composed = composeDamageRegions(snapshot, pixels, animationFrames, damage) &&
+            composed = composeDamageRegions(snapshot, pixels, animationFrames,
+                                             decorPixels, damage) &&
                 presentDamage(snapshot.screenWidth, damage);
         if (!composed) {
             constexpr ScreenRect fullScreen{
                 0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH, MICANT_COMPOSITOR_SCREEN_HEIGHT};
-            composed = composeRegion(snapshot, pixels, fullScreen, animationFrames) &&
+            composed = composeRegion(snapshot, pixels, fullScreen, animationFrames,
+                                     decorPixels) &&
                 presentRegion(snapshot.screenWidth, fullScreen);
         }
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {

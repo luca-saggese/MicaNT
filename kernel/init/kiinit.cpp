@@ -2472,6 +2472,7 @@ micant::ps::EProcess* g_compositorProcessObject{};
 micant::ob::ObjectHeader* g_compositorProcessReference{};
 micant::Handle g_compositorMetadataSection{};
 micant::Handle g_compositorPixelsSection{};
+micant::Handle g_compositorDecorPixelsSection{};
 MicaCompositorMetadataStore* g_compositorMetadata{};
 
 bool initializeCompositorSections() noexcept {
@@ -2489,6 +2490,18 @@ bool initializeCompositorSections() noexcept {
         &pixelsSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
     if (result != NtStatus::Success) {
         (void)sys::NtClose(g_compositorMetadataSection);
+        g_compositorMetadataSection = 0;
+        return false;
+    }
+    LargeInteger decorSize{};
+    decorSize.quadPart = MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE;
+    result = sys::NtCreateSectionFromKernel(&g_compositorDecorPixelsSection,
+        section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr,
+        &decorSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
+    if (result != NtStatus::Success) {
+        (void)sys::NtClose(g_compositorPixelsSection);
+        (void)sys::NtClose(g_compositorMetadataSection);
+        g_compositorPixelsSection = 0;
         g_compositorMetadataSection = 0;
         return false;
     }
@@ -2513,6 +2526,17 @@ void publishCompositorSurfacesInCompositorSpace() noexcept {
 }
 uint32_t g_explorerApplicationWindowCount{};
 uint64_t g_explorerApplicationWindowHandles[MICANT_WIN32K_WINDOW_CAPACITY]{};
+std::atomic_flag g_userSurfaceImageCopyLock = ATOMIC_FLAG_INIT;
+uint32_t g_userSurfaceImageCopyBuffer[MICANT_COMPOSITOR_TITLE_MAX_PIXELS]{};
+struct UserSurfaceImageCopyGuard {
+    UserSurfaceImageCopyGuard() noexcept {
+        while (g_userSurfaceImageCopyLock.test_and_set(std::memory_order_acquire))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    ~UserSurfaceImageCopyGuard() noexcept {
+        g_userSurfaceImageCopyLock.clear(std::memory_order_release);
+    }
+};
 
 bool launchUserImageProcess(const char16_t* imageName,
                             micant::Handle& processHandle,
@@ -2663,6 +2687,16 @@ bool launchUserImageProcess(const char16_t* imageName,
             result = sys::NtMapViewOfSectionFromKernel(g_compositorPixelsSection,
                 processHandle, &pixelsBase, 0, 0, nullptr, &pixelsView,
                 2, 0, pixelProtection);
+        if (result == NtStatus::Success && processHandle == g_compositorProcessHandle) {
+            uintptr_t decorBase = MICANT_COMPOSITOR_DECOR_PIXELS_BASE;
+            size_t decorView = MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE;
+            result = sys::NtMapViewOfSectionFromKernel(g_compositorDecorPixelsSection,
+                processHandle, &decorBase, 0, 0, nullptr, &decorView,
+                2, 0, mm::PAGE_READWRITE);
+            if (result == NtStatus::Success &&
+                decorBase != MICANT_COMPOSITOR_DECOR_PIXELS_BASE)
+                result = NtStatus::Conflict;
+        }
         if (result != NtStatus::Success || metadataBase != MICANT_COMPOSITOR_METADATA_BASE ||
             pixelsBase != MICANT_COMPOSITOR_PIXELS_BASE) {
             serialWrite("[MicaNT Compositor] Section view mapping failed status=");
@@ -4075,6 +4109,67 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         // The isolated pre-Executive CPL3 ABI probe has no Ps owner yet. Its
         // objects use owner zero and are explicitly torn down by the probe;
         // every process-backed request is keyed by its allocated Ps ID.
+        if (request.operation == MICANT_WIN32K_OP_SET_WINDOW_ICON_DATA ||
+            request.operation == MICANT_WIN32K_OP_SET_WINDOW_TITLE_SURFACE) {
+            uint32_t width{}, height{};
+            uint64_t sourceAddress{};
+            size_t sourceBytes{};
+            const bool iconRequest =
+                request.operation == MICANT_WIN32K_OP_SET_WINDOW_ICON_DATA;
+            if (iconRequest) {
+                const uint64_t icon = request.args[2];
+                if (request.args[1] >= MICANT_COMPOSITOR_ICON_TYPES)
+                    return status(NtStatus::InvalidParameter);
+                if (icon) {
+                    if (!request.args[3] || !request.args[4] || !request.args[5] ||
+                        request.args[4] > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+                        request.args[5] > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+                        request.args[6] != request.args[4] * sizeof(uint32_t))
+                        return status(NtStatus::InvalidParameter);
+                    sourceAddress = request.args[3];
+                    width = static_cast<uint32_t>(request.args[4]);
+                    height = static_cast<uint32_t>(request.args[5]);
+                    sourceBytes = static_cast<size_t>(width) * height * sizeof(uint32_t);
+                } else if (request.args[3] || request.args[4] || request.args[5] ||
+                           request.args[6]) {
+                    return status(NtStatus::InvalidParameter);
+                }
+            } else {
+                if (!request.args[1]) {
+                    if (request.args[2] || request.args[3] || request.args[4])
+                        return status(NtStatus::InvalidParameter);
+                } else {
+                    if (!request.args[2] || !request.args[3] ||
+                        request.args[2] > MICANT_COMPOSITOR_TITLE_MAX_WIDTH ||
+                        request.args[3] > MICANT_COMPOSITOR_TITLE_MAX_HEIGHT ||
+                        request.args[4] < request.args[2] ||
+                        request.args[4] > MICANT_COMPOSITOR_TITLE_MAX_WIDTH)
+                        return status(NtStatus::InvalidParameter);
+                    sourceAddress = request.args[1];
+                    width = static_cast<uint32_t>(request.args[2]);
+                    height = static_cast<uint32_t>(request.args[3]);
+                    sourceBytes = static_cast<size_t>(request.args[4]) * height * sizeof(uint32_t);
+                }
+            }
+            UserSurfaceImageCopyGuard copyGuard{};
+            if (sourceBytes) {
+                const NtStatus copyStatus = ex::ExSafeCopyFromUser(
+                    g_userSurfaceImageCopyBuffer,
+                    reinterpret_cast<const void*>(sourceAddress), sourceBytes);
+                if (copyStatus != NtStatus::Success) return status(copyStatus);
+            }
+            const uint64_t ownerId = process ? process->processId() : 0;
+            const NtStatus updateStatus = iconRequest
+                ? win32k::freestanding::setWindowIconData(request, ownerId,
+                    sourceBytes ? g_userSurfaceImageCopyBuffer : nullptr, width, height)
+                : win32k::freestanding::setWindowTitleSurface(request, ownerId,
+                    sourceBytes ? g_userSurfaceImageCopyBuffer : nullptr, width, height,
+                    iconRequest ? width : static_cast<uint32_t>(request.args[4]));
+            if (updateStatus != NtStatus::Success) return status(updateStatus);
+            publishCompositorSurfacesInCompositorSpace();
+            return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
+                                               &request, sizeof(request)));
+        }
         if (request.operation == MICANT_WIN32K_OP_SET_THEME_SNAPSHOT) {
             if (!process || process->processId() != g_explorerProcessId)
                 return status(NtStatus::AccessDenied);

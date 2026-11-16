@@ -350,21 +350,16 @@ the evidence named here, not just declarations or a successful compile.
   the same live-window caption pixel before/after the runtime switch; the Dark
   sample passed after the Explorer broadcast fix above. Caption buttons use
   theme snapshot normal/hover/pressed/inactive colors, opacity and borders.
-- [ ] Replace generic 8x8 caption title glyphs with the shared font service and
-  carry safe per-window icon pixels through the compositor surface protocol.
-  The compositor is deliberately freestanding (`-nostdlib`) and import-free;
-  `FontManager` loads font files through NTDLL file and VM calls, so it cannot
-  be linked directly until the compositor has an explicit import/syscall and
-  font-loading path. A local experiment linked that dependency and built, but
-  QEMU trapped with `#UD` after the first app window was created; the available
-  PE/map evidence does not identify the trapping instruction. User32 already
-  validates and leases process-local HICON handles, but Win32k retains only an
-  opaque token and the compositor surface protocol has no icon pixels. Closing
-  this item requires a bounded, copied BGRA snapshot keyed by window/type with
-  dimensions, stride, generation, replacement rollback and destruction
-  invalidation; raw HICON values or process pointers must never enter shared
-  metadata. Keep the 8x8 fallback until both transport paths are implemented
-  and have QEMU pixel evidence.
+- [x] Caption titles now use the shared GDI font path and per-process font
+  selection; bounded title coverage and copied BGRA HICON snapshots travel in
+  a separate compositor decoration section. Window metadata carries only
+  checked offsets, dimensions, strides and generations; it contains no process
+  pointers or raw icon handles. Replacement advances the generation, and
+  window destruction/reuse clears retained icon/title pixels. The decoration
+  section is writable only in the trusted compositor mapping, leaving window
+  content pixels read-only there. The shared surface pool is 20 slots to
+  accommodate live control probes and reopened windows within QEMU memory.
+  QEMU confirmed both caption text and WhiteSur folder icon pixels.
 - [x] Win32k clamps resize against client-area minima, accounting for the
   active frame and caption metrics on all four edges/corners; the minimum
   outer size therefore preserves a 160x100 client. The QEMU input test now
@@ -385,6 +380,11 @@ the evidence named here, not just declarations or a successful compile.
   windows, then cycles the live app from Dark to Light Purple and verifies the
   pressed caption button pixel is exactly `#9A57A3` (diagnostics:
   `/private/tmp/micant-nonclient-inactive-accent-final-run`).
+- [x] The integrated QEMU input run verified caption title/icon pixels,
+  maximize/restore, caption dragging, all eight resize edges/corners, minimum
+  client dimensions, close/reopen cycles and live Light-to-Dark switching;
+  compositor surface allocation remained available through the reopen matrix
+  (`/private/tmp/micant-item3-title-icon-pixel-2`).
 
 ### 4. Explorer theme coverage
 

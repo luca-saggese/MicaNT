@@ -766,7 +766,9 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kGetCursor);
     MICA_WIN32K_PROC(MicaWin32kGetCursorInfo);
     MICA_WIN32K_PROC(MicaWin32kSetWindowIcon);
+    MICA_WIN32K_PROC(MicaWin32kSetWindowIconData);
     MICA_WIN32K_PROC(MicaWin32kGetWindowIcon);
+    MICA_WIN32K_PROC(MicaWin32kSetWindowTitleSurface);
     MICA_WIN32K_PROC(MicaWin32kRegisterClassW);
     MICA_WIN32K_PROC(MicaWin32kDispatchMessageW);
     MICA_WIN32K_PROC(MicaWin32kSetWindowLongPtrW);
@@ -788,6 +790,100 @@ template <typename T> T Win32kProc(const char* name) noexcept {
 #undef MICA_WIN32K_PROC
     return nullptr;
 }
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+struct CaptionDibInfo {
+    uint32_t size{40};
+    int32_t width{}, height{};
+    uint16_t planes{1}, bitCount{32};
+    uint32_t compression{}, imageSize{};
+    int32_t xPixelsPerMeter{}, yPixelsPerMeter{};
+    uint32_t colorsUsed{}, colorsImportant{};
+};
+struct CaptionTextExtent { int32_t cx{}, cy{}; };
+
+bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
+    using SetTitleFn = int32_t (*)(void*, const uint32_t*, uint32_t, uint32_t, uint32_t);
+    const auto setTitle = Win32kProc<SetTitleFn>("MicaWin32kSetWindowTitleSurface");
+    if (!hwnd || !setTitle) return false;
+    const auto clearTitle = [&]() noexcept { return setTitle(hwnd, nullptr, 0, 0, 0) != 0; };
+
+    size_t length = 0;
+    if (title) {
+        while (length < 63 && title[length]) ++length;
+        if (title[length]) {
+            (void)clearTitle();
+            return false;
+        }
+    }
+    if (!length) return clearTitle();
+
+    constexpr uint32_t kMaxWidth = 512;
+    constexpr uint32_t kMaxHeight = 32;
+    CaptionDibInfo info{};
+    info.width = static_cast<int32_t>(kMaxWidth);
+    info.height = -static_cast<int32_t>(kMaxHeight);
+    void* dc = CreateCompatibleDC(nullptr);
+    void* bits = nullptr;
+    void* bitmap = dc ? CreateDIBSection(dc, &info, 0, &bits, nullptr, 0) : nullptr;
+    if (!dc || !bitmap || !bits) {
+        if (bitmap) (void)DeleteObject(bitmap);
+        if (dc) (void)DeleteDC(dc);
+        (void)clearTitle();
+        return false;
+    }
+
+    auto* pixels = static_cast<uint32_t*>(bits);
+    for (size_t index = 0; index < static_cast<size_t>(kMaxWidth) * kMaxHeight; ++index)
+        pixels[index] = 0;
+    void* oldBitmap = SelectObject(dc, bitmap);
+    void* font = GetStockObject(13); // DEFAULT_GUI_FONT, backed by GDI FontManager.
+    void* oldFont = font ? SelectObject(dc, font) : nullptr;
+    CaptionTextExtent extent{};
+    const bool measured = oldBitmap && oldFont &&
+        GetTextExtentPoint32W(dc, title, static_cast<int32_t>(length), &extent) &&
+        extent.cx > 0 && extent.cy > 0;
+    const uint32_t width = measured
+        ? std::min<uint32_t>(static_cast<uint32_t>(extent.cx), kMaxWidth) : 0;
+    const uint32_t height = measured
+        ? std::min<uint32_t>(static_cast<uint32_t>(extent.cy), kMaxHeight) : 0;
+    const bool rendered = measured && width && height && SetBkMode(dc, 1) > 0 &&
+        SetTextColor(dc, 0x00FFFFFFu) != 0xFFFFFFFFu &&
+        TextOutW(dc, 0, 0, title, static_cast<int32_t>(length));
+    bool published = false;
+    if (rendered) {
+        // GDI's FontManager blends a white glyph into the transparent DIB.
+        // Keep that grayscale coverage as alpha; the compositor applies the
+        // current active/inactive HeaderBar foreground color at composition.
+        for (uint32_t y = 0; y < height; ++y) {
+            for (uint32_t x = 0; x < width; ++x) {
+                uint32_t& pixel = pixels[static_cast<size_t>(y) * width + x];
+                const uint32_t source =
+                    pixels[static_cast<size_t>(y) * kMaxWidth + x];
+                const uint32_t coverage = std::max({source & 0xFFu,
+                    (source >> 8) & 0xFFu, (source >> 16) & 0xFFu});
+                pixel = coverage << 24;
+            }
+        }
+        published = setTitle(hwnd, pixels, width, height, width) != 0;
+    }
+    if (oldFont) (void)SelectObject(dc, oldFont);
+    if (oldBitmap) (void)SelectObject(dc, oldBitmap);
+    (void)DeleteObject(bitmap);
+    (void)DeleteDC(dc);
+    if (!published) (void)clearTitle();
+    return published;
+}
+
+bool hasWindowCaption(void* hwnd) noexcept {
+    using GetLongFn = intptr_t (*)(void*, int32_t);
+    const auto getLong = Win32kProc<GetLongFn>("MicaWin32kGetWindowLongPtrW");
+    constexpr int32_t kGwlStyle = -16;
+    constexpr uint32_t kWsCaption = 0x00C00000u;
+    return hwnd && getLong &&
+        (static_cast<uint32_t>(getLong(hwnd, kGwlStyle)) & kWsCaption) == kWsCaption;
+}
+#endif
 
 struct WinNtWindowState {
     uint64_t  magic{0x4D4E5448574E4431ULL}; // "MNTHWD1"
@@ -1028,6 +1124,35 @@ RegisteredClassIcons* findRegisteredClassIcons(const wchar_t* name) noexcept {
         if (i < MICANT_WIN32K_TEXT_CAPACITY && !entry.name[i] && !name[i]) return &entry;
     }
     return nullptr;
+}
+
+int32_t setWindowIconPixels(void* hwnd, uint32_t type, void* icon,
+                            uint64_t* previous) noexcept {
+    if (previous) *previous = 0;
+    if (!previous || type >= MICANT_COMPOSITOR_ICON_TYPES) return 0;
+    winuser::IconHandleTable::Lease lease{};
+    uint32_t width{}, height{}, stride{};
+    const uint8_t* pixels = nullptr;
+    if (icon) {
+        if (!winuser::ProcessIconHandles().acquire(icon, lease)) return 0;
+        const auto& view = lease.bitmap();
+        if (view.cursor || !view.width || !view.height ||
+            view.width > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+            view.height > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+            view.width > UINT32_MAX / sizeof(uint32_t) ||
+            view.stride != view.width * sizeof(uint32_t) ||
+            static_cast<uint64_t>(view.stride) * view.height > view.pixels.size())
+            return 0;
+        width = view.width;
+        height = view.height;
+        stride = view.stride;
+        pixels = view.pixels.data();
+    }
+    using SetFn = int32_t (*)(void*, uint32_t, uint64_t, const uint8_t*,
+        uint32_t, uint32_t, uint32_t, uint64_t*);
+    const auto set = Win32kProc<SetFn>("MicaWin32kSetWindowIconData");
+    return set ? set(hwnd, type, reinterpret_cast<uint64_t>(icon), pixels,
+        width, height, stride, previous) : 0;
 }
 #endif
 
@@ -1615,22 +1740,24 @@ void* User32_CreateWindowExW(
     void* hwnd = fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
 #if defined(BUILD_SYSTEM32_USER32_DLL)
     if (hwnd) {
+        constexpr uint32_t kWsCaption = 0x00C00000u;
+        if (!hWndParent && (dwStyle & kWsCaption) == kWsCaption)
+            (void)publishCaptionTitleSurface(hwnd, lpWindowName);
         if (auto* icons = findRegisteredClassIcons(lpClassName)) {
             for (auto& entry : g_registeredWindowClasses) {
                 if (entry.window) continue;
                 entry = {hwnd, icons};
                 break;
             }
-            using SetIconFn = int32_t (*)(void*, uint32_t, uint64_t, uint64_t*);
-            const auto setIcon = Win32kProc<SetIconFn>("MicaWin32kSetWindowIcon");
             const auto applyDefault = [&](uint32_t type, void* icon) noexcept {
-                if (!icon || !setIcon) return;
+                if (!icon) return;
                 uint64_t previous{};
-                if (!setIcon(hwnd, type, reinterpret_cast<uint64_t>(icon), &previous)) return;
+                if (!setWindowIconPixels(hwnd, type, icon, &previous)) return;
                 (void)winuser::ProcessWindowIcons().set(hwnd, type, icon);
                 if (winuser::ProcessWindowIcons().get(hwnd, type) != icon) {
                     uint64_t ignored{};
-                    (void)setIcon(hwnd, type, previous, &ignored);
+                    (void)setWindowIconPixels(hwnd, type,
+                        reinterpret_cast<void*>(previous), &ignored);
                 }
             };
             applyDefault(1, icons->large);
@@ -1693,20 +1820,42 @@ uintptr_t User32_SetClassLongPtrW(void* hwnd, int32_t index, uintptr_t value) no
     winuser::IconHandleTable::Lease replacementLease{};
     if (replacement && !winuser::ProcessIconHandles().acquire(replacement, replacementLease)) return 0;
     void* previous = handle;
+    const uint32_t type = index == -14 ? 1u : 0u;
+    void* changedWindows[128]{};
+    void* previousIcons[128]{};
+    winuser::IconHandleTable::Lease previousLeases[128]{};
+    size_t changedCount = 0;
+    for (const auto& window : g_registeredWindowClasses) {
+        if (window.icons != windowClass->icons || !window.window) continue;
+        void* oldIcon = winuser::ProcessWindowIcons().get(window.window, type);
+        if (oldIcon && !winuser::ProcessIconHandles().acquire(oldIcon,
+                                                               previousLeases[changedCount]))
+            return 0;
+        uint64_t ignored{};
+        const bool applied = setWindowIconPixels(window.window, type, replacement, &ignored);
+        const bool recorded = applied &&
+            winuser::ProcessWindowIcons().set(window.window, type, replacement);
+        if (!recorded) {
+            if (applied) {
+                uint64_t rollback{};
+                (void)setWindowIconPixels(window.window, type, oldIcon, &rollback);
+            }
+            while (changedCount) {
+                --changedCount;
+                uint64_t rollback{};
+                (void)setWindowIconPixels(changedWindows[changedCount], type,
+                    previousIcons[changedCount], &rollback);
+                (void)winuser::ProcessWindowIcons().set(changedWindows[changedCount],
+                    type, previousIcons[changedCount]);
+            }
+            return 0;
+        }
+        changedWindows[changedCount] = window.window;
+        previousIcons[changedCount] = oldIcon;
+        ++changedCount;
+    }
     handle = replacement;
     lease = std::move(replacementLease);
-    const uint32_t type = index == -14 ? 1u : 0u;
-    using SetIconFn = int32_t (*)(void*, uint32_t, uint64_t, uint64_t*);
-    const auto setIcon = Win32kProc<SetIconFn>("MicaWin32kSetWindowIcon");
-    if (setIcon) {
-        for (const auto& window : g_registeredWindowClasses) {
-            if (window.icons != windowClass->icons || !window.window) continue;
-            uint64_t ignored{};
-            if (!setIcon(window.window, type, reinterpret_cast<uint64_t>(replacement), &ignored))
-                continue;
-            (void)winuser::ProcessWindowIcons().set(window.window, type, replacement);
-        }
-    }
     return reinterpret_cast<uintptr_t>(previous);
 }
 #endif
@@ -3470,13 +3619,13 @@ intptr_t User32_SendMessageW(void* hWnd, uint32_t message, uintptr_t wParam, int
         winuser::IconHandleTable::Lease validation{};
         if (icon && !winuser::ProcessIconHandles().acquire(icon, validation)) return 0;
         uint64_t previous{};
-        auto set=Win32kProc<SetIconFn>("MicaWin32kSetWindowIcon");
-        if (!set || !set(hWnd, static_cast<uint32_t>(wParam),
-                          reinterpret_cast<uint64_t>(icon), &previous)) return 0;
+        if (!setWindowIconPixels(hWnd, static_cast<uint32_t>(wParam), icon,
+                                 &previous)) return 0;
         (void)winuser::ProcessWindowIcons().set(hWnd, static_cast<uint32_t>(wParam), icon);
         if (icon && winuser::ProcessWindowIcons().get(hWnd, static_cast<uint32_t>(wParam)) != icon) {
             uint64_t ignored{};
-            (void)set(hWnd, static_cast<uint32_t>(wParam), previous, &ignored);
+            (void)setWindowIconPixels(hWnd, static_cast<uint32_t>(wParam),
+                reinterpret_cast<void*>(previous), &ignored);
             return 0;
         }
         return static_cast<intptr_t>(previous);
@@ -3489,7 +3638,13 @@ intptr_t User32_SendMessageW(void* hWnd, uint32_t message, uintptr_t wParam, int
 #endif
     using Fn=intptr_t (*)(void*,uint32_t,uintptr_t,intptr_t);
     auto fn=Win32kProc<Fn>("MicaWin32kSendMessageW");
-    return fn ? fn(hWnd,message,wParam,lParam) : 0;
+    const intptr_t result = fn ? fn(hWnd,message,wParam,lParam) : 0;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (message == 0x000Cu /* WM_SETTEXT */ && result && hasWindowCaption(hWnd))
+        (void)publishCaptionTitleSurface(hWnd,
+            reinterpret_cast<const wchar_t*>(lParam));
+#endif
+    return result;
 }
 
 int32_t User32_GetClientRect(void* hWnd, WinNtRect* lpRect) noexcept {
@@ -3517,6 +3672,12 @@ int32_t User32_GetWindowTextW(void* hWnd, wchar_t* lpString, int32_t nMaxCount) 
     using Fn=int32_t (*)(void*,wchar_t*,int32_t);
     auto fn=Win32kProc<Fn>("MicaWin32kGetWindowTextW");
     return fn ? fn(hWnd,lpString,nMaxCount) : 0;
+}
+
+int32_t User32_SetWindowTextW(void* hWnd, const wchar_t* lpString) noexcept {
+    if (!hWnd || !lpString) return 0;
+    return User32_SendMessageW(hWnd, 0x000Cu /* WM_SETTEXT */, 0,
+        reinterpret_cast<intptr_t>(lpString)) != 0;
 }
 
 int32_t User32_IsWindowVisible(void* hWnd) noexcept {
@@ -4606,6 +4767,9 @@ __declspec(dllexport) int32_t EnumWindows(int32_t (*lpEnumFunc)(void*, intptr_t)
 }
 __declspec(dllexport) int32_t GetWindowTextW(void* hWnd, wchar_t* lpString, int32_t nMaxCount) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetWindowTextW(hWnd, lpString, nMaxCount);
+}
+__declspec(dllexport) int32_t SetWindowTextW(void* hWnd, const wchar_t* lpString) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowTextW(hWnd, lpString);
 }
 __declspec(dllexport) int32_t IsWindowVisible(void* hWnd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_IsWindowVisible(hWnd);

@@ -377,6 +377,9 @@ def verify_mouse(
             ]})
             time.sleep(0.5)
             after = screen("after.ppm")
+            paint_marker = "[MicaNT Explorer] Application window paint presented"
+            paint_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(paint_marker)
             execute("input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": True}},
             ]})
@@ -400,7 +403,29 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not dispatch Enter into an application window action")
-            opened = wait_for_changed_screen(after, "app-window.ppm", 10000)
+            paint_deadline = time.monotonic() + 15
+            while time.monotonic() < paint_deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count(paint_marker) > paint_count:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Explorer application window did not present a WM_PAINT surface")
+            opened = wait_for_changed_screen(after, "app-window.ppm", 10000, timeout=15)
+            title_background = pixel_at(opened, 500, 105)
+            title_text_rows = sum(
+                any(pixel_at(opened, x, y) != title_background
+                    for x in range(204, 450))
+                for y in range(95, 130)
+            )
+            if title_text_rows <= 8:
+                raise RuntimeError("Caption title did not use the shared GDI font raster")
+            title_icon_ink = sum(
+                pixel_at(opened, x, y) != title_background
+                for y in range(95, 121) for x in range(204, 236)
+            )
+            if title_icon_ink < 24:
+                raise RuntimeError("WhiteSur window icon did not reach the caption pixels")
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
@@ -1090,6 +1115,12 @@ def verify_mouse(
             for cycle in range(3):
                 # Closing the last app leaves no foreground target. Reactivate
                 # the desktop before sending Enter to open the next cycle.
+                paint_marker = "[MicaNT Explorer] Application window paint presented"
+                paint_count = serial_path.read_text(
+                    encoding="utf-8", errors="replace").count(paint_marker)
+                paint_failure = "[MicaNT Explorer] Application window paint failed"
+                paint_failure_count = serial_path.read_text(
+                    encoding="utf-8", errors="replace").count(paint_failure)
                 move_to(500, 600)
                 execute("input-send-event", {"events": [
                     {"type": "btn", "data": {"button": "left", "down": True}},
@@ -1105,8 +1136,24 @@ def verify_mouse(
                             "key": {"type": "qcode", "data": "ret"},
                         },
                     }]})
-                reopened = wait_for_changed_screen(
-                    after, f"reopen-cycle-{cycle + 1}.ppm", 5000)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if serial.count(paint_marker) > paint_count:
+                        break
+                    if serial.count(paint_failure) > paint_failure_count:
+                        raise RuntimeError("Reopened Explorer window failed to present its DIB")
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError("Reopened Explorer window did not complete WM_PAINT")
+                reopen_pixel_deadline = time.monotonic() + 5
+                while time.monotonic() < reopen_pixel_deadline:
+                    reopened = screen(f"reopen-cycle-{cycle + 1}.ppm")
+                    if pixel_at(reopened, 280, 105) != pixel_at(after, 280, 105):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Reopened Explorer titlebar did not reach scanout")
                 for down in (True, False):
                     execute("input-send-event", {"events": [{
                         "type": "key", "data": {

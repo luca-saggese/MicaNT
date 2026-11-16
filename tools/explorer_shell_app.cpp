@@ -63,6 +63,7 @@ struct AppWindow {
     size_t directoryRowCount{};
     bool open{};
     bool minimized{};
+    bool firstPaintPresented{};
 };
 
 struct CachedDesktopIcon {
@@ -1784,6 +1785,7 @@ void openView(View view) noexcept {
     for (auto& candidate : g.apps) if (!candidate.open) { app = &candidate; break; }
     if (!app) return;
     app->view = view;
+    app->firstPaintPresented = false;
     const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(micant::UserSharedDataAddress);
     size_t systemRootLength = 0;
     while (systemRootLength < std::size(shared->ntSystemRoot) && shared->ntSystemRoot[systemRootLength])
@@ -1910,12 +1912,16 @@ void openView(View view) noexcept {
     present(app->hwnd);
     if (view == View::MyComputer && !g.themeButtonProbe) {
         constexpr uintptr_t kThemeButtonId = 0x771u;
+        PrintLine("[MicaNT Theme] BUTTON probe creation starting");
         g.themeButtonProbe = CreateWindowExW(0, L"BUTTON", L"Theme button",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP, 530, 300, 120, 40,
             app->hwnd, reinterpret_cast<HMENU>(kThemeButtonId), nullptr, nullptr);
         if (g.themeButtonProbe) {
+            PrintLine("[MicaNT Theme] BUTTON probe created");
             ShowWindow(g.themeButtonProbe, SW_SHOW);
+            PrintLine("[MicaNT Theme] BUTTON probe shown");
             UpdateWindow(g.themeButtonProbe);
+            PrintLine("[MicaNT Theme] BUTTON probe painted");
             const HWND focusBeforeButton = GetFocus();
             const bool focusApiPassed = focusBeforeButton &&
                 SetFocus(g.themeButtonProbe) == focusBeforeButton &&
@@ -2762,15 +2768,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (message == WM_PAINT) {
         HDC source = nullptr;
         uint32_t width = 0, height = 0;
+        AppWindow* app = appFromHwnd(hwnd);
         if (hwnd == g.desktop) { source = g.desktopDc; width = g.screenW; height = g.screenH - TASKBAR_H; }
         else if (hwnd == g.taskbar) { source = g.taskbarDc; width = g.screenW; height = TASKBAR_H; }
         else if (hwnd == g.startMenu) { source = g.menuDc; width = MENU_W; height = MENU_H; }
-        else if (auto* app = appFromHwnd(hwnd)) { source = app->dc; width = app->width; height = app->height; }
+        else if (app) { source = app->dc; width = app->width; height = app->height; }
         PAINTSTRUCT paint{};
         HDC target = BeginPaint(hwnd, &paint);
-        if (target && source && width && height)
-            BitBlt(target, 0, 0, static_cast<int>(width), static_cast<int>(height), source, 0, 0, SRCCOPY);
-        EndPaint(hwnd, &paint);
+        const bool copied = target && source && width && height &&
+            BitBlt(target, 0, 0, static_cast<int>(width), static_cast<int>(height),
+                   source, 0, 0, SRCCOPY);
+        if (app && !target)
+            PrintLine("[MicaNT Explorer] Application paint has no target DC");
+        else if (app && !source)
+            PrintLine("[MicaNT Explorer] Application paint has no source DC");
+        else if (app && !copied)
+            PrintLine("[MicaNT Explorer] Application paint BitBlt failed");
+        const bool ended = EndPaint(hwnd, &paint) != FALSE;
+        if (app && copied && ended && !app->firstPaintPresented) {
+            app->firstPaintPresented = true;
+            PrintLine("[MicaNT Explorer] Application window paint presented");
+        } else if (app && (!copied || !ended)) {
+            PrintLine("[MicaNT Explorer] Application window paint failed");
+        }
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -2792,6 +2812,19 @@ extern "C" void _start(const char* = nullptr) {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WindowProc;
+    wchar_t titleIconPath[512]{};
+    size_t titleIconPathLength = 0;
+    constexpr wchar_t kTitleIconSuffix[] =
+        L"\\System\\Icons\\WhiteSur\\places\\32\\folder-documents.png";
+    if (appendSystemRoot(titleIconPath, std::size(titleIconPath), titleIconPathLength) &&
+        appendWide(titleIconPath, std::size(titleIconPath), titleIconPathLength,
+                   kTitleIconSuffix, std::size(kTitleIconSuffix) - 1)) {
+        windowClass.hIcon = static_cast<HICON>(LoadImageW(nullptr, titleIconPath,
+            1u, 32, 32, 0x0010u));
+        PrintLine(windowClass.hIcon
+            ? "[MicaNT Theme] WhiteSur window icon loaded for caption"
+            : "[MicaNT Theme] WhiteSur window icon load failed");
+    }
     windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     PrintLine(windowClass.hCursor
         ? "[MicaNT Cursor] Explorer class arrow loaded"

@@ -109,6 +109,17 @@ struct Window {
     bool hasTaskbarButtonBounds{};
 };
 
+struct WindowIconImage {
+    uint32_t width{}, height{}, stride{};
+    uint64_t generation{};
+    uint32_t pixels[MICANT_COMPOSITOR_ICON_MAX_PIXELS]{};
+};
+struct WindowTitleSurface {
+    uint32_t width{}, height{}, stride{};
+    uint64_t generation{};
+    uint32_t pixels[MICANT_COMPOSITOR_TITLE_MAX_PIXELS]{};
+};
+
 struct QueuedMessage {
     uint64_t hwnd{}, wParam{};
     int64_t lParam{};
@@ -129,6 +140,8 @@ struct PointerGesture {
 
 WindowClass g_classes[kClassCapacity]{};
 Window g_windows[kWindowCapacity]{};
+WindowIconImage g_windowIcons[kWindowCapacity][MICANT_COMPOSITOR_ICON_TYPES]{};
+WindowTitleSurface g_windowTitles[kWindowCapacity]{};
 QueuedMessage g_messages[kMessageCapacity]{};
 uint16_t g_nextAtom{1};
 uint32_t g_nextGeneration{1};
@@ -802,6 +815,15 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         auto& window = g_windows[index];
         if (window.active) continue;
         window = {};
+        for (auto& icon : g_windowIcons[index]) {
+            icon.width = icon.height = icon.stride = 0;
+            std::fill_n(icon.pixels, MICANT_COMPOSITOR_ICON_MAX_PIXELS, 0u);
+        }
+        g_windowTitles[index].width = 0;
+        g_windowTitles[index].height = 0;
+        g_windowTitles[index].stride = 0;
+        std::fill_n(g_windowTitles[index].pixels,
+                    MICANT_COMPOSITOR_TITLE_MAX_PIXELS, 0u);
         window.active = true;
         window.handle = makeHandle(index);
         window.parent = request.args[6];
@@ -827,6 +849,65 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
 }
 
 } // namespace
+
+NtStatus setWindowIconData(MicaWin32kRequest& request,
+                           uint64_t ownerProcessId, const uint32_t* pixels,
+                           uint32_t width, uint32_t height) noexcept {
+    const uint32_t type = static_cast<uint32_t>(request.args[1]);
+    const uint64_t icon = request.args[2];
+    if (type >= MICANT_COMPOSITOR_ICON_TYPES ||
+        (icon && (!pixels || !width || !height ||
+                  width > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+                  height > MICANT_COMPOSITOR_ICON_MAX_DIMENSION)) ||
+        (!icon && (pixels || width || height)))
+        return NtStatus::InvalidParameter;
+    StateLockGuard lock;
+    auto* window = findWindow(request.args[0], ownerProcessId);
+    if (!window) return NtStatus::InvalidHandle;
+    auto& image = g_windowIcons[static_cast<size_t>(window - g_windows)][type];
+    request.result = window->icons[type];
+    window->icons[type] = icon;
+    image.width = width;
+    image.height = height;
+    image.stride = width;
+    if (++image.generation == 0) ++image.generation;
+    std::fill_n(image.pixels, MICANT_COMPOSITOR_ICON_MAX_PIXELS, 0u);
+    if (icon) {
+        for (uint32_t row = 0; row < height; ++row)
+            std::copy_n(pixels + static_cast<size_t>(row) * width, width,
+                        image.pixels + static_cast<size_t>(row) * width);
+    }
+    markWindowBounds(*window);
+    return NtStatus::Success;
+}
+
+NtStatus setWindowTitleSurface(MicaWin32kRequest& request,
+                               uint64_t ownerProcessId, const uint32_t* pixels,
+                               uint32_t width, uint32_t height,
+                               uint32_t stride) noexcept {
+    if ((!pixels && (width || height || stride)) ||
+        (pixels && (!width || !height || width > MICANT_COMPOSITOR_TITLE_MAX_WIDTH ||
+                    height > MICANT_COMPOSITOR_TITLE_MAX_HEIGHT ||
+                    stride < width || stride > MICANT_COMPOSITOR_TITLE_MAX_WIDTH)))
+        return NtStatus::InvalidParameter;
+    StateLockGuard lock;
+    auto* window = findWindow(request.args[0], ownerProcessId);
+    if (!window) return NtStatus::InvalidHandle;
+    auto& surface = g_windowTitles[static_cast<size_t>(window - g_windows)];
+    surface.width = width;
+    surface.height = height;
+    surface.stride = width;
+    if (++surface.generation == 0) ++surface.generation;
+    std::fill_n(surface.pixels, MICANT_COMPOSITOR_TITLE_MAX_PIXELS, 0u);
+    if (pixels) {
+        for (uint32_t row = 0; row < height; ++row)
+            std::copy_n(pixels + static_cast<size_t>(row) * stride, width,
+                        surface.pixels + static_cast<size_t>(row) * width);
+    }
+    markWindowBounds(*window);
+    request.result = surface.generation;
+    return NtStatus::Success;
+}
 
 NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
     StateLockGuard lock;
@@ -1186,6 +1267,9 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             window->icons[type] = request.args[2];
             return NtStatus::Success;
         }
+        case MICANT_WIN32K_OP_SET_WINDOW_ICON_DATA:
+        case MICANT_WIN32K_OP_SET_WINDOW_TITLE_SURFACE:
+            return NtStatus::InvalidParameter;
         case MICANT_WIN32K_OP_GET_WINDOW_ICON: {
             const auto* window = findWindow(request.args[0], ownerProcessId);
             const uint32_t type = static_cast<uint32_t>(request.args[1]);
@@ -1322,6 +1406,17 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             window.activeWriters = 0;
             for (auto& writerOwner : window.writerOwners) writerOwner = {};
             if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
+            const size_t windowIndex = static_cast<size_t>(&window - g_windows);
+            for (auto& icon : g_windowIcons[windowIndex])
+            {
+                icon.width = icon.height = icon.stride = 0;
+                std::fill_n(icon.pixels, MICANT_COMPOSITOR_ICON_MAX_PIXELS, 0u);
+            }
+            g_windowTitles[windowIndex].width = 0;
+            g_windowTitles[windowIndex].height = 0;
+            g_windowTitles[windowIndex].stride = 0;
+            std::fill_n(g_windowTitles[windowIndex].pixels,
+                        MICANT_COMPOSITOR_TITLE_MAX_PIXELS, 0u);
             window = {};
         }
         if (g_focusedWindowOwner == ownerProcessId) {
@@ -1671,6 +1766,46 @@ void publishCompositorSurfaces() noexcept {
                      MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT)
                 : 0u);
         info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
+        const size_t windowIndex = static_cast<size_t>(&window - g_windows);
+        const WindowIconImage* icon = nullptr;
+        uint32_t iconType = 0;
+        for (; iconType < MICANT_COMPOSITOR_ICON_TYPES; ++iconType) {
+            const auto& candidate = g_windowIcons[windowIndex][iconType];
+            if (candidate.width && candidate.height) {
+                icon = &candidate;
+                break;
+            }
+        }
+        if (icon) {
+            const uint64_t iconOffset = MICANT_COMPOSITOR_ICON_PIXEL_OFFSET +
+                (static_cast<uint64_t>(index) * MICANT_COMPOSITOR_ICON_TYPES +
+                 iconType) * MICANT_COMPOSITOR_ICON_MAX_PIXELS;
+            info.iconPixelOffset = static_cast<uint32_t>(iconOffset);
+            info.iconWidth = icon->width;
+            info.iconHeight = icon->height;
+            info.iconStride = icon->stride;
+            info.iconGeneration = icon->generation;
+            auto* sharedPixels = reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_DECOR_PIXELS_BASE) +
+                iconOffset;
+            for (uint32_t row = 0; row < icon->height; ++row)
+                std::copy_n(icon->pixels + static_cast<size_t>(row) * icon->stride,
+                            icon->width, sharedPixels + static_cast<size_t>(row) * icon->stride);
+        }
+        const auto& title = g_windowTitles[windowIndex];
+        if (title.width && title.height) {
+            const uint64_t titleOffset = MICANT_COMPOSITOR_TITLE_PIXEL_OFFSET +
+                static_cast<uint64_t>(index) * MICANT_COMPOSITOR_TITLE_MAX_PIXELS;
+            info.titlePixelOffset = static_cast<uint32_t>(titleOffset);
+            info.titleWidth = title.width;
+            info.titleHeight = title.height;
+            info.titleStride = title.stride;
+            info.titleGeneration = title.generation;
+            auto* sharedPixels = reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_DECOR_PIXELS_BASE) +
+                titleOffset;
+            for (uint32_t row = 0; row < title.height; ++row)
+                std::copy_n(title.pixels + static_cast<size_t>(row) * title.stride,
+                            title.width, sharedPixels + static_cast<size_t>(row) * title.stride);
+        }
         info.dirtyLeft = window.dirtyLeft;
         info.dirtyTop = window.dirtyTop;
         info.dirtyRight = window.dirtyRight;

@@ -509,6 +509,47 @@ int32_t MicaWin32kSetWindowIcon(void* hwnd, uint32_t type, uint64_t icon,
     return 1;
 }
 
+int32_t MicaWin32kSetWindowIconData(void* hwnd, uint32_t type, uint64_t icon,
+    const uint8_t* pixels, uint32_t width, uint32_t height,
+    uint32_t strideBytes, uint64_t* previous) {
+    if (previous) *previous = 0;
+    if (!previous || type >= MICANT_COMPOSITOR_ICON_TYPES ||
+        (icon && (!pixels || !width || !height ||
+            width > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+            height > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+            strideBytes != width * sizeof(uint32_t))) ||
+        (!icon && (pixels || width || height || strideBytes))) return 0;
+    MicaWin32kRequest value{};
+    value.operation = MICANT_WIN32K_OP_SET_WINDOW_ICON_DATA;
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.args[1] = type;
+    value.args[2] = icon;
+    value.args[3] = reinterpret_cast<uint64_t>(pixels);
+    value.args[4] = width;
+    value.args[5] = height;
+    value.args[6] = strideBytes;
+    if (!request(value.operation, value)) return 0;
+    *previous = value.result;
+    return 1;
+}
+
+int32_t MicaWin32kSetWindowTitleSurface(void* hwnd, const uint32_t* pixels,
+    uint32_t width, uint32_t height, uint32_t stride) {
+    if ((!pixels && (width || height || stride)) ||
+        (pixels && (!width || !height ||
+            width > MICANT_COMPOSITOR_TITLE_MAX_WIDTH ||
+            height > MICANT_COMPOSITOR_TITLE_MAX_HEIGHT || stride < width ||
+            stride > MICANT_COMPOSITOR_TITLE_MAX_WIDTH))) return 0;
+    MicaWin32kRequest value{};
+    value.operation = MICANT_WIN32K_OP_SET_WINDOW_TITLE_SURFACE;
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.args[1] = reinterpret_cast<uint64_t>(pixels);
+    value.args[2] = width;
+    value.args[3] = height;
+    value.args[4] = stride;
+    return request(value.operation, value) ? 1 : 0;
+}
+
 uint64_t MicaWin32kGetWindowIcon(void* hwnd, uint32_t type) {
     if (type > 2) return 0;
     MicaWin32kRequest value{};

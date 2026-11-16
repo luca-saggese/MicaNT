@@ -105,6 +105,8 @@ enum {
     MICANT_WIN32K_OP_SET_FOCUS,
     MICANT_WIN32K_OP_SET_WINDOW_ICON,
     MICANT_WIN32K_OP_GET_WINDOW_ICON,
+    MICANT_WIN32K_OP_SET_WINDOW_ICON_DATA,
+    MICANT_WIN32K_OP_SET_WINDOW_TITLE_SURFACE,
     MICANT_WIN32K_OP_GET_CURSOR_POS,
     MICANT_WIN32K_OP_GET_CURSOR_CLIP,
     MICANT_WIN32K_OP_SET_CURSOR_POS,
@@ -184,6 +186,10 @@ MICANT_WIN32K_API int32_t MicaWin32kDeleteObject(void*);
 MICANT_WIN32K_API void* MicaWin32kGetStockObject(int32_t);
 MICANT_WIN32K_API void* MicaWin32kCreateDibSection(void*, int32_t, int32_t, void**);
 MICANT_WIN32K_API int32_t MicaWin32kSetWindowIcon(void*, uint32_t, uint64_t, uint64_t*);
+MICANT_WIN32K_API int32_t MicaWin32kSetWindowIconData(
+    void*, uint32_t, uint64_t, const uint8_t*, uint32_t, uint32_t, uint32_t, uint64_t*);
+MICANT_WIN32K_API int32_t MicaWin32kSetWindowTitleSurface(
+    void*, const uint32_t*, uint32_t, uint32_t, uint32_t);
 MICANT_WIN32K_API uint64_t MicaWin32kGetWindowIcon(void*, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kPeekMessageW(MicaWin32kMessage*, void*, uint32_t, uint32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kGetMessageW(MicaWin32kMessage*, void*, uint32_t, uint32_t);
