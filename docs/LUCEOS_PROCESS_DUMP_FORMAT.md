@@ -39,7 +39,13 @@ alone, allowing the memory chunk to be checked independently of its metadata.
 | 4 | Process: `uint32 PID, uint32 handleCount, uint32 threadCount, uint16 imageNameBytes, uint16 reserved`, then UTF-16 image name |
 | 5 | Thread: the 80-byte native system thread record followed by `uint64 TEB, uint64 stackBase, uint64 stackLimit` (zero means unavailable) |
 | 6 | Module: `uint64 imageBase, uint64 imageSize, uint16 pathBytes, uint16 reserved[3]`, then UTF-16 full path |
+| 7 | Kernel crash context (248 bytes): `CRSH`, `uint16 version, uint16 size, uint32 stopCode, uint32 flags, uint64 parameters[4], uint64 buildId, uint32 CPU/PID/TID/stackBytes, uint64 RIP/RSP/RFLAGS/CR2, uint64 GPR[16], uint64 stackLimit/stackBase`. The header crash flag is bit 2 and its PID is zero. |
+| 8 | Captured kernel stack: the type 2 data descriptor (`uint64 base, uint32 byteCount, uint32 dataCRC32`) followed by at most 512 stack bytes; base is the captured RSP. |
 | `0xffffffff` | Successful end marker, zero payload |
+
+For type 7, context flag bit 31 marks an explicitly synthetic fixture. Such a
+record is useful for validating readers and CRC handling, but is not evidence
+captured by a running kernel and says nothing about storage persistence.
 
 CRC-32 uses the reflected IEEE polynomial `0xedb88320`, initial value
 `0xffffffff`, and final complement. Data records are bounded to 64 KiB. A

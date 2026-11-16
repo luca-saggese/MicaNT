@@ -20,6 +20,7 @@ PROCESS = struct.Struct("<IIIHH")
 MODULE = struct.Struct("<QQHHHH")
 THREAD_SIZE = 104  # 80-byte SYSTEM_THREAD_INFORMATION + TEB and stack bounds
 CRASH_FLAG = 1 << 2
+CRASH_FLAG_SYNTHETIC = 1 << 31
 CRASH_CONTEXT_SIZE = 248
 CRASH_CONTEXT_PREFIX = struct.Struct("<4sHHII4QQ4I4Q16QQQ")
 CRASH_STACK_MAX = 512
@@ -183,6 +184,7 @@ def parse(path: Path, extract: Path | None) -> tuple[dict, list[dict], bool, lis
                     errors.append(f"kernel crash stack length {stack_bytes} exceeds {CRASH_STACK_MAX}")
                 crash_context = {
                     "stop_code": stop_code, "flags": crash_flags,
+                    "synthetic": bool(crash_flags & CRASH_FLAG_SYNTHETIC),
                     "parameters": list(params), "build_id": build_id,
                     "cpu": cpu, "pid": crash_pid, "tid": tid,
                     "stack_bytes": stack_bytes, "rip": rip, "rsp": rsp,
@@ -285,6 +287,8 @@ def report(header: dict, records: list[dict], ended: bool, errors: list[str]) ->
                       f"  RIP {fmt_addr(rec['rip'])}  RSP {fmt_addr(rec['rsp'])}  RFLAGS {fmt_addr(rec['rflags'])}  CR2 {fmt_addr(rec['cr2'])}",
                       f"  Stack {fmt_addr(rec['stack_limit'])}–{fmt_addr(rec['stack_base'])}  |  captured {rec['stack_bytes']} bytes",
                       f"  Context build ID: {rec['build_id']}  |  flags 0x{rec['flags']:X}"]
+            if rec["synthetic"]:
+                lines.append("  Provenance: SYNTHETIC FIXTURE (not captured by the kernel)")
             lines.append("  GPRs: " + " ".join(fmt_addr(value) for value in rec["gprs"]))
         elif kind == 8:
             lines.append(f"Kernel stack {fmt_addr(rec['base'])}: {rec['byte_count']} bytes  "
