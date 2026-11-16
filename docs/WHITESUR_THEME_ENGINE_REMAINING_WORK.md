@@ -481,8 +481,12 @@ the evidence named here, not just declarations or a successful compile.
   then verify in Explorer and QEMU that the prior profile and full snapshot are
   unchanged and the queue drains cleanly
   (`/private/tmp/micant-theme-point7-queue-1794805019`).
-- [ ] Test malformed or unavailable profile reload preserves the previous
-  complete theme; the queue exhaustion path covers publication failure only.
+- [x] Attempt to load an unavailable packaged profile and compare both the
+  Explorer profile and full Win32k snapshot to the previous state. QEMU logged
+  the fallback and rollback markers before completing the input/move/resize
+  suite (`/private/tmp/micant-theme-point7-missing-profile-retry-1794805309`).
+- [ ] Test malformed profile data that passes file lookup but fails snapshot
+  validation; unavailable profile and queue exhaustion paths are covered.
 
 ### 8. Compositor effects
 

@@ -368,7 +368,8 @@ def verify_mouse(
                         "[MicaNT Theme] GetThemeSysFont returns GDI font metadata and metrics" in startup_serial and
                         "[MicaNT Theme] GetThemeFont combines CSS snapshot fields with the GDI system face" in startup_serial and
                         "[MicaNT Theme] Userenv resolved profile path from current token SID" in startup_serial and
-                        "[MicaNT Theme] Full notification queue rejected theme atomically and recovered" in startup_serial):
+                        "[MicaNT Theme] Full notification queue rejected theme atomically and recovered" in startup_serial and
+                        "[MicaNT Theme] Unavailable profile kept the previous complete theme" in startup_serial):
                     break
                 time.sleep(0.1)
             else:

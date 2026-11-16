@@ -92,6 +92,7 @@ struct ShellState {
     // Explorer thread stack while loading and verifying compiled profiles.
     MicaThemeSnapshot themeCandidate{};
     MicaThemeSnapshot themeVerify{};
+    MicaThemeSnapshot themeRollbackProbe{};
     bool visualThemeReady{};
     char themeProfile[96]{};
     bool themeAuto{};
@@ -1009,7 +1010,7 @@ void verifyThemeChangeQueueRollback() noexcept {
         PrintLine("[MicaNT Theme] Queue pressure rollback probe unavailable");
         return;
     }
-    const MicaThemeSnapshot previous = g.visualTheme;
+    g.themeRollbackProbe = g.visualTheme;
     char previousProfile[sizeof(g.themeProfile)]{};
     std::memcpy(previousProfile, g.themeProfile, sizeof(previousProfile));
     size_t queued = 0;
@@ -1019,20 +1020,31 @@ void verifyThemeChangeQueueRollback() noexcept {
     // A full queue must reject snapshot publication before changing the
     // compositor's snapshot. Keep the selected profile and visible theme too.
     loadActiveVisualTheme("WhiteSur/Dark");
-    MicaThemeSnapshot observed{};
     const bool unchanged = queued != 0 && !themeProfileEquals(g.themeProfile, "WhiteSur/Dark") &&
         std::memcmp(g.themeProfile, previousProfile, sizeof(previousProfile)) == 0 &&
-        MicaWin32kGetThemeSnapshot(&observed) &&
-        std::memcmp(&observed, &previous, sizeof(previous)) == 0;
+        MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
+        std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
+                    sizeof(g.themeRollbackProbe)) == 0;
 
     MSG message{};
     size_t drained = 0;
     while (drained <= queued && PeekMessageW(&message, g.desktop,
             WM_THEME_QUEUE_PRESSURE_PROBE, WM_THEME_QUEUE_PRESSURE_PROBE, PM_REMOVE))
         ++drained;
-    PrintLine(unchanged && drained == queued
+    const bool queueRollback = unchanged && drained == queued;
+
+    // An unavailable package profile must leave the published snapshot intact.
+    loadActiveVisualTheme("WhiteSur/UnavailableProfile");
+    const bool missingProfileRollback =
+        std::memcmp(g.themeProfile, previousProfile, sizeof(previousProfile)) == 0 &&
+        MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
+        std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
+                    sizeof(g.themeRollbackProbe)) == 0;
+    PrintLine(queueRollback && missingProfileRollback
         ? "[MicaNT Theme] Full notification queue rejected theme atomically and recovered"
         : "[MicaNT Theme] Full notification queue rollback probe failed");
+    if (missingProfileRollback)
+        PrintLine("[MicaNT Theme] Unavailable profile kept the previous complete theme");
 }
 
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
