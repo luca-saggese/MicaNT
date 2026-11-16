@@ -11,6 +11,7 @@ option(MICANT_BOOTSTRAP_RUNTIME_SELFTEST "Halt after kernel C++ lifecycle verifi
 option(MICANT_BOOTSTRAP_TIMER_SELFTEST "Halt after isolated scheduler-clock tick verification" OFF)
 option(MICANT_BOOTSTRAP_NETWORK_SELFTEST "Enable M10 receive-path fault injection" OFF)
 option(MICANT_BOOTSTRAP_TASKMGR_SELFTEST "Launch taskmgr.exe from the mounted System32 image during QEMU verification" OFF)
+option(MICANT_BOOTSTRAP_THEME_TEST "Launch theme_test.exe for QEMU theme verification" OFF)
 
 if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
@@ -568,8 +569,32 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "taskmgr"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
+
+    # Dedicated Ring 3 consumer for theme and common-control verification.
+    # Keep these probes out of Explorer, which remains a normal shell client.
+    add_executable(theme_test_boot EXCLUDE_FROM_ALL tools/theme_test_app.cpp)
+    target_include_directories(theme_test_boot PRIVATE
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_compile_options(theme_test_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_compile_definitions(theme_test_boot PRIVATE MICANT_UXTHEME_IMPORTS)
+    target_link_options(theme_test_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+    )
+    target_link_libraries(theme_test_boot PRIVATE
+        user32_boot gdi32_boot uxtheme_boot comctl32_boot)
+    set_target_properties(theme_test_boot PROPERTIES
+        OUTPUT_NAME "theme_test"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
     if (MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
         target_compile_definitions(taskmgr_boot PRIVATE MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    endif()
+    if (MICANT_BOOTSTRAP_THEME_TEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_THEME_TEST)
     endif()
     add_executable(taskmgr_probe_boot EXCLUDE_FROM_ALL tools/taskmgr_probe_app.cpp)
     target_include_directories(taskmgr_probe_boot PRIVATE "${CMAKE_SOURCE_DIR}")

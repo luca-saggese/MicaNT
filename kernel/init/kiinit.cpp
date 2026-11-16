@@ -4626,6 +4626,17 @@ void pollKeyboardInput() noexcept {
     serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
+#if defined(MICANT_BOOTSTRAP_THEME_TEST)
+    serialWrite("[MicaNT ThemeTest] Launching dedicated control test app\r\n");
+    micant::Handle themeTestProcessHandle = 0;
+    micant::Handle themeTestProcessId = 0;
+    if (!launchUserImageProcess(u"theme_test.exe", themeTestProcessHandle,
+                                themeTestProcessId))
+        stopWithError("[MicaNT ThemeTest] Ring 3 process launch failed\r\n");
+    if (micant::sys::NtClose(themeTestProcessHandle) != micant::NtStatus::Success)
+        stopWithError("[MicaNT ThemeTest] Process handle close failed\r\n");
+    serialWrite("[MicaNT ThemeTest] Dedicated control test app launched\r\n");
+#endif
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     serialWrite("[MicaNT Taskmgr] Launching process-action probe\r\n");
     if (!launchUserImageProcess(u"taskmgr_probe.exe", g_taskmgrProbeProcessHandle,
