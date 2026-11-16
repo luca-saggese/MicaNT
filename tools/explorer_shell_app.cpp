@@ -113,6 +113,10 @@ struct ShellState {
     uint32_t themeScrollNotifications{};
     bool themeScrollProbeReported{};
     bool themeWindowScrollProbeReported{};
+    HWND themeAttachedScrollProbe{};
+    bool themeAttachedScrollProbeReported{};
+    bool themeAttachedScrollArrowReported{};
+    bool themeAttachedScrollThumbReported{};
     HWND themeTabProbe{};
     bool themeTabProbeReported{};
     bool themeTabInputReported{};
@@ -121,11 +125,20 @@ struct ShellState {
     HWND themeRadioProbe{};
     uint32_t themeThreeStateNotifications{};
     uint32_t themeRadioNotifications{};
+    HWND themeAutoRadioA{};
+    HWND themeAutoRadioB{};
+    HWND themeAutoRadioC{};
+    HWND themeAutoRadioD{};
+    uint32_t themeAutoRadioNotifications{};
+    bool themeAutoRadioInputReported{};
     bool themeStateProbeAttempted{};
     bool themeMenuApiReported{};
     bool themeMenuPopupStarted{};
     bool themeMenuMouseCommand{};
     bool themeMenuKeyboardCommand{};
+    bool themeMenuBarStarted{};
+    bool themeMenuBarCommand{};
+    HMENU themeMenuBarProbe{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -149,6 +162,7 @@ struct ShellState {
 
 ShellState g{};
 constexpr wchar_t kClassName[] = L"MicaNT.Explorer.Desktop";
+constexpr wchar_t kThemeAttachedScrollClassName[] = L"MicaNT.ThemeAttachedScrollProbe";
 constexpr wchar_t kDesktopTitle[] = L"MicaNT Desktop";
 constexpr wchar_t kTaskbarTitle[] = L"MicaNT Taskbar";
 constexpr wchar_t kStartTitle[] = L"Start";
@@ -434,9 +448,18 @@ void drawAppWindow(AppWindow& app) noexcept {
     const uint32_t entryForeground = entryStyle &&
         (entryStyle->flags & MICANT_THEME_HAS_FOREGROUND)
         ? themePixel(entryStyle->foreground) : rgb(35, 74, 117);
-    const uint32_t rowForeground = windowStyle &&
+    uint32_t rowForeground = windowStyle &&
         (windowStyle->flags & MICANT_THEME_HAS_FOREGROUND)
         ? themePixel(windowStyle->foreground) : entryForeground;
+    const auto contrastDistance = [](uint32_t left, uint32_t right) noexcept {
+        const int32_t red = int32_t((left >> 16) & 0xFFu) - int32_t((right >> 16) & 0xFFu);
+        const int32_t green = int32_t((left >> 8) & 0xFFu) - int32_t((right >> 8) & 0xFFu);
+        const int32_t blue = int32_t(left & 0xFFu) - int32_t(right & 0xFFu);
+        const auto absolute = [](int32_t value) noexcept { return value < 0 ? -value : value; };
+        return absolute(red) + absolute(green) + absolute(blue);
+    };
+    if (contrastDistance(rowForeground, windowBackground) < 96)
+        rowForeground = entryForeground;
     const uint32_t entryBorder = entryStyle &&
         (entryStyle->flags & MICANT_THEME_HAS_BORDER)
         ? themePixel(entryStyle->border) : rgb(191, 202, 215);
@@ -728,14 +751,24 @@ void drawAppWindow(AppWindow& app) noexcept {
         } else {
             text(p, w, h, 370, y + 4, type, secondaryForeground);
         }
-        if (!g.explorerRowsThemePixelReported && i == 0 && app.view == View::ControlPanel) {
+        if (!g.explorerRowsThemePixelReported && i == 0 &&
+            (app.view == View::MyComputer || app.view == View::ControlPanel)) {
             const size_t right = w < 360 ? w : 360;
             bool themedInkFound = false;
-            for (size_t rowY = static_cast<size_t>(y + 4);
-                 rowY < static_cast<size_t>(y + 12) && rowY < h && !themedInkFound;
+            for (size_t rowY = static_cast<size_t>(y + 2);
+                 rowY < static_cast<size_t>(y + 26) && rowY < h && !themedInkFound;
                  ++rowY) {
                 for (size_t column = 199; column < right; ++column) {
-                    if (p[rowY * w + column] == rowForeground) {
+                    const uint32_t pixel = p[rowY * w + column];
+                    const auto channelDistance = [](uint32_t left, uint32_t right,
+                                                    uint32_t shift) noexcept {
+                        const int32_t difference = int32_t((left >> shift) & 0xFFu) -
+                                                   int32_t((right >> shift) & 0xFFu);
+                        return difference < 0 ? -difference : difference;
+                    };
+                    if (channelDistance(pixel, rowForeground, 0) <= 24 &&
+                        channelDistance(pixel, rowForeground, 8) <= 24 &&
+                        channelDistance(pixel, rowForeground, 16) <= 24) {
                         themedInkFound = true;
                         break;
                     }
@@ -1697,6 +1730,43 @@ AppWindow* appFromHwnd(HWND hwnd) noexcept {
     return nullptr;
 }
 
+LRESULT CALLBACK ThemeAttachedScrollProc(HWND hwnd, UINT message,
+                                          WPARAM wParam, LPARAM lParam) {
+    if (message == 0x0081u) return 1; // WM_NCCREATE
+    if (message == 0x000Fu) { // WM_PAINT
+        PAINTSTRUCT paint{};
+        if (BeginPaint(hwnd, &paint)) {
+            RECT client{};
+            if (GetClientRect(hwnd, &client)) {
+                HBRUSH background = CreateSolidBrush(RGB(248, 248, 248));
+                if (background) {
+                    (void)FillRect(paint.hdc, &client, background);
+                    (void)DeleteObject(background);
+                }
+            }
+            (void)EndPaint(hwnd, &paint);
+        }
+        return 0;
+    }
+    if ((message == 0x0114u || message == 0x0115u) &&
+        hwnd == g.themeAttachedScrollProbe) {
+        const uint32_t code = static_cast<uint16_t>(wParam);
+        const int position = GetScrollPos(hwnd, message == 0x0115u ? 1 : 0);
+        if (message == 0x0115u && code == 0u && position == 19 &&
+            !g.themeAttachedScrollArrowReported) {
+            g.themeAttachedScrollArrowReported = true;
+            PrintLine("[MicaNT Theme] Attached WS_VSCROLL arrow notified and position read back");
+        }
+        if (message == 0x0115u && code == 5u && position > 19 &&
+            !g.themeAttachedScrollThumbReported) {
+            g.themeAttachedScrollThumbReported = true;
+            PrintLine("[MicaNT Theme] Attached WS_VSCROLL thumb drag notified and position read back");
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
 void openView(View view) noexcept {
     for (auto& existing : g.apps) {
         if (existing.open && existing.view == view) {
@@ -1984,6 +2054,60 @@ void openView(View view) noexcept {
         } else {
             PrintLine("[MicaNT Theme] User32 3-state/radio creation failed");
         }
+        constexpr UINT kBsAutoRadioButton = 0x0009u;
+        constexpr uintptr_t kAutoRadioAId = 0x77Eu;
+        constexpr uintptr_t kAutoRadioBId = 0x77Fu;
+        constexpr uintptr_t kAutoRadioCId = 0x780u;
+        constexpr uintptr_t kAutoRadioDId = 0x781u;
+        const UINT kAutoRadioStyle = kStyle | kBsAutoRadioButton;
+        g.themeAutoRadioA = CreateWindowExW(0, L"BUTTON", L"Auto radio A",
+            kAutoRadioStyle | WS_GROUP, 200, 414, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(kAutoRadioAId), nullptr, nullptr);
+        g.themeAutoRadioB = CreateWindowExW(0, L"BUTTON", L"Auto radio B",
+            kAutoRadioStyle, 360, 414, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(kAutoRadioBId), nullptr, nullptr);
+        g.themeAutoRadioC = CreateWindowExW(0, L"BUTTON", L"Auto radio C",
+            kAutoRadioStyle | WS_GROUP, 200, 446, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(kAutoRadioCId), nullptr, nullptr);
+        g.themeAutoRadioD = CreateWindowExW(0, L"BUTTON", L"Auto radio D",
+            kAutoRadioStyle, 360, 446, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(kAutoRadioDId), nullptr, nullptr);
+        if (g.themeAutoRadioA && g.themeAutoRadioB &&
+            g.themeAutoRadioC && g.themeAutoRadioD) {
+            ShowWindow(g.themeAutoRadioA, SW_SHOW);
+            ShowWindow(g.themeAutoRadioB, SW_SHOW);
+            ShowWindow(g.themeAutoRadioC, SW_SHOW);
+            ShowWindow(g.themeAutoRadioD, SW_SHOW);
+            const bool initiallyClear =
+                SendMessageW(g.themeAutoRadioA, kBmGetCheck, 0, 0) == 0 &&
+                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 0 &&
+                SendMessageW(g.themeAutoRadioC, kBmGetCheck, 0, 0) == 0 &&
+                SendMessageW(g.themeAutoRadioD, kBmGetCheck, 0, 0) == 0;
+            (void)SendMessageW(g.themeAutoRadioA, kBmClick, 0, 0);
+            const bool firstSelected =
+                SendMessageW(g.themeAutoRadioA, kBmGetCheck, 0, 0) == 1 &&
+                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 0;
+            (void)SendMessageW(g.themeAutoRadioB, kBmClick, 0, 0);
+            const bool secondExclusive =
+                SendMessageW(g.themeAutoRadioA, kBmGetCheck, 0, 0) == 0 &&
+                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 1;
+            (void)SendMessageW(g.themeAutoRadioC, kBmClick, 0, 0);
+            const bool groupsIndependent =
+                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 1 &&
+                SendMessageW(g.themeAutoRadioC, kBmGetCheck, 0, 0) == 1;
+            (void)SendMessageW(g.themeAutoRadioD, kBmClick, 0, 0);
+            const bool secondGroupExclusive =
+                SendMessageW(g.themeAutoRadioC, kBmGetCheck, 0, 0) == 0 &&
+                SendMessageW(g.themeAutoRadioD, kBmGetCheck, 0, 0) == 1 &&
+                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 1;
+            const bool notificationCounts = g.themeAutoRadioNotifications == 4;
+            PrintLine(initiallyClear && firstSelected && secondExclusive &&
+                groupsIndependent && secondGroupExclusive && notificationCounts
+                ? "[MicaNT Theme] User32 auto-radio exclusive groups verified"
+                : "[MicaNT Theme] User32 auto-radio exclusivity mismatch");
+        } else {
+            PrintLine("[MicaNT Theme] User32 auto-radio group creation failed");
+        }
     }
     if (view == View::MyComputer && !g.themeEditProbeReported) {
         constexpr uintptr_t kThemeEditId = 0x777u;
@@ -2193,6 +2317,43 @@ void openView(View view) noexcept {
             PrintLine(g.themeWindowScrollProbeReported
                 ? "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified"
                 : "[MicaNT Theme] Window SB_VERT state message mismatch");
+
+            constexpr int32_t kSbHorz = 0;
+            constexpr uint32_t kWsHScroll = 0x00100000u;
+            constexpr uint32_t kWsVScroll = 0x00200000u;
+            g.themeAttachedScrollProbe = CreateWindowExW(0,
+                kThemeAttachedScrollClassName, L"",
+                WS_CHILD | WS_VISIBLE | kWsHScroll | kWsVScroll,
+                200, 180, 150, 120, app->hwnd,
+                reinterpret_cast<HMENU>(0x77Bu), nullptr, nullptr);
+            if (g.themeAttachedScrollProbe) {
+                SCROLLINFO attachedInfo{};
+                attachedInfo.cbSize = sizeof(attachedInfo);
+                attachedInfo.fMask = kSifRange | kSifPage | kSifPos;
+                attachedInfo.nMin = 0;
+                attachedInfo.nMax = 60;
+                attachedInfo.nPage = 5;
+                attachedInfo.nPos = 20;
+                const bool hSet = SetScrollInfo(g.themeAttachedScrollProbe,
+                    kSbHorz, &attachedInfo, TRUE) == 20;
+                const bool vSet = SetScrollInfo(g.themeAttachedScrollProbe,
+                    kSbVert, &attachedInfo, TRUE) == 20;
+                SCROLLINFO attachedReadback{};
+                attachedReadback.cbSize = sizeof(attachedReadback);
+                attachedReadback.fMask = attachedInfo.fMask;
+                const bool hReadback = GetScrollInfo(g.themeAttachedScrollProbe,
+                    kSbHorz, &attachedReadback) && attachedReadback.nPos == 20;
+                const bool vReadback = GetScrollInfo(g.themeAttachedScrollProbe,
+                    kSbVert, &attachedReadback) && attachedReadback.nPos == 20;
+                ShowWindow(g.themeAttachedScrollProbe, SW_SHOW);
+                UpdateWindow(g.themeAttachedScrollProbe);
+                g.themeAttachedScrollProbeReported = hSet && vSet && hReadback && vReadback;
+                PrintLine(g.themeAttachedScrollProbeReported
+                    ? "[MicaNT Theme] Attached WS_HSCROLL/WS_VSCROLL pixels and range/page/position ready"
+                    : "[MicaNT Theme] Attached scrollbar state setup failed");
+            } else {
+                PrintLine("[MicaNT Theme] Attached scrollbar probe window creation failed");
+            }
         } else {
             PrintLine("[MicaNT Theme] Production User32 SCROLLBAR creation failed");
         }
@@ -2224,6 +2385,21 @@ void openView(View view) noexcept {
             PrintLine("[MicaNT Theme] Production User32 popup creation failed");
         }
         if (popup) (void)DestroyMenu(popup);
+    }
+    if (view == View::MyComputer && g.themeMenuApiReported &&
+        g.themeMenuPopupStarted && !g.themeMenuBarStarted) {
+        g.themeMenuBarStarted = true;
+        HMENU barMenu = CreateMenu();
+        const bool ready = barMenu &&
+            AppendMenuW(barMenu, MF_STRING, 0x8850u, L"Run") &&
+            SetMenu(app->hwnd, barMenu) && DrawMenuBar(app->hwnd);
+        if (ready) {
+            g.themeMenuBarProbe = barMenu;
+            PrintLine("[MicaNT Theme] Production User32 menu bar attached and painted");
+        } else {
+            PrintLine("[MicaNT Theme] Production User32 menu bar creation failed");
+            if (barMenu) (void)DestroyMenu(barMenu);
+        }
     }
 }
 
@@ -2302,6 +2478,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         PrintLine("[MicaNT Theme] User32 popup keyboard owner command received");
         return 0;
     }
+    if (message == WM_COMMAND && !lParam && HIWORD(wParam) == 0 &&
+        LOWORD(wParam) == 0x8850u) {
+        g.themeMenuBarCommand = true;
+        PrintLine("[MicaNT Theme] User32 menu bar owner command received");
+        if (g.themeMenuBarProbe) {
+            (void)SetMenu(hwnd, nullptr);
+            (void)DrawMenuBar(hwnd);
+            (void)DestroyMenu(g.themeMenuBarProbe);
+            g.themeMenuBarProbe = nullptr;
+        }
+        return 0;
+    }
     if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
         (LOWORD(wParam) == 0x774u || LOWORD(wParam) == 0x776u)) {
         ++g.themeThreeStateNotifications;
@@ -2310,6 +2498,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
         LOWORD(wParam) == 0x775u) {
         ++g.themeRadioNotifications;
+        return 0;
+    }
+    if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
+        LOWORD(wParam) >= 0x77Eu && LOWORD(wParam) <= 0x781u) {
+        ++g.themeAutoRadioNotifications;
+        if (LOWORD(wParam) == 0x77Eu && !g.themeAutoRadioInputReported &&
+            SendMessageW(g.themeAutoRadioA, 0x00F0u, 0, 0) == 1 &&
+            SendMessageW(g.themeAutoRadioB, 0x00F0u, 0, 0) == 0) {
+            g.themeAutoRadioInputReported = true;
+            PrintLine("[MicaNT Theme] Physical auto-radio input kept one group selection");
+        }
         return 0;
     }
     if (message == WM_HSCROLL && reinterpret_cast<HWND>(lParam) == g.themeScrollProbe) {
@@ -2651,6 +2850,15 @@ extern "C" void _start(const char* = nullptr) {
     if (!RegisterClassExW(&windowClass)) {
         for (;;) __asm__ __volatile__("pause");
     }
+
+    WNDCLASSEXW attachedScrollClass{};
+    attachedScrollClass.cbSize = sizeof(attachedScrollClass);
+    attachedScrollClass.lpfnWndProc = ThemeAttachedScrollProc;
+    attachedScrollClass.lpszClassName = kThemeAttachedScrollClassName;
+    const bool attachedScrollClassReady = RegisterClassExW(&attachedScrollClass) != 0;
+    PrintLine(attachedScrollClassReady
+        ? "[MicaNT Theme] Attached scrollbar probe class registered"
+        : "[MicaNT Theme] Attached scrollbar probe class registration failed");
 
     g.desktop = CreateWindowExW(0, kClassName, kDesktopTitle,
         WS_POPUP | WS_VISIBLE, 0, 0, static_cast<int32_t>(g.screenW),

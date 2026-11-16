@@ -37,6 +37,7 @@ constexpr int32_t kSwRestore = 9;
 constexpr uint32_t kWindowAnimationMinimize = MICANT_WIN32K_ANIMATION_MINIMIZE;
 constexpr uint32_t kWindowAnimationRestore = MICANT_WIN32K_ANIMATION_RESTORE;
 constexpr int32_t kGwlpWndProc = -4;
+constexpr int32_t kGwlStyle = -16;
 constexpr int32_t kGwlpUserData = -21;
 constexpr uint32_t kWsChild = 0x40000000u;
 constexpr uint32_t kWsBorder = 0x00800000u;
@@ -1290,6 +1291,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 request.result = static_cast<uint64_t>(window->userData);
             } else if (index == kGwlpWndProc) {
                 request.result = window->windowProcedure;
+            } else if (index == kGwlStyle) {
+                request.result = window->style;
             } else {
                 return NtStatus::InvalidParameter;
             }

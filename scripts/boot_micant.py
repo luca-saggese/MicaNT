@@ -422,18 +422,22 @@ def verify_mouse(
                         "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
+                        "[MicaNT Theme] User32 auto-radio exclusive groups verified" in serial and
                         "[MicaNT Theme] Production User32 menu ownership and query round-trip verified" in serial and
                         "[MicaNT Theme] Production User32 popup mouse selection ready" in serial and
                         "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified" in serial and
                         "[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified" in serial and
                         "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial and
                         "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified" in serial and
-                        "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified" in serial):
+                        "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified" in serial and
+                        "[MicaNT Theme] Attached WS_HSCROLL/WS_VSCROLL pixels and range/page/position ready" in serial):
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
                     raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
                 if "[MicaNT Theme] Production User32 menu round-trip failed" in serial:
                     raise RuntimeError("Production User32 menu API round-trip failed")
+                if "[MicaNT Theme] Production User32 menu bar creation failed" in serial:
+                    raise RuntimeError("Production User32 menu bar could not be attached or painted")
                 if "[MicaNT Theme] Production User32 popup creation failed" in serial:
                     raise RuntimeError("Production User32 popup menu could not be created")
                 if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
@@ -446,6 +450,9 @@ def verify_mouse(
                 if "[MicaNT Theme] User32 3-state/radio message mismatch" in serial or \
                         "[MicaNT Theme] User32 3-state/radio creation failed" in serial:
                     raise RuntimeError("Production User32 three-state/radio behavior failed")
+                if "[MicaNT Theme] User32 auto-radio exclusivity mismatch" in serial or \
+                        "[MicaNT Theme] User32 auto-radio group creation failed" in serial:
+                    raise RuntimeError("Production User32 auto-radio exclusivity failed")
                 if "[MicaNT Theme] SysTabControl32 message or creation mismatch" in serial or \
                         "[MicaNT Theme] SysTabControl32 initialization or creation failed" in serial:
                     raise RuntimeError("Production SysTabControl32 message behavior failed")
@@ -457,6 +464,9 @@ def verify_mouse(
                     raise RuntimeError("Production User32 SCROLLBAR behavior failed")
                 if "[MicaNT Theme] Window SB_VERT state message mismatch" in serial:
                     raise RuntimeError("Production User32 window scrollbar state failed")
+                if "[MicaNT Theme] Attached scrollbar state setup failed" in serial or \
+                        "[MicaNT Theme] Attached scrollbar probe window creation failed" in serial:
+                    raise RuntimeError("Attached WS_HSCROLL/WS_VSCROLL probe setup failed")
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")
@@ -504,6 +514,60 @@ def verify_mouse(
                 time.sleep(0.05)
             else:
                 raise RuntimeError("User32 popup keyboard selection did not send WM_COMMAND")
+            # TrackPopupMenu runs a modal message loop. Exercise the radio only
+            # after both popup sessions have returned to Explorer's main loop.
+            auto_radio_before = screen("theme-auto-radio-before.ppm")
+            move_to(210, 428)
+            set_left_button(True)
+            time.sleep(0.1)
+            set_left_button(False)
+            deadline = time.monotonic() + 3
+            radio_input_marker = "[MicaNT Theme] Physical auto-radio input kept one group selection"
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if radio_input_marker in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Physical auto-radio input did not preserve exclusivity")
+            move_to(490, 500)
+            auto_radio_after = screen("theme-auto-radio-after.ppm")
+            radio_glyph_changed = sum(
+                pixel_at(auto_radio_before, x, y) != pixel_at(auto_radio_after, x, y)
+                for y in range(421, 434) for x in range(204, 217))
+            if radio_glyph_changed < 1:
+                raise RuntimeError("Auto-radio checked glyph did not change its screen pixels")
+            menu_bar_ready = "[MicaNT Theme] Production User32 menu bar attached and painted"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if menu_bar_ready in serial:
+                    break
+                if "[MicaNT Theme] Production User32 menu bar creation failed" in serial:
+                    raise RuntimeError("Production User32 menu bar could not be attached or painted")
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Explorer did not attach and paint the User32 menu bar")
+            menu_bar = screen("theme-menu-bar.ppm")
+            menu_bar_changed = sum(
+                pixel_at(opened, x, y) != pixel_at(menu_bar, x, y)
+                for y in range(130, 162) for x in range(190, 430)
+            )
+            if menu_bar_changed < 80:
+                raise RuntimeError("Attached User32 menu bar did not change its client pixels")
+            move_to(215, 145)
+            set_left_button(True)
+            time.sleep(0.1)
+            set_left_button(False)
+            menu_bar_command = "[MicaNT Theme] User32 menu bar owner command received"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if menu_bar_command in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("User32 menu bar click did not send WM_COMMAND")
             checkbox_normal = screen("theme-checkbox-unchecked.ppm")
             move_to(590, 364)
             checkbox_hover = screen("theme-checkbox-hover.ppm")
@@ -598,6 +662,48 @@ def verify_mouse(
             scrollbar_scrolled = screen("theme-scrollbar-scrolled.ppm")
             if scrollbar_region_changed(scrollbar_normal, scrollbar_scrolled) < 1:
                 raise RuntimeError("User32 SCROLLBAR arrow did not change its rendered thumb")
+
+            attached_normal = screen("theme-attached-scroll-normal.ppm")
+            move_to(342, 231)
+            attached_hover = screen("theme-attached-scroll-hover.ppm")
+            def attached_scroll_region_changed(left: bytes, right: bytes) -> int:
+                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
+                           for y in range(180, 300) for x in range(334, 350))
+            if attached_scroll_region_changed(attached_normal, attached_hover) < 1:
+                raise RuntimeError("Attached WS_VSCROLL hover did not change themed pixels")
+            move_to(342, 188)
+            set_left_button(True)
+            set_left_button(False)
+            deadline = time.monotonic() + 2
+            arrow_marker = "[MicaNT Theme] Attached WS_VSCROLL arrow notified and position read back"
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if arrow_marker in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Attached WS_VSCROLL arrow failed notification or position readback")
+            attached_arrow = screen("theme-attached-scroll-arrow.ppm")
+            if attached_scroll_region_changed(attached_normal, attached_arrow) < 1:
+                raise RuntimeError("Attached WS_VSCROLL arrow did not move themed pixels")
+            move_to(342, 231)
+            set_left_button(True)
+            move_to(342, 252)
+            time.sleep(0.1)
+            set_left_button(False)
+            deadline = time.monotonic() + 2
+            thumb_marker = "[MicaNT Theme] Attached WS_VSCROLL thumb drag notified and position read back"
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if thumb_marker in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Attached WS_VSCROLL thumb drag failed notification or position readback")
+            attached_thumb = screen("theme-attached-scroll-thumb.ppm")
+            if attached_scroll_region_changed(attached_arrow, attached_thumb) < 1:
+                raise RuntimeError("Attached WS_VSCROLL thumb drag did not move themed pixels")
+
             button_normal = screen("theme-button-normal.ppm")
             move_to(590, 320)
             button_hover = screen("theme-button-hover.ppm")
