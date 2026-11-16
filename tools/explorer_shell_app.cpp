@@ -109,6 +109,9 @@ struct ShellState {
     HWND themeEditProbe{};
     bool themeEditProbeReported{};
     uint32_t themeEditChangeNotifications{};
+    HWND themeScrollProbe{};
+    uint32_t themeScrollNotifications{};
+    bool themeScrollProbeReported{};
     HWND themeTabProbe{};
     bool themeTabProbeReported{};
     bool themeTabInputReported{};
@@ -2077,6 +2080,44 @@ void openView(View view) noexcept {
             PrintLine("[MicaNT Theme] SysTabControl32 initialization or creation failed");
         }
     }
+    if (view == View::MyComputer && !g.themeScrollProbeReported &&
+        !g.themeScrollProbe) {
+        constexpr uintptr_t kThemeScrollId = 0x77Au;
+        constexpr UINT kSifRange = 0x0001u;
+        constexpr UINT kSifPage = 0x0002u;
+        constexpr UINT kSifPos = 0x0004u;
+        g.themeScrollProbe = CreateWindowExW(0, L"SCROLLBAR", L"",
+            WS_CHILD | WS_VISIBLE, 370, 380, 180, 18, app->hwnd,
+            reinterpret_cast<HMENU>(kThemeScrollId), nullptr, nullptr);
+        if (g.themeScrollProbe) {
+            SCROLLINFO info{};
+            info.cbSize = sizeof(info);
+            info.fMask = kSifRange | kSifPage | kSifPos;
+            info.nMin = 0;
+            info.nMax = 100;
+            info.nPage = 20;
+            info.nPos = 35;
+            const bool setAccepted = SetScrollInfo(g.themeScrollProbe, 2, &info, TRUE) == 35;
+            SCROLLINFO readback{};
+            readback.cbSize = sizeof(readback);
+            readback.fMask = info.fMask;
+            const bool readbackSucceeded = GetScrollInfo(g.themeScrollProbe, 2,
+                &readback) && readback.nMin == 0 && readback.nMax == 100 &&
+                readback.nPage == 20 && readback.nPos == 35;
+            const int oldPosition = SetScrollPos(g.themeScrollProbe, 2, 42, TRUE);
+            const bool positionMessages = oldPosition == 35 &&
+                GetScrollPos(g.themeScrollProbe, 2) == 42;
+            ShowWindow(g.themeScrollProbe, SW_SHOW);
+            UpdateWindow(g.themeScrollProbe);
+            g.themeScrollProbeReported = setAccepted && readbackSucceeded &&
+                positionMessages;
+            PrintLine(g.themeScrollProbeReported
+                ? "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified"
+                : "[MicaNT Theme] Production User32 SCROLLBAR message mismatch");
+        } else {
+            PrintLine("[MicaNT Theme] Production User32 SCROLLBAR creation failed");
+        }
+    }
 }
 
 void toggleStart() noexcept {
@@ -2150,6 +2191,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
         LOWORD(wParam) == 0x775u) {
         ++g.themeRadioNotifications;
+        return 0;
+    }
+    if (message == WM_HSCROLL && reinterpret_cast<HWND>(lParam) == g.themeScrollProbe) {
+        ++g.themeScrollNotifications;
+        if (g.themeScrollNotifications == 1)
+            PrintLine("[MicaNT Theme] SCROLLBAR arrow input sent WM_HSCROLL");
         return 0;
     }
     if (message == WM_NOTIFY && lParam && g.themeTabProbe) {

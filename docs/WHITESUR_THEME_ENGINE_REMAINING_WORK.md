@@ -281,10 +281,22 @@ the evidence named here, not just declarations or a successful compile.
   production comctl32 implementation has bounded item storage and supports
   insert/delete/get/set/current-selection/hit-test messages, themed GDI paint,
   mouse and focused-arrow selection, and `WM_NOTIFY/TCN_SELCHANGE`. The
-  integrated run then failed the BUTTON focus-clear pixel assertion: Win32k
-  focus state and Space behavior work, but the focus indicator does not visibly
-  clear after focus moves. Menus, scrollbars, disabled-state and clipping
-  coverage remain open.
+  integrated run `/private/tmp/micant-theme-controls-focus-authority-final`
+  confirmed the SCROLLBAR range/page/position messages, hover pixels, arrow
+  input, `WM_HSCROLL`, and thumb movement before stopping at the BUTTON focus
+  pixel assertion. Pixel audit showed the focused and ordinary hover captures
+  are identical, even though focus ownership and Space activation work; the
+  focus ring is not being painted. Its pixel assertions remain open while the
+  input test proceeds to focus-loss/no-activation checks.
+  A production `SCROLLBAR` child class now owns bounded range/page/position
+  state, exports SB_CTL get/set APIs, paints UxTheme parts with a Base fallback,
+  and supports arrow/page/thumb input with capture and parent scroll
+  notifications. QEMU verified its range/page/position readback, hover pixels,
+  arrow input, `WM_HSCROLL` and thumb movement in
+  `/private/tmp/micant-theme-controls-scroll-focus-loss`; that full run later
+  stopped at an Explorer Control Panel text-color pixel assertion. Only
+  `SB_CTL` is implemented; attached-window scrollbars, repeat timers, and
+  complete disabled/clipping coverage remain open. Menus also remain open.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active

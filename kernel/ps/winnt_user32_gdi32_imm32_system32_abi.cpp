@@ -35,10 +35,12 @@ namespace micant::um::winnt_user32_gdi32_imm32_abi {
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 intptr_t User32_ButtonWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t User32_EditWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+intptr_t User32_ScrollBarWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 void* User32_BeginPaint(void*, WinNtPaintStruct*) noexcept;
 int32_t User32_EndPaint(void*, const WinNtPaintStruct*) noexcept;
 intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 void* User32_SetFocus(void*) noexcept;
+void* User32_GetFocus() noexcept;
 void* User32_SetCapture(void*) noexcept;
 int32_t User32_ReleaseCapture() noexcept;
 intptr_t User32_DefWindowProcW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
@@ -99,11 +101,27 @@ struct EditState {
     uint16_t length{};
     wchar_t text[512]{};
 };
+struct ScrollInfoW {
+    uint32_t cbSize, fMask;
+    int32_t nMin, nMax;
+    uint32_t nPage;
+    int32_t nPos, nTrackPos;
+};
+struct ScrollBarState {
+    void* hwnd{};
+    void* parent{};
+    uintptr_t id{};
+    int32_t minimum{}, maximum{100}, position{}, trackPosition{};
+    uint32_t page{10}, style{}, state{}, hotPart{}, pressedPart{}, disabledArrows{};
+    bool captured{};
+};
 std::array<ButtonState, 64> g_buttons{};
 std::array<EditState, 64> g_edits{};
+std::array<ScrollBarState, 64> g_scrollBars{};
 void* g_hotButton{};
 uint32_t g_buttonClassState{};
 uint32_t g_editClassState{};
+uint32_t g_scrollBarClassState{};
 constexpr uint32_t kButtonHot = 0x01;
 constexpr uint32_t kButtonPressed = 0x02;
 constexpr uint32_t kButtonFocused = 0x04;
@@ -151,6 +169,30 @@ constexpr uint32_t kBmGetCheck = 0x00F0u;
 constexpr uint32_t kBmSetCheck = 0x00F1u;
 constexpr uint32_t kBnClicked = 0u;
 constexpr uint32_t kEnChange = 0x0300u;
+constexpr uint32_t kSbSetPos = 0x00E0u;
+constexpr uint32_t kSbGetPos = 0x00E1u;
+constexpr uint32_t kSbSetRange = 0x00E2u;
+constexpr uint32_t kSbGetRange = 0x00E3u;
+constexpr uint32_t kSbEnableArrows = 0x00E4u;
+constexpr uint32_t kSbSetRangeRedraw = 0x00E6u;
+constexpr uint32_t kSbSetScrollInfo = 0x00E9u;
+constexpr uint32_t kSbGetScrollInfo = 0x00EAu;
+constexpr uint32_t kSbsVert = 0x0001u;
+constexpr uint32_t kSbsUnsupported = 0x0018u;
+constexpr uint32_t kSifRange = 0x0001u;
+constexpr uint32_t kSifPage = 0x0002u;
+constexpr uint32_t kSifPos = 0x0004u;
+constexpr uint32_t kSifDisableNoScroll = 0x0008u;
+constexpr uint32_t kSifTrackPos = 0x0010u;
+constexpr uint32_t kSifAll = kSifRange | kSifPage | kSifPos | kSifTrackPos | kSifDisableNoScroll;
+constexpr uint32_t kSifSet = kSifRange | kSifPage | kSifPos | kSifDisableNoScroll;
+constexpr uint32_t kSbLineUp = 0u;
+constexpr uint32_t kSbLineDown = 1u;
+constexpr uint32_t kSbPageUp = 2u;
+constexpr uint32_t kSbPageDown = 3u;
+constexpr uint32_t kSbThumbPosition = 4u;
+constexpr uint32_t kSbThumbTrack = 5u;
+constexpr uint32_t kSbEndScroll = 8u;
 constexpr uint32_t kMkLButton = 0x0001u;
 constexpr uint32_t kVkSpace = 0x20u;
 constexpr uint32_t kDtCenter = 0x00000001u;
@@ -1532,6 +1574,15 @@ void* User32_CreateWindowExW(
         if (!ensureBuiltinClass(L"EDIT",
                 reinterpret_cast<void*>(&User32_EditWndProc), g_editClassState))
             return nullptr;
+    } else if (isClassName(lpClassName, L"SCROLLBAR")) {
+        if (dwStyle & kSbsUnsupported) {
+            setThreadLastError(87); // SBS_SIZEBOX/SBS_SIZEGRIP are not implemented.
+            return nullptr;
+        }
+        if (!ensureBuiltinClass(L"SCROLLBAR",
+                reinterpret_cast<void*>(&User32_ScrollBarWndProc),
+                g_scrollBarClassState))
+            return nullptr;
     }
 #endif
     using Fn = void* (*)(uint32_t,const wchar_t*,const wchar_t*,uint32_t,int32_t,int32_t,int32_t,int32_t,void*,void*,void*,void*);
@@ -1786,6 +1837,169 @@ bool fillButtonRect(void* dc, const WinNtRect& rect, uint32_t color) noexcept {
 EditState* findEdit(void* hwnd) noexcept {
     for (auto& edit : g_edits) if (edit.hwnd == hwnd && hwnd) return &edit;
     return nullptr;
+}
+
+ScrollBarState* findScrollBar(void* hwnd) noexcept {
+    for (auto& bar : g_scrollBars) if (bar.hwnd == hwnd && hwnd) return &bar;
+    return nullptr;
+}
+
+int32_t scrollBarMaximumPosition(const ScrollBarState& bar) noexcept {
+    const int64_t range = int64_t(bar.maximum) - bar.minimum + 1;
+    const int64_t visible = std::min<int64_t>(bar.page, std::max<int64_t>(0, range));
+    const int64_t maximum = int64_t(bar.maximum) - std::max<int64_t>(0, visible - 1);
+    return static_cast<int32_t>(std::clamp<int64_t>(maximum, bar.minimum, INT32_MAX));
+}
+
+void clampScrollBar(ScrollBarState& bar) noexcept {
+    if (bar.maximum < bar.minimum) bar.maximum = bar.minimum;
+    bar.position = std::clamp(bar.position, bar.minimum, scrollBarMaximumPosition(bar));
+    bar.trackPosition = std::clamp(bar.trackPosition, bar.minimum,
+                                   scrollBarMaximumPosition(bar));
+}
+
+struct ScrollBarGeometry {
+    MicaWin32kRect firstArrow{}, secondArrow{}, track{}, thumb{};
+    int32_t trackStart{}, trackLength{}, thumbLength{};
+    bool vertical{};
+};
+
+ScrollBarGeometry scrollBarGeometry(const ScrollBarState& bar,
+                                    int32_t width, int32_t height) noexcept {
+    ScrollBarGeometry geometry{};
+    geometry.vertical = (bar.style & kSbsVert) != 0;
+    const int32_t axis = geometry.vertical ? height : width;
+    const int32_t cross = geometry.vertical ? width : height;
+    if (axis <= 0 || cross <= 0) return geometry;
+    const int32_t arrow = std::min(std::max(1, cross), std::max(1, axis / 2));
+    if (geometry.vertical) {
+        geometry.firstArrow = {0, 0, width, arrow};
+        geometry.secondArrow = {0, height - arrow, width, height};
+        geometry.track = {0, arrow, width, height - arrow};
+    } else {
+        geometry.firstArrow = {0, 0, arrow, height};
+        geometry.secondArrow = {width - arrow, 0, width, height};
+        geometry.track = {arrow, 0, width - arrow, height};
+    }
+    geometry.trackStart = arrow;
+    geometry.trackLength = std::max(0, axis - 2 * arrow);
+    const int64_t range = std::max<int64_t>(1, int64_t(bar.maximum) - bar.minimum + 1);
+    const int64_t proportional = geometry.trackLength *
+        std::min<int64_t>(bar.page, range) / range;
+    geometry.thumbLength = std::clamp<int32_t>(static_cast<int32_t>(proportional),
+        std::min(10, geometry.trackLength), geometry.trackLength);
+    const int32_t travel = std::max(0, geometry.trackLength - geometry.thumbLength);
+    const int64_t scrollRange = int64_t(scrollBarMaximumPosition(bar)) - bar.minimum;
+    const int64_t offset = scrollRange > 0
+        ? (int64_t(bar.position) - bar.minimum) * travel / scrollRange : 0;
+    const int32_t thumbStart = geometry.trackStart + static_cast<int32_t>(offset);
+    if (geometry.vertical)
+        geometry.thumb = {0, thumbStart, width, thumbStart + geometry.thumbLength};
+    else
+        geometry.thumb = {thumbStart, 0, thumbStart + geometry.thumbLength, height};
+    return geometry;
+}
+
+uint32_t scrollBarPartAt(const ScrollBarState& bar, int32_t x, int32_t y,
+                         int32_t width, int32_t height) noexcept {
+    const auto g = scrollBarGeometry(bar, width, height);
+    const auto contains = [x, y](const MicaWin32kRect& r) noexcept {
+        return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+    };
+    if (contains(g.firstArrow)) return g.vertical ? 1u : 3u;
+    if (contains(g.secondArrow)) return g.vertical ? 2u : 4u;
+    if (contains(g.thumb)) return g.vertical ? 6u : 5u;
+    if (contains(g.track)) {
+        const int32_t axis = g.vertical ? y : x;
+        const int32_t thumbAxis = g.vertical ? g.thumb.top : g.thumb.left;
+        return axis < thumbAxis ? 7u : 8u;
+    }
+    return 0;
+}
+
+uint32_t scrollArrowState(const ScrollBarState& bar, uint32_t part) noexcept {
+    uint32_t base = 1;
+    if (bar.style & kSbsVert) base = part == 2 ? 5 : 1;
+    else base = part == 3 ? 9 : 13;
+    const bool disabled = (bar.state & kButtonDisabled) ||
+        (bar.disabledArrows & ((part == 1 || part == 3) ? 1u : 2u));
+    if (disabled) return base + 3;
+    if (bar.pressedPart == part) return base + 2;
+    if (bar.hotPart == part) return base + 1;
+    return base;
+}
+
+void invalidateScrollBar(void* hwnd) noexcept {
+    using PostFn = int32_t (*)(void*, uint32_t, uintptr_t, intptr_t);
+    const auto post = Win32kProc<PostFn>("MicaWin32kPostMessageW");
+    if (post) (void)post(hwnd, kWmPaint, 0, 0);
+}
+
+void notifyScrollBar(const ScrollBarState& bar, uint32_t code) noexcept {
+    if (!bar.parent) return;
+    const uint32_t packed = (static_cast<uint32_t>(bar.trackPosition) & 0xFFFFu) << 16 |
+                            (code & 0xFFFFu);
+    (void)User32_SendMessageW(bar.parent, (bar.style & kSbsVert) ? 0x0115u : 0x0114u,
+                              packed, reinterpret_cast<intptr_t>(bar.hwnd));
+}
+
+bool drawScrollBarPart(void* theme, void* dc, int32_t part, int32_t state,
+                       const MicaWin32kRect& rect, uint32_t fallback) noexcept {
+    if (rect.right <= rect.left || rect.bottom <= rect.top) return true;
+    if (theme && DrawThemeBackground(theme, dc, part, state, &rect, nullptr) == 0)
+        return true;
+    if (part == 1) {
+        const uint32_t groupState = (state - 1) % 4;
+        fallback = groupState == 1 ? kColorButtonHot :
+            groupState == 2 ? kColorButtonPressed :
+            groupState == 3 ? kColorButtonDisabled : kColorButton;
+    } else if (part == 2 || part == 3) {
+        fallback = state == 2 ? 0xFFB6C8E0u :
+            state == 3 ? 0xFF9FB8D5u :
+            state == 4 ? 0xFFE4E4E4u : 0xFFD1D1D1u;
+    }
+    const WinNtRect fill{rect.left, rect.top, rect.right, rect.bottom};
+    return fillButtonRect(dc, fill, fallback);
+}
+
+bool drawScrollBar(void* hwnd, const ScrollBarState& bar, void* dc,
+                   int32_t width, int32_t height) noexcept {
+    if (!dc || width <= 0 || height <= 0 || width > 4096 || height > 4096)
+        return false;
+    const auto g = scrollBarGeometry(bar, width, height);
+    void* theme = OpenThemeData(hwnd, L"SCROLLBAR");
+    const uint32_t thumbPart = g.vertical ? 3u : 2u;
+    MicaWin32kRect before = g.track;
+    MicaWin32kRect after = g.track;
+    if (g.vertical) {
+        before.bottom = std::clamp(g.thumb.top, before.top, before.bottom);
+        after.top = std::clamp(g.thumb.bottom, after.top, after.bottom);
+    } else {
+        before.right = std::clamp(g.thumb.left, before.left, before.right);
+        after.left = std::clamp(g.thumb.right, after.left, after.right);
+    }
+    bool drawn = drawScrollBarPart(theme, dc, g.vertical ? 7 : 6, 1,
+                                    before, 0xFFF5F5F5u);
+    drawn &= drawScrollBarPart(theme, dc, g.vertical ? 5 : 4, 1,
+                               after, 0xFFF5F5F5u);
+    drawn &= drawScrollBarPart(theme, dc, 1, scrollArrowState(bar,
+        g.vertical ? 1u : 3u), g.firstArrow, kColorButton);
+    drawn &= drawScrollBarPart(theme, dc, 1, scrollArrowState(bar,
+        g.vertical ? 2u : 4u), g.secondArrow, kColorButton);
+    const int32_t thumbState = (bar.state & kButtonDisabled) ? 4 :
+        bar.pressedPart == (g.vertical ? 6u : 5u) ? 3 :
+        bar.hotPart == (g.vertical ? 6u : 5u) ? 2 : 1;
+    drawn &= drawScrollBarPart(theme, dc, thumbPart, thumbState, g.thumb, 0xFFD1D1D1u);
+    if (theme) (void)CloseThemeData(theme);
+    return drawn;
+}
+
+void copyScrollInfo(const ScrollBarState& bar, ScrollInfoW& info) noexcept {
+    const uint32_t mask = info.fMask;
+    if (mask & kSifRange) { info.nMin = bar.minimum; info.nMax = bar.maximum; }
+    if (mask & kSifPage) info.nPage = bar.page;
+    if (mask & kSifPos) info.nPos = bar.position;
+    if (mask & kSifTrackPos) info.nTrackPos = bar.trackPosition;
 }
 
 void invalidateEdit(void* hwnd) noexcept {
@@ -2373,6 +2587,226 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         return hasRect && client.right > 0 && client.bottom > 0;
     }
     if (click) notifyButtonClicked(hwnd);
+    return User32_DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+intptr_t User32_ScrollBarWndProc(void* hwnd, uint32_t message,
+                                uintptr_t wParam, intptr_t lParam) noexcept {
+    if (message == kWmNcCreate) {
+        const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
+        if (!create || (static_cast<uint32_t>(create->style) & kSbsUnsupported))
+            return 0;
+        ScrollBarState initial{};
+        initial.hwnd = hwnd;
+        initial.parent = create->parent;
+        initial.id = reinterpret_cast<uintptr_t>(create->menu);
+        initial.style = static_cast<uint32_t>(create->style);
+        if (initial.style & kWsDisabled) initial.state |= kButtonDisabled;
+        ButtonLockGuard guard(g_buttonLock);
+        for (auto& entry : g_scrollBars) {
+            if (entry.hwnd) continue;
+            entry = initial;
+            return 1;
+        }
+        return 0;
+    }
+    if (message == kWmDestroy || message == kWmNcDestroy) {
+        ButtonLockGuard guard(g_buttonLock);
+        if (auto* bar = findScrollBar(hwnd)) *bar = {};
+        return 0;
+    }
+    if (message == kSbGetPos) {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* bar = findScrollBar(hwnd);
+        return bar ? bar->position : 0;
+    }
+    if (message == kSbSetPos || message == kSbSetRange ||
+        message == kSbSetRangeRedraw || message == kSbSetScrollInfo ||
+        message == kSbEnableArrows) {
+        int32_t result{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* bar = findScrollBar(hwnd);
+            if (!bar) return 0;
+            result = bar->position;
+            if (message == kSbSetPos) bar->position = static_cast<int32_t>(lParam);
+            else if (message == kSbSetRange || message == kSbSetRangeRedraw) {
+                bar->minimum = static_cast<int32_t>(wParam);
+                bar->maximum = static_cast<int32_t>(lParam);
+            } else if (message == kSbEnableArrows) {
+                bar->disabledArrows = static_cast<uint32_t>(wParam) & 3u;
+            } else {
+                const auto* info = reinterpret_cast<const ScrollInfoW*>(lParam);
+                if (!info || info->cbSize < sizeof(ScrollInfoW) ||
+                    (info->fMask & ~kSifSet)) return 0;
+                if (info->fMask & kSifRange) {
+                    bar->minimum = info->nMin;
+                    bar->maximum = info->nMax;
+                }
+                if (info->fMask & kSifPage) bar->page = info->nPage;
+                if (info->fMask & kSifPos) bar->position = info->nPos;
+                if (info->fMask & kSifDisableNoScroll)
+                    bar->disabledArrows = bar->maximum <= bar->minimum ? 3u : 0u;
+            }
+            clampScrollBar(*bar);
+        }
+        if (message != kSbSetPos || wParam || message == kSbSetRangeRedraw ||
+            message == kSbSetScrollInfo)
+            invalidateScrollBar(hwnd);
+        return result;
+    }
+    if (message == kSbGetRange || message == kSbGetScrollInfo) {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* bar = findScrollBar(hwnd);
+        if (!bar) return 0;
+        if (message == kSbGetRange) {
+            if (wParam) *reinterpret_cast<int32_t*>(wParam) = bar->minimum;
+            if (lParam) *reinterpret_cast<int32_t*>(lParam) = bar->maximum;
+        } else {
+            auto* info = reinterpret_cast<ScrollInfoW*>(lParam);
+            if (!info || info->cbSize < sizeof(ScrollInfoW) ||
+                (info->fMask & ~kSifAll)) return 0;
+            copyScrollInfo(*bar, *info);
+        }
+        return 1;
+    }
+    if (message == kWmThemeChanged || message == kWmSettingChange) {
+        invalidateScrollBar(hwnd);
+        return 0;
+    }
+    if (message == kWmEnable) {
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* bar = findScrollBar(hwnd);
+            if (!bar) return 0;
+            if (wParam) bar->state &= ~kButtonDisabled;
+            else bar->state |= kButtonDisabled;
+        }
+        invalidateScrollBar(hwnd);
+        return 0;
+    }
+    if (message == kWmCaptureChanged) {
+        ButtonLockGuard guard(g_buttonLock);
+        if (auto* bar = findScrollBar(hwnd)) {
+            bar->captured = false;
+            bar->pressedPart = 0;
+            clampScrollBar(*bar);
+        }
+        invalidateScrollBar(hwnd);
+        return 0;
+    }
+    const auto getDimensions = [hwnd](int32_t& width, int32_t& height) noexcept {
+        MicaWin32kRect rect{};
+        using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
+        const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
+        if (!getRect || !getRect(hwnd, &rect) || rect.right <= rect.left ||
+            rect.bottom <= rect.top) return false;
+        width = rect.right - rect.left;
+        height = rect.bottom - rect.top;
+        return true;
+    };
+    if (message == kWmMouseMove || message == kWmLButtonDown ||
+        message == kWmLButtonUp) {
+        int32_t width{}, height{};
+        if (!getDimensions(width, height)) return 0;
+        const int32_t x = static_cast<int16_t>(static_cast<uint16_t>(lParam));
+        const int32_t y = static_cast<int16_t>(static_cast<uint16_t>(
+            static_cast<uintptr_t>(lParam) >> 16));
+        uint32_t code{};
+        bool redraw = false;
+        bool release = false;
+        ScrollBarState copy{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* bar = findScrollBar(hwnd);
+            if (!bar) return 0;
+            const uint32_t hit = scrollBarPartAt(*bar, x, y, width, height);
+            if (message == kWmMouseMove) {
+                redraw = bar->hotPart != hit;
+                bar->hotPart = hit;
+                if (bar->captured && bar->pressedPart == ((bar->style & kSbsVert) ? 6u : 5u)) {
+                    const auto g = scrollBarGeometry(*bar, width, height);
+                    const int32_t axis = g.vertical ? y : x;
+                    const int32_t travel = std::max(0, g.trackLength - g.thumbLength);
+                    const int32_t offset = std::clamp(axis - g.thumbLength / 2 - g.trackStart,
+                                                     0, travel);
+                    const int64_t range = int64_t(scrollBarMaximumPosition(*bar)) - bar->minimum;
+                    bar->trackPosition = travel && range
+                        ? static_cast<int32_t>(int64_t(bar->minimum) + range * offset / travel)
+                        : bar->minimum;
+                    if (bar->position != bar->trackPosition) {
+                        bar->position = bar->trackPosition;
+                        code = kSbThumbTrack;
+                        redraw = true;
+                    }
+                }
+            } else if (message == kWmLButtonDown) {
+                if (bar->state & kButtonDisabled) return 0;
+                if ((hit == 1 || hit == 3) && (bar->disabledArrows & 1u)) return 0;
+                if ((hit == 2 || hit == 4) && (bar->disabledArrows & 2u)) return 0;
+                bar->hotPart = hit;
+                bar->pressedPart = hit;
+                bar->captured = hit != 0;
+                if (hit == ((bar->style & kSbsVert) ? 6u : 5u)) {
+                    bar->trackPosition = bar->position;
+                } else if (hit == 1 || hit == 3) {
+                    bar->position = static_cast<int32_t>(std::max<int64_t>(
+                        bar->minimum, int64_t(bar->position) - 1));
+                    code = kSbLineUp;
+                } else if (hit == 2 || hit == 4) {
+                    bar->position = static_cast<int32_t>(std::min<int64_t>(
+                        scrollBarMaximumPosition(*bar), int64_t(bar->position) + 1));
+                    code = kSbLineDown;
+                } else if (hit == 7) {
+                    const int32_t page = static_cast<int32_t>(std::min<uint32_t>(bar->page, INT32_MAX));
+                    bar->position = static_cast<int32_t>(std::max<int64_t>(
+                        bar->minimum, int64_t(bar->position) - page));
+                    code = kSbPageUp;
+                } else if (hit == 8) {
+                    const int32_t page = static_cast<int32_t>(std::min<uint32_t>(bar->page, INT32_MAX));
+                    bar->position = static_cast<int32_t>(std::min<int64_t>(
+                        scrollBarMaximumPosition(*bar), int64_t(bar->position) + page));
+                    code = kSbPageDown;
+                }
+                redraw = true;
+                copy = *bar;
+            } else {
+                if (bar->captured && bar->pressedPart == ((bar->style & kSbsVert) ? 6u : 5u)) {
+                    bar->position = bar->trackPosition;
+                    code = kSbThumbPosition;
+                }
+                release = bar->captured;
+                bar->captured = false;
+                bar->pressedPart = 0;
+                copy = *bar;
+                redraw = true;
+            }
+            if (!copy.hwnd) copy = *bar;
+        }
+        if (message == kWmLButtonDown && copy.captured) (void)User32_SetCapture(hwnd);
+        if (release) (void)User32_ReleaseCapture();
+        if (redraw) invalidateScrollBar(hwnd);
+        if (code) notifyScrollBar(copy, code);
+        if (message == kWmLButtonUp && release) notifyScrollBar(copy, kSbEndScroll);
+        return 0;
+    }
+    if (message == kWmPaint) {
+        ScrollBarState bar{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            const auto* current = findScrollBar(hwnd);
+            if (!current) return 0;
+            bar = *current;
+        }
+        WinNtPaintStruct paint{};
+        void* dc = User32_BeginPaint(hwnd, &paint);
+        if (!dc) return 0;
+        int32_t width{}, height{};
+        const bool hasDimensions = getDimensions(width, height);
+        const bool drawn = hasDimensions && drawScrollBar(hwnd, bar, dc, width, height);
+        const bool presented = User32_EndPaint(hwnd, &paint) != 0;
+        return drawn && presented;
+    }
     return User32_DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
@@ -3618,6 +4052,42 @@ __declspec(dllexport) int32_t PostMessageW(void* hWnd, uint32_t Msg, uintptr_t w
 }
 __declspec(dllexport) intptr_t SendMessageW(void* hWnd, uint32_t Msg, uintptr_t wParam, intptr_t lParam) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(hWnd,Msg,wParam,lParam);
+}
+__declspec(dllexport) int32_t SetScrollInfo(void* hWnd, int32_t nBar,
+        const void* info, int32_t redraw) {
+    constexpr uint32_t kSbmSetScrollInfo = 0x00E9u;
+    constexpr uint32_t kSifSet = 0x000Fu;
+    const auto* scrollInfo = static_cast<const micant::um::winnt_user32_gdi32_imm32_abi::ScrollInfoW*>(info);
+    if (nBar != 2 || !scrollInfo || scrollInfo->cbSize < sizeof(*scrollInfo) ||
+        (scrollInfo->fMask & ~kSifSet)) return 0;
+    (void)micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+        hWnd, kSbmSetScrollInfo, redraw != 0,
+        reinterpret_cast<intptr_t>(info));
+    return static_cast<int32_t>(
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+            hWnd, 0x00E1u, 0, 0));
+}
+__declspec(dllexport) int32_t GetScrollInfo(void* hWnd, int32_t nBar, void* info) {
+    constexpr uint32_t kSbmGetScrollInfo = 0x00EAu;
+    if (nBar != 2 || !info) return 0;
+    return static_cast<int32_t>(
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+            hWnd, kSbmGetScrollInfo, 0, reinterpret_cast<intptr_t>(info)));
+}
+__declspec(dllexport) int32_t SetScrollPos(void* hWnd, int32_t nBar,
+        int32_t position, int32_t redraw) {
+    constexpr uint32_t kSbmSetPos = 0x00E0u;
+    if (nBar != 2) return 0;
+    return static_cast<int32_t>(
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+            hWnd, kSbmSetPos, redraw != 0, position));
+}
+__declspec(dllexport) int32_t GetScrollPos(void* hWnd, int32_t nBar) {
+    constexpr uint32_t kSbmGetPos = 0x00E1u;
+    if (nBar != 2) return 0;
+    return static_cast<int32_t>(
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+            hWnd, kSbmGetPos, 0, 0));
 }
 __declspec(dllexport) int32_t GetClientRect(void* hWnd, micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* lpRect) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetClientRect(hWnd, lpRect);

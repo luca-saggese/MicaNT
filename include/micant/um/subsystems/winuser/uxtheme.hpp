@@ -200,6 +200,17 @@ inline bool classControl(LPCWSTR classes, uint8_t& control) noexcept {
     return false;
 }
 inline uint8_t stateIndex(uint8_t control, int state) noexcept {
+    if (control == 8) {
+        // Scrollbar parts use their own state enumerations. Collapse the four
+        // arrow directions onto the bounded normal/hot/pressed/disabled theme
+        // slots; thumb parts already use states 1 through 4.
+        if (state >= 1 && state <= 16) {
+            const int withinDirection = (state - 1) % 4;
+            return withinDirection == 1 ? 1 : withinDirection == 2 ? 2 :
+                withinDirection == 3 ? 4 : 0;
+        }
+        return 0xFF;
+    }
     if (state == 1) return 0;
     if (control == 2 || control == 3) {
         switch (state) {
@@ -226,6 +237,7 @@ inline uint8_t stateIndex(uint8_t control, int state) noexcept {
 }
 inline bool controlForPart(const ThemeHandle& handle, int part, uint8_t& control) noexcept {
     control = handle.control;
+    if (handle.control == 8) return part >= 1 && part <= 10;
     if (handle.control != 0) return part == 1;
     if (part == 1) return true; // BP_PUSHBUTTON
     if (part == 2) { control = 3; return true; } // BP_RADIOBUTTON

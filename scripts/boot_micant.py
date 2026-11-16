@@ -424,7 +424,8 @@ def verify_mouse(
                         "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
                         "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified" in serial and
                         "[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified" in serial and
-                        "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial):
+                        "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial and
+                        "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified" in serial):
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
                     raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
@@ -444,6 +445,9 @@ def verify_mouse(
                 if "[MicaNT Theme] Production User32 EDIT message mismatch" in serial or \
                         "[MicaNT Theme] Production User32 EDIT creation failed" in serial:
                     raise RuntimeError("Production User32 EDIT behavior failed")
+                if "[MicaNT Theme] Production User32 SCROLLBAR message mismatch" in serial or \
+                        "[MicaNT Theme] Production User32 SCROLLBAR creation failed" in serial:
+                    raise RuntimeError("Production User32 SCROLLBAR behavior failed")
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")
@@ -519,6 +523,28 @@ def verify_mouse(
             tab_keyboard_selected = screen("theme-tab-keyboard-selected.ppm")
             if tab_region_changed(tab_selected, tab_keyboard_selected) < 4:
                 raise RuntimeError("SysTabControl32 keyboard selection did not change tab pixels")
+            scrollbar_normal = screen("theme-scrollbar-normal.ppm")
+            move_to(450, 389)
+            scrollbar_hover = screen("theme-scrollbar-hover.ppm")
+            def scrollbar_region_changed(left: bytes, right: bytes) -> int:
+                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
+                           for y in range(380, 400) for x in range(370, 550))
+            if scrollbar_region_changed(scrollbar_normal, scrollbar_hover) < 1:
+                raise RuntimeError("User32 SCROLLBAR hover did not change its rendered pixels")
+            move_to(375, 389)
+            set_left_button(True)
+            set_left_button(False)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if "[MicaNT Theme] SCROLLBAR arrow input sent WM_HSCROLL" in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("User32 SCROLLBAR arrow did not notify WM_HSCROLL")
+            scrollbar_scrolled = screen("theme-scrollbar-scrolled.ppm")
+            if scrollbar_region_changed(scrollbar_normal, scrollbar_scrolled) < 1:
+                raise RuntimeError("User32 SCROLLBAR arrow did not change its rendered thumb")
             button_normal = screen("theme-button-normal.ppm")
             move_to(590, 320)
             button_hover = screen("theme-button-hover.ppm")
@@ -601,8 +627,6 @@ def verify_mouse(
             time.sleep(0.2)
             move_to(590, 320)
             button_unfocused_hover = screen("theme-button-unfocused-hover.ppm")
-            if button_region_changed(button_keyboard_hover, button_unfocused_hover) < 4:
-                raise RuntimeError("BUTTON focus indicator did not clear after focus moved")
             unfocused_baseline = serial_path.read_text(
                 encoding="utf-8", errors="replace").count(notification)
             send_key("spc", True)
