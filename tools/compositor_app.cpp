@@ -11,6 +11,10 @@
 namespace {
 
 uint32_t g_frame[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
+constexpr int64_t kWindowEffectRadiusLimit = 32;
+constexpr int64_t kWindowShadowExtent = 6;
+uint32_t g_windowCornerBackdrop[4][kWindowEffectRadiusLimit *
+                                   kWindowEffectRadiusLimit]{};
 MicaCompositorMetadataStore g_metadataSnapshot{};
 bool g_presentFailureReported{};
 bool g_hasPresentedFrame{};
@@ -21,6 +25,7 @@ struct ScreenRect {
 };
 
 ScreenRect g_composeClip{};
+uint8_t g_windowDrawOpacity{255};
 constexpr uint64_t kWindowAnimationDurationMs = 240;
 constexpr uint64_t kAnimationFrameInterval100ns = 160000;
 
@@ -40,6 +45,10 @@ struct AnimationRuntime {
 
 AnimationRuntime g_animationRuntime[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
 AnimationFrame g_animationFrames[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+MicaCompositorMetadataStore g_effectProbeMetadata{};
+MicaCompositorSurfaceInfo g_effectProbeSurface{};
+AnimationFrame g_effectProbeAnimations[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+uint32_t g_effectProbePixels[64u * 64u]{};
 
 uint64_t animationClockMilliseconds() noexcept {
     const auto* shared = reinterpret_cast<volatile const micant::KUserSharedData*>(
@@ -200,7 +209,126 @@ void fillRect(int64_t left, int64_t top, int64_t right, int64_t bottom,
     for (int64_t y = top; y < bottom; ++y) {
         auto* row = g_frame + static_cast<size_t>(y) * width +
             static_cast<size_t>(left);
-        for (size_t x = 0; x < rowWidth; ++x) row[x] = color;
+        if (g_windowDrawOpacity == 255) {
+            for (size_t x = 0; x < rowWidth; ++x) row[x] = color;
+        } else {
+            const uint32_t source =
+                (static_cast<uint32_t>(g_windowDrawOpacity) << 24) |
+                (color & 0x00FFFFFFu);
+            for (size_t x = 0; x < rowWidth; ++x)
+                row[x] = blend(source, row[x]);
+        }
+    }
+}
+
+uint32_t applyPremultipliedOpacity(uint32_t pixel, uint8_t opacity) noexcept {
+    const auto scale = [opacity](uint32_t channel) noexcept {
+        return (channel * opacity + 127u) / 255u;
+    };
+    return (scale(pixel >> 24) << 24) |
+        (scale((pixel >> 16) & 0xFFu) << 16) |
+        (scale((pixel >> 8) & 0xFFu) << 8) |
+        scale(pixel & 0xFFu);
+}
+
+void blendWindowShadow(int64_t left, int64_t top, int64_t right, int64_t bottom,
+                       uint32_t width, uint32_t height) noexcept {
+    // Shadow work is bounded to six strips around the window, not its area.
+    const auto draw = [&](int64_t x, int64_t y, int64_t dx, int64_t dy) noexcept {
+        if (x < g_composeClip.left || x >= g_composeClip.right ||
+            y < g_composeClip.top || y >= g_composeClip.bottom ||
+            x < 0 || x >= width || y < 0 || y >= height) return;
+        const int64_t distanceSquared = dx * dx + dy * dy;
+        const uint32_t alpha = distanceSquared < 4 ? 44u :
+            distanceSquared < 9 ? 36u : distanceSquared < 16 ? 28u :
+            distanceSquared < 25 ? 20u : distanceSquared < 36 ? 12u : 0u;
+        if (!alpha) return;
+        const size_t destination = static_cast<size_t>(y) * width +
+            static_cast<size_t>(x);
+        g_frame[destination] = blend(alpha << 24, g_frame[destination]);
+    };
+    for (int64_t y = top - kWindowShadowExtent; y < top; ++y) {
+        const int64_t dy = top - y;
+        for (int64_t x = left - kWindowShadowExtent;
+             x < right + kWindowShadowExtent; ++x) {
+            const int64_t dx = x < left ? left - x :
+                x >= right ? x - right + 1 : 0;
+            draw(x, y, dx, dy);
+        }
+    }
+    for (int64_t y = bottom; y < bottom + kWindowShadowExtent; ++y) {
+        const int64_t dy = y - bottom + 1;
+        for (int64_t x = left - kWindowShadowExtent;
+             x < right + kWindowShadowExtent; ++x) {
+            const int64_t dx = x < left ? left - x :
+                x >= right ? x - right + 1 : 0;
+            draw(x, y, dx, dy);
+        }
+    }
+    for (int64_t y = top; y < bottom; ++y) {
+        for (int64_t x = left - kWindowShadowExtent; x < left; ++x)
+            draw(x, y, left - x, 0);
+        for (int64_t x = right; x < right + kWindowShadowExtent; ++x)
+            draw(x, y, x - right + 1, 0);
+    }
+}
+
+void saveWindowCornerBackdrop(int64_t left, int64_t top,
+                              int64_t right, int64_t bottom,
+                              int64_t radius, uint32_t width,
+                              uint32_t height) noexcept {
+    for (int64_t y = 0; y < radius; ++y) {
+        for (int64_t x = 0; x < radius; ++x) {
+            const size_t offset = static_cast<size_t>(
+                y * kWindowEffectRadiusLimit + x);
+            const int64_t px[4]{left + x, right - radius + x,
+                                left + x, right - radius + x};
+            const int64_t py[4]{top + y, top + y,
+                                bottom - radius + y, bottom - radius + y};
+            for (size_t corner = 0; corner < 4; ++corner) {
+                g_windowCornerBackdrop[corner][offset] =
+                    px[corner] >= g_composeClip.left &&
+                    px[corner] < g_composeClip.right &&
+                    py[corner] >= g_composeClip.top &&
+                    py[corner] < g_composeClip.bottom &&
+                    px[corner] >= 0 && px[corner] < width &&
+                    py[corner] >= 0 && py[corner] < height
+                    ? g_frame[static_cast<size_t>(py[corner]) * width +
+                              static_cast<size_t>(px[corner])] : 0;
+            }
+        }
+    }
+}
+
+void applyWindowCornerMask(int64_t left, int64_t top,
+                           int64_t right, int64_t bottom,
+                           int64_t radius, uint32_t width,
+                           uint32_t height) noexcept {
+    const int64_t radiusSquared = radius * radius;
+    for (int64_t y = 0; y < radius; ++y) {
+        for (int64_t x = 0; x < radius; ++x) {
+            const int64_t centerX = 2 * x + 1 - 2 * radius;
+            const int64_t centerY = 2 * y + 1 - 2 * radius;
+            if (centerX * centerX + centerY * centerY <= 4 * radiusSquared)
+                continue;
+            const size_t offset = static_cast<size_t>(
+                y * kWindowEffectRadiusLimit + x);
+            const int64_t px[4]{left + x, right - radius + x,
+                                left + x, right - radius + x};
+            const int64_t py[4]{top + y, top + y,
+                                bottom - radius + y, bottom - radius + y};
+            for (size_t corner = 0; corner < 4; ++corner) {
+                if (px[corner] < g_composeClip.left ||
+                    px[corner] >= g_composeClip.right ||
+                    py[corner] < g_composeClip.top ||
+                    py[corner] >= g_composeClip.bottom ||
+                    px[corner] < 0 || px[corner] >= width ||
+                    py[corner] < 0 || py[corner] >= height) continue;
+                g_frame[static_cast<size_t>(py[corner]) * width +
+                        static_cast<size_t>(px[corner])] =
+                    g_windowCornerBackdrop[corner][offset];
+            }
+        }
     }
 }
 
@@ -215,7 +343,14 @@ void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
             if (px >= g_composeClip.left && px < g_composeClip.right &&
                 py >= g_composeClip.top && py < g_composeClip.bottom &&
                 px < width && py < height)
-                g_frame[static_cast<size_t>(py) * width + static_cast<size_t>(px)] = color;
+            {
+                auto& destination = g_frame[static_cast<size_t>(py) * width +
+                    static_cast<size_t>(px)];
+                if (g_windowDrawOpacity == 255) destination = color;
+                else destination = blend(
+                    (static_cast<uint32_t>(g_windowDrawOpacity) << 24) |
+                    (color & 0x00FFFFFFu), destination);
+            }
         }
     }
 }
@@ -262,6 +397,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         clip.left < 0 || clip.top < 0 || clip.right > width || clip.bottom > height ||
         clip.left >= clip.right || clip.top >= clip.bottom) return false;
     g_composeClip = clip;
+    g_windowDrawOpacity = 255;
 
     const bool themeValid = MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme));
     const auto* normalHeaderbar = themeValid
@@ -269,6 +405,8 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
     const auto* inactiveHeaderbar = themeValid
         ? &metadata.theme.styles[13u * MICANT_THEME_STATE_COUNT + 7u] : nullptr;
     const auto* normalButton = themeValid ? &metadata.theme.styles[0] : nullptr;
+    const auto* windowStyle = themeValid
+        ? &metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT] : nullptr;
 
     fillRect(clip.left, clip.top, clip.right, clip.bottom, 0xFF1C3A5Cu,
              width, height);
@@ -340,6 +478,25 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         const int64_t sourceClientHeight = surface.height - sourceFrame * 2 - sourceCaption;
         if (clientWidth <= 0 || clientHeight <= 0) continue;
 
+        const bool validWindowStyle = windowStyle && windowStyle->flags;
+        const uint8_t opacity = validWindowStyle &&
+            (windowStyle->flags & MICANT_THEME_HAS_OPACITY)
+            ? windowStyle->opacity : 255u;
+        int64_t radius = validWindowStyle &&
+            (windowStyle->flags & MICANT_THEME_HAS_RADIUS)
+            ? windowStyle->borderRadius : 0;
+        if (!topLevel || !frame) radius = 0;
+        if (radius > kWindowEffectRadiusLimit) radius = kWindowEffectRadiusLimit;
+        if (radius * 2 > windowWidth) radius = windowWidth / 2;
+        if (radius * 2 > windowHeight) radius = windowHeight / 2;
+        if (radius > 0) {
+            blendWindowShadow(windowLeft, windowTop, windowRight, windowBottom,
+                              width, height);
+            saveWindowCornerBackdrop(windowLeft, windowTop, windowRight,
+                                     windowBottom, radius, width, height);
+        }
+        g_windowDrawOpacity = opacity;
+
         if (frame || caption) {
             const bool foreground = (surface.flags & MICANT_COMPOSITOR_SURFACE_FOREGROUND) != 0;
             const auto* headerbarStyle = foreground ? normalHeaderbar : inactiveHeaderbar;
@@ -375,8 +532,16 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                 buttonColor = normalButton->background | 0xFF000000u;
                 closeColor = buttonColor;
             }
-            fillRect(windowLeft, windowTop, windowRight, windowBottom,
-                     frameColor, width, height);
+            if (frame) {
+                fillRect(windowLeft, windowTop, windowRight,
+                         windowTop + frame, frameColor, width, height);
+                fillRect(windowLeft, windowBottom - frame, windowRight,
+                         windowBottom, frameColor, width, height);
+                fillRect(windowLeft, windowTop + frame, windowLeft + frame,
+                         windowBottom - frame, frameColor, width, height);
+                fillRect(windowRight - frame, windowTop + frame, windowRight,
+                         windowBottom - frame, frameColor, width, height);
+            }
             if (caption) {
                 fillRect(windowLeft + frame, windowTop + frame,
                          windowRight - frame, windowTop + frame + caption,
@@ -481,9 +646,14 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                     x >= g_composeClip.right || x < 0 || x >= width) continue;
                                 const uint32_t source = decorPixels[surface.iconPixelOffset +
                                     static_cast<size_t>(row) * surface.iconStride + column];
-                                if (source >> 24)
+                                const uint32_t sourceAlpha = source >> 24;
+                                const uint32_t effectiveAlpha =
+                                    (sourceAlpha * opacity + 127u) / 255u;
+                                if (effectiveAlpha)
                                     g_frame[static_cast<size_t>(y) * width +
-                                        static_cast<size_t>(x)] = blend(source,
+                                        static_cast<size_t>(x)] = blend(
+                                            (effectiveAlpha << 24) |
+                                                (source & 0x00FFFFFFu),
                                             g_frame[static_cast<size_t>(y) * width +
                                                 static_cast<size_t>(x)]);
                             }
@@ -521,7 +691,10 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                 const uint32_t coverage = decorPixels[surface.titlePixelOffset +
                                     static_cast<size_t>(row) * surface.titleStride + column] >> 24;
                                 if (!coverage) continue;
-                                const uint32_t glyph = (coverage << 24) | (titleColor & 0x00FFFFFFu);
+                                const uint32_t effectiveCoverage =
+                                    (coverage * opacity + 127u) / 255u;
+                                const uint32_t glyph = (effectiveCoverage << 24) |
+                                    (titleColor & 0x00FFFFFFu);
                                 const size_t destination = static_cast<size_t>(y) * width +
                                     static_cast<size_t>(x);
                                 g_frame[destination] = blend(glyph, g_frame[destination]);
@@ -559,14 +732,16 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                 const uint32_t* source = surfaces + sourceRow + sourceX;
                 size_t x = 0;
                 while (x < pixelCount) {
-                    if ((source[x] >> 24) == 255u) {
+                    if ((source[x] >> 24) == 255u && opacity == 255u) {
                         const size_t runStart = x++;
                         while (x < pixelCount && (source[x] >> 24) == 255u) ++x;
                         for (size_t copy = runStart; copy < x; ++copy)
                             destination[copy] = source[copy];
                     } else {
-                        const uint32_t alpha = source[x] >> 24;
-                        if (alpha) destination[x] = blend(source[x], destination[x]);
+                        uint32_t pixel = applyPremultipliedOpacity(source[x], opacity);
+                        if (pixel >> 24)
+                            destination[x] = micant::shared::graphics::PremultipliedSourceOver(
+                                pixel, destination[x]);
                         ++x;
                     }
                 }
@@ -576,13 +751,18 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                     const size_t sourceX = static_cast<size_t>(localX) *
                         static_cast<size_t>(sourceClientWidth) /
                         static_cast<size_t>(clientWidth);
-                    const uint32_t source = surfaces[sourceRow + sourceX];
-                    const uint32_t alpha = source >> 24;
-                    if (alpha == 255u) destination[x] = source;
-                    else if (alpha) destination[x] = blend(source, destination[x]);
+                    const uint32_t source = applyPremultipliedOpacity(
+                        surfaces[sourceRow + sourceX], opacity);
+                    if (source >> 24)
+                        destination[x] = micant::shared::graphics::PremultipliedSourceOver(
+                            source, destination[x]);
                 }
             }
         }
+        if (radius > 0)
+            applyWindowCornerMask(windowLeft, windowTop, windowRight, windowBottom,
+                                  radius, width, height);
+        g_windowDrawOpacity = 255;
     }
 
     const auto& cursor = metadata.cursor;
@@ -700,9 +880,21 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
     }
 
     damage.count = metadata.dirtyRegionCount;
+    const bool shadowEnabled =
+        MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme)) &&
+        (metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].flags &
+         MICANT_THEME_HAS_RADIUS) &&
+        metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].borderRadius != 0;
     for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
         const auto& dirty = metadata.dirtyRegions[index];
-        const ScreenRect region{dirty.left, dirty.top, dirty.right, dirty.bottom};
+        const int64_t margin = shadowEnabled ? kWindowShadowExtent : 0;
+        const ScreenRect region{
+            dirty.left > margin ? dirty.left - margin : 0,
+            dirty.top > margin ? dirty.top - margin : 0,
+            dirty.right + margin < MICANT_COMPOSITOR_SCREEN_WIDTH
+                ? dirty.right + margin : MICANT_COMPOSITOR_SCREEN_WIDTH,
+            dirty.bottom + margin < MICANT_COMPOSITOR_SCREEN_HEIGHT
+                ? dirty.bottom + margin : MICANT_COMPOSITOR_SCREEN_HEIGHT};
         damage.regions[index] = region;
     }
     return true;
@@ -723,6 +915,85 @@ bool composeDamageRegions(const MicaCompositorMetadataStore& metadata,
 bool presentDamage(uint32_t screenWidth, const DamageSet& damage) noexcept {
     for (size_t index = 0; index < damage.count; ++index)
         if (!presentRegion(screenWidth, damage.regions[index])) return false;
+    return true;
+}
+
+bool verifyWindowEffectsRasterizer() noexcept {
+    auto& metadata = g_effectProbeMetadata;
+    // These bounded probe buffers are static-storage objects and start zeroed.
+    metadata.magic = MICANT_COMPOSITOR_STORE_MAGIC;
+    metadata.version = MICANT_COMPOSITOR_STORE_VERSION;
+    metadata.screenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
+    metadata.screenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
+    metadata.surfaceCapacity = 1;
+    metadata.theme.magic = MICANT_THEME_SNAPSHOT_MAGIC;
+    metadata.theme.version = MICANT_THEME_SNAPSHOT_VERSION;
+    metadata.theme.headerSize = static_cast<uint16_t>(offsetof(MicaThemeSnapshot, styles));
+    metadata.theme.totalSize = sizeof(MicaThemeSnapshot);
+    metadata.theme.controlCount = MICANT_THEME_CONTROL_COUNT;
+    metadata.theme.stateCount = MICANT_THEME_STATE_COUNT;
+    auto& style = metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT];
+    style.flags = MICANT_THEME_HAS_RADIUS | MICANT_THEME_HAS_OPACITY;
+    style.borderRadius = 8;
+    style.opacity = 128;
+
+    auto& surface = g_effectProbeSurface;
+    surface.window = 1;
+    surface.x = 100;
+    surface.y = 100;
+    surface.width = surface.height = surface.pitch = 64;
+    surface.style = 0x00040000u | 0x00800000u | 0x00400000u;
+    surface.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
+        MICANT_COMPOSITOR_SURFACE_VISIBLE |
+        MICANT_COMPOSITOR_SURFACE_FOREGROUND;
+    auto& probeSurface = metadata.surfaces[0];
+    probeSurface.window = surface.window;
+    probeSurface.x = surface.x;
+    probeSurface.y = surface.y;
+    probeSurface.width = surface.width;
+    probeSurface.height = surface.height;
+    probeSurface.pitch = surface.pitch;
+    probeSurface.style = surface.style;
+    probeSurface.flags = surface.flags;
+    for (auto& pixel : g_effectProbePixels) pixel = 0x80808080u;
+    constexpr uint32_t background = 0xFF1C3A5Cu;
+    constexpr ScreenRect clip{94, 94, 170, 170};
+    if (!composeRegion(metadata, g_effectProbePixels, clip,
+                       g_effectProbeAnimations, nullptr)) return false;
+    const uint32_t expectedClient =
+        micant::shared::graphics::PremultipliedSourceOver(
+            0x40404040u, background);
+    const uint32_t expectedShadow = blend(0x2C000000u, background);
+    const size_t corner = 100u * MICANT_COMPOSITOR_SCREEN_WIDTH + 100u;
+    const size_t client = 140u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
+    const size_t shadow = 99u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
+    if (g_frame[corner] != background) {
+        constexpr char message[] = "[MicaNT Compositor] Rounded corner pixel mismatch\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+    if (g_frame[client] != expectedClient) {
+        constexpr char message[] = "[MicaNT Compositor] Window opacity pixel mismatch\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+    if (g_frame[shadow] != expectedShadow) {
+        constexpr char message[] = "[MicaNT Compositor] Window shadow pixel mismatch\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+
+    // An empty/invalid theme snapshot style retains the opaque square Base path.
+    style.flags = 0;
+    style.borderRadius = 0;
+    style.opacity = 255;
+    if (!composeRegion(metadata, g_effectProbePixels, clip,
+                       g_effectProbeAnimations, nullptr)) return false;
+    if (g_frame[corner] != 0xFF334B66u) {
+        constexpr char message[] = "[MicaNT Compositor] Base window pixel mismatch\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
     return true;
 }
 
@@ -749,6 +1020,15 @@ extern "C" void _start() noexcept {
         MICANT_COMPOSITOR_DECOR_PIXELS_BASE);
     constexpr char startupMessage[] = "[MicaNT Compositor] Ring 3 compositor entered\r\n";
     print(startupMessage, sizeof(startupMessage) - 1);
+    constexpr char effectPassed[] =
+        "[MicaNT Compositor] Window opacity, radius, shadow and Base pixels verified\r\n";
+    constexpr char effectFailed[] =
+        "[MicaNT Compositor] Window software effect pixel probe failed\r\n";
+    const bool effectsPassed = verifyWindowEffectsRasterizer();
+    const char* effectMessage = effectsPassed ? effectPassed : effectFailed;
+    const size_t effectMessageLength = effectsPassed
+        ? sizeof(effectPassed) - 1 : sizeof(effectFailed) - 1;
+    print(effectMessage, effectMessageLength);
     micant::um::UserVideoInfo64 displayInfo{};
     if (micant::sys::invokeUserService(0x80,
             reinterpret_cast<uint64_t>(&displayInfo)) == 0) {

@@ -491,9 +491,16 @@ the evidence named here, not just declarations or a successful compile.
 ### 8. Compositor effects
 
 - [x] DIB-backed UxTheme parts support clipped rounded fills and alpha blend.
-- [ ] Implement and verify software-compositor window transparency, rounded
-  window masks, shadows and bounded blur, with resource-failure fallback to
-  basic composition/Base visuals.
+- [x] Software composition applies premultiplied window opacity, a bounded
+  corner mask and a six-pixel shadow when the Window theme style supplies a
+  radius; damage expands around the shadow. Missing/invalid style keeps the
+  opaque square Base path. A synthetic compositor pixel probe for corner,
+  backdrop opacity, shadow and Base fallback passed in QEMU
+  (`/private/tmp/micant-theme-point8-effects-corrected-1794805980`).
+- [ ] Add a stable backdrop scratch pipeline for bounded blur and connect
+  transparency/radius/shadow/blur preferences to per-user settings. Verify
+  effects on real Explorer windows and after move/resize, including resource
+  failure fallback; current QEMU pixel proof is a synthetic compositor surface.
 - [ ] Keep VirtIO-GPU 2D scanout evidence distinct from GPU-composition claims;
   no hardware or accelerated-composition verification is established.
 
