@@ -5,6 +5,7 @@
 #include <string_view>
 #include "micant/shared/ntstatus.hpp"
 #include "micant/shared/ntdef.hpp"
+#include "micant/shared/native_process_abi.hpp"
 #include "micant/shared/syscall_numbers.hpp"
 
 namespace micant::fs {
@@ -30,6 +31,7 @@ inline constexpr uint32_t SSN_NtProtectVirtualMemory     = 0x0050;
 inline constexpr uint32_t SSN_NtFlushInstructionCache     = MICANT_SSN_NT_FLUSH_INSTRUCTION_CACHE;
 inline constexpr uint32_t SSN_NtQueryVirtualMemory       = 0x0023;
 inline constexpr uint32_t SSN_NtCreateProcessEx          = 0x00B4;
+inline constexpr uint32_t SSN_NtCreateUserProcess        = MICANT_SSN_NT_CREATE_USER_PROCESS;
 inline constexpr uint32_t SSN_NtTerminateProcess         = 0x002C;
 inline constexpr uint32_t SSN_NtCreateThreadEx           = 0x00BD;
 inline constexpr uint32_t SSN_NtTerminateThread          = 0x0053;
@@ -112,6 +114,8 @@ inline constexpr uint32_t SSN_NtAlertThread = MICANT_SSN_NT_ALERT_THREAD;
 inline constexpr uint32_t SSN_NtTestAlert = MICANT_SSN_NT_TEST_ALERT;
 inline constexpr uint32_t SSN_NtDuplicateObject = MICANT_SSN_NT_DUPLICATE_OBJECT;
 inline constexpr uint32_t SSN_NtFlushBuffersFile = MICANT_SSN_NT_FLUSH_BUFFERS_FILE;
+inline constexpr uint32_t SSN_MicantReadPendingCrashDump = MICANT_SSN_MICANT_READ_PENDING_CRASH_DUMP;
+inline constexpr uint32_t SSN_MicantAcknowledgeCrashDump = MICANT_SSN_MICANT_ACKNOWLEDGE_CRASH_DUMP;
 
 /**
  * @brief Native NT Syscall Signatures in Modern C++23
@@ -289,6 +293,12 @@ NtStatus NtCreateProcessExFromKernel(Handle* processHandle, uint32_t desiredAcce
 NtStatus NtCreateProcessExCaptured(Handle* userProcessHandle, uint32_t desiredAccess,
     ObjectAttributes* capturedAttributes, Handle parentProcess, uint32_t flags,
     Handle section, Handle debugPort, Handle exceptionPort, bool inJob);
+NtStatus NtCreateUserProcess(Handle* processHandle, Handle* threadHandle,
+    uint32_t processDesiredAccess, uint32_t threadDesiredAccess,
+    ObjectAttributes* processObjectAttributes, ObjectAttributes* threadObjectAttributes,
+    uint32_t processFlags, uint32_t threadFlags, void* processParameters,
+    shared::native_process::ProcessCreateInfo64* createInfo,
+    PsAttributeList* attributeList);
 NtStatus NtCreateEvent(Handle* eventHandle, uint32_t desiredAccess,
                        ObjectAttributes* objectAttributes, uint32_t eventType,
                        bool initialState);

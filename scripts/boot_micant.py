@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -199,6 +200,579 @@ def count_tcp_payload_frames(capture: Path, payload: bytes) -> int:
         if bytes(frame[payload_start:payload_end]) == payload:
             matches += 1
     return matches
+
+
+def verify_theme_test(
+    qmp_path: Path,
+    temp: Path,
+    serial_path: Path,
+    diagnostics_dir: Path | None = None,
+) -> None:
+    """Drive the dedicated Ring 3 theme client and compare real scanout pixels."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            if "QMP" not in json.loads(stream.readline()):
+                raise RuntimeError("QEMU did not send a QMP greeting")
+
+            def execute(command: str, arguments: dict | None = None) -> None:
+                stream.write((json.dumps({
+                    "execute": command, "arguments": arguments or {},
+                }) + "\n").encode())
+                stream.flush()
+                while True:
+                    response = json.loads(stream.readline())
+                    if "error" in response:
+                        raise RuntimeError(f"QMP {command} failed: {response['error']}")
+                    if "return" in response:
+                        return
+
+            execute("qmp_capabilities")
+
+            pointer = [0, 0]
+            pointer_initialized = False
+
+            def relative(axis: str, distance: int) -> None:
+                while distance:
+                    step = max(-64, min(64, distance))
+                    execute("input-send-event", {"events": [{
+                        "type": "rel", "data": {"axis": axis, "value": step},
+                    }]})
+                    distance -= step
+                    time.sleep(0.02)
+
+            def move_to(x: int, y: int) -> None:
+                nonlocal pointer_initialized
+                if not pointer_initialized:
+                    relative("x", -1200)
+                    relative("y", -1200)
+                    pointer[:] = [0, 0]
+                    pointer_initialized = True
+                relative("x", x - pointer[0])
+                relative("y", y - pointer[1])
+                pointer[:] = [x, y]
+                time.sleep(0.2)
+
+            def click(x: int, y: int) -> None:
+                move_to(x, y)
+                execute("input-send-event", {"events": [{
+                    "type": "btn", "data": {"button": "left", "down": True},
+                }]})
+                time.sleep(0.08)
+                execute("input-send-event", {"events": [{
+                    "type": "btn", "data": {"button": "left", "down": False},
+                }]})
+                time.sleep(0.25)
+                move_to(10, 10)
+
+            def screen(name: str) -> bytes:
+                path = temp / name
+                execute("screendump", {"filename": str(path)})
+                if diagnostics_dir is not None:
+                    shutil.copyfile(path, diagnostics_dir / name)
+                with path.open("rb") as image:
+                    if (image.readline() != b"P6\n" or
+                            image.readline() != b"1024 768\n" or
+                            image.readline() != b"255\n"):
+                        raise RuntimeError("Unexpected VirtIO scanout screenshot format")
+                    pixels = image.read()
+                if len(pixels) != 1024 * 768 * 3:
+                    raise RuntimeError("Truncated VirtIO scanout screenshot")
+                return pixels
+
+            def pixel(image: bytes, x: int, y: int) -> bytes:
+                offset = (y * 1024 + x) * 3
+                return image[offset:offset + 3]
+
+            def region_diff(left: bytes, right: bytes) -> int:
+                changed = 0
+                for y in range(118, 430):
+                    for x in range(88, 610):
+                        offset = (y * 1024 + x) * 3
+                        if left[offset:offset + 3] != right[offset:offset + 3]:
+                            changed += 1
+                return changed
+
+            def wait_for_marker(marker: str, previous_count: int = 0) -> str:
+                deadline = time.monotonic() + 8
+                latest = ""
+                while time.monotonic() < deadline:
+                    latest = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if latest.count(marker) > previous_count:
+                        return latest
+                    time.sleep(0.05)
+                raise RuntimeError(f"theme_test.exe did not report: {marker}; serial tail:\n{latest[-2500:]}")
+
+            startup = serial_path.read_text(encoding="utf-8", errors="replace")
+            for marker in (
+                "[MicaNT ThemeTest TEMP] user entry reached",
+                "[MicaNT ThemeTest TEMP] CreateWindowExW succeeded",
+                "[MicaNT ThemeTest] Base snapshot published",
+                "[MicaNT ThemeTest TEMP] Base snapshot published",
+                "[MicaNT ThemeTest] Active WhiteSur Light loaded",
+                "[MicaNT ThemeTest TEMP] active.profile theme applied",
+                "[MicaNT ThemeTest] Initial HTHEME snapshot pinned",
+                "[MicaNT ThemeTest] Full notification queue rejected theme; active snapshot intact",
+                "[MicaNT ThemeTest] Valid theme publish recovered after queue drain",
+                "[MicaNT ThemeTest TEMP] notification queue probe passed",
+                "[MicaNT ThemeTest] Production control window started",
+                "[MicaNT ThemeTest TEMP] ShowWindow completed from hidden state",
+            ):
+                if marker not in startup:
+                    raise RuntimeError(f"theme_test.exe startup lacked required evidence: {marker}")
+            light = screen("theme-test-light-start.ppm")
+
+            click(508, 208)  # WhiteSur Dark
+            dark_serial = wait_for_marker("[MicaNT ThemeTest] WhiteSur Dark snapshot published")
+            if "[MicaNT ThemeTest] Open HTHEME retained old snapshot; new HTHEME sees new theme" not in dark_serial:
+                raise RuntimeError("HTHEME generation lifetime did not survive the Dark theme switch")
+            dark = screen("theme-test-dark.ppm")
+            changed = region_diff(light, dark)
+            if changed < 30 or pixel(light, 100, 94) == pixel(dark, 100, 94):
+                raise RuntimeError(
+                    "WhiteSur Light-to-Dark switch did not change caption/client scanout pixels "
+                    f"(region changed={changed})"
+                )
+
+            click(508, 174)  # WhiteSur Light
+            light_serial = wait_for_marker("[MicaNT ThemeTest] WhiteSur Light snapshot published")
+            if "[MicaNT ThemeTest] HTHEME snapshot lifetime check failed" in light_serial:
+                raise RuntimeError("UxTheme handle snapshot check failed")
+            light_again = screen("theme-test-light-again.ppm")
+            if region_diff(light, light_again) > 8:
+                raise RuntimeError("Returning to WhiteSur Light did not restore its original pixels")
+
+            active_marker = "[MicaNT ThemeTest] Active WhiteSur Light loaded"
+            active_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
+                active_marker)
+            click(508, 242)  # Reload active.profile (WhiteSur/Light)
+            wait_for_marker(active_marker, active_count)
+            active_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
+                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot")
+            before_reject = screen("theme-test-before-rejections.ppm")
+
+            click(508, 276)  # Missing profile
+            missing_serial = wait_for_marker(
+                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot", active_count,
+            )
+            missing_count = missing_serial.count(
+                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot")
+            missing_screen = screen("theme-test-missing-profile.ppm")
+            if region_diff(before_reject, missing_screen) > 8:
+                raise RuntimeError("Missing-profile rollback changed the active theme pixels")
+
+            click(508, 310)  # Truncated compiled-style fixture
+            malformed_serial = wait_for_marker(
+                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot", missing_count,
+            )
+            malformed_screen = screen("theme-test-malformed-style.ppm")
+            if region_diff(before_reject, malformed_screen) > 8:
+                raise RuntimeError("Malformed-style rollback changed the active theme pixels")
+
+            base_marker = "[MicaNT ThemeTest] Base snapshot published"
+            base_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
+                base_marker)
+            click(508, 342)  # Base fallback
+            wait_for_marker(base_marker, base_count)
+            base_screen = screen("theme-test-base-fallback.ppm")
+            base_rollback_count = serial_path.read_text(
+                encoding="utf-8", errors="replace").count(
+                    "[MicaNT ThemeTest] Rejected theme preserved the active snapshot")
+            click(508, 276)  # Missing WhiteSur profile with Base as the last valid theme
+            wait_for_marker(
+                "[MicaNT ThemeTest] Rejected theme preserved the active snapshot",
+                base_rollback_count,
+            )
+            base_after_missing = screen("theme-test-base-missing-profile.ppm")
+            if region_diff(base_screen, base_after_missing) > 8:
+                raise RuntimeError("Missing WhiteSur profile changed the Base fallback pixels")
+            light_count = serial_path.read_text(encoding="utf-8", errors="replace").count(
+                "[MicaNT ThemeTest] WhiteSur Light snapshot published")
+            click(508, 174)  # A valid load recovers after Base
+            wait_for_marker("[MicaNT ThemeTest] WhiteSur Light snapshot published", light_count)
+            recovered = screen("theme-test-recovered-light.ppm")
+            if region_diff(light, recovered) > 8:
+                raise RuntimeError("Valid WhiteSur reload did not recover after failed loads/Base fallback")
+            print(
+                "theme_test.exe Light/Dark/reload, Base fallback, invalid-profile rollback, "
+                "HTHEME lifetime, and scanout pixel checks passed.", flush=True,
+            )
+
+
+def verify_cmd_terminal(
+    qmp_path: Path,
+    temp: Path,
+    diagnostics_dir: Path,
+) -> None:
+    """Type real commands into cmd.exe and retain terminal scanout evidence."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            if "QMP" not in json.loads(stream.readline()):
+                raise RuntimeError("QEMU did not send a QMP greeting")
+
+            def execute(command: str, arguments: dict | None = None) -> None:
+                stream.write((json.dumps({
+                    "execute": command, "arguments": arguments or {},
+                }) + "\n").encode())
+                stream.flush()
+                while True:
+                    line = stream.readline()
+                    if not line:
+                        raise RuntimeError("QMP closed during CMD terminal verification")
+                    response = json.loads(line)
+                    if "error" in response:
+                        raise RuntimeError(f"QMP {command} failed: {response['error']}")
+                    if "return" in response:
+                        return
+
+            execute("qmp_capabilities")
+
+            def screen(name: str) -> bytes:
+                path = temp / name
+                execute("screendump", {"filename": str(path)})
+                shutil.copyfile(path, diagnostics_dir / name)
+                with path.open("rb") as image:
+                    if (image.readline() != b"P6\n" or
+                            image.readline() != b"1024 768\n" or
+                            image.readline() != b"255\n"):
+                        raise RuntimeError("Unexpected CMD scanout screenshot format")
+                    pixels = image.read()
+                if len(pixels) != 1024 * 768 * 3:
+                    raise RuntimeError("Truncated CMD scanout screenshot")
+                return pixels
+
+            def region_diff(left: bytes, right: bytes) -> int:
+                # Restrict comparisons to the terminal client area and ignore
+                # animated desktop/cursor pixels around the window.
+                changed = 0
+                for y in range(122, 580):
+                    row = y * 1024
+                    for x in range(124, 876):
+                        offset = (row + x) * 3
+                        if left[offset:offset + 3] != right[offset:offset + 3]:
+                            changed += 1
+                return changed
+
+            pointer = [0, 0]
+            pointer_initialized = False
+
+            def move_to(x: int, y: int) -> None:
+                nonlocal pointer_initialized
+                if not pointer_initialized:
+                    for axis in ("x", "y"):
+                        remaining = -1200
+                        while remaining:
+                            step = max(-64, min(64, remaining))
+                            execute("input-send-event", {"events": [{
+                                "type": "rel", "data": {"axis": axis, "value": step},
+                            }]})
+                            remaining -= step
+                    pointer[:] = [0, 0]
+                    pointer_initialized = True
+                for axis, index in (("x", 0), ("y", 1)):
+                    remaining = (x if index == 0 else y) - pointer[index]
+                    while remaining:
+                        step = max(-64, min(64, remaining))
+                        execute("input-send-event", {"events": [{
+                            "type": "rel", "data": {"axis": axis, "value": step},
+                        }]})
+                        pointer[index] += step
+                        remaining -= step
+                        time.sleep(0.01)
+                time.sleep(0.15)
+
+            def move_by(dx: int, dy: int) -> None:
+                for axis, distance in (("x", dx), ("y", dy)):
+                    while distance:
+                        step = max(-64, min(64, distance))
+                        execute("input-send-event", {"events": [{
+                            "type": "rel", "data": {"axis": axis, "value": step},
+                        }]})
+                        pointer[0 if axis == "x" else 1] += step
+                        distance -= step
+                time.sleep(0.2)
+
+            def set_left_button(down: bool) -> None:
+                execute("input-send-event", {"events": [{
+                    "type": "btn", "data": {"button": "left", "down": down},
+                }]})
+                time.sleep(0.12)
+
+            def drag(start_x: int, start_y: int, dx: int, dy: int) -> None:
+                move_to(start_x, start_y)
+                set_left_button(True)
+                while dx or dy:
+                    step_x = max(-64, min(64, dx))
+                    step_y = max(-64, min(64, dy))
+                    move_by(step_x, step_y)
+                    dx -= step_x
+                    dy -= step_y
+                set_left_button(False)
+
+            def wait_for_window_change(before: bytes, name: str,
+                                       threshold: int = 1200) -> bytes:
+                deadline = time.monotonic() + 5
+                latest = before
+                while time.monotonic() < deadline:
+                    latest = screen(name)
+                    if region_diff(before, latest) >= threshold:
+                        time.sleep(0.25)
+                        latest = screen(name)
+                        if region_diff(before, latest) >= threshold:
+                            return latest
+                    time.sleep(0.1)
+                raise RuntimeError(
+                    f"CMD window action {name} produced no stable visible change; "
+                    f"changed pixels: {region_diff(before, latest)}")
+
+            def click_terminal() -> None:
+                move_to(180, 160)
+                for down in (True, False):
+                    execute("input-send-event", {"events": [{
+                        "type": "btn", "data": {"button": "left", "down": down},
+                    }]})
+                time.sleep(0.2)
+
+            def key(qcode: str) -> None:
+                for down in (True, False):
+                    execute("input-send-event", {"events": [{
+                        "type": "key", "data": {
+                            "down": down, "key": {"type": "qcode", "data": qcode},
+                        },
+                    }]})
+                time.sleep(0.025)
+
+            def shifted_key(qcode: str) -> None:
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": True, "key": {"type": "qcode", "data": "shift"},
+                    },
+                }]})
+                key(qcode)
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": False, "key": {"type": "qcode", "data": "shift"},
+                    },
+                }]})
+
+            def type_text(text: str) -> None:
+                for character in text:
+                    if character == " ":
+                        qcode = "spc"
+                    elif character == ".":
+                        qcode = "dot"
+                    elif character == "-":
+                        qcode = "minus"
+                    elif character == ":":
+                        shifted_key("semicolon")
+                        continue
+                    elif character == "(":
+                        shifted_key("9")
+                        continue
+                    elif character == ")":
+                        shifted_key("0")
+                        continue
+                    elif "A" <= character <= "Z":
+                        shifted_key(character.lower())
+                        continue
+                    elif "a" <= character <= "z" or "0" <= character <= "9":
+                        qcode = character
+                    else:
+                        raise RuntimeError(f"CMD QMP helper cannot type {character!r}")
+                    key(qcode)
+
+            def echo_reference(text: str, name: str) -> tuple[bytes, tuple[int, int, int, int]]:
+                """Render reference text through CMD/GDI and return its glyph bounds."""
+                type_text("cls")
+                key("ret")
+                baseline = screen(name)
+                type_text("echo " + text)
+                key("ret")
+                baseline = capture_after_input(baseline, name, "echo reference")
+                # Find bright glyph pixels in the client area, then retain the
+                # last glyph row band (the echo output, below the prompt line).
+                rows: list[tuple[int, int, int]] = []
+                for y in range(122, 580):
+                    xs = [x for x in range(124, 876)
+                          if max(baseline[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]) > 180]
+                    if xs:
+                        rows.append((y, min(xs), max(xs)))
+                bands: list[list[tuple[int, int, int]]] = []
+                for row in rows:
+                    if not bands or row[0] > bands[-1][-1][0] + 1:
+                        bands.append([row])
+                    else:
+                        bands[-1].append(row)
+                if not bands:
+                    raise RuntimeError(f"CMD echo reference produced no visible glyphs: {text}")
+                band = bands[-1]
+                return baseline, (min(r[1] for r in band), band[0][0],
+                                  max(r[2] for r in band) + 1, band[-1][0] + 1)
+
+            def assert_echo_text(target: bytes, reference: bytes,
+                                 bounds: tuple[int, int, int, int], label: str) -> None:
+                x0, y0, x1, y1 = bounds
+                width, height = x1 - x0, y1 - y0
+                points: list[tuple[int, int]] = []
+                for row in range(height):
+                    for column in range(width):
+                        offset = ((y0 + row) * 1024 + x0 + column) * 3
+                        if max(reference[offset:offset + 3]) > 100:
+                            points.append((column, row))
+                if not points:
+                    raise RuntimeError(f"CMD {label} reference contains no glyph pixels")
+                # Compare glyph pixels independently of the GDI text color;
+                # status output is red while echo references use the normal
+                # terminal text attribute.
+                for y in range(122, 580 - height):
+                    for x in range(124, 876 - width):
+                        if all(max(target[((y + dy) * 1024 + x + dx) * 3:
+                                          ((y + dy) * 1024 + x + dx) * 3 + 3]) > 100
+                               for dx, dy in points):
+                            return
+                raise RuntimeError(f"CMD {label} output did not contain the expected visible text")
+
+            last = screen("cmd-terminal-00-startup.ppm")
+            click_terminal()
+
+            def capture_after_input(before: bytes, name: str, label: str) -> bytes:
+                deadline = time.monotonic() + 5
+                latest = before
+                stable = 0
+                previous = before
+                while time.monotonic() < deadline:
+                    latest = screen(name)
+                    if region_diff(before, latest) >= 50:
+                        # The first changed frame often contains only the typed
+                        # command. Wait for the terminal to finish painting its
+                        # response before retaining the command screenshot.
+                        if region_diff(previous, latest) < 4:
+                            stable += 1
+                        else:
+                            stable = 0
+                        if stable >= 2:
+                            return latest
+                    previous = latest
+                    time.sleep(0.15)
+                raise RuntimeError(
+                    f"CMD terminal did not visibly update after {label}; "
+                    f"changed pixels in client region: {region_diff(before, latest)}")
+
+            def submit(command: str, name: str) -> bytes:
+                nonlocal last
+                type_text(command)
+                key("ret")
+                last = capture_after_input(last, name, command)
+                return last
+
+            # Backspace corrects the mistyped suffix before Enter reaches CMD.
+            type_text("helpz")
+            key("backspace")
+            key("ret")
+            last = capture_after_input(last, "cmd-terminal-01-help.ppm", "help/Backspace/Enter")
+            submit("cd system32", "cmd-terminal-02-cd-system32.ppm")
+            dir_reference, dir_bounds = echo_reference(
+                "cmd-m0-known.txt", "cmd-terminal-ref-dir.ppm")
+            type_reference, type_bounds = echo_reference(
+                "luceos cmd m0 real fat file fixture", "cmd-terminal-ref-type.ppm")
+            process_reference, process_bounds = echo_reference(
+                "Started process", "cmd-terminal-ref-process.ppm")
+            process_exit_reference, process_exit_bounds = echo_reference(
+                "exited with code 0x00000000", "cmd-terminal-ref-process-exit.ppm")
+            process_error_reference, process_error_bounds = echo_reference(
+                "CreateProcessW failed (Win32 error", "cmd-terminal-ref-process-error.ppm")
+            status_reference, status_bounds = echo_reference(
+                "Command failed (NTSTATUS 0xC0000034).", "cmd-terminal-ref-status.ppm")
+            submit("cls", "cmd-terminal-clear-before-dir.ppm")
+            dir_screen = submit("dir", "cmd-terminal-03-dir.ppm")
+            assert_echo_text(dir_screen, dir_reference, dir_bounds, "dir")
+            submit("cls", "cmd-terminal-clear-before-type.ppm")
+            type_screen = submit("type cmd-m0-known.txt", "cmd-terminal-04-type.ppm")
+            assert_echo_text(type_screen, type_reference, type_bounds, "type")
+            process_screen = submit("fileimage", "cmd-terminal-04-process-launch.ppm")
+            assert_echo_text(process_screen, process_reference, process_bounds,
+                             "file-backed PE process launch")
+            process_exit_screen = submit("echo reap", "cmd-terminal-04-process-exit.ppm")
+            assert_echo_text(process_exit_screen, process_exit_reference, process_exit_bounds,
+                             "file-backed PE process exit status")
+            submit("cd ..", "cmd-terminal-05-cd-parent.ppm")
+            submit("cd cmd-m0-no-such-dir", "cmd-terminal-06-cd-missing.ppm")
+            assert_echo_text(last, status_reference, status_bounds, "missing cd NTSTATUS")
+            missing_file = submit("type cmd-m0-no-such-file.txt",
+                                  "cmd-terminal-06-type-missing.ppm")
+            assert_echo_text(missing_file, status_reference, status_bounds,
+                             "missing type NTSTATUS")
+            unknown_command = submit("cmd-m0-no-such-command",
+                                     "cmd-terminal-06-command-unknown.ppm")
+            assert_echo_text(unknown_command, process_error_reference,
+                             process_error_bounds, "unknown command failure")
+
+            key("up")
+            history_screen = screen("cmd-terminal-07-history.ppm")
+            if region_diff(last, history_screen) < 20:
+                raise RuntimeError("CMD Up-arrow history did not change the terminal input")
+            last = history_screen
+
+            # Fill beyond one viewport, then check both scroll directions.
+            for index in range(15):
+                submit("help", f"cmd-terminal-history-{index:02d}.ppm")
+            key("pgup")
+            scroll_up = screen("cmd-terminal-08-scroll-up.ppm")
+            if region_diff(last, scroll_up) < 20:
+                raise RuntimeError("CMD PageUp did not scroll terminal history")
+            last = scroll_up
+            key("pgdn")
+            scroll_down = screen("cmd-terminal-09-scroll-down.ppm")
+            if region_diff(last, scroll_down) < 20:
+                raise RuntimeError("CMD PageDown did not restore the terminal viewport")
+
+            # The initial outer frame is positioned at (120, 90), sized
+            # 760x500. Exercise each caption control on the standard system
+            # frame, then drag and resize the restored window by actual QMP
+            # mouse input. Retain every transition for visual diagnosis.
+            move_to(835, 104)  # Maximize caption button.
+            set_left_button(True)
+            set_left_button(False)
+            maximized = wait_for_window_change(
+                scroll_down, "cmd-window-maximized.ppm", 5000)
+
+            move_to(974, 19)  # Restore caption button on the maximized frame.
+            set_left_button(True)
+            set_left_button(False)
+            restored = wait_for_window_change(
+                maximized, "cmd-window-restored.ppm", 5000)
+
+            move_to(806, 104)  # Minimize caption button.
+            set_left_button(True)
+            set_left_button(False)
+            minimized = wait_for_window_change(
+                restored, "cmd-window-minimized.ppm", 5000)
+            move_to(300, 748)  # Restore from the taskbar.
+            set_left_button(True)
+            set_left_button(False)
+            taskbar_restored = wait_for_window_change(
+                minimized, "cmd-window-taskbar-restored.ppm", 5000)
+
+            drag(350, 104, 30, 20)  # Move the titlebar.
+            dragged = wait_for_window_change(
+                taskbar_restored, "cmd-window-dragged.ppm", 1200)
+            drag(908, 608, 25, 20)  # Resize from the bottom-right grip.
+            resized = wait_for_window_change(
+                dragged, "cmd-window-resized.ppm", 1200)
+
+            move_to(912, 124)  # Close caption button after move and resize.
+            set_left_button(True)
+            set_left_button(False)
+            closed = wait_for_window_change(
+                resized, "cmd-window-closed.ppm", 1200)
+
+            print(
+                "CMD QMP key input, Backspace, history, real directory/file commands, "
+                "scrolling, window controls and retained screenshots passed. Evidence: "
+                f"{diagnostics_dir.resolve()}", flush=True)
 
 
 def verify_mouse(
@@ -1524,6 +2098,138 @@ def serial_has_failure(serial_log: str) -> bool:
     return False
 
 
+def run_crash_dump_two_boots(
+    command: list[str], ahci_image: Path, temp: Path,
+    log_directory: Path, timeout: int, stable_seconds: int,
+) -> None:
+    """Persist one controlled crash across two real boots and decode its FAT export."""
+    if "-snapshot" not in command:
+        raise RuntimeError("crash dump self-test expected the normal snapshot option")
+    persistent_command = [
+        arg.replace("fat:ro:", "fat:rw:") if arg.startswith("file=fat:ro:") else arg
+        for arg in command if arg != "-snapshot"
+    ]
+    extracted = log_directory / "recovered-minidump.dmp"
+    phase_specs = (
+        ("crash-first-boot", "[LuceOS Crash] persistent dump committed=1"),
+        ("crash-recovery-boot", "[LuceCrashRecovery] validated, flushed, and acknowledged "),
+    )
+
+    for phase, marker in phase_specs:
+        phase_serial = log_directory / f"{phase}.serial.log"
+        phase_qemu_log = log_directory / f"{phase}.qemu.log"
+        phase_qmp = temp / f"{phase}.qmp.sock"
+        phase_command = list(persistent_command)
+        for index, arg in enumerate(phase_command[:-1]):
+            if arg == "-serial":
+                phase_command[index + 1] = f"file:{phase_serial}"
+            elif arg == "-qmp":
+                phase_command[index + 1] = f"unix:{phase_qmp},server=on,wait=off"
+
+        print(f"Starting {phase} with persistent AHCI image {ahci_image}", flush=True)
+        started = time.monotonic()
+        with phase_qemu_log.open("w", encoding="utf-8") as qemu_output:
+            process = subprocess.Popen(
+                phase_command, cwd=ROOT, stdout=qemu_output,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                while time.monotonic() - started < timeout:
+                    if phase_serial.is_file():
+                        serial = phase_serial.read_text(encoding="utf-8", errors="replace")
+                        if marker in serial:
+                            if phase == "crash-first-boot":
+                                if "[LuceOS Crash] persistent dump committed=0" in serial:
+                                    raise RuntimeError("kernel reported that crash dump persistence failed")
+                                print("First boot committed the persistent crash record.", flush=True)
+                            else:
+                                match = re.search(
+                                    r"\[LuceCrashRecovery\] validated, flushed, and acknowledged "
+                                    r"(C:\\Windows\\Minidump\\LUCEOS-[0-9A-Fa-f]{16}\.dmp)",
+                                    serial,
+                                )
+                                if not match:
+                                    raise RuntimeError("recovery marker lacked the expected Minidump path")
+                                expected_name = match.group(1).rsplit("\\", 1)[-1]
+                                print(f"Ring 3 recovery confirmed {match.group(1)}", flush=True)
+                            break
+                        if "[LuceOS Crash] persistent dump committed=0" in serial:
+                            raise RuntimeError("kernel could not persist the crash record")
+                    return_code = process.poll()
+                    if return_code is not None:
+                        raise RuntimeError(
+                            f"QEMU exited during {phase} before the required serial marker "
+                            f"(exit={return_code})"
+                        )
+                    time.sleep(0.1)
+                else:
+                    tail = (phase_serial.read_text(encoding="utf-8", errors="replace")[-8000:]
+                            if phase_serial.is_file() else "(no serial output)")
+                    raise RuntimeError(f"timeout waiting for {phase} marker:\n{tail}")
+
+                if phase == "crash-first-boot":
+                    shutil.copyfile(phase_serial, log_directory / "serial.log")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    continue
+
+                stable_start = time.monotonic()
+                while time.monotonic() - stable_start < stable_seconds:
+                    if process.poll() is not None:
+                        raise RuntimeError("recovery boot halted before the stable persistence interval")
+                    time.sleep(0.1)
+                shutil.copyfile(phase_serial, log_directory / "serial.log")
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                shutil.copyfile(ahci_image, log_directory / "crash-dump-disk.img")
+                extracted_result = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / "extract_gpt_fat32_file.py"),
+                     str(ahci_image), str(extracted)],
+                    cwd=ROOT, check=True, capture_output=True, text=True,
+                )
+                match_name = expected_name
+                if not match_name.startswith("LUCEOS-") or not match_name.endswith(".dmp"):
+                    raise RuntimeError("Ring 3 recovery exported an unexpected filename")
+                if f"FAT file: {match_name}" not in extracted_result.stdout:
+                    raise RuntimeError(
+                        "the recovered FAT directory entry does not match the acknowledged filename"
+                    )
+                print(extracted_result.stdout.strip(), flush=True)
+                decoded = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / "read_lud.py"),
+                     str(extracted), "--json"],
+                    cwd=ROOT, check=True, capture_output=True, text=True,
+                )
+                report = json.loads(decoded.stdout)
+                if not report.get("complete") or report.get("errors"):
+                    raise RuntimeError("host decoder rejected the recovered dump structure or CRC")
+                if not report.get("header", {}).get("kernel_crash"):
+                    raise RuntimeError("recovered file is not marked as a kernel crash dump")
+                print(
+                    f"Recovered and host-decoded {match_name}; CRC/structure valid, "
+                    f"records={len(report.get('records', []))}.", flush=True,
+                )
+                return
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+    raise RuntimeError("two-boot crash dump verification ended without an exported dump")
+
+
 def run_qemu(
     ovmf_code: Path,
     timeout: int,
@@ -1539,7 +2245,11 @@ def run_qemu(
     network_test: bool = False,
     memory_mib: int = 1024,
     taskmgr_selftest: bool = False,
+    graphics_backend: str = "auto",
+    theme_test: bool = False,
     process_memory_selftest: bool = False,
+    cmd_test: bool = False,
+    crash_dump_selftest: bool = False,
 ) -> None:
     if memory_mib not in (256, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -1549,7 +2259,26 @@ def run_qemu(
         raise RuntimeError("timer self-test halts before process tests and desktop/input; incompatible runner options")
     if taskmgr_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
         raise RuntimeError("Task Manager self-test requires the unattended desktop boot path")
-    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or taskmgr_selftest):
+    if theme_test and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or taskmgr_selftest):
+        raise RuntimeError("Theme test requires the unattended desktop boot path")
+    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
+        raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
+    if cmd_test and (interactive or verify_input or runtime_selftest or timer_selftest or
+                     network_test or usb_test or taskmgr_selftest or theme_test or
+                     process_memory_selftest or verify_usb_input):
+        raise RuntimeError("CMD test requires its dedicated unattended QMP input path")
+    if cmd_test and memory_mib != 512:
+        raise RuntimeError("CMD test must run within its 500 MiB profile: set --memory-mib 512")
+    if cmd_test and diagnostics_dir is None:
+        raise RuntimeError("CMD test requires --diagnostics-dir to retain screenshots and evidence")
+    if crash_dump_selftest and (interactive or verify_input or verify_usb_input or
+                                runtime_selftest or timer_selftest or network_test or
+                                usb_test or taskmgr_selftest or theme_test or
+                                process_memory_selftest or cmd_test):
+        raise RuntimeError("Crash dump self-test requires its isolated two-boot profile")
+    if crash_dump_selftest and diagnostics_dir is None:
+        raise RuntimeError("Crash dump self-test requires --diagnostics-dir to retain the disk image and logs")
+    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
         raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
     if verify_usb_input and not usb_test:
         raise RuntimeError("USB HID verification requires --usb-test")
@@ -1568,6 +2297,59 @@ def run_qemu(
     qemu = shutil.which(os.environ.get("MICANT_QEMU", "qemu-system-x86_64"))
     if not qemu:
         raise RuntimeError("qemu-system-x86_64 was not found on PATH")
+
+    device_help = subprocess.run(
+        [qemu, "-device", "help"], capture_output=True, text=True, check=False
+    )
+    display_help = subprocess.run(
+        [qemu, "-display", "help"], capture_output=True, text=True, check=False
+    )
+    device_listing = device_help.stdout + device_help.stderr
+    display_listing = display_help.stdout + display_help.stderr
+    display_backend = display.split(",", 1)[0]
+    virgl_device_available = "virtio-vga-gl" in device_listing
+    gl_display_available = (
+        display_backend in {"gtk", "sdl"} and display_backend in display_listing
+    )
+    virgl_available = virgl_device_available and gl_display_available
+    virgl_probe_error = ""
+    if virgl_available:
+        try:
+            probe = subprocess.run(
+                [qemu, "-machine", "q35", "-nodefaults", "-m", "128",
+                 "-display", f"{display_backend},gl=on", "-device", "virtio-vga-gl", "-S"],
+                capture_output=True, text=True, check=False, timeout=3,
+            )
+            virgl_available = probe.returncode == 0
+            if not virgl_available:
+                virgl_probe_error = (probe.stderr or probe.stdout).strip()
+        except subprocess.TimeoutExpired:
+            # QEMU stayed alive with the requested device and GL display
+            # initialized. subprocess.run terminates the short-lived probe.
+            virgl_available = True
+        except OSError as error:
+            virgl_available = False
+            virgl_probe_error = str(error)
+    if graphics_backend == "virgl" and not virgl_available:
+        if not virgl_device_available:
+            reason = "virtio-vga-gl is absent from the installed QEMU device list"
+        elif not gl_display_available:
+            reason = "the selected display is not an available GTK/SDL GL backend"
+        else:
+            reason = "the QEMU GL startup probe failed"
+            if virgl_probe_error:
+                reason += f": {virgl_probe_error}"
+        raise RuntimeError(
+            f"VirGL was required, but {reason}"
+        )
+    use_virgl = graphics_backend == "virgl" or (
+        graphics_backend == "auto" and virgl_available
+    )
+    qemu_display = f"{display_backend},gl=on" if use_virgl else display
+    print(
+        "QEMU graphics backend: " + ("VirGL" if use_virgl else "VirtIO 2D"),
+        flush=True,
+    )
     if not ovmf_code.is_file():
         raise RuntimeError(f"OVMF code image does not exist: {ovmf_code}")
 
@@ -1604,6 +2386,9 @@ def run_qemu(
         # loader opens the real DLLs from there for file-backed SEC_IMAGE.
         system32_dir = esp / "MicaNT" / "System32"
         system32_dir.mkdir(parents=True)
+        # The crash recovery service only opens this directory after restart;
+        # the fatal path itself writes to the dedicated reserved partition.
+        (esp / "Windows" / "Minidump").mkdir(parents=True)
         # Keep redistributable system fonts on the mounted system volume so
         # user-mode font consumers can load them through the normal file path.
         # The TTFs and their upstream notices are kept together in the source
@@ -1656,6 +2441,15 @@ def run_qemu(
             raise RuntimeError("System theme selection profile is missing")
         shutil.copytree(theme_source_dir,
                         esp / "MicaNT" / "System" / "Themes" / "WhiteSur")
+        if theme_test:
+            # A truncated compiled-style fixture exercises parsing/validation
+            # rollback independently from the missing-profile case.
+            malformed_style = (
+                esp / "MicaNT" / "System" / "Themes" / "WhiteSur" /
+                "Probe" / "native.style"
+            )
+            malformed_style.parent.mkdir(parents=True, exist_ok=True)
+            malformed_style.write_bytes(b"MicaNT invalid compiled theme fixture\n")
         shutil.copy2(theme_profile_source,
                      esp / "MicaNT" / "System" / "Themes" / "active.profile")
         icon_source_dir = ROOT / "System" / "Icons" / "WhiteSur"
@@ -1679,6 +2473,10 @@ def run_qemu(
             shutil.copyfile(ROOT / "build" / "network-probe.exe", system32_dir / "network-probe.exe")
             shutil.copyfile(ROOT / "build" / "https-probe.exe", system32_dir / "https-probe.exe")
             (system32_dir / "m10-network-test.flag").write_bytes(b"M10\n")
+        if cmd_test:
+            fixture = system32_dir / "cmd-m0-known.txt"
+            fixture.write_bytes("luceos cmd m0 real fat file fixture\r\n".encode("utf-8"))
+            shutil.copyfile(fixture, diagnostics_dir / fixture.name)
         for source in sorted((ROOT / "build" / "system32").glob("*.dll")):
             shutil.copyfile(source, system32_dir / source.name)
         explorer_image = ROOT / "build" / "explorer.exe"
@@ -1693,6 +2491,15 @@ def run_qemu(
         if not proctop_image.is_file():
             raise RuntimeError("Process memory top utility was not built for the system volume")
         shutil.copyfile(proctop_image, system32_dir / proctop_image.name)
+        lucecrash_image = ROOT / "build" / "lucecrash.exe"
+        if not lucecrash_image.is_file():
+            raise RuntimeError("Kernel crash recovery service was not built for the system volume")
+        shutil.copyfile(lucecrash_image, system32_dir / lucecrash_image.name)
+        if theme_test:
+            theme_test_image = ROOT / "build" / "theme_test.exe"
+            if not theme_test_image.is_file():
+                raise RuntimeError("Dedicated theme test image was not built for the system volume")
+            shutil.copyfile(theme_test_image, system32_dir / theme_test_image.name)
         if taskmgr_selftest:
             taskmgr_image = ROOT / "build" / "taskmgr.exe"
             if not taskmgr_image.is_file():
@@ -1702,6 +2509,11 @@ def run_qemu(
             if not taskmgr_probe_image.is_file():
                 raise RuntimeError("Task Manager action probe was not built for the QEMU system volume")
             shutil.copyfile(taskmgr_probe_image, system32_dir / taskmgr_probe_image.name)
+        if cmd_test:
+            cmd_image = ROOT / "build" / "cmd.exe"
+            if not cmd_image.is_file():
+                raise RuntimeError("CMD image was not built for the QEMU system volume")
+            shutil.copyfile(cmd_image, system32_dir / cmd_image.name)
         compositor_image = ROOT / "build" / "compositor.exe"
         if not compositor_image.is_file():
             raise RuntimeError("Ring 3 compositor image was not built for the QEMU system volume")
@@ -1748,13 +2560,13 @@ def run_qemu(
             "-smp", "1",
             "-m", str(memory_mib),
             "-vga", "none",
-            "-device", "virtio-vga",
+            "-device", "virtio-vga-gl" if use_virgl else "virtio-vga",
             "-drive",
             f"if=pflash,format=raw,unit=0,readonly=on,file={ovmf_code.resolve()}",
             "-drive", f"file=fat:ro:{esp},format=raw,if=ide,index=0",
-            "-drive", f"file={ahci_image},format=raw,if=none,id=ahci_disk",
+            "-drive", f"file={ahci_image},format=raw,if=none,id=ahci_disk,snapshot=off",
             "-device", "ide-hd,drive=ahci_disk,bus=ide.1",
-            "-display", display,
+            "-display", qemu_display,
             "-serial", f"file:{serial_path}",
             "-monitor", "none",
             "-qmp", f"unix:{temp / 'qmp.sock'},server=on,wait=off",
@@ -1799,10 +2611,17 @@ def run_qemu(
                 "-device", "usb-mouse,id=usb_mouse,bus=xhci.0,port=1.2",
                 "-device", "usb-storage,id=usb_storage,drive=usb_disk,bus=xhci.0",
             ])
+        if crash_dump_selftest:
+            run_crash_dump_two_boots(
+                command, ahci_image, temp, diagnostics_dir, timeout, stable_seconds,
+            )
+            return
         started = time.monotonic()
         complete_since = None
         surface_verified = False
+        theme_test_verified = False
         process_memory_verified = False
+        cmd_test_verified = False
         usb_input_sent = False
         network_outbound_peer_done = False
         network_loss_injected = False
@@ -1932,7 +2751,10 @@ def run_qemu(
                     if serial_has_failure(serial_log):
                         raise RuntimeError(f"Kernel bootstrap failed:\n{serial_log[-8000:]}")
                     if process_memory_selftest and "[MicaNT ProcessMemoryTest] FAILED" in serial_log:
-                        raise RuntimeError(f"procdump process-memory self-test failed:\n{serial_log[-8000:]}")
+                        raise RuntimeError(
+                            "procdump process-memory integration self-test failed:\n"
+                            f"{serial_log[-8000:]}"
+                        )
                     if (process_memory_selftest and
                             "[MicaNT ProcessMemoryTest] report, page read, dump CRC and release verified" in serial_log):
                         process_memory_verified = True
@@ -1945,16 +2767,34 @@ def run_qemu(
                         print("CPL3 surface reached VirtIO scanout before desktop redraw.", flush=True)
                     progress = serial_progress(serial_log, expected)
                     if progress == len(expected):
+                        if cmd_test and "[MicaNT CMD] Ring 3 terminal process launched" not in serial_log:
+                            complete_since = None
+                            time.sleep(0.1)
+                            continue
+                        if theme_test and "[MicaNT ThemeTest] Production control window started" not in serial_log:
+                            complete_since = None
+                            time.sleep(0.1)
+                            continue
+                        if process_memory_selftest and not process_memory_verified:
+                            complete_since = None
+                            time.sleep(0.1)
+                            continue
+                        if theme_test and not theme_test_verified:
+                            verify_theme_test(
+                                temp / "qmp.sock", temp, serial_path, diagnostics_dir,
+                            )
+                            theme_test_verified = True
+                        if cmd_test and not cmd_test_verified:
+                            verify_cmd_terminal(
+                                temp / "qmp.sock", temp, diagnostics_dir,
+                            )
+                            cmd_test_verified = True
                         time_evidence = timer_selftest or runtime_selftest or (
                             "[MicaNT Hal] CPL3 UTC SystemTime advanced and matched KUSER" in serial_log or
                             "[MicaNT Hal] CPL3 UTC SystemTime correctly unavailable for local firmware time" in serial_log
                         )
                         if not time_evidence:
                             raise RuntimeError("CPL3 time probe reported neither UTC success nor explicit unavailable status")
-                        if process_memory_selftest and not process_memory_verified:
-                            complete_since = None
-                            time.sleep(0.1)
-                            continue
                         if taskmgr_selftest:
                             theme_evidence = (
                                 "Task Manager: system theme loaded." in serial_log or
@@ -2020,6 +2860,18 @@ def run_qemu(
                                 complete_since = None
                                 time.sleep(0.1)
                                 continue
+                            if "Task Manager: native window paint presented." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: native window resize delivered." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
+                            if "Task Manager: native window close processed." not in serial_log:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
                         if complete_since is None:
                             complete_since = time.monotonic()
                         elif time.monotonic() - complete_since >= stable_seconds:
@@ -2067,12 +2919,16 @@ def run_qemu(
                                 )
                                 print("Explorer input, window cleanup and Light-to-Dark theme switch passed.", flush=True)
                             result = (
-                                "Process-memory self-test" if process_memory_selftest else
+                                "CMD graphical terminal QMP self-test" if cmd_test else
+                                "Dedicated theme test app" if theme_test else
                                 "Task Manager process-snapshot self-test" if taskmgr_selftest else
                                 "timer self-test" if timer_selftest else
                                 "C++ runtime self-test" if runtime_selftest else
                                 "modular boot"
                             )
+                            if cmd_test:
+                                shutil.copyfile(serial_path, diagnostics_dir / "serial.log")
+                                shutil.copyfile(qemu_output_path, diagnostics_dir / "qemu.log")
                             print(f"QEMU {result} passed; serial remained stable for "
                                   f"{stable_seconds}s.", flush=True)
                             if interactive:
@@ -2137,6 +2993,9 @@ def main() -> int:
     parser.add_argument("--diagnostics-dir", type=Path)
     parser.add_argument("--stable-seconds", type=int, default=5)
     parser.add_argument("--display", default="none")
+    parser.add_argument(
+        "--graphics-backend", choices=("auto", "virtio2d", "virgl"), default="auto"
+    )
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--verify-input", action="store_true")
     parser.add_argument("--usb-test", action="store_true")
@@ -2145,7 +3004,10 @@ def main() -> int:
     parser.add_argument("--runtime-selftest", action="store_true")
     parser.add_argument("--timer-selftest", action="store_true")
     parser.add_argument("--taskmgr-selftest", action="store_true")
+    parser.add_argument("--theme-test", action="store_true")
+    parser.add_argument("--cmd-test", action="store_true")
     parser.add_argument("--process-memory-selftest", action="store_true")
+    parser.add_argument("--crash-dump-selftest", action="store_true")
     args = parser.parse_args()
 
     if args.ovmf_code is None:
@@ -2171,7 +3033,11 @@ def main() -> int:
             args.network_test,
             args.memory_mib,
             args.taskmgr_selftest,
-            process_memory_selftest=args.process_memory_selftest,
+            args.graphics_backend,
+            args.theme_test,
+            args.process_memory_selftest,
+            args.cmd_test,
+            args.crash_dump_selftest,
         )
     except KeyboardInterrupt:
         return 130

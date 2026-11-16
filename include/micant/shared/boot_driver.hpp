@@ -55,6 +55,15 @@ struct MsiInterruptRouteV1 {
 };
 
 struct FileBackendV1;
+struct CrashDumpStorageV1 {
+    uint32_t Size;
+    uint32_t Version;
+    void* Context;
+    uint64_t CapacitySectors;
+    bool (*Read)(void*, uint64_t, uint16_t, void*) noexcept;
+    bool (*Write)(void*, uint64_t, uint16_t, const void*) noexcept;
+    int32_t (*Flush)(void*) noexcept;
+};
 
 struct KernelServices {
     uint32_t Size;
@@ -142,6 +151,12 @@ struct KernelServices {
         int32_t (*)(void*, uint64_t, uint32_t, const void*, uint32_t*),
         int32_t (*)(void*), void (*)(void*), uint32_t, uint64_t*);
     int32_t (*FlushBlockDevice)(void*, uint64_t);
+    // Boot-start storage owner may publish a prevalidated reserved raw extent.
+    // Callbacks must be bounded, allocation-free and fail without waiting if
+    // the controller is already servicing another command.
+    uint32_t CrashDumpStorageVersion;
+    int32_t (*RegisterCrashDumpStorage)(void*, const CrashDumpStorageV1*, uint64_t*);
+    int32_t (*UnregisterCrashDumpStorage)(void*, uint64_t);
 };
 
 inline constexpr size_t KERNEL_SERVICES_V1_SIZE = offsetof(KernelServices, PciReadConfig32);
@@ -176,6 +191,14 @@ struct CompositionLayer {
 using PresentCompositionRoutine = bool (*)(void*, const uint32_t*, uint32_t, uint32_t,
                                             uint32_t, const CompositionLayer*, uint32_t);
 
+enum class DisplayBackend : uint32_t {
+    Unknown = 0,
+    Virtio2D = 1,
+    Virgl = 2,
+    VirglAccelerated = 3,
+    Gop = 4,
+};
+
 struct DisplayDevice {
     uint32_t Size;
     uint32_t Version;
@@ -186,6 +209,7 @@ struct DisplayDevice {
     void* Context;
     PresentFrameRoutine PresentFrame;
     PresentCompositionRoutine PresentComposition;
+    DisplayBackend Backend;
 };
 
 struct DriverObject {

@@ -31,6 +31,7 @@ SYSTEM32_TOOLS = [
     ("tools/whoami_app.cpp", "build/whoami.exe", "whoami.exe"),
     ("tools/tasklist_app.cpp", "build/tasklist.exe", "tasklist.exe"),
     ("tools/procdump_app.cpp", "build/procdump.exe", "procdump.exe"),
+    ("tools/lucecrash_app.cpp", "build/lucecrash.exe", "lucecrash.exe"),
     ("tools/procdump_app.cpp", "build/proctop.exe", "proctop.exe"),
     ("tools/ping_app.cpp", "build/ping.exe", "ping.exe"),
     ("tools/cmd_app.cpp", "build/cmd.exe", "cmd.exe"),
@@ -383,7 +384,7 @@ def run_local_build():
     print(f"      Compiling {len(SYSTEM32_TOOLS)} System32 Utilities & Desktop Apps...")
     for src, out_path, name in SYSTEM32_TOOLS:
         # explorer.exe links to the win32k import library, built below.
-        if name == "explorer.exe":
+        if name in ("explorer.exe", "lucecrash.exe"):
             continue
         full_src = os.path.join(REPO_ROOT, src)
         full_out = os.path.join(REPO_ROOT, out_path)

@@ -149,7 +149,10 @@ def run(command: list[str]) -> None:
 
 def write_manifest(
     cxx: Path, *, runtime_selftest: bool = False, timer_selftest: bool = False,
-    taskmgr_selftest: bool = False, process_memory_selftest: bool = False
+    taskmgr_selftest: bool = False, theme_test: bool = False,
+    process_memory_selftest: bool = False,
+    cmd_test: bool = False,
+    crash_dump_selftest: bool = False,
 ) -> None:
     if not all(path.is_file() for path in (KERNEL, BOOTLOADER, DISPLAY_DRIVER)):
         raise RuntimeError("CMake completed without producing all boot PE artifacts")
@@ -191,7 +194,10 @@ def write_manifest(
         "runtime_selftest": runtime_selftest,
         "timer_selftest": timer_selftest,
         "taskmgr_selftest": taskmgr_selftest,
+        "theme_test": theme_test,
         "process_memory_selftest": process_memory_selftest,
+        "cmd_test": cmd_test,
+        "crash_dump_selftest": crash_dump_selftest,
         "target": "ntoskrnl_core_baremetal",
         "architecture": "AMD64",
         "artifacts": {
@@ -235,6 +241,10 @@ def main() -> int:
     )
     parser.add_argument("--ovmf-code", type=Path, help="OVMF x86_64 code firmware image")
     parser.add_argument("--display", help="QEMU display backend (auto-detected by default)")
+    parser.add_argument(
+        "--graphics-backend", choices=("auto", "virtio2d", "virgl"), default="auto",
+        help="select VirtIO-GPU 2D, or attempt VirGL only when QEMU and the display support it",
+    )
     parser.add_argument("--timeout", type=int, default=90, help="boot milestone timeout")
     parser.add_argument("--memory-mib", type=int, default=1024,
                         choices=(256, 512, 1024, 2048, 4096),
@@ -266,8 +276,22 @@ def main() -> int:
         "--taskmgr-selftest", action="store_true",
         help="launch taskmgr.exe in QEMU and verify its live process snapshot syscall",
     )
-    parser.add_argument("--process-memory-selftest", action="store_true",
-                        help="exercise Ring 3 process queries and dump/top output in QEMU")
+    parser.add_argument(
+        "--theme-test", action="store_true",
+        help="launch theme_test.exe in QEMU for dedicated Win32 theme verification",
+    )
+    parser.add_argument(
+        "--process-memory-selftest", action="store_true",
+        help="exercise process memory queries, bounded dump streaming and cleanup in QEMU",
+    )
+    parser.add_argument(
+        "--cmd-test", action="store_true",
+        help="launch the Ring 3 CMD terminal and exercise it through QMP",
+    )
+    parser.add_argument(
+        "--crash-dump-selftest", action="store_true",
+        help="fault the kernel, persist a crash dump, reboot, recover it to C:\\Windows\\Minidump and decode it",
+    )
     parser.add_argument(
         "--usb-test", action="store_true",
         help="attach QEMU xHCI, USB HID and read-only USB mass storage devices",
@@ -295,8 +319,22 @@ def main() -> int:
         parser.error("--network-test requires a normal kernel boot")
     if args.taskmgr_selftest and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer):
         parser.error("--taskmgr-selftest requires the unattended normal desktop boot path")
-    if args.process_memory_selftest and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest):
-        parser.error("--process-memory-selftest requires the unattended normal desktop boot path")
+    if args.theme_test and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest):
+        parser.error("--theme-test requires the unattended normal desktop boot path")
+    if args.process_memory_selftest and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer):
+        parser.error("--process-memory-selftest requires the normal desktop boot path")
+    if args.cmd_test and (args.runtime_selftest or args.timer_selftest or args.usb_test or
+                          args.network_test or args.check_explorer or args.taskmgr_selftest or
+                          args.theme_test or args.process_memory_selftest):
+        parser.error("--cmd-test requires its dedicated unattended QMP input profile")
+    if args.cmd_test and args.memory_mib != 512:
+        parser.error("--cmd-test must run with --memory-mib 512")
+    if args.crash_dump_selftest and (args.runtime_selftest or args.timer_selftest or
+            args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest or
+            args.theme_test or args.process_memory_selftest or args.cmd_test):
+        parser.error("--crash-dump-selftest has its own two-boot QEMU profile")
+    if args.crash_dump_selftest and args.diagnostics_dir is not None and args.diagnostics_dir.exists():
+        parser.error("--diagnostics-dir must be a new directory for crash-dump evidence")
 
     try:
         cmake = shutil.which("cmake")
@@ -332,7 +370,10 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_TIMER_SELFTEST:BOOL={'ON' if args.timer_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_NETWORK_SELFTEST:BOOL={'ON' if args.network_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_TASKMGR_SELFTEST:BOOL={'ON' if args.taskmgr_selftest else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_THEME_TEST:BOOL={'ON' if args.theme_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST:BOOL={'ON' if args.process_memory_selftest else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_CMD_TEST:BOOL={'ON' if args.cmd_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST:BOOL={'ON' if args.crash_dump_selftest else 'OFF'}",
             ]
         )
         if args.check_explorer:
@@ -373,16 +414,23 @@ def main() -> int:
                 "taskmgr_boot",
                 "procdump_boot",
                 "proctop_boot",
+                "lucecrash_boot",
+                "theme_test_boot",
                 "taskmgr_probe_boot",
                 "compositor_boot",
             ]
         )
+        if args.cmd_test:
+            run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "cmd_boot"])
         write_manifest(
             cxx,
             runtime_selftest=args.runtime_selftest,
             timer_selftest=args.timer_selftest,
             taskmgr_selftest=args.taskmgr_selftest,
+            theme_test=args.theme_test,
             process_memory_selftest=args.process_memory_selftest,
+            cmd_test=args.cmd_test,
+            crash_dump_selftest=args.crash_dump_selftest,
         )
         validate_build_manifest(
             ROOT,
@@ -409,23 +457,37 @@ def main() -> int:
             str(args.memory_mib),
             "--display",
             "none" if args.headless else display,
+            "--graphics-backend",
+            args.graphics_backend,
         ]
         if args.diagnostics_dir:
             boot_command.extend(["--diagnostics-dir", str(args.diagnostics_dir.resolve())])
+        elif args.cmd_test:
+            evidence_dir = ROOT / "build" / f"cmd-m0-qemu-evidence-{time.time_ns()}"
+            boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
+        elif args.crash_dump_selftest:
+            evidence_dir = ROOT / "build" / f"crash-dump-qemu-evidence-{time.time_ns()}"
+            boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
         if args.runtime_selftest:
             boot_command.append("--runtime-selftest")
         elif args.timer_selftest:
             boot_command.append("--timer-selftest")
         elif args.taskmgr_selftest:
             boot_command.append("--taskmgr-selftest")
-        elif args.process_memory_selftest:
-            boot_command.append("--process-memory-selftest")
+        elif args.theme_test:
+            boot_command.append("--theme-test")
+        elif args.cmd_test:
+            boot_command.append("--cmd-test")
+        elif args.crash_dump_selftest:
+            boot_command.append("--crash-dump-selftest")
         elif not args.headless:
             boot_command.append("--interactive")
         elif args.usb_test:
             boot_command.append("--verify-usb-input")
-        else:
+        elif not args.process_memory_selftest:
             boot_command.append("--verify-input")
+        if args.process_memory_selftest:
+            boot_command.append("--process-memory-selftest")
         if args.usb_test:
             boot_command.append("--usb-test")
         if args.network_test:

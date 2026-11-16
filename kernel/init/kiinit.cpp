@@ -16,6 +16,7 @@
 #include "micant/km/executive/afd_io.hpp"
 #include "micant/shared/afd_socket_abi.hpp"
 #include "micant/km/executive/io_block_device.hpp"
+#include "micant/km/core/crash_dump.hpp"
 #include "micant/km/executive/arbiter.hpp"
 #include "micant/km/executive/dma_baremetal.hpp"
 #include "micant/km/core/ke.hpp"
@@ -32,6 +33,7 @@
 #include "micant/km/drivers/net/tcpip.hpp"
 #include "micant/km/drivers/net/tcpip_kernel_api.hpp"
 #include "micant/shared/ntstatus.hpp"
+#include "micant/um/native/pe.hpp"
 #include "micant/shared/user_graphics.hpp"
 #include "micant/shared/compositor_surface.h"
 #include "micant/shared/win32k_client.h"
@@ -47,6 +49,17 @@
 namespace micant::sys {
 NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& reference) noexcept;
 }
+
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+namespace micant::km::hid {
+void DebugValidateInputQueues(const char* stage) noexcept;
+}
+#define CMD_HID_VALIDATE(stage) micant::km::hid::DebugValidateInputQueues(stage)
+#else
+#define CMD_HID_VALIDATE(stage) ((void)0)
+#endif
+
+extern "C" const unsigned char __ImageBase;
 
 namespace micant::tcpip::kernel_api {
 bool hasAdapter() noexcept { return NetworkStack::get().hasAdapter(); }
@@ -777,6 +790,39 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     const uint64_t handoffPhysical = hal::amd64::translateBootstrapAddress(&handoff);
     if (!activeStackPhysical || !handoffPhysical)
         stopWithError("[MicaNT Mm] Active UEFI bootstrap stack/handoff is not mapped\r\n");
+    const uintptr_t kernelImageBase = reinterpret_cast<uintptr_t>(&__ImageBase);
+    const auto* kernelDos = reinterpret_cast<const pe::ImageDosHeader*>(kernelImageBase);
+    if (!hal::amd64::bootstrapKernelRange(kernelImageBase, sizeof(*kernelDos), false) ||
+        kernelDos->e_magic != pe::DOS_MAGIC || kernelDos->e_lfanew <= 0 ||
+        static_cast<uint32_t>(kernelDos->e_lfanew) > 1024 * 1024 ||
+        kernelImageBase > UINTPTR_MAX - static_cast<uint32_t>(kernelDos->e_lfanew))
+        stopWithError("[MicaNT Mm] Loaded kernel PE header is invalid\r\n");
+    const uintptr_t kernelNtAddress = kernelImageBase +
+        static_cast<uint32_t>(kernelDos->e_lfanew);
+    const auto* kernelNt = reinterpret_cast<const pe::ImageNtHeaders64*>(kernelNtAddress);
+    if (!hal::amd64::bootstrapKernelRange(kernelNtAddress, sizeof(*kernelNt), false) ||
+        kernelNt->signature != pe::NT_SIGNATURE ||
+        kernelNt->fileHeader.machine != pe::MACHINE_AMD64 ||
+        kernelNt->optionalHeader.magic != pe::PE32PLUS_MAGIC ||
+        !kernelNt->optionalHeader.sizeOfImage ||
+        kernelNt->optionalHeader.sizeOfImage > UINT64_MAX - kernelImageBase)
+        stopWithError("[MicaNT Mm] Loaded kernel image extent is invalid\r\n");
+    const uint64_t kernelImagePhysical = hal::amd64::translateBootstrapAddress(
+        reinterpret_cast<const void*>(kernelImageBase));
+    const uint64_t kernelImagePhysicalEnd = kernelImagePhysical +
+        kernelNt->optionalHeader.sizeOfImage;
+    if (!kernelImagePhysical || kernelImagePhysicalEnd < kernelImagePhysical)
+        stopWithError("[MicaNT Mm] Loaded kernel image is not identity mapped\r\n");
+    serialWrite("[MicaNT Mm] Kernel image physical range=");
+    serialWriteNumber(kernelImagePhysical);
+    serialWrite("..");
+    serialWriteNumber(kernelImagePhysicalEnd);
+    serialWrite(" bytes=");
+    serialWriteNumber(kernelNt->optionalHeader.sizeOfImage);
+    serialWrite("\r\n");
+    if (!hal::amd64::protectBootstrapKernelImageRange(
+            kernelImagePhysical, kernelNt->optionalHeader.sizeOfImage))
+        stopWithError("[MicaNT Mm] Kernel image PFN protection setup failed\r\n");
     for (size_t index = 0; index < descriptorCount; ++index) {
         uefi::EfiMemoryDescriptor descriptor{};
         if (!readBootMemoryDescriptor(handoff, index, descriptor))
@@ -800,6 +846,20 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
         const bool containsActiveBootstrapData =
             (descriptor.physicalStart <= activeStackPhysical && activeStackPhysical < end) ||
             (descriptor.physicalStart <= handoffPhysical && handoffPhysical < end);
+        const bool containsKernelImage =
+            descriptor.physicalStart < kernelImagePhysicalEnd &&
+            kernelImagePhysical < end;
+        if (containsKernelImage) {
+            deferredPages += descriptor.numberOfPages;
+            serialWrite("[MicaNT Mm] Excluded kernel image descriptor type=");
+            serialWriteNumber(descriptor.type);
+            serialWrite(" start=");
+            serialWriteNumber(descriptor.physicalStart);
+            serialWrite(" pages=");
+            serialWriteNumber(descriptor.numberOfPages);
+            serialWrite("\r\n");
+            continue;
+        }
         if (containsActiveBootstrapData) {
             deferredPages += descriptor.numberOfPages;
             serialWrite("[MicaNT Mm] Protected active EFI stack/handoff descriptor type=");
@@ -1229,6 +1289,94 @@ void* bootMapDeviceMemory(void* owner, uint64_t physical, size_t size) noexcept 
     }
     *freeMapping = {owner, address, size, claim};
     return address;
+}
+
+struct CrashDumpStorageOwner {
+    uint64_t RegistrationToken{};
+    micant::Handle TrustedProcessId{};
+    bool BackendReady{};
+    bool PendingDump{};
+};
+CrashDumpStorageOwner g_crashDumpStorageOwner{};
+bool g_crashDumpSelfTestPendingAtBoot{};
+micant::boot_driver::CrashDumpStorageV1 g_crashDumpProvider{};
+
+int32_t bootClaimPciDevice(void* owner, uint16_t segment, uint16_t bus,
+    uint16_t device, uint16_t function,
+    const micant::boot_driver::PciBarRequestV1* requests, size_t requestCount,
+    uint64_t* token, micant::boot_driver::PciBarResourceV1* resources,
+    size_t* resourceCount) noexcept;
+
+struct CrashDumpProviderRegistration {
+    BootDriverServiceContext* Owner{};
+    micant::boot_driver::CrashDumpStorageV1 Provider{};
+    uint64_t Token{};
+    bool Used{};
+};
+CrashDumpProviderRegistration g_crashDumpRegistration{};
+uint64_t g_nextCrashDumpRegistration{1};
+
+bool crashDumpRawRead(void* context, uint64_t lba, uint16_t count, void* output) noexcept {
+    auto* registration = static_cast<CrashDumpProviderRegistration*>(context);
+    return registration && registration->Used && registration->Provider.Read &&
+        registration->Provider.Read(registration->Provider.Context, lba, count, output);
+}
+bool crashDumpRawWrite(void* context, uint64_t lba, uint16_t count,
+                       const void* input) noexcept {
+    auto* registration = static_cast<CrashDumpProviderRegistration*>(context);
+    return registration && registration->Used && registration->Provider.Write &&
+        registration->Provider.Write(registration->Provider.Context, lba, count, input);
+}
+micant::NtStatus crashDumpRawFlush(void* context) noexcept {
+    auto* registration = static_cast<CrashDumpProviderRegistration*>(context);
+    if (!registration || !registration->Used || !registration->Provider.Flush)
+        return micant::NtStatus::DeviceNotReady;
+    return static_cast<micant::NtStatus>(registration->Provider.Flush(
+        registration->Provider.Context));
+}
+
+int32_t bootRegisterCrashDumpStorage(void* rawOwner,
+    const micant::boot_driver::CrashDumpStorageV1* provider, uint64_t* token) noexcept {
+    auto* owner = static_cast<BootDriverServiceContext*>(rawOwner);
+    if (!owner || owner->Index >= kMaxBootStartDrivers || !provider || !token ||
+        provider->Size < sizeof(*provider) || provider->Version != 1 ||
+        !provider->Context || !provider->Read || !provider->Write || !provider->Flush ||
+        provider->CapacitySectors < micant::ke::CrashDumpBufferBytes / 512)
+        return bootStatus(micant::NtStatus::InvalidParameter);
+    if (g_crashDumpRegistration.Used) return bootStatus(micant::NtStatus::DeviceBusy);
+    auto& registration = g_crashDumpRegistration;
+    registration.Owner = owner;
+    registration.Provider = *provider;
+    registration.Token = g_nextCrashDumpRegistration++;
+    if (!registration.Token) registration.Token = g_nextCrashDumpRegistration++;
+    registration.Used = true;
+    const micant::ke::CrashDumpRawBackend backend{&registration, crashDumpRawRead,
+        crashDumpRawWrite, crashDumpRawFlush, provider->CapacitySectors};
+    if (!micant::ke::initializeCrashDumpBackend(backend)) {
+        registration = {};
+        return bootStatus(micant::NtStatus::DeviceDataError);
+    }
+    g_crashDumpStorageOwner.BackendReady = true;
+    g_crashDumpStorageOwner.PendingDump = micant::ke::loadPendingCrashDump();
+    g_crashDumpSelfTestPendingAtBoot = g_crashDumpStorageOwner.PendingDump;
+    g_crashDumpStorageOwner.RegistrationToken = registration.Token;
+    *token = registration.Token;
+    serialWrite(g_crashDumpStorageOwner.PendingDump
+        ? "[LuceOS Crash] persistent dump loaded from reserved GPT partition\r\n"
+        : "[LuceOS Crash] persistent dump backend ready; no pending dump\r\n");
+    return bootStatus(micant::NtStatus::Success);
+}
+
+int32_t bootUnregisterCrashDumpStorage(void* rawOwner, uint64_t token) noexcept {
+    auto* owner = static_cast<BootDriverServiceContext*>(rawOwner);
+    auto& registration = g_crashDumpRegistration;
+    if (!owner || !registration.Used || registration.Owner != owner ||
+        registration.Token != token) return bootStatus(micant::NtStatus::InvalidHandle);
+    if (g_crashDumpStorageOwner.PendingDump) return bootStatus(micant::NtStatus::DeviceBusy);
+    micant::ke::clearCrashDumpBackend();
+    g_crashDumpStorageOwner = {};
+    registration = {};
+    return bootStatus(micant::NtStatus::Success);
 }
 
 bool bootReleaseDeviceMemory(void* owner, void* address, size_t size) noexcept {
@@ -1772,6 +1920,9 @@ void initializeKernelServices(micant::boot_driver::KernelServices& services,
     services.DurableBlockDeviceVersion = 1;
     services.CreateDurableWritableBlockDevice = bootCreateDurableWritableBlockDevice;
     services.FlushBlockDevice = bootFlushBlockDevice;
+    services.CrashDumpStorageVersion = 1;
+    services.RegisterCrashDumpStorage = bootRegisterCrashDumpStorage;
+    services.UnregisterCrashDumpStorage = bootUnregisterCrashDumpStorage;
     services.RegisterFileOpenRoutine = bootRegisterFileOpenRoutine;
     services.UnregisterFileOpenRoutine = bootUnregisterFileOpenRoutine;
     services.OpenBackendFile = bootOpenBackendFile;
@@ -2541,7 +2692,8 @@ struct UserSurfaceImageCopyGuard {
 bool launchUserImageProcess(const char16_t* imageName,
                             micant::Handle& processHandle,
                             micant::Handle& processId,
-                            bool startSuspended = false) noexcept {
+                            bool startSuspended = false,
+                            micant::Handle* suspendedThreadHandle = nullptr) noexcept {
     using namespace micant;
     char16_t path[256]{};
     size_t directoryLength{};
@@ -2563,6 +2715,7 @@ bool launchUserImageProcess(const char16_t* imageName,
     std::memcpy(path + length, imageName, imageNameLength * sizeof(char16_t));
     length += imageNameLength;
 
+    serialWrite("[MicaNT Ps] Opening desktop image\r\n");
     Handle file{};
     result = io::IoOpenBackendFile(&file, 0x0021, {path, length});
     if (result != NtStatus::Success) {
@@ -2574,6 +2727,7 @@ bool launchUserImageProcess(const char16_t* imageName,
     Handle imageSection{};
     result = sys::NtCreateSectionFromKernel(&imageSection, section::SECTION_ALL_ACCESS,
         nullptr, nullptr, mm::PAGE_EXECUTE_READ, section::SEC_FILE | section::SEC_IMAGE, file);
+    serialWrite("[MicaNT Ps] Desktop SEC_IMAGE creation returned\r\n");
     const auto fileClose = sys::NtClose(file);
     if (result == NtStatus::Success && fileClose != NtStatus::Success) result = fileClose;
     if (result != NtStatus::Success) {
@@ -2611,8 +2765,10 @@ bool launchUserImageProcess(const char16_t* imageName,
         return false;
     }
 
+    serialWrite("[MicaNT Ps] Creating desktop process object\r\n");
     result = sys::NtCreateProcessExFromKernel(&processHandle,
         0x001FFFFF, nullptr, systemProcessHandle, 0, imageSection, 0, 0, false);
+    serialWrite("[MicaNT Ps] Desktop process object creation returned\r\n");
     const auto parentClose = sys::NtClose(systemProcessHandle);
     const auto sectionClose = sys::NtClose(imageSection);
     if (result == NtStatus::Success && parentClose != NtStatus::Success) result = parentClose;
@@ -2670,29 +2826,57 @@ bool launchUserImageProcess(const char16_t* imageName,
         imageName[4] == u'm' && imageName[5] == u'g' && imageName[6] == u'r' &&
         imageName[7] == u'.' && imageName[8] == u'e' && imageName[9] == u'x' &&
         imageName[10] == u'e' && imageName[11] == 0;
+#if defined(MICANT_BOOTSTRAP_THEME_TEST)
+    const bool themeTestImage = imageName &&
+        std::u16string_view(imageName) == u"theme_test.exe" &&
+        process && process->nativeImages() &&
+        process->processImageName() == u"theme_test.exe" &&
+        process->nativeImages()->module(0) &&
+        process->nativeImages()->module(0)->name == "theme_test.exe";
+#else
+    constexpr bool themeTestImage = false;
+#endif
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+    const bool cmdTestImage = imageName &&
+        std::u16string_view(imageName) == u"cmd.exe" &&
+        process && process->nativeImages() &&
+        process->processImageName() == u"cmd.exe" &&
+        process->nativeImages()->module(0) &&
+        process->nativeImages()->module(0)->name == "cmd.exe";
+#else
+    constexpr bool cmdTestImage = false;
+#endif
     if (processHandle == g_compositorProcessHandle || processHandle == g_explorerProcessHandle ||
-        taskManagerImage) {
+        taskManagerImage || themeTestImage || cmdTestImage) {
         uintptr_t metadataBase = MICANT_COMPOSITOR_METADATA_BASE;
         size_t metadataView = MICANT_COMPOSITOR_METADATA_STORE_SIZE;
         const uint32_t metadataProtection = processHandle == g_compositorProcessHandle
             ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
+        serialWrite("[MicaNT Compositor] Mapping metadata view\r\n");
         result = sys::NtMapViewOfSectionFromKernel(g_compositorMetadataSection,
             processHandle, &metadataBase, 0, 0, nullptr, &metadataView,
             2, 0, metadataProtection);
+        serialWrite("[MicaNT Compositor] Metadata view mapping returned\r\n");
         uintptr_t pixelsBase = MICANT_COMPOSITOR_PIXELS_BASE;
         size_t pixelsView = MICANT_COMPOSITOR_PIXEL_STORE_SIZE;
-        const uint32_t pixelProtection = processHandle == g_explorerProcessHandle || taskManagerImage
+        const uint32_t pixelProtection = processHandle == g_explorerProcessHandle ||
+            taskManagerImage || themeTestImage || cmdTestImage
             ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
-        if (result == NtStatus::Success)
+        if (result == NtStatus::Success) {
+            serialWrite("[MicaNT Compositor] Mapping pixel view\r\n");
             result = sys::NtMapViewOfSectionFromKernel(g_compositorPixelsSection,
                 processHandle, &pixelsBase, 0, 0, nullptr, &pixelsView,
                 2, 0, pixelProtection);
+            serialWrite("[MicaNT Compositor] Pixel view mapping returned\r\n");
+        }
         if (result == NtStatus::Success && processHandle == g_compositorProcessHandle) {
             uintptr_t decorBase = MICANT_COMPOSITOR_DECOR_PIXELS_BASE;
             size_t decorView = MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE;
+            serialWrite("[MicaNT Compositor] Mapping decoration view\r\n");
             result = sys::NtMapViewOfSectionFromKernel(g_compositorDecorPixelsSection,
                 processHandle, &decorBase, 0, 0, nullptr, &decorView,
                 2, 0, mm::PAGE_READWRITE);
+            serialWrite("[MicaNT Compositor] Decoration view mapping returned\r\n");
             if (result == NtStatus::Success &&
                 decorBase != MICANT_COMPOSITOR_DECOR_PIXELS_BASE)
                 result = NtStatus::Conflict;
@@ -2744,10 +2928,16 @@ bool launchUserImageProcess(const char16_t* imageName,
             }
         }
     }
+    serialWrite("[MicaNT Ps] Creating desktop initial thread\r\n");
     result = sys::NtCreateThreadExFromKernel(&thread, 0x001FFFFF, nullptr,
         processHandle, entryPoint, 0, 1, 0, 0, 0, nullptr);
     if (result == NtStatus::Success && !startSuspended)
         result = sys::NtResumeThread(thread, nullptr);
+    serialWrite("[MicaNT Ps] Desktop initial thread setup returned\r\n");
+    if (thread && startSuspended && suspendedThreadHandle) {
+        *suspendedThreadHandle = thread;
+        thread = 0;
+    }
     if (thread) {
         const auto threadClose = sys::NtClose(thread);
         if (result == NtStatus::Success && threadClose != NtStatus::Success) result = threadClose;
@@ -2772,6 +2962,37 @@ bool launchUserImageProcess(const char16_t* imageName,
 bool launchExplorerProcess() noexcept {
     return launchUserImageProcess(u"explorer.exe", g_explorerProcessHandle,
                                   g_explorerProcessId);
+}
+
+void recoverPendingCrashDumpAfterMount() noexcept {
+    if (!g_crashDumpStorageOwner.BackendReady) return;
+    micant::Handle processHandle{}, processId{}, threadHandle{};
+    if (!launchUserImageProcess(u"lucecrash.exe", processHandle, processId,
+                                true, &threadHandle)) {
+        serialWrite("[LuceCrashRecovery] launch failed; reserved dump retained\r\n");
+        return;
+    }
+    g_crashDumpStorageOwner.TrustedProcessId = processId;
+    const auto resumeStatus = micant::sys::NtResumeThread(threadHandle, nullptr);
+    const auto threadCloseStatus = micant::sys::NtClose(threadHandle);
+    if (resumeStatus != micant::NtStatus::Success ||
+        threadCloseStatus != micant::NtStatus::Success) {
+        serialWrite("[LuceCrashRecovery] initial thread resume failed; dump retained\r\n");
+        (void)micant::sys::NtTerminateProcess(processHandle, micant::NtStatus::Unsuccessful);
+    } else {
+        const auto waitStatus = micant::sys::NtWaitForSingleObject(processHandle, false, nullptr);
+        micant::ProcessBasicInformation exitInfo{};
+        uint32_t returnedBytes{};
+        const auto queryStatus = micant::sys::NtQueryInformationProcess(processHandle,
+            micant::ProcessInformationClass::ProcessBasicInformation, &exitInfo,
+            sizeof(exitInfo), &returnedBytes);
+        if (waitStatus != micant::NtStatus::Success || queryStatus != micant::NtStatus::Success ||
+            returnedBytes != sizeof(exitInfo) || exitInfo.exitStatus != micant::NtStatus::Success)
+            serialWrite("[LuceCrashRecovery] failed; reserved dump retained\r\n");
+    }
+    if (micant::sys::NtClose(processHandle) != micant::NtStatus::Success)
+        serialWrite("[LuceCrashRecovery] process handle close failed\r\n");
+    g_crashDumpStorageOwner.TrustedProcessId = 0;
 }
 
 bool launchCompositorProcess() noexcept {
@@ -2816,6 +3037,38 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
     using namespace micant;
     const auto number = args.number, first = args.first, second = args.second;
     const auto status = [](NtStatus value) { return static_cast<uint64_t>(value); };
+    if (number == sys::SSN_MicantReadPendingCrashDump ||
+        number == sys::SSN_MicantAcknowledgeCrashDump) {
+        const auto* process = ke::KeGetCurrentProcess();
+        if (!g_crashDumpStorageOwner.BackendReady || !process ||
+            !g_crashDumpStorageOwner.TrustedProcessId ||
+            process->processId() != g_crashDumpStorageOwner.TrustedProcessId)
+            return status(NtStatus::AccessDenied);
+        if (number == sys::SSN_MicantAcknowledgeCrashDump)
+            return status(ke::acknowledgePendingCrashDump(first));
+        auto* bytesRequired = reinterpret_cast<uint32_t*>(args.third);
+        auto* dumpId = reinterpret_cast<uint64_t*>(args.fourth);
+        const auto* destination = reinterpret_cast<void*>(first);
+        if (second > ke::CrashDumpBufferBytes) return status(NtStatus::InvalidParameter);
+        const uint32_t capacity = static_cast<uint32_t>(second);
+        if (!bytesRequired || !dumpId ||
+            ex::ProbeForWrite(bytesRequired, sizeof(*bytesRequired), alignof(uint32_t)) != NtStatus::Success ||
+            ex::ProbeForWrite(dumpId, sizeof(*dumpId), alignof(uint64_t)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        const uint8_t* dump{};
+        uint32_t length{};
+        uint64_t id{};
+        const NtStatus query = ke::queryPendingCrashDump(dump, length, id);
+        if (query != NtStatus::Success) return status(query);
+        if (ex::ExSafeCopyToUser(bytesRequired, &length, sizeof(length)) != NtStatus::Success ||
+            ex::ExSafeCopyToUser(dumpId, &id, sizeof(id)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        if (!capacity) return status(NtStatus::BufferTooSmall);
+        if (capacity < length) return status(NtStatus::BufferTooSmall);
+        if (ex::ProbeForWrite(const_cast<void*>(destination), length, 1) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        return status(ex::ExSafeCopyToUser(const_cast<void*>(destination), dump, length));
+    }
     if (number == sys::SSN_NtCreatePort || number == sys::SSN_NtConnectPort ||
         number == sys::SSN_NtRequestWaitReplyPort)
         return status(NtStatus::NotImplemented);
@@ -3120,12 +3373,16 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             return status(NtStatus::AccessViolation);
         auto* ioStatusAddress = reinterpret_cast<IoStatusBlock*>(extra[0]);
         const auto* userBuffer = reinterpret_cast<const void*>(extra[1]);
-        if (extra[2] > 1024 * 1024 || extra[4]) return status(NtStatus::NotSupported);
-        const size_t length = static_cast<size_t>(extra[2]);
+        const uint32_t length32 = static_cast<uint32_t>(extra[2]);
+        if (length32 > 1024 * 1024 || extra[4]) {
+            return status(NtStatus::NotSupported);
+        }
+        const size_t length = static_cast<size_t>(length32);
         const auto* byteOffsetAddress = reinterpret_cast<const LargeInteger*>(extra[3]);
-        if (!ioStatusAddress || (length && !userBuffer) || args.second || args.third || args.fourth)
+        if (!ioStatusAddress || (length && !userBuffer) || args.second || args.third || args.fourth) {
             return status(args.second || args.third || args.fourth
                 ? NtStatus::NotSupported : NtStatus::InvalidParameter);
+        }
         if (ex::ProbeForWrite(ioStatusAddress, sizeof(IoStatusBlock), alignof(IoStatusBlock)) != NtStatus::Success ||
             ex::ProbeForRead(userBuffer, length, 1) != NtStatus::Success)
             return status(NtStatus::AccessViolation);
@@ -3796,6 +4053,33 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         __asm__ __volatile__("swapgs" : : : "memory");
         return status(result);
     }
+    if (number == sys::SSN_NtCreateUserProcess) {
+        uint64_t extra[7]{};
+        if (args.userStack > UINT64_MAX - 40 ||
+            ex::ExSafeCopyFromUser(extra, reinterpret_cast<const void*>(args.userStack + 40),
+                                   sizeof(extra)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        // Image opening and address-space construction can wait for I/O and
+        // allocate pageable state, so switch to the scheduler's kernel GS
+        // convention before enabling interrupts.
+        __asm__ __volatile__("swapgs" : : : "memory");
+        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
+        if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
+        const auto result = sys::NtCreateUserProcess(
+            reinterpret_cast<Handle*>(first), reinterpret_cast<Handle*>(second),
+            static_cast<uint32_t>(args.third), static_cast<uint32_t>(args.fourth),
+            reinterpret_cast<ObjectAttributes*>(extra[0]),
+            reinterpret_cast<ObjectAttributes*>(extra[1]),
+            static_cast<uint32_t>(extra[2]), static_cast<uint32_t>(extra[3]),
+            reinterpret_cast<void*>(extra[4]),
+            reinterpret_cast<shared::native_process::ProcessCreateInfo64*>(extra[5]),
+            reinterpret_cast<PsAttributeList*>(extra[6]));
+        if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
+        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        __asm__ __volatile__("swapgs" : : : "memory");
+        return status(result);
+    }
     if (number == sys::SSN_NtTerminateProcess || number == sys::SSN_NtTerminateThread) {
         // The syscall entry used SWAPGS; restore the bootstrap kernel's GS
         // convention before switching away. If termination fails, restore the
@@ -4197,8 +4481,6 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                                                &request, sizeof(request)));
         }
         if (request.operation == MICANT_WIN32K_OP_SET_THEME_SNAPSHOT) {
-            if (!process || process->processId() != g_explorerProcessId)
-                return status(NtStatus::AccessDenied);
             MicaThemeSnapshot snapshot{};
             const NtStatus themeCopyStatus = ex::ExSafeCopyFromUser(
                 &snapshot, reinterpret_cast<const void*>(request.args[0]), sizeof(snapshot));
@@ -4224,7 +4506,9 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (request.operation == MICANT_WIN32K_OP_PUMP_INPUT) {
             bool keyboardQueued = false;
             static bool explorerMouseClickObserved = false;
+            CMD_HID_VALIDATE("win32k pump entry");
             pollKeyboardInput();
+            CMD_HID_VALIDATE("PS2 keyboard poll");
             MicaWin32kInputEvent event{};
             if (pollMouseInput(event)) {
                 const bool clickQueued = win32k::freestanding::dispatchMouseInput(event);
@@ -4237,6 +4521,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 }
                 request.result = 1;
             }
+            CMD_HID_VALIDATE("PS2 mouse poll");
             for (unsigned count = 0; count < 32; ++count) {
                 km::hid::MOUSE_INPUT_DATA packet{};
                 if (!km::hid::MouClassPopInputData(packet)) break;
@@ -4253,6 +4538,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 publishCompositorSurfacesInCompositorSpace();
                 request.result = 1;
             }
+            CMD_HID_VALIDATE("mouse queue dispatch");
             for (unsigned count = 0; count < 32; ++count) {
                 km::hid::KEYBOARD_INPUT_DATA packet{};
                 if (!km::hid::KbdClassPopInputData(packet)) break;
@@ -4307,6 +4593,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 keyboardQueued |= win32k::freestanding::dispatchKeyboardInput(key);
                 request.result = 1;
             }
+            CMD_HID_VALIDATE("keyboard queue dispatch");
             static bool explorerKeyboardInputObserved = false;
             auto* inputProcess = ke::KeGetCurrentProcess();
             if (keyboardQueued && !explorerKeyboardInputObserved && inputProcess &&
@@ -4642,6 +4929,7 @@ void pollKeyboardInput() noexcept {
     serialWrite("[MicaNT Explorer] Kernel idle loop entered\r\n");
     if (!initializeCompositorSections())
         stopWithError("[MicaNT Compositor] Shared sections failed\r\n");
+    serialWrite("[MicaNT Compositor] Shared sections ready\r\n");
     if (!launchCompositorProcess())
         stopWithError("[MicaNT Compositor] Ring 3 launch failed\r\n");
     serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
@@ -4657,6 +4945,16 @@ void pollKeyboardInput() noexcept {
     if (micant::sys::NtClose(themeTestProcessHandle) != micant::NtStatus::Success)
         stopWithError("[MicaNT ThemeTest] Process handle close failed\r\n");
     serialWrite("[MicaNT ThemeTest] Dedicated control test app launched\r\n");
+#endif
+#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+    serialWrite("[MicaNT CMD] Launching Ring 3 terminal application\r\n");
+    micant::Handle cmdProcessHandle = 0;
+    micant::Handle cmdProcessId = 0;
+    if (!launchUserImageProcess(u"cmd.exe", cmdProcessHandle, cmdProcessId))
+        stopWithError("[MicaNT CMD] Ring 3 process launch failed\r\n");
+    if (micant::sys::NtClose(cmdProcessHandle) != micant::NtStatus::Success)
+        stopWithError("[MicaNT CMD] Process handle close failed\r\n");
+    serialWrite("[MicaNT CMD] Ring 3 terminal process launched\r\n");
 #endif
 #if defined(MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     serialWrite("[MicaNT Taskmgr] Launching process-action probe\r\n");
@@ -5007,6 +5305,15 @@ extern "C" micant::NtStatus KiSystemStartup(
     micant::sys::scheduleDeferredTimerDeletes();
     micant::io::IoScheduleDeferredFileDeletes();
     initializeBootStartDrivers(handoff);
+    recoverPendingCrashDumpAfterMount();
+#if defined(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
+    if (!g_crashDumpStorageOwner.BackendReady)
+        stopWithError("[LuceOS Crash] self-test requires persistent backend\r\n");
+    if (!g_crashDumpSelfTestPendingAtBoot) {
+        serialWrite("[LuceOS Crash] controlled fault self-test\r\n");
+        __builtin_trap();
+    }
+#endif
     auto& bootNetworkStack = micant::tcpip::NetworkStack::get();
     bootNetworkStack.initialize();
     bool utcSeeded = false;

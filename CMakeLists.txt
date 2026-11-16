@@ -13,6 +13,8 @@ option(MICANT_BOOTSTRAP_NETWORK_SELFTEST "Enable M10 receive-path fault injectio
 option(MICANT_BOOTSTRAP_TASKMGR_SELFTEST "Launch taskmgr.exe from the mounted System32 image during QEMU verification" OFF)
 option(MICANT_BOOTSTRAP_THEME_TEST "Launch theme_test.exe for QEMU theme verification" OFF)
 option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-memory integration self-test" OFF)
+option(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST "Fault, persist, reboot and recover a LuceOS crash dump in QEMU" OFF)
+option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
 
 if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
@@ -571,6 +573,31 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
 
+    # CMD is a separate Ring 3 PE. Its graphical frontend reaches Win32k and
+    # GDI through the native client DLLs; its command engine uses NTDLL file
+    # syscalls rather than kernel Executive headers.
+    add_executable(cmd_boot EXCLUDE_FROM_ALL tools/cmd_app.cpp)
+    target_include_directories(cmd_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(cmd_boot PRIVATE
+        MICANT_NATIVE_USERMODE MICANT_UXTHEME_IMPORTS
+        MICANT_PROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+        MICANT_PROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+        MICANT_PROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    )
+    target_compile_options(cmd_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(cmd_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+    )
+    target_link_libraries(cmd_boot PRIVATE
+        user32_boot gdi32_boot win32k_boot ntdll_boot kernel32_boot ucrtbase_boot)
+    set_target_properties(cmd_boot PROPERTIES
+        OUTPUT_NAME "cmd"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+
     # Dedicated Ring 3 consumer for theme and common-control verification.
     # Keep these probes out of Explorer, which remains a normal shell client.
     add_executable(theme_test_boot EXCLUDE_FROM_ALL tools/theme_test_app.cpp)
@@ -586,7 +613,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
     target_link_libraries(theme_test_boot PRIVATE
-        user32_boot gdi32_boot uxtheme_boot comctl32_boot)
+        kernel32_boot user32_boot gdi32_boot win32k_boot uxtheme_boot comctl32_boot)
     set_target_properties(theme_test_boot PROPERTIES
         OUTPUT_NAME "theme_test"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
@@ -606,6 +633,20 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(procdump_boot PRIVATE ntdll_boot)
     set_target_properties(procdump_boot PROPERTIES
         OUTPUT_NAME "procdump"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+    add_executable(lucecrash_boot EXCLUDE_FROM_ALL tools/lucecrash_app.cpp)
+    target_include_directories(lucecrash_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_options(lucecrash_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(lucecrash_boot PRIVATE
+        -nostdlib -Wl,--subsystem,native -Wl,-e,_start
+    )
+    target_link_libraries(lucecrash_boot PRIVATE ntdll_boot)
+    set_target_properties(lucecrash_boot PROPERTIES
+        OUTPUT_NAME "lucecrash"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
     add_executable(proctop_boot EXCLUDE_FROM_ALL tools/procdump_app.cpp)
@@ -636,6 +677,12 @@ if (MICANT_ENABLE_BAREMETAL)
     endif()
     if (MICANT_BOOTSTRAP_THEME_TEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_THEME_TEST)
+    endif()
+    if (MICANT_BOOTSTRAP_CMD_TEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CMD_TEST)
+    endif()
+    if (MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
     endif()
     add_executable(taskmgr_probe_boot EXCLUDE_FROM_ALL tools/taskmgr_probe_app.cpp)
     target_include_directories(taskmgr_probe_boot PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -732,6 +779,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(ws2_32_boot PRIVATE ntdll_boot)
     set_target_properties(ws2_32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "ws2_32"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
@@ -753,6 +801,8 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(ws2_32_service_boot PRIVATE ntdll_boot)
     set_target_properties(ws2_32_service_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "ws2_32"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         ARCHIVE_OUTPUT_NAME "ws2_32_service"
@@ -773,6 +823,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(dnsapi_boot PRIVATE ws2_32_boot ntdll_boot)
     set_target_properties(dnsapi_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "dnsapi"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
@@ -792,6 +843,8 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(dnsapi_service_boot PRIVATE ws2_32_service_boot ntdll_boot)
     set_target_properties(dnsapi_service_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "dnsapi"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         ARCHIVE_OUTPUT_NAME "dnsapi_service"
@@ -812,6 +865,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(crypt32_boot PRIVATE ntdll_boot)
     set_target_properties(crypt32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "crypt32"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
@@ -830,6 +884,8 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(crypt32_service_boot PRIVATE ntdll_boot)
     set_target_properties(crypt32_service_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "crypt32"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         ARCHIVE_OUTPUT_NAME "crypt32_service"
@@ -850,6 +906,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(winhttp_boot PRIVATE ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot)
     set_target_properties(winhttp_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "winhttp"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
@@ -869,6 +926,8 @@ if (MICANT_ENABLE_BAREMETAL)
         dnsapi_service_boot crypt32_service_boot)
     set_target_properties(winhttp_service_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "winhttp"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/network-system32"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/network-system32"
         ARCHIVE_OUTPUT_NAME "winhttp_service"
@@ -927,6 +986,8 @@ if (MICANT_ENABLE_BAREMETAL)
 
     add_library(kernel32_boot SHARED EXCLUDE_FROM_ALL
         kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp
+        tools/dlls/native_stack_probe.cpp
+        kernel/ex/freestanding_memory.cpp
     )
     target_compile_definitions(kernel32_boot PRIVATE MICANT_FREESTANDING_KERNEL32)
     target_compile_options(kernel32_boot PRIVATE
@@ -946,8 +1007,9 @@ if (MICANT_ENABLE_BAREMETAL)
     )
     add_library(ucrtbase_boot SHARED EXCLUDE_FROM_ALL
         kernel/ps/winnt_ucrtbase_runtime_abi.cpp
+        kernel/ps/ucrt_native_heap_syscalls.cpp
     )
-    target_compile_definitions(ucrtbase_boot PRIVATE MICANT_FREESTANDING_UCRT)
+    target_compile_definitions(ucrtbase_boot PRIVATE MICANT_FREESTANDING_UCRT MICANT_NATIVE_USERMODE)
     target_compile_options(ucrtbase_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-emulated-tls

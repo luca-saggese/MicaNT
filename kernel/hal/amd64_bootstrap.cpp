@@ -13,12 +13,14 @@
 #include "micant/km/executive/usermode.hpp"
 #include "micant/km/core/ke.hpp"
 #include "micant/km/core/crash_record.hpp"
+#include "micant/km/core/crash_dump.hpp"
 #include "micant/km/core/clock_timer.hpp"
 #include "micant/km/core/passive_work.hpp"
 #include <atomic>
 
 extern "C" volatile bool g_ring3ProbeActive{};
 extern "C" volatile bool g_ring3ClockProbeActive{};
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
 
 namespace {
 
@@ -96,6 +98,8 @@ constexpr uint64_t kTestBase = uint64_t{130} << 39;
 constexpr uint64_t kBootstrapHeapBase = kTestBase + (uint64_t{1} << 30);
 constexpr uint64_t kBootstrapHeapEnd = kTestBase + (uint64_t{1} << 39);
 uint64_t g_bootstrapHeapNext{};
+uint64_t g_protectedKernelImageFirst{};
+uint64_t g_protectedKernelImageEnd{};
 constexpr uint64_t kKuserKernelAlias = uint64_t{131} << 39;
 constexpr uint64_t kKuserRootAlias = kKuserKernelAlias + 4096;
 constexpr uint64_t kUserStackBase = kUserBase + 4096;
@@ -436,6 +440,12 @@ bool pagingContextMatches(void* context) noexcept {
     for (const auto* root = g_processPagingRoots; root; root = root->next)
         if (root == context) return (root->pfn << micant::mm::PageShift4KB) == active;
     return false;
+}
+
+bool overlapsProtectedKernelImage(uint64_t physical, size_t size) noexcept {
+    if (!g_protectedKernelImageEnd || !size || physical > UINT64_MAX - size) return false;
+    return physical < g_protectedKernelImageEnd &&
+        g_protectedKernelImageFirst < physical + size;
 }
 
 void invalidatePage(uint64_t address) noexcept {
@@ -1858,6 +1868,7 @@ void MicantProbePageFault(const uint64_t* frame) noexcept {
         trap.faultAddress = faultAddress;
         micant::ke::captureCrashRecord(evidence,
             0x1000000eu, 14, trap.errorCode, trap.rip, faultAddress, &trap, 0);
+        const bool dumpPersisted = micant::ke::persistCrashRecord(evidence);
         logTrapValue("[LuceOS Crash] Stop code=0x", evidence.bugCheckCode);
         logTrapValue("[LuceOS Crash] param1(vector)=0x", evidence.parameters[0]);
         logTrapValue("[LuceOS Crash] param2(error)=0x", evidence.parameters[1]);
@@ -1874,7 +1885,8 @@ void MicantProbePageFault(const uint64_t* frame) noexcept {
             logTrapValue("[LuceOS Crash] AMD64 GPR=0x", evidence.gpr[i]);
         logTrapValue("[LuceOS Crash] build ID=0x", evidence.buildId);
         logTrapValue("[LuceOS Crash] record CRC32=0x", evidence.crc32);
-        logTrapValue("[LuceOS Crash] evidence is stack-local; persistent dump unavailable=", 1);
+        if (g_log) g_log(dumpPersisted ? "[LuceOS Crash] persistent dump committed=1\r\n"
+                                      : "[LuceOS Crash] persistent dump committed=0\r\n");
         logTrapValue("[MicaNT Hal] PF CR2=0x", faultAddress);
         logTrapValue("[MicaNT Hal] PF error=0x", frame[0]);
         logTrapValue("[MicaNT Hal] PF RIP=0x", frame[1]);
@@ -2049,6 +2061,120 @@ __attribute__((naked)) void MicantProbeFaultEntry() {
     );
 }
 
+extern "C" __attribute__((naked)) void MicantFatalExceptionCommon() noexcept {
+    __asm__ __volatile__(
+        "cli\ncld\n"
+        "pushq %rax\npushq %rcx\npushq %rdx\npushq %rbx\npushq %rbp\n"
+        "pushq %rsi\npushq %rdi\npushq %r8\npushq %r9\npushq %r10\n"
+        "pushq %r11\npushq %r12\npushq %r13\npushq %r14\npushq %r15\n"
+        "movq %rsp, %r12\nleaq 120(%r12), %rcx\nmovq %r12, %rdx\n"
+        "andq $-16, %rsp\nsubq $32, %rsp\n"
+        "callq MicantCaptureFatalException\nud2\n");
+}
+
+#define MICANT_FATAL_NOERR_STUB(name, vector) \
+    extern "C" __attribute__((naked)) void name() noexcept { \
+        __asm__ __volatile__("pushq $0\npushq $" #vector "\njmp MicantFatalExceptionCommon\n"); \
+    }
+#define MICANT_FATAL_ERR_STUB(name, vector) \
+    extern "C" __attribute__((naked)) void name() noexcept { \
+        __asm__ __volatile__("pushq $" #vector "\njmp MicantFatalExceptionCommon\n"); \
+    }
+
+MICANT_FATAL_NOERR_STUB(MicantFatalVector0, 0)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector1, 1)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector2, 2)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector3, 3)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector4, 4)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector5, 5)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector6, 6)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector7, 7)
+MICANT_FATAL_ERR_STUB(MicantFatalVector8, 8)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector9, 9)
+MICANT_FATAL_ERR_STUB(MicantFatalVector10, 10)
+MICANT_FATAL_ERR_STUB(MicantFatalVector11, 11)
+MICANT_FATAL_ERR_STUB(MicantFatalVector12, 12)
+MICANT_FATAL_ERR_STUB(MicantFatalVector13, 13)
+MICANT_FATAL_ERR_STUB(MicantFatalVector14, 14)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector15, 15)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector16, 16)
+MICANT_FATAL_ERR_STUB(MicantFatalVector17, 17)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector18, 18)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector19, 19)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector20, 20)
+MICANT_FATAL_ERR_STUB(MicantFatalVector21, 21)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector22, 22)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector23, 23)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector24, 24)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector25, 25)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector26, 26)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector27, 27)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector28, 28)
+MICANT_FATAL_ERR_STUB(MicantFatalVector29, 29)
+MICANT_FATAL_ERR_STUB(MicantFatalVector30, 30)
+MICANT_FATAL_NOERR_STUB(MicantFatalVector31, 31)
+
+#undef MICANT_FATAL_NOERR_STUB
+#undef MICANT_FATAL_ERR_STUB
+
+uintptr_t MicantFatalExceptionStub(uint64_t vector) noexcept {
+    static void (*const stubs[32])() noexcept = {
+        MicantFatalVector0, MicantFatalVector1, MicantFatalVector2, MicantFatalVector3,
+        MicantFatalVector4, MicantFatalVector5, MicantFatalVector6, MicantFatalVector7,
+        MicantFatalVector8, MicantFatalVector9, MicantFatalVector10, MicantFatalVector11,
+        MicantFatalVector12, MicantFatalVector13, MicantFatalVector14, MicantFatalVector15,
+        MicantFatalVector16, MicantFatalVector17, MicantFatalVector18, MicantFatalVector19,
+        MicantFatalVector20, MicantFatalVector21, MicantFatalVector22, MicantFatalVector23,
+        MicantFatalVector24, MicantFatalVector25, MicantFatalVector26, MicantFatalVector27,
+        MicantFatalVector28, MicantFatalVector29, MicantFatalVector30, MicantFatalVector31,
+    };
+    return vector < 32 ? reinterpret_cast<uintptr_t>(stubs[vector])
+                       : reinterpret_cast<uintptr_t>(MicantProbeFaultEntry);
+}
+
+extern "C" [[noreturn]] void MicantCaptureFatalException(
+    const uint64_t* frame, const uint64_t* saved) noexcept {
+    if (!frame || !saved) stopOnTrap();
+    const uint64_t vector = frame[0];
+    const uint64_t error = frame[1];
+    micant::ke::KTrapFrame trap{};
+    trap.r15 = saved[0]; trap.r14 = saved[1]; trap.r13 = saved[2];
+    trap.r12 = saved[3]; trap.r11 = saved[4]; trap.r10 = saved[5];
+    trap.r9 = saved[6]; trap.r8 = saved[7]; trap.rdi = saved[8];
+    trap.rsi = saved[9]; trap.rbp = saved[10]; trap.rbx = saved[11];
+    trap.rdx = saved[12]; trap.rcx = saved[13]; trap.rax = saved[14];
+    trap.errorCode = static_cast<uint32_t>(error);
+    trap.rip = frame[2];
+    trap.segCs = static_cast<uint16_t>(frame[3]);
+    trap.eFlags = static_cast<uint32_t>(frame[4]);
+    trap.rsp = (frame[3] & 3u) ? frame[5] : reinterpret_cast<uintptr_t>(frame + 5);
+    __asm__ __volatile__("movq %%cr2, %0" : "=r"(trap.faultAddress));
+
+    micant::ke::CrashRecord evidence{};
+    micant::ke::captureCrashRecord(evidence,
+        0x10000000u | static_cast<uint32_t>(vector),
+        vector, error, trap.rip, trap.faultAddress, &trap, 0);
+    const bool persisted = micant::ke::persistCrashRecord(evidence);
+    logTrapValue("[LuceOS Crash] Stop code=0x", evidence.bugCheckCode);
+    logTrapValue("[LuceOS Crash] Parameter 1 (vector)=0x", evidence.parameters[0]);
+    logTrapValue("[LuceOS Crash] Parameter 2 (error)=0x", evidence.parameters[1]);
+    logTrapValue("[LuceOS Crash] Parameter 3 (RIP)=0x", evidence.parameters[2]);
+    logTrapValue("[LuceOS Crash] Parameter 4 (CR2)=0x", evidence.parameters[3]);
+    logTrapValue("[LuceOS Crash] RIP=0x", evidence.rip);
+    logTrapValue("[LuceOS Crash] RSP=0x", evidence.rsp);
+    logTrapValue("[LuceOS Crash] RFLAGS=0x", evidence.rflags);
+    logTrapValue("[LuceOS Crash] CR2=0x", evidence.cr2);
+    logTrapValue("[LuceOS Crash] PID=0x", evidence.pid);
+    logTrapValue("[LuceOS Crash] TID=0x", evidence.tid);
+    logTrapValue("[LuceOS Crash] stack bytes=0x", evidence.stackBytes);
+    for (size_t i = 0; i < 16; ++i)
+        logTrapValue("[LuceOS Crash] GPR=0x", evidence.gpr[i]);
+    logTrapValue("[LuceOS Crash] build ID=0x", evidence.buildId);
+    if (g_log) g_log(persisted ? "[LuceOS Crash] persistent dump committed=1\r\n"
+                              : "[LuceOS Crash] persistent dump committed=0\r\n");
+    stopOnTrap();
+}
+
 __attribute__((naked)) void MicantProbeInvalidOpcodeEntry() {
     __asm__ __volatile__(
         "cli\ncld\nmovq %rsp, %rcx\nandq $-16, %rsp\nsubq $32, %rsp\n"
@@ -2095,6 +2221,7 @@ void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noex
         micant::ke::captureCrashRecord(evidence,
             0x10000000u | static_cast<uint32_t>(vector), // MicaNT-private exception reason
             vector, trap.errorCode, trap.rip, trap.faultAddress, &trap, 0);
+        const bool dumpPersisted = micant::ke::persistCrashRecord(evidence);
         logTrapValue("[LuceOS Crash] Stop code=0x", evidence.bugCheckCode);
         logTrapValue("[LuceOS Crash] RIP=0x", evidence.rip);
         logTrapValue("[LuceOS Crash] RSP=0x", evidence.rsp);
@@ -2115,9 +2242,8 @@ void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noex
         }
         logTrapValue("[LuceOS Crash] build ID=0x", evidence.buildId);
         logTrapValue("[LuceOS Crash] evidence CRC32=0x", evidence.crc32);
-        logTrapValue("[LuceOS Crash] record is stack-local and not recoverable; build ID absent=",
-                     evidence.buildId == 0 ? 1 : 0);
-        logTrapValue("[LuceOS Crash] persistent dump unavailable (no backend connected)=", 1);
+        if (g_log) g_log(dumpPersisted ? "[LuceOS Crash] persistent dump committed=1\r\n"
+                                      : "[LuceOS Crash] persistent dump committed=0\r\n");
     }
     logTrapValue("[MicaNT Hal] Unhandled exception vector=0x", vector);
     if (frame) {
@@ -3011,6 +3137,7 @@ bool mapBootstrapManagedPage(void* context, uintptr_t address, uint64_t pfn,
         address - BootstrapUserAddressBase >= BootstrapUserAddressSize ||
         (address & mm::PageMask4KB) || !pfn ||
         pfn > (kPhysicalMask >> mm::PageShift4KB) ||
+        overlapsProtectedKernelImage(pfn << mm::PageShift4KB, mm::PageSize4KB) ||
         (protection != mm::PAGE_READWRITE && protection != mm::PAGE_READONLY &&
          protection != mm::PAGE_EXECUTE_READ && protection != mm::PAGE_EXECUTE_READWRITE &&
          protection != mm::PAGE_NOACCESS)) {
@@ -3024,6 +3151,19 @@ bool mapBootstrapManagedPage(void* context, uintptr_t address, uint64_t pfn,
         if (!unmapPage(address, true)) __builtin_trap();
         return false;
     }
+    return true;
+}
+
+bool protectBootstrapKernelImageRange(uint64_t physicalBase, size_t size) noexcept {
+    if (!g_addressSpaceReady || !physicalBase || (physicalBase & mm::PageMask4KB) || !size ||
+        physicalBase > UINT64_MAX - size || physicalBase + size > kPhysicalMask + mm::PageSize4KB)
+        return false;
+    const uint64_t first = physicalBase & ~uint64_t{mm::PageMask4KB};
+    const uint64_t end = (physicalBase + size + mm::PageMask4KB) & ~uint64_t{mm::PageMask4KB};
+    if (end <= first || (g_protectedKernelImageEnd &&
+        (g_protectedKernelImageFirst != first || g_protectedKernelImageEnd != end))) return false;
+    g_protectedKernelImageFirst = first;
+    g_protectedKernelImageEnd = end;
     return true;
 }
 
@@ -3068,6 +3208,7 @@ static bool mapBootstrapManagedViewImpl(void* context, uintptr_t address, const 
     for (size_t i = 0; i < count && prepared; ++i) {
         touchedPages = i + 1;
         if (!pfns[i] || pfns[i] > (kPhysicalMask >> mm::PageShift4KB) ||
+            overlapsProtectedKernelImage(pfns[i] << mm::PageShift4KB, mm::PageSize4KB) ||
             isProtectedIommuPhysicalPage(pfns[i] << mm::PageShift4KB)) {
             prepared = false;
             break;
@@ -3199,7 +3340,8 @@ bool replaceBootstrapManagedPage(void* context, uintptr_t address, uint64_t expe
         (protection != mm::PAGE_READONLY && protection != mm::PAGE_READWRITE &&
          protection != mm::PAGE_EXECUTE_READ && protection != mm::PAGE_EXECUTE_READWRITE &&
          protection != mm::PAGE_NOACCESS) ||
-        isProtectedIommuPhysicalPage(replacementPfn << mm::PageShift4KB)) return false;
+        isProtectedIommuPhysicalPage(replacementPfn << mm::PageShift4KB) ||
+        overlapsProtectedKernelImage(replacementPfn << mm::PageShift4KB, mm::PageSize4KB)) return false;
     uint64_t* table = activePagingRoot();
     for (int shift = 39; shift > 12; shift -= 9) {
         const uint64_t entry = table[(address >> shift) & 511];
@@ -3553,7 +3695,8 @@ bool releaseBootstrapKernelHeapRange(uintptr_t address, size_t pageCount) noexce
 
 bool mapBootstrapKernelHeapPage(uintptr_t address, uint64_t pfn) noexcept {
     if (address < kBootstrapHeapBase || address >= kBootstrapHeapEnd ||
-        (address & mm::PageMask4KB) || !pfn || pfn > (kPhysicalMask >> mm::PageShift4KB))
+        (address & mm::PageMask4KB) || !pfn || pfn > (kPhysicalMask >> mm::PageShift4KB) ||
+        overlapsProtectedKernelImage(pfn << mm::PageShift4KB, mm::PageSize4KB))
         return false;
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
@@ -3798,8 +3941,22 @@ bool verifyNativeImageLoading() noexcept {
     __asm__ __volatile__("cli" : : : "memory");
     const bool cleanupPending = io::IoDeferredFileDeletesPending();
     if (savedFlags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    if (g_log) {
+        g_log("[MicaNT HalTrace] native image result probe=");
+        MicantNetbootSerialWriteNumber(g_probeSucceeded);
+        g_log(" cleanup=");
+        MicantNetbootSerialWriteNumber(cleanupPending);
+        g_log(" active-before=");
+        MicantNetbootSerialWriteNumber(activeBefore);
+        g_log(" active-after=");
+        MicantNetbootSerialWriteNumber(mm::PfnDatabase::get().getActiveCount());
+        g_log("\r\n");
+    }
+    // Passive cleanup can release unrelated PFNs while the CPL3 probe is
+    // running. A lower global count is valid; leaked probe pages would make
+    // the count grow after deferred file cleanup has drained.
     return g_probeSucceeded && !cleanupPending &&
-        mm::PfnDatabase::get().getActiveCount() == activeBefore;
+        mm::PfnDatabase::get().getActiveCount() <= activeBefore;
 }
 
 // Walk every existing leaf, including large pages, before making the IOMMU
@@ -5264,6 +5421,7 @@ bool verifyRing3Transition() noexcept {
             : vector == 19
                 ? reinterpret_cast<uint64_t>(MicantProbeUserSimdFloatEntry)
             : vector == 14 ? reinterpret_cast<uint64_t>(MicantProbePageFaultEntry)
+            : vector < 32 ? MicantFatalExceptionStub(vector)
                           : reinterpret_cast<uint64_t>(MicantProbeFaultEntry);
         g_idt[vector] = {
             static_cast<uint16_t>(handler),

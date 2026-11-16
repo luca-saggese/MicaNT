@@ -2,6 +2,7 @@
 
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/ntstatus.hpp"
+#include "micant/shared/native_process_abi.hpp"
 
 // Mode-neutral declarations for the public Ring 3 -> NTDLL boundary. Native
 // user DLLs include this header instead of Executive/dispatcher headers.
@@ -41,6 +42,15 @@ MICANT_NT_API_IMPORT micant::NtStatus NtCreateThreadEx(
     void* startRoutine, void* argument, uint32_t createFlags,
     uintptr_t zeroBits, size_t stackSize, size_t maximumStackSize,
     void* attributeList) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtCreateUserProcess(
+    micant::Handle* processHandle, micant::Handle* threadHandle,
+    uint32_t processDesiredAccess, uint32_t threadDesiredAccess,
+    micant::ObjectAttributes* processObjectAttributes,
+    micant::ObjectAttributes* threadObjectAttributes,
+    uint32_t processFlags, uint32_t threadFlags,
+    void* processParameters,
+    micant::shared::native_process::ProcessCreateInfo64* createInfo,
+    micant::PsAttributeList* attributeList) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtQuerySystemTime(micant::LargeInteger* systemTime) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtQueryPerformanceCounter(
     micant::LargeInteger* counter, micant::LargeInteger* frequency) noexcept;
@@ -89,6 +99,17 @@ MICANT_NT_API_IMPORT micant::NtStatus NtDeviceIoControlFile(
     void* apcContext, micant::IoStatusBlock* ioStatusBlock,
     uint32_t ioControlCode, const void* inputBuffer, uint32_t inputBufferLength,
     void* outputBuffer, uint32_t outputBufferLength) noexcept;
+
+// Private, boot-service-only LuceOS crash recovery interface. A null/zero-size
+// read queries the required serialized LUCDMP size and pending dump ID;
+// STATUS_BUFFER_TOO_SMALL reports the size. A successful read copies the
+// bounded pending image. ACK releases the reserved copy only for the matching
+// dump ID and must be issued after the exported file has been flushed.
+MICANT_NT_API_IMPORT micant::NtStatus MicantReadPendingCrashDump(
+    void* buffer, uint32_t capacity, uint32_t* bytesRequired,
+    uint64_t* dumpId) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus MicantAcknowledgeCrashDump(
+    uint64_t dumpId) noexcept;
 }
 
 #undef MICANT_NT_API_IMPORT

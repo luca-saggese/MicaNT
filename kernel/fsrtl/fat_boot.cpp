@@ -501,88 +501,107 @@ bool writeDirectorySlot(FatVolume& volume, uint32_t sectorNumber,
 }
 
 NtStatus createRootFile(FatVolume& volume, const char* path, FatDirEntry& result) noexcept {
-    if (!path || !*path || containsPathSeparator(path)) return NtStatus::NotSupported;
-    uint8_t shortName[11];
-    std::memset(shortName, ' ', sizeof(shortName));
-    size_t baseLength{}, extensionLength{};
-    bool inExtension{};
-    for (const char* cursor = path; *cursor; ++cursor) {
-        if (*cursor == '.') {
-            if (inExtension) return NtStatus::NotSupported;
-            inExtension = true;
-            continue;
-        }
-        char value = *cursor;
-        if (value >= 'a' && value <= 'z') value = static_cast<char>(value - ('a' - 'A'));
-        const bool legal = (value >= 'A' && value <= 'Z') ||
-            (value >= '0' && value <= '9') || value == '_' || value == '-';
-        if (!legal) return NtStatus::NotSupported;
-        if (!inExtension) {
-            if (baseLength == 8) return NtStatus::NotSupported;
-            shortName[baseLength++] = static_cast<uint8_t>(value);
-        } else {
-            if (extensionLength == 3) return NtStatus::NotSupported;
-            shortName[8 + extensionLength++] = static_cast<uint8_t>(value);
-        }
+    if (!path || !*path) return NtStatus::NotSupported;
+    const char* leaf = path;
+    for (const char* cursor = path; *cursor; ++cursor)
+        if (*cursor == '\\' || *cursor == '/') leaf = cursor + 1;
+    if (!*leaf) return NtStatus::NotSupported;
+    uint32_t parentCluster = volume.RootCluster;
+    if (leaf != path) {
+        char parentPath[kMaximumPath]{};
+        const size_t parentLength = static_cast<size_t>(leaf - path - 1);
+        if (!parentLength || parentLength >= sizeof(parentPath)) return NtStatus::NotSupported;
+        std::memcpy(parentPath, path, parentLength);
+        FatDirEntry parent{};
+        const auto parentStatus = findFile(volume, parentPath, parent);
+        if (parentStatus != NtStatus::Success || !parent.Directory || parent.FirstCluster < 2)
+            return NtStatus::ObjectPathNotFound;
+        parentCluster = parent.FirstCluster;
     }
-    if (!baseLength) return NtStatus::NotSupported;
-    uint32_t cluster = volume.RootCluster;
-    for (uint32_t traversed = 0; traversed <= volume.DataClusterCount; ++traversed) {
+
+    char16_t longName[128]{};
+    size_t nameLength{};
+    for (const char* cursor = leaf; *cursor; ++cursor) {
+        const unsigned char ch = static_cast<unsigned char>(*cursor);
+        if (ch < 0x20 || ch > 0x7e || nameLength + 1 >= std::size(longName))
+            return NtStatus::NotSupported;
+        longName[nameLength++] = static_cast<char16_t>(ch);
+    }
+    if (!nameLength) return NtStatus::NotSupported;
+    const size_t lfnCount = (nameLength + 12) / 13;
+    if (!lfnCount || lfnCount > 19) return NtStatus::NotSupported;
+
+    uint8_t shortName[11]{};
+    std::memcpy(shortName, "LUCEOS~1DMP", 11);
+    // The dump identifier is unique in its directory. Refuse any alias
+    // collision rather than creating an ambiguous long-name entry.
+    FatDirEntry collision{};
+    if (findInDirectory(volume, parentCluster, "LUCEOS~1.DMP", collision) == NtStatus::Success)
+        return NtStatus::ObjectNameCollision;
+    uint8_t checksum{};
+    for (uint8_t value : shortName)
+        checksum = static_cast<uint8_t>(((checksum & 1u) << 7) + (checksum >> 1) + value);
+
+    const size_t needed = lfnCount + 1;
+    uint32_t slotSectors[20]{};
+    uint16_t slotOffsets[20]{};
+    size_t found{};
+    uint32_t cluster = parentCluster;
+    for (uint32_t traversed = 0; traversed <= volume.DataClusterCount && found < needed; ++traversed) {
         if (cluster < 2 || cluster - 2 >= volume.DataClusterCount) return NtStatus::DeviceDataError;
         uint32_t clusterLba{};
         if (!clusterToLba(volume, cluster, clusterLba) ||
-            !readVolume(volume, clusterLba, volume.SectorsPerCluster, g_clusterBuffer)) return NtStatus::DeviceDataError;
-        const size_t count = static_cast<size_t>(volume.SectorsPerCluster) * kSectorSize / 32;
-        for (size_t index = 0; index < count; ++index) {
-            const uint8_t* existing = g_clusterBuffer + index * 32;
-            if (existing[0] != 0 && existing[0] != 0xE5) continue;
-            uint8_t diskEntry[32]{};
-            std::memcpy(diskEntry, shortName, sizeof(shortName));
-            diskEntry[11] = 0x20;
-            const uint32_t relativeSector = clusterLba +
-                static_cast<uint32_t>((index * 32) / kSectorSize);
-            const uint16_t offset = static_cast<uint16_t>((index * 32) % kSectorSize);
-            if (existing[0] == 0) {
-                // FAT's zero entry terminates the entire directory. Preserve
-                // that terminator after consuming it, including across a
-                // cluster boundary, before making the new entry visible.
-                uint32_t nextSector{};
-                uint16_t nextOffset{};
-                bool hasNext = false;
-                if (index + 1 < count) {
-                    nextSector = clusterLba + static_cast<uint32_t>(((index + 1) * 32) / kSectorSize);
-                    nextOffset = static_cast<uint16_t>(((index + 1) * 32) % kSectorSize);
-                    hasNext = true;
-                } else {
-                    uint32_t nextClusterValue{};
-                    if (!readFatEntry(volume, cluster, nextClusterValue)) return NtStatus::DeviceDataError;
-                    if (nextClusterValue < 0x0FFFFFF8u) {
-                        if (!clusterToLba(volume, nextClusterValue, nextSector))
-                            return NtStatus::DeviceDataError;
-                        hasNext = true;
-                    }
-                }
-                if (hasNext) {
-                    uint8_t endMarker[32]{};
-                    if (!writeDirectorySlot(volume, nextSector, nextOffset, endMarker))
-                        return NtStatus::DeviceDataError;
-                }
-            }
-            if (!writeDirectorySlot(volume, relativeSector, offset, diskEntry)) return NtStatus::DeviceDataError;
-            result = {};
-            formatShortName(diskEntry, result.ShortName, sizeof(result.ShortName));
-            std::memcpy(result.Name, result.ShortName, sizeof(result.ShortName));
-            result.DirectorySector = relativeSector;
-            result.DirectoryOffset = offset;
-            std::memcpy(result.RawName, shortName, sizeof(shortName));
-            return NtStatus::Success;
+            !readVolume(volume, clusterLba, volume.SectorsPerCluster, g_clusterBuffer))
+            return NtStatus::DeviceDataError;
+        const size_t slots = static_cast<size_t>(volume.SectorsPerCluster) * kSectorSize / 32;
+        for (size_t index = 0; index < slots && found < needed; ++index) {
+            const uint8_t first = g_clusterBuffer[index * 32];
+            if (first != 0 && first != 0xE5) { found = 0; continue; }
+            slotSectors[found] = clusterLba + static_cast<uint32_t>((index * 32) / kSectorSize);
+            slotOffsets[found] = static_cast<uint16_t>((index * 32) % kSectorSize);
+            ++found;
         }
+        if (found >= needed) break;
         uint32_t next{};
         if (!readFatEntry(volume, cluster, next)) return NtStatus::DeviceDataError;
-        if (next >= 0x0FFFFFF8u) return NtStatus::DiskFull;
+        if (next >= 0x0FFFFFF8u) break;
         cluster = next;
     }
-    return NtStatus::DeviceDataError;
+    if (found < needed) return NtStatus::DiskFull;
+
+    for (size_t diskIndex = 0; diskIndex < lfnCount; ++diskIndex) {
+        const size_t sequence = lfnCount - diskIndex;
+        uint8_t entry[32];
+        std::memset(entry, 0xff, sizeof(entry));
+        entry[0] = static_cast<uint8_t>(sequence | (sequence == lfnCount ? 0x40u : 0u));
+        entry[11] = 0x0f; entry[12] = 0; entry[13] = checksum;
+        entry[26] = entry[27] = 0;
+        static constexpr uint8_t nameOffsets[13] = {
+            1,3,5,7,9,14,16,18,20,22,24,28,30};
+        for (size_t character = 0; character < 13; ++character) {
+            const size_t source = (sequence - 1) * 13 + character;
+            uint16_t code = source < nameLength ? longName[source]
+                : source == nameLength ? 0 : 0xffff;
+            entry[nameOffsets[character]] = static_cast<uint8_t>(code);
+            entry[nameOffsets[character] + 1] = static_cast<uint8_t>(code >> 8);
+        }
+        if (!writeDirectorySlot(volume, slotSectors[diskIndex], slotOffsets[diskIndex], entry))
+            return NtStatus::DeviceDataError;
+    }
+    uint8_t shortEntry[32]{};
+    std::memcpy(shortEntry, shortName, sizeof(shortName));
+    shortEntry[11] = 0x20;
+    const size_t shortSlot = lfnCount;
+    if (!writeDirectorySlot(volume, slotSectors[shortSlot], slotOffsets[shortSlot], shortEntry))
+        return NtStatus::DeviceDataError;
+    result = {};
+    formatShortName(shortEntry, result.ShortName, sizeof(result.ShortName));
+    for (size_t i = 0; i < nameLength; ++i) result.Name[i] = static_cast<char>(longName[i]);
+    result.Name[nameLength] = 0;
+    std::memcpy(result.RawName, shortName, sizeof(shortName));
+    result.DirectorySector = slotSectors[shortSlot];
+    result.DirectoryOffset = slotOffsets[shortSlot];
+    return NtStatus::Success;
 }
 
 bool writeFileAt(FatVolume& volume, FatDirEntry& entry, uint64_t offset,
@@ -902,6 +921,22 @@ void releaseImage(void* opaque) noexcept {
     }
     if (control) release(control);
 }
+NtStatus referenceImageControl(void* opaque, bool (*retain)(void*) noexcept,
+                               void (*release)(void*) noexcept, void** output) noexcept {
+    if (!opaque || !retain || !release || !output) return NtStatus::InvalidParameter;
+    *output = nullptr;
+    Gate guard;
+    if (!guard.held) return NtStatus::DeviceNotReady;
+    auto& file = *static_cast<FileContext*>(opaque);
+    if (!file.inUse || !file.owner || file.owner->offline || !file.imageReferences)
+        return NtStatus::InvalidDeviceState;
+    if (!file.imageControl) return NtStatus::ObjectNameNotFound;
+    if (file.retainControl != retain || file.releaseControl != release)
+        return NtStatus::InvalidDeviceState;
+    if (!retain(file.imageControl)) return NtStatus::NoMemory;
+    *output = file.imageControl;
+    return NtStatus::Success;
+}
 NtStatus publishImageControl(void* opaque, void* candidate, bool (*retain)(void*) noexcept,
                              void (*release)(void*) noexcept, void** output) noexcept {
     if (!opaque || !candidate || !retain || !release || !output) return NtStatus::InvalidParameter;
@@ -1208,6 +1243,7 @@ NtStatus openFile(uint64_t targetMount, std::u16string_view name, bool openIf, u
             backend.querySize = fileSize;
             backend.acquireImage = acquireImage;
             backend.releaseImage = releaseImage;
+            backend.referenceImageControl = referenceImageControl;
             backend.publishImageControl = publishImageControl;
             if (isSystemRootStore) backend.securityDescriptor = &g_rootStoreAcl;
             current = nullptr; return NtStatus::Success;

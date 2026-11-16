@@ -13,6 +13,12 @@ inline constexpr uint32_t CrashRecordSignature = 0x48535243; // "CRSH" on disk
 inline constexpr uint16_t CrashRecordVersion = 1;
 inline constexpr uint16_t CrashRecordHeaderSize = 248;
 inline constexpr size_t CrashStackCaptureBytes = 512;
+consteval uint64_t crashBuildIdentifier(const char* value) {
+    uint64_t hash = 14695981039346656037ULL;
+    while (*value) { hash ^= static_cast<uint8_t>(*value++); hash *= 1099511628211ULL; }
+    return hash ? hash : 1;
+}
+inline constexpr uint64_t CrashBuildIdentifier = crashBuildIdentifier(__DATE__ " " __TIME__);
 
 struct CrashRecord final {
     uint32_t signature{CrashRecordSignature};
@@ -55,7 +61,7 @@ static_assert(offsetof(CrashRecord, stack) == CrashRecordHeaderSize);
 inline void captureCrashRecord(CrashRecord& out, uint32_t code,
                                uint64_t p1, uint64_t p2, uint64_t p3,
                                uint64_t p4, const KTrapFrame* frame,
-                               uint64_t buildId = 0) noexcept {
+                               uint64_t buildId = CrashBuildIdentifier) noexcept {
     out = {};
     out.size = CrashRecordHeaderSize;
     out.bugCheckCode = code;
@@ -63,7 +69,7 @@ inline void captureCrashRecord(CrashRecord& out, uint32_t code,
     out.parameters[1] = p2;
     out.parameters[2] = p3;
     out.parameters[3] = p4;
-    out.buildId = buildId;
+    out.buildId = buildId ? buildId : CrashBuildIdentifier;
     out.processorNumber = g_CurrentCpu.processorNumber;
 
     auto* thread = g_CurrentCpu.currentThread;

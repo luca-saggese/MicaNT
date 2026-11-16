@@ -25,6 +25,9 @@ constexpr uint32_t kSectorSize = 512;
 constexpr uint64_t kMinimumHbaRegistersSize = 0x100;
 constexpr uint64_t kMaximumHbaRegistersSize = 0x1100;
 constexpr uint32_t kMaximumSectorsPerCommand = 128;
+constexpr uint8_t kCrashDumpTypeGuid[16] = {
+    0x4c,0x55,0x43,0x44,0x4d,0x50,0x4f,0x53,
+    0x80,0x00,0x4c,0x55,0x43,0x45,0x4f,0x53};
 constexpr size_t kFileContextCount = 32;
 constexpr size_t kMaximumPath = 256;
 constexpr uint32_t kFileReadData = 0x00000001;
@@ -91,6 +94,9 @@ struct DriverState {
     volatile uint32_t* Port{};
     uint8_t PortNumber{0xFF};
     uint64_t DiskSectors{};
+    uint64_t CrashDumpFirstLba{};
+    uint64_t CrashDumpSectorCount{};
+    uint64_t CrashDumpRegistrationToken{};
     uint8_t FlushCommand{};
     uint64_t CommandListDma{};
     uint64_t ReceivedFisDma{};
@@ -193,7 +199,8 @@ bool startPort(volatile uint32_t* port) noexcept {
     return true;
 }
 
-bool executeCommand(uint8_t command, uint64_t lba, uint16_t sectors) noexcept {
+bool executeCommand(uint8_t command, uint64_t lba, uint16_t sectors,
+                    bool crashMode = false) noexcept {
     const bool flush = command == 0xE7 || command == 0xEA;
     if (!g_state.Port || (!sectors && !flush) || sectors > kMaximumSectorsPerCommand) return false;
     auto& header = g_dma->commandList[0];
@@ -231,7 +238,14 @@ bool executeCommand(uint8_t command, uint64_t lba, uint16_t sectors) noexcept {
 #endif
     g_state.Port[0x10 / 4] = 0xFFFFFFFFu;
     g_state.Port[0x38 / 4] = 1;
-    if (!waitRegister(&g_state.Port[0x38 / 4], 1, 0, 500)) return false;
+    if (crashMode) {
+        bool completed{};
+        for (uint32_t poll = 0; poll < 1000000; ++poll) {
+            if ((g_state.Port[0x38 / 4] & 1u) == 0) { completed = true; break; }
+            __asm__ __volatile__("pause" ::: "memory");
+        }
+        if (!completed) return false;
+    } else if (!waitRegister(&g_state.Port[0x38 / 4], 1, 0, 500)) return false;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     const uint32_t taskFile = g_state.Port[0x20 / 4];
     return (taskFile & 0x21u) == 0;
@@ -296,6 +310,27 @@ bool hasSupportedFatVolume() noexcept {
             return true;
     }
     return false;
+}
+
+bool findCrashDumpExtent(uint64_t& firstLba, uint64_t& sectorCount) noexcept {
+    using namespace micant::storage::partition_table;
+    firstLba = sectorCount = 0;
+    Result result{};
+    const Device disk{nullptr, &readPartitionSectors, g_state.DiskSectors, kSectorSize,
+                      g_partitionScratch, sizeof(g_partitionScratch)};
+    if (discover(disk, g_partitionExtents,
+            sizeof(g_partitionExtents) / sizeof(g_partitionExtents[0]), result) != Status::Success ||
+        result.kind != TableKind::Gpt) return false;
+    for (size_t i = 0; i < result.count; ++i) {
+        const Extent& extent = g_partitionExtents[i];
+        if (std::memcmp(extent.typeGuid, kCrashDumpTypeGuid, sizeof(kCrashDumpTypeGuid)) != 0)
+            continue;
+        if (sectorCount || extent.sectorCount < 8 || extent.firstLba >= g_state.DiskSectors ||
+            extent.sectorCount > g_state.DiskSectors - extent.firstLba) return false;
+        firstLba = extent.firstLba;
+        sectorCount = extent.sectorCount;
+    }
+    return sectorCount >= 8;
 }
 
 bool writeSectors(uint64_t lba, uint16_t count, const void* source) noexcept {
@@ -530,6 +565,8 @@ bool initializeController() noexcept {
             g_state.DiskSectors = 0;
             continue;
         }
+        (void)findCrashDumpExtent(g_state.CrashDumpFirstLba,
+                                  g_state.CrashDumpSectorCount);
         g_state.PortNumber = portIndex;
         g_state.Initialized = true;
         g_controllerStatus = STATUS_SUCCESS;
@@ -578,6 +615,12 @@ bool drainPciTransactions() noexcept {
 
 bool cleanupController() noexcept {
     if (!g_state.Services) return true;
+    if (g_state.CrashDumpRegistrationToken) {
+        if (!g_state.Services->UnregisterCrashDumpStorage ||
+            g_state.Services->UnregisterCrashDumpStorage(g_state.Services->Context,
+                g_state.CrashDumpRegistrationToken) != STATUS_SUCCESS) return false;
+        g_state.CrashDumpRegistrationToken = 0;
+    }
     if (g_state.MountToken) {
         if (g_state.Services->UnmountFatBlockDevice(g_state.Services->Context, g_state.MountToken) != STATUS_SUCCESS) return false;
         g_state.MountToken = 0;
@@ -704,6 +747,50 @@ int32_t flushDisk(void* context) noexcept {
     return ok ? STATUS_SUCCESS : STATUS_DEVICE_DATA_ERROR;
 }
 
+bool crashDumpRead(void* context, uint64_t relativeLba, uint16_t count,
+                   void* output) noexcept {
+    auto* state = static_cast<DriverState*>(context);
+    if (state != &g_state || !state->Initialized || !output || !count || count > 8 ||
+        relativeLba >= state->CrashDumpSectorCount ||
+        count > state->CrashDumpSectorCount - relativeLba ||
+        g_ioLock.test_and_set(std::memory_order_acquire)) return false;
+    bool okay = (state->Port[0x38 / 4] & 1u) == 0 &&
+        (state->Port[0x34 / 4] & 1u) == 0 &&
+        readSectors(state->CrashDumpFirstLba + relativeLba, count, output);
+    spinUnlock(g_ioLock);
+    return okay;
+}
+
+bool crashDumpWrite(void* context, uint64_t relativeLba, uint16_t count,
+                    const void* input) noexcept {
+    auto* state = static_cast<DriverState*>(context);
+    if (state != &g_state || !state->Initialized || !input || !count || count > 8 ||
+        relativeLba >= state->CrashDumpSectorCount ||
+        count > state->CrashDumpSectorCount - relativeLba ||
+        g_ioLock.test_and_set(std::memory_order_acquire)) return false;
+    bool okay = (state->Port[0x38 / 4] & 1u) == 0 &&
+        (state->Port[0x34 / 4] & 1u) == 0;
+    if (okay) {
+        const size_t bytes = static_cast<size_t>(count) * kSectorSize;
+        std::memcpy(g_dma->data, input, bytes);
+        okay = executeCommand(0x35, state->CrashDumpFirstLba + relativeLba,
+                              count, true);
+    }
+    spinUnlock(g_ioLock);
+    return okay;
+}
+
+int32_t crashDumpFlush(void* context) noexcept {
+    auto* state = static_cast<DriverState*>(context);
+    if (state != &g_state || !state->Initialized || !state->FlushCommand ||
+        g_ioLock.test_and_set(std::memory_order_acquire)) return STATUS_DEVICE_BUSY;
+    const bool idle = (state->Port[0x38 / 4] & 1u) == 0 &&
+        (state->Port[0x34 / 4] & 1u) == 0;
+    const bool okay = idle && executeCommand(state->FlushCommand, 0, 0, true);
+    spinUnlock(g_ioLock);
+    return okay ? STATUS_SUCCESS : STATUS_DEVICE_DATA_ERROR;
+}
+
 void releaseBlockContext(void*) noexcept {
     // The backend context is static image state, so the generic Io object has
     // no allocation to release here. Published callbacks pin this boot image.
@@ -776,6 +863,21 @@ extern "C" int32_t DriverEntry(DriverObject* driverObject,
     g_state.Published = true;
     driverObject->DeviceExtension = &g_state;
     driverObject->DriverUnload = &unloadFailedDriver;
+    if (g_state.CrashDumpSectorCount >= 8 && services->Size >= sizeof(KernelServices) &&
+        services->CrashDumpStorageVersion == 1 && services->RegisterCrashDumpStorage) {
+        CrashDumpStorageV1 provider{sizeof(CrashDumpStorageV1), 1, &g_state,
+            g_state.CrashDumpSectorCount, crashDumpRead, crashDumpWrite, crashDumpFlush};
+        const int32_t registerStatus = services->RegisterCrashDumpStorage(
+            services->Context, &provider, &g_state.CrashDumpRegistrationToken);
+        if (registerStatus != STATUS_SUCCESS) {
+            g_state.CrashDumpRegistrationToken = 0;
+            services->Log(services->Context,
+                "AHCI crash-dump raw extent registration failed; crash evidence remains serial-only");
+        }
+    } else {
+        services->Log(services->Context,
+            "AHCI crash-dump reserved GPT extent unavailable; crash evidence remains serial-only");
+    }
     services->Log(services->Context, "AHCI writable block device mounted by FsRtl");
     return STATUS_SUCCESS;
 }

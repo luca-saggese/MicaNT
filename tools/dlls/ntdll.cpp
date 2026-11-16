@@ -120,7 +120,7 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtRaiseException(
                          ", %rax\n\tsyscall\n\tret\n\t");
 }
 
-extern "C" __declspec(dllexport) [[noreturn]] void RtlRestoreContext(
+extern "C" [[noreturn]] __declspec(dllexport) void RtlRestoreContext(
     micant::CONTEXT* context, ExceptionRecord64* exceptionRecord) noexcept;
 
 namespace {
@@ -1174,7 +1174,7 @@ namespace {
 }
 }
 
-extern "C" __declspec(dllexport) [[noreturn]] void RtlRaiseStatus(int32_t status) noexcept {
+extern "C" [[noreturn]] __declspec(dllexport) void RtlRaiseStatus(int32_t status) noexcept {
     raiseDispatchFailure(static_cast<uint32_t>(status), nullptr);
 }
 
@@ -1193,7 +1193,7 @@ extern "C" __declspec(dllexport) void RtlRaiseException(ExceptionRecord64* recor
     RtlRaiseStatus(status < 0 ? status : static_cast<int32_t>(0xC0000144u));
 }
 
-extern "C" __declspec(dllexport) [[noreturn]] void RtlRestoreContext(
+extern "C" [[noreturn]] __declspec(dllexport) void RtlRestoreContext(
     micant::CONTEXT* context, ExceptionRecord64* exceptionRecord) noexcept {
     if (!context) {
         raiseDispatchFailure(0xC000000Du, exceptionRecord);
@@ -1330,7 +1330,7 @@ __attribute__((naked, noreturn)) __declspec(dllexport) void KiUserApcDispatcher(
         "ud2\n");
 }
 
-__declspec(dllexport) [[noreturn]] void RtlUnwindEx(
+[[noreturn]] __declspec(dllexport) void RtlUnwindEx(
     void* targetFrame, void* targetIp, ExceptionRecord64* record,
     void* returnValue, micant::CONTEXT* context, void* /*historyTable*/) noexcept {
     const bool exitUnwind = targetFrame == nullptr;
@@ -1599,7 +1599,7 @@ extern "C" __declspec(dllexport) unsigned long RtlRemoveVectoredContinueHandler(
     return removeVectoredHandler(g_vectoredContinueHandlers, cookie);
 }
 
-extern "C" __declspec(dllexport) [[noreturn]] void KiUserExceptionDispatcher(
+extern "C" [[noreturn]] __declspec(dllexport) void KiUserExceptionDispatcher(
     ExceptionRecord64* record, micant::CONTEXT* context) noexcept {
     if (record && context && RtlDispatchException(record, context))
         RtlRestoreContext(context, nullptr);
@@ -1663,6 +1663,20 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtCreateProcessEx(
 #endif
 }
 
+// The MicaNT native profile implements the documented NT user-process
+// creation contract on a dedicated service slot. This is not the Windows
+// per-build syscall index; the exported NTDLL name and AMD64 argument ABI are
+// the stable boundary used by user-mode Kernel32.
+__attribute__((naked)) __declspec(dllexport) int32_t NtCreateUserProcess(
+    void**, void**, uint32_t, uint32_t, void*, void*, uint32_t, uint32_t,
+    void*, void*, void*) noexcept {
+#if defined(__x86_64__)
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovq $0x173, %rax\n\tsyscall\n\tret\n\t");
+#else
+    return 0;
+#endif
+}
+
 struct UserListEntry64 { uintptr_t next, previous; };
 struct UserLoaderData64 {
     uint32_t length;
@@ -1700,7 +1714,7 @@ extern "C" __declspec(dllexport) uint64_t NtYieldExecution() noexcept;
 // The kernel enters this routine for each new user thread. The first thread
 // initializes file-backed DLLs in the PEB's loader order before calling the
 // executable entrypoint; later threads wait for that transaction to finish.
-__declspec(dllexport) [[noreturn]] void RtlUserThreadStart(
+[[noreturn]] __declspec(dllexport) void RtlUserThreadStart(
     void* startRoutine, void* parameter) noexcept {
     uintptr_t teb{};
     __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
@@ -1862,6 +1876,7 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtClose(void* /*handle*/) n
 #endif
 }
 
+
 __attribute__((naked)) __declspec(dllexport) int32_t NtCreateEvent(
     void** /*handle*/, uint32_t /*access*/, void* /*attributes*/, uint32_t /*type*/, uint8_t /*initial*/) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x48, %eax\n\tsyscall\n\tret\n\t");
@@ -1944,6 +1959,21 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtFlushBuffersFile(
     void* /*fileHandle*/, void* /*ioStatusBlock*/) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovl $" MICANT_STRINGIFY(MICANT_SSN_NT_FLUSH_BUFFERS_FILE)
                          ", %eax\n\tsyscall\n\tret\n\t");
+}
+
+// Private MicaNT crash-recovery services. These deliberately use the
+// project-specific Micant* names; they are not public Windows NT APIs.
+__attribute__((naked)) __declspec(dllexport) int32_t MicantReadPendingCrashDump(
+    void* /*buffer*/, uint32_t /*capacity*/, uint32_t* /*bytesRequired*/,
+    uint64_t* /*dumpId*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $" MICANT_STRINGIFY(MICANT_SSN_MICANT_READ_PENDING_CRASH_DUMP)
+                         ", %eax\n\tsyscall\n\tretq\n");
+}
+
+__attribute__((naked)) __declspec(dllexport) int32_t MicantAcknowledgeCrashDump(
+    uint64_t /*dumpId*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $" MICANT_STRINGIFY(MICANT_SSN_MICANT_ACKNOWLEDGE_CRASH_DUMP)
+                         ", %eax\n\tsyscall\n\tretq\n");
 }
 
 __attribute__((naked)) __declspec(dllexport) int32_t NtQueryInformationFile(
