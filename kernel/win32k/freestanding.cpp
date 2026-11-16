@@ -509,14 +509,14 @@ bool ensureCompositorSlot(Window& window) noexcept {
     auto* root = rootWindow(&window);
     if (!root) return false;
     if (root->compositorSlot == UINT32_MAX) {
-        bool occupied[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+        bool occupied[MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY]{};
         for (const auto& candidate : g_windows)
             if (candidate.active && candidate.compositorSlot <
-                MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY)
                 occupied[candidate.compositorSlot] = true;
         size_t slot = 0;
-        while (slot < MICANT_COMPOSITOR_SURFACE_CAPACITY && occupied[slot]) ++slot;
-        if (slot == MICANT_COMPOSITOR_SURFACE_CAPACITY) return false;
+        while (slot < MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY && occupied[slot]) ++slot;
+        if (slot == MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY) return false;
         root->compositorSlot = static_cast<uint32_t>(slot);
     }
     window.compositorSlot = root->compositorSlot;
@@ -1963,6 +1963,62 @@ void publishCompositorSurfaces() noexcept {
             window.animationTarget.right, window.animationTarget.bottom};
         info.animationGeneration = window.animationGeneration;
         for (size_t character = 0; character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
+             window.title[character]; ++character)
+            info.title[character] = window.title[character];
+    }
+    // Child HWNDs share their root window's pixel block. Publish their client
+    // rectangles as metadata layers so the compositor's existing child overlay
+    // pass can restore their pixels after the root client is drawn.
+    for (const auto& window : g_windows) {
+        if (!window.active || !window.parent || !window.visible ||
+            !hasVisibleAncestors(window)) continue;
+        auto* root = rootWindow(const_cast<Window*>(&window));
+        if (!root || root->compositorSlot >= MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY)
+            continue;
+        size_t metadataIndex = 0;
+        while (metadataIndex < MICANT_COMPOSITOR_SURFACE_CAPACITY &&
+               store->surfaces[metadataIndex].window) ++metadataIndex;
+        if (metadataIndex == MICANT_COMPOSITOR_SURFACE_CAPACITY) break;
+
+        int64_t windowX{}, windowY{}, rootX{}, rootY{};
+        if (!windowScreenOrigin(window, windowX, windowY) ||
+            !windowScreenOrigin(*root, rootX, rootY)) continue;
+        const int32_t frame = frameInset(window);
+        const int32_t caption = captionHeight(window);
+        const int32_t clientWidth = std::max(1, window.width - frame * 2);
+        const int32_t clientHeight = std::max(1,
+            window.height - frame * 2 - caption);
+        const int32_t rootFrame = frameInset(*root);
+        const int32_t rootCaption = captionHeight(*root);
+        const int64_t clientX = windowX - rootX - rootFrame + frame;
+        const int64_t clientY = windowY - rootY - rootFrame - rootCaption + frame + caption;
+        const int32_t rootClientWidth = std::max(1, root->width - rootFrame * 2);
+        const int32_t rootClientHeight = std::max(1,
+            root->height - rootFrame * 2 - rootCaption);
+        if (clientX < 0 || clientY < 0 ||
+            clientX + clientWidth > rootClientWidth ||
+            clientY + clientHeight > rootClientHeight) continue;
+
+        auto& info = store->surfaces[metadataIndex];
+        info.window = window.handle;
+        info.parentWindow = window.parent;
+        info.ownerProcessId = window.ownerProcessId;
+        info.x = static_cast<int32_t>(windowX + frame);
+        info.y = static_cast<int32_t>(windowY + frame + caption);
+        info.width = static_cast<uint32_t>(clientWidth);
+        info.height = static_cast<uint32_t>(clientHeight);
+        info.pitch = MICANT_COMPOSITOR_SCREEN_WIDTH;
+        info.zOrder = static_cast<uint32_t>(visibleOrder(window));
+        info.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
+            MICANT_COMPOSITOR_SURFACE_VISIBLE;
+        info.pixelOffset = static_cast<uint32_t>(
+            root->compositorSlot * MICANT_COMPOSITOR_SURFACE_PIXELS +
+            clientY * MICANT_COMPOSITOR_SCREEN_WIDTH + clientX);
+        info.activeWriters = window.activeWriters;
+        info.style = window.style;
+        info.contentGeneration = window.contentGeneration;
+        for (size_t character = 0;
+             character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
              window.title[character]; ++character)
             info.title[character] = window.title[character];
     }

@@ -142,7 +142,7 @@ uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
         MicaWin32kRequest value{};
         value.args[0] = reinterpret_cast<uint64_t>(context.window);
         if (!request(MICANT_WIN32K_OP_GET_WINDOW_SURFACE, value) ||
-            !value.result || value.result > MICANT_COMPOSITOR_SURFACE_CAPACITY ||
+            !value.result || value.result > MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY ||
             value.rect.left < 0 || value.rect.top < 0 ||
             value.rect.right <= value.rect.left || value.rect.bottom <= value.rect.top ||
             value.rect.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
