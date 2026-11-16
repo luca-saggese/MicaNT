@@ -605,6 +605,8 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
     if (!dstPixels || !srcPixels) return 0;
     const uint32_t dstPitch = dst->window
         ? MICANT_COMPOSITOR_SCREEN_WIDTH : dstWidth;
+    const uint32_t srcPitch = src->window
+        ? MICANT_COMPOSITOR_SCREEN_WIDTH : srcWidth;
     const int64_t left = x;
     const int64_t top = y;
     const int64_t right = left + width;
@@ -619,7 +621,7 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
             const int64_t dx = left + column;
             if (sx < 0 || sx >= srcWidth || dx < 0 || dx >= dstWidth) continue;
             uint32_t& target = dstPixels[static_cast<size_t>(dy) * dstPitch + dx];
-            const uint32_t sourcePixel = srcPixels[static_cast<size_t>(sy) * srcWidth + sx];
+            const uint32_t sourcePixel = srcPixels[static_cast<size_t>(sy) * srcPitch + sx];
             if (rasterOperation == kSrcCopy) {
                 target = sourcePixel;
             } else {
@@ -640,6 +642,8 @@ int32_t MicaWin32kFillRect(void* dc, const MicaWin32kRect* rectangle,
     uint32_t width{}, height{};
     uint32_t* pixels = pixelsFor(*context, width, height);
     if (!pixels || !width || !height) return 0;
+    const uint32_t pitch = context->window
+        ? MICANT_COMPOSITOR_SCREEN_WIDTH : width;
     const int64_t left = std::max<int64_t>(0, rectangle->left);
     const int64_t top = std::max<int64_t>(0, rectangle->top);
     const int64_t right = std::min<int64_t>(width, rectangle->right);
@@ -650,8 +654,8 @@ int32_t MicaWin32kFillRect(void* dc, const MicaWin32kRect* rectangle,
     const uint32_t blue = (colorRef >> 16) & 0xFFu;
     const uint32_t pixel = 0xFF000000u | (red << 16) | (green << 8) | blue;
     for (int64_t y = top; y < bottom; ++y)
-        std::fill(pixels + static_cast<size_t>(y) * width + left,
-                  pixels + static_cast<size_t>(y) * width + right, pixel);
+        std::fill(pixels + static_cast<size_t>(y) * pitch + left,
+                  pixels + static_cast<size_t>(y) * pitch + right, pixel);
     return 1;
 }
 
@@ -664,6 +668,8 @@ int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
     uint32_t width{}, height{};
     uint32_t* pixels = pixelsFor(*context, width, height);
     if (!pixels || !width || !height) return 0;
+    const uint32_t pitch = context->window
+        ? MICANT_COMPOSITOR_SCREEN_WIDTH : width;
     const int64_t left = std::max<int64_t>(0, rectangle->left);
     const int64_t top = std::max<int64_t>(0, rectangle->top);
     const int64_t right = std::min<int64_t>(width, rectangle->right);
@@ -677,7 +683,7 @@ int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
     const uint32_t blue = argb & 0xFFu;
     for (int64_t y = top; y < bottom; ++y) {
         for (int64_t x = left; x < right; ++x) {
-            uint32_t& destination = pixels[static_cast<size_t>(y) * width + x];
+            uint32_t& destination = pixels[static_cast<size_t>(y) * pitch + x];
             const uint32_t dstRed = (destination >> 16) & 0xFFu;
             const uint32_t dstGreen = (destination >> 8) & 0xFFu;
             const uint32_t dstBlue = destination & 0xFFu;

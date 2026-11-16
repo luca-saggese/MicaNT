@@ -1844,6 +1844,16 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
         (void)fillButtonRect(dc, {0, 0, 1, height}, kColorBorder);
         (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
     }
+    // WhiteSur expresses the focused entry ring with box-shadow, which the
+    // bounded native snapshot does not model. Keep the focus state visible
+    // with a two-pixel GDI ring while retaining UxTheme for the surface.
+    if (edit.state & kButtonFocused) {
+        constexpr uint32_t kFocusRing = 0xFF4A90D9u;
+        (void)fillButtonRect(dc, {0, 0, width, 2}, kFocusRing);
+        (void)fillButtonRect(dc, {0, height - 2, width, height}, kFocusRing);
+        (void)fillButtonRect(dc, {0, 0, 2, height}, kFocusRing);
+        (void)fillButtonRect(dc, {width - 2, 0, width, height}, kFocusRing);
+    }
 
     uint32_t textColor = (edit.state & kButtonDisabled) ? 0xFF777777u : kColorWindowText;
     if (theme) {
@@ -1859,10 +1869,8 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
         std::max(textLeft, width - 4), std::max(textTop, height - 1)};
     const bool hasTextBounds = textBounds.right > textBounds.left &&
                                textBounds.bottom > textBounds.top;
-    bool textDrawn = edit.length == 0 || !hasTextBounds || (theme &&
-        DrawThemeText(theme, dc, 1, themeState, edit.text, edit.length,
-                      0x00000020u | 0x00000800u, 0, &textBounds) == 0);
-    if (!textDrawn && edit.length && hasTextBounds) {
+    bool textDrawn = edit.length == 0 || !hasTextBounds;
+    if (edit.length && hasTextBounds) {
         void* clipToken{};
         const bool clipped = MicaGdiPushClipRect(dc, &textBounds, &clipToken) != 0 && clipToken;
         if (clipped) {

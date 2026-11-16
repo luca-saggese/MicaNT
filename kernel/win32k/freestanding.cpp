@@ -435,6 +435,14 @@ Window* rootWindow(Window* window) noexcept {
     return window;
 }
 
+uint64_t visibleOrder(const Window& window) noexcept {
+    auto* root = rootWindow(const_cast<Window*>(&window));
+    const uint64_t rootOrder = root ? root->zOrder : window.zOrder;
+    const bool child = root && root != &window;
+    return rootOrder <= (UINT32_MAX - 1u) / 2u
+        ? rootOrder * 2u + (child ? 1u : 0u) : UINT32_MAX;
+}
+
 bool belongsToWindow(const Window* window, uint64_t ancestorHandle) noexcept {
     for (size_t depth = 0; window && depth < kWindowCapacity; ++depth) {
         if (window->handle == ancestorHandle) return true;
@@ -492,7 +500,7 @@ Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
         const int64_t localY = static_cast<int64_t>(y) - window.y;
         if (!window.active || !window.visible || window.iconic || localX < 0 ||
             localY < 0 || localX >= window.width || localY >= window.height) continue;
-        if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
+        if (!topmost || visibleOrder(window) > visibleOrder(*topmost)) topmost = &window;
     }
     return topmost;
 }
@@ -1426,6 +1434,11 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         (void)activateWindow(target);
         markWindowBounds(*target);
         target->zOrder = nextZOrder();
+        // Focus follows the actual hit-test target. Mouse capture only reroutes
+        // button messages; it must not keep focus stranded on a child after a
+        // click lands on its top-level client window.
+        if (!target->parent && g_focusedWindow != target->handle)
+            (void)setFocusedWindow(target);
         const uint8_t button = captionButtonAt(*target,
             static_cast<int32_t>(static_cast<int64_t>(x) - target->x),
             static_cast<int32_t>(static_cast<int64_t>(y) - target->y));
@@ -1634,7 +1647,7 @@ void publishCompositorSurfaces() noexcept {
         info.width = static_cast<uint32_t>(window.width);
         info.height = static_cast<uint32_t>(window.height);
         info.pitch = MICANT_COMPOSITOR_SCREEN_WIDTH;
-        info.zOrder = static_cast<uint32_t>(window.zOrder);
+        info.zOrder = static_cast<uint32_t>(visibleOrder(window));
         info.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
             (window.visible ? MICANT_COMPOSITOR_SURFACE_VISIBLE : 0u) |
             (window.iconic ? MICANT_COMPOSITOR_SURFACE_ICONIC : 0u) |

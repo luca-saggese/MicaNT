@@ -465,6 +465,20 @@ def verify_mouse(
                     checkbox_region_changed(checkbox_hover, checkbox_pressed) < 2 or \
                     checkbox_region_changed(checkbox_normal, checkbox_checked) < 2:
                 raise RuntimeError("User32 checkbox state did not change its rendered pixels")
+            move_to(590, 320)
+            set_left_button(True)
+            set_left_button(False)
+            edit_normal = screen("theme-edit-normal.ppm")
+            move_to(340, 314)
+            set_left_button(True)
+            set_left_button(False)
+            move_to(490, 314)
+            edit_focused = screen("theme-edit-focused.ppm")
+            def edit_region_changed(left: bytes, right: bytes) -> int:
+                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
+                           for y in range(300, 328) for x in range(200, 480))
+            if edit_region_changed(edit_normal, edit_focused) < 1:
+                raise RuntimeError("User32 EDIT focus did not change its rendered pixels")
             button_normal = screen("theme-button-normal.ppm")
             move_to(590, 320)
             button_hover = screen("theme-button-hover.ppm")

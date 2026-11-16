@@ -272,10 +272,13 @@ the evidence named here, not just declarations or a successful compile.
   they passed on QEMU serial. Added a production `EDIT` class with bounded text
   storage, text messages, `WM_CHAR` append/backspace, readonly behavior,
   `EN_CHANGE`, themed UxTheme/GDI drawing and Base fallback. Explorer's QEMU
-  probe verified text round-trip, input, readonly, unsupported-style rejection
-  and focus pixel change. The latest run passed these probes plus the checkbox
-  and radio serial checks, then stopped at the preexisting BUTTON pressed-pixel
-  assertion (`/private/tmp/micant-theme-edit-surface-slots-block2-final`).
+  probe verified text round-trip, input, readonly, unsupported-style rejection,
+  and GDI-rendered text/focus pixels. QEMU also passed checkbox state pixels,
+  EDIT focus pixels, BUTTON hover/pressed/capture and Space activation. The
+  latest full run still fails the BUTTON focus-clear pixel check after clicking
+  the parent client (`/private/tmp/micant-theme-controls-parent-focus`);
+  focus transfer/paint invalidation remains open. Menus, tabs, scrollbars,
+  Tab traversal and full control state/clipping coverage remain open.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
