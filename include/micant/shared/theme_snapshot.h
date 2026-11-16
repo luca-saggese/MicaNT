@@ -23,6 +23,7 @@ enum MicaThemeStyleFlags {
     MICANT_THEME_HAS_FONT_WEIGHT = 1u << 10,
     MICANT_THEME_HAS_FONT_STYLE = 1u << 11,
     MICANT_THEME_HAS_FONT_FAMILY = 1u << 12,
+    MICANT_THEME_HAS_BACKDROP_BLUR = 1u << 13,
 };
 
 typedef struct MicaThemeStyleSnapshot {
@@ -62,7 +63,7 @@ static_assert(sizeof(MicaThemeSnapshot) ==
 
 inline bool MicaThemeSnapshotIsValid(const MicaThemeSnapshot* snapshot,
                                      size_t byteLength) noexcept {
-    constexpr uint32_t knownFlags = (1u << 13) - 1u;
+    constexpr uint32_t knownFlags = (1u << 14) - 1u;
     if (!snapshot || byteLength != sizeof(MicaThemeSnapshot) ||
         snapshot->magic != MICANT_THEME_SNAPSHOT_MAGIC ||
         snapshot->version != MICANT_THEME_SNAPSHOT_VERSION ||

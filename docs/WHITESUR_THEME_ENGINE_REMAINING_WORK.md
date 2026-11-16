@@ -503,10 +503,15 @@ the evidence named here, not just declarations or a successful compile.
   opaque square Base path. A synthetic compositor pixel probe for corner,
   backdrop opacity, shadow and Base fallback passed in QEMU
   (`/private/tmp/micant-theme-point8-effects-corrected-1794805980`).
-- [ ] Add a stable backdrop scratch pipeline for bounded blur and connect
-  transparency/radius/shadow/blur preferences to per-user settings. Verify
-  effects on real Explorer windows and after move/resize, including resource
-  failure fallback; current QEMU pixel proof is a synthetic compositor surface.
+- [x] Add a stable backdrop scratch pipeline for bounded radius-2 box blur,
+  gated separately from opacity. A non-uniform two-surface pixel probe in QEMU
+  verifies the blur result differs from opacity-only composition.
+- [ ] Connect transparency/radius/shadow/blur preferences to per-user settings.
+  Verify effects on real Explorer windows and after move/resize, including
+  resource failure fallback; current QEMU pixel proof is synthetic.
+- [ ] The WhiteSur style producer and saved per-user effect preferences do not
+  emit the compositor blur bit yet; activation from a selected profile remains
+  open.
 - [ ] Keep VirtIO-GPU 2D scanout evidence distinct from GPU-composition claims;
   no hardware or accelerated-composition verification is established.
 

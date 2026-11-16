@@ -8,13 +8,31 @@
 #include <stddef.h>
 #include <stdint.h>
 
+extern "C" void* memset(void* destination, int value, size_t count) {
+    auto* bytes = static_cast<volatile uint8_t*>(destination);
+    for (size_t index = 0; index < count; ++index)
+        bytes[index] = static_cast<uint8_t>(value);
+    return destination;
+}
+
+extern "C" void* memcpy(void* destination, const void* source, size_t count) {
+    auto* output = static_cast<volatile uint8_t*>(destination);
+    const auto* input = static_cast<const volatile uint8_t*>(source);
+    for (size_t index = 0; index < count; ++index) output[index] = input[index];
+    return destination;
+}
+
 namespace {
 
 uint32_t g_frame[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
 constexpr int64_t kWindowEffectRadiusLimit = 32;
 constexpr int64_t kWindowShadowExtent = 6;
+constexpr int64_t kWindowBlurRadius = 2;
 uint32_t g_windowCornerBackdrop[4][kWindowEffectRadiusLimit *
                                    kWindowEffectRadiusLimit]{};
+uint32_t g_windowBlurBackdrop[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
+uint16_t g_windowBlurRowSums[kWindowBlurRadius * 2 + 1]
+    [MICANT_COMPOSITOR_SCREEN_WIDTH][3]{};
 MicaCompositorMetadataStore g_metadataSnapshot{};
 bool g_presentFailureReported{};
 bool g_hasPresentedFrame{};
@@ -46,9 +64,9 @@ struct AnimationRuntime {
 AnimationRuntime g_animationRuntime[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
 AnimationFrame g_animationFrames[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
 MicaCompositorMetadataStore g_effectProbeMetadata{};
-MicaCompositorSurfaceInfo g_effectProbeSurface{};
+MicaCompositorSurfaceInfo g_effectProbeSurfaces[2]{};
 AnimationFrame g_effectProbeAnimations[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
-uint32_t g_effectProbePixels[64u * 64u]{};
+uint32_t g_effectProbePixels[128u * 128u + 64u * 64u]{};
 
 uint64_t animationClockMilliseconds() noexcept {
     const auto* shared = reinterpret_cast<volatile const micant::KUserSharedData*>(
@@ -231,6 +249,78 @@ uint32_t applyPremultipliedOpacity(uint32_t pixel, uint8_t opacity) noexcept {
         scale(pixel & 0xFFu);
 }
 
+void captureWindowBlurBackdrop(uint32_t width, uint32_t height) noexcept {
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    for (size_t index = 0; index < pixelCount; ++index)
+        g_windowBlurBackdrop[index] = g_frame[index];
+}
+
+void applyWindowBackdropBlur(int64_t left, int64_t top,
+                             int64_t right, int64_t bottom,
+                             uint8_t opacity, uint32_t width,
+                             uint32_t height) noexcept {
+    left = left < g_composeClip.left ? g_composeClip.left : left;
+    top = top < g_composeClip.top ? g_composeClip.top : top;
+    right = right > g_composeClip.right ? g_composeClip.right : right;
+    bottom = bottom > g_composeClip.bottom ? g_composeClip.bottom : bottom;
+    if (left >= right || top >= bottom || !opacity || opacity == 255) return;
+
+    const auto captureHorizontal = [&](int64_t screenY, size_t rowSlot) noexcept {
+        if (screenY < 0) screenY = 0;
+        if (screenY >= height) screenY = static_cast<int64_t>(height) - 1;
+        for (int64_t x = left; x < right; ++x) {
+            uint32_t red = 0, green = 0, blue = 0;
+            for (int64_t dx = -kWindowBlurRadius; dx <= kWindowBlurRadius; ++dx) {
+                int64_t sampleX = x + dx;
+                if (sampleX < 0) sampleX = 0;
+                if (sampleX >= width) sampleX = static_cast<int64_t>(width) - 1;
+                const uint32_t pixel = g_windowBlurBackdrop[
+                    static_cast<size_t>(screenY) * width +
+                    static_cast<size_t>(sampleX)];
+                red += (pixel >> 16) & 0xFFu;
+                green += (pixel >> 8) & 0xFFu;
+                blue += pixel & 0xFFu;
+            }
+            auto& row = g_windowBlurRowSums[rowSlot][x];
+            row[0] = static_cast<uint16_t>(red);
+            row[1] = static_cast<uint16_t>(green);
+            row[2] = static_cast<uint16_t>(blue);
+        }
+    };
+
+    constexpr size_t kernel = static_cast<size_t>(kWindowBlurRadius * 2 + 1);
+    size_t head = 0;
+    for (size_t row = 0; row < kernel; ++row)
+        captureHorizontal(top - kWindowBlurRadius + static_cast<int64_t>(row), row);
+
+    for (int64_t y = top; y < bottom; ++y) {
+        for (int64_t x = left; x < right; ++x) {
+            uint32_t red = 0, green = 0, blue = 0;
+            for (size_t row = 0; row < kernel; ++row) {
+                const auto& sums = g_windowBlurRowSums[(head + row) % kernel][x];
+                red += sums[0];
+                green += sums[1];
+                blue += sums[2];
+            }
+            constexpr uint32_t sampleCount = static_cast<uint32_t>(kernel * kernel);
+            const uint32_t blurred = 0xFF000000u |
+                (((red + sampleCount / 2) / sampleCount) << 16) |
+                (((green + sampleCount / 2) / sampleCount) << 8) |
+                ((blue + sampleCount / 2) / sampleCount);
+            const size_t destination = static_cast<size_t>(y) * width +
+                static_cast<size_t>(x);
+            const uint32_t tint = (static_cast<uint32_t>(opacity) << 24) |
+                (blurred & 0x00FFFFFFu);
+            g_frame[destination] = blend(tint, g_frame[destination]);
+        }
+        if (y + 1 < bottom) {
+            head = (head + 1) % kernel;
+            captureHorizontal(y + kWindowBlurRadius + 1,
+                              (head + kernel - 1) % kernel);
+        }
+    }
+}
+
 void blendWindowShadow(int64_t left, int64_t top, int64_t right, int64_t bottom,
                        uint32_t width, uint32_t height) noexcept {
     // Shadow work is bounded to six strips around the window, not its area.
@@ -407,6 +497,12 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
     const auto* normalButton = themeValid ? &metadata.theme.styles[0] : nullptr;
     const auto* windowStyle = themeValid
         ? &metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT] : nullptr;
+    const bool blurRequested = windowStyle &&
+        (windowStyle->flags & MICANT_THEME_HAS_BACKDROP_BLUR) &&
+        (windowStyle->flags & MICANT_THEME_HAS_OPACITY) &&
+        windowStyle->opacity > 0 && windowStyle->opacity < 255;
+    if (blurRequested && (clip.left != 0 || clip.top != 0 ||
+        clip.right != width || clip.bottom != height)) return false;
 
     fillRect(clip.left, clip.top, clip.right, clip.bottom, 0xFF1C3A5Cu,
              width, height);
@@ -478,10 +574,14 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         const int64_t sourceClientHeight = surface.height - sourceFrame * 2 - sourceCaption;
         if (clientWidth <= 0 || clientHeight <= 0) continue;
 
-        const bool validWindowStyle = windowStyle && windowStyle->flags;
+        const bool validWindowStyle = topLevel && windowStyle && windowStyle->flags;
         const uint8_t opacity = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_OPACITY)
             ? windowStyle->opacity : 255u;
+        const bool blurWindow = validWindowStyle &&
+            (windowStyle->flags & MICANT_THEME_HAS_BACKDROP_BLUR) &&
+            (windowStyle->flags & MICANT_THEME_HAS_OPACITY) &&
+            opacity > 0 && opacity < 255;
         int64_t radius = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_RADIUS)
             ? windowStyle->borderRadius : 0;
@@ -489,6 +589,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         if (radius > kWindowEffectRadiusLimit) radius = kWindowEffectRadiusLimit;
         if (radius * 2 > windowWidth) radius = windowWidth / 2;
         if (radius * 2 > windowHeight) radius = windowHeight / 2;
+        if (blurWindow) captureWindowBlurBackdrop(width, height);
         if (radius > 0) {
             blendWindowShadow(windowLeft, windowTop, windowRight, windowBottom,
                               width, height);
@@ -718,6 +819,9 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         const int64_t right = clientRight < clip.right ? clientRight : clip.right;
         const int64_t bottom = clientBottom < clip.bottom ? clientBottom : clip.bottom;
         if (right <= clipLeft || bottom <= clipTop) continue;
+        if (blurWindow)
+            applyWindowBackdropBlur(left, top, clientRight, clientBottom,
+                                    opacity, width, height);
         for (int64_t y = clipTop; y < bottom; ++y) {
             const size_t sourceY = animation.active
                 ? static_cast<size_t>(y - top) * static_cast<size_t>(sourceClientHeight) /
@@ -855,7 +959,15 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
                    DamageSet& damage) noexcept {
     constexpr ScreenRect fullScreen{
         0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH, MICANT_COMPOSITOR_SCREEN_HEIGHT};
-    bool fullRedraw = !g_hasPresentedFrame ||
+    const bool blurEnabled =
+        MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme)) &&
+        (metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].flags &
+         MICANT_THEME_HAS_BACKDROP_BLUR) &&
+        (metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].flags &
+         MICANT_THEME_HAS_OPACITY) &&
+        metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].opacity > 0 &&
+        metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].opacity < 255;
+    bool fullRedraw = blurEnabled || !g_hasPresentedFrame ||
         (metadata.dirtyFlags & MICANT_COMPOSITOR_DIRTY_FULL) != 0 ||
         (metadata.dirtyFlags & ~MICANT_COMPOSITOR_DIRTY_FULL) != 0 ||
         metadata.themeGeneration != g_lastThemeGeneration ||
@@ -925,7 +1037,7 @@ bool verifyWindowEffectsRasterizer() noexcept {
     metadata.version = MICANT_COMPOSITOR_STORE_VERSION;
     metadata.screenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
     metadata.screenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
-    metadata.surfaceCapacity = 1;
+    metadata.surfaceCapacity = 2;
     metadata.theme.magic = MICANT_THEME_SNAPSHOT_MAGIC;
     metadata.theme.version = MICANT_THEME_SNAPSHOT_VERSION;
     metadata.theme.headerSize = static_cast<uint16_t>(offsetof(MicaThemeSnapshot, styles));
@@ -933,46 +1045,66 @@ bool verifyWindowEffectsRasterizer() noexcept {
     metadata.theme.controlCount = MICANT_THEME_CONTROL_COUNT;
     metadata.theme.stateCount = MICANT_THEME_STATE_COUNT;
     auto& style = metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT];
-    style.flags = MICANT_THEME_HAS_RADIUS | MICANT_THEME_HAS_OPACITY;
+    style.flags = MICANT_THEME_HAS_RADIUS | MICANT_THEME_HAS_OPACITY |
+        MICANT_THEME_HAS_BACKDROP_BLUR;
     style.borderRadius = 8;
     style.opacity = 128;
 
-    auto& surface = g_effectProbeSurface;
-    surface.window = 1;
+    auto& underlay = g_effectProbeSurfaces[0];
+    underlay = {};
+    underlay.window = 1;
+    underlay.x = 90;
+    underlay.y = 90;
+    underlay.width = underlay.height = 100;
+    underlay.pitch = 100;
+    underlay.zOrder = 1;
+    underlay.style = 0x40000000u; // child: no frame, no window effects.
+    underlay.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
+        MICANT_COMPOSITOR_SURFACE_VISIBLE;
+    metadata.surfaces[0] = underlay;
+
+    auto& surface = g_effectProbeSurfaces[1];
+    surface = {};
+    surface.window = 2;
     surface.x = 100;
     surface.y = 100;
     surface.width = surface.height = surface.pitch = 64;
+    surface.pixelOffset = 128u * 128u;
+    surface.zOrder = 2;
     surface.style = 0x00040000u | 0x00800000u | 0x00400000u;
     surface.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
         MICANT_COMPOSITOR_SURFACE_VISIBLE |
         MICANT_COMPOSITOR_SURFACE_FOREGROUND;
-    auto& probeSurface = metadata.surfaces[0];
-    probeSurface.window = surface.window;
-    probeSurface.x = surface.x;
-    probeSurface.y = surface.y;
-    probeSurface.width = surface.width;
-    probeSurface.height = surface.height;
-    probeSurface.pitch = surface.pitch;
-    probeSurface.style = surface.style;
-    probeSurface.flags = surface.flags;
-    for (auto& pixel : g_effectProbePixels) pixel = 0x80808080u;
-    constexpr uint32_t background = 0xFF1C3A5Cu;
-    constexpr ScreenRect clip{94, 94, 170, 170};
+    metadata.surfaces[1] = surface;
+    for (auto& pixel : g_effectProbePixels) pixel = 0;
+    for (uint32_t y = 0; y < 100; ++y)
+        for (uint32_t x = 0; x < 100; ++x)
+            g_effectProbePixels[static_cast<size_t>(y) * 100 + x] =
+                ((x + y) & 1u) ? 0xFFFFFFFFu : 0xFF000000u;
+    for (uint32_t pixel = 0; pixel < 64u * 64u; ++pixel)
+        g_effectProbePixels[128u * 128u + pixel] = 0x80808080u;
+    constexpr uint32_t background = 0xFF000000u;
+    constexpr ScreenRect clip{0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH,
+                              MICANT_COMPOSITOR_SCREEN_HEIGHT};
     if (!composeRegion(metadata, g_effectProbePixels, clip,
                        g_effectProbeAnimations, nullptr)) return false;
+    const uint32_t blurredBackdrop = blend(0x807A7A7Au, background);
     const uint32_t expectedClient =
         micant::shared::graphics::PremultipliedSourceOver(
+            0x40404040u, blurredBackdrop);
+    const uint32_t unblurredClient =
+        micant::shared::graphics::PremultipliedSourceOver(
             0x40404040u, background);
-    const uint32_t expectedShadow = blend(0x2C000000u, background);
+    const uint32_t expectedShadow = blend(0x2C000000u, 0xFFFFFFFFu);
     const size_t corner = 100u * MICANT_COMPOSITOR_SCREEN_WIDTH + 100u;
     const size_t client = 140u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
     const size_t shadow = 99u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
-    if (g_frame[corner] != background) {
+    if (g_frame[corner] != 0xFF000000u) {
         constexpr char message[] = "[MicaNT Compositor] Rounded corner pixel mismatch\r\n";
         print(message, sizeof(message) - 1);
         return false;
     }
-    if (g_frame[client] != expectedClient) {
+    if (g_frame[client] != expectedClient || expectedClient == unblurredClient) {
         constexpr char message[] = "[MicaNT Compositor] Window opacity pixel mismatch\r\n";
         print(message, sizeof(message) - 1);
         return false;
