@@ -112,6 +112,7 @@ struct ShellState {
     HWND themeScrollProbe{};
     uint32_t themeScrollNotifications{};
     bool themeScrollProbeReported{};
+    bool themeWindowScrollProbeReported{};
     HWND themeTabProbe{};
     bool themeTabProbeReported{};
     bool themeTabInputReported{};
@@ -122,6 +123,9 @@ struct ShellState {
     uint32_t themeRadioNotifications{};
     bool themeStateProbeAttempted{};
     bool themeMenuApiReported{};
+    bool themeMenuPopupStarted{};
+    bool themeMenuMouseCommand{};
+    bool themeMenuKeyboardCommand{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -2155,9 +2159,71 @@ void openView(View view) noexcept {
             PrintLine(g.themeScrollProbeReported
                 ? "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified"
                 : "[MicaNT Theme] Production User32 SCROLLBAR message mismatch");
+
+            constexpr int32_t kSbVert = 1;
+            constexpr uint32_t kEsbDisableDown = 0x0002u;
+            SCROLLINFO windowInfo{};
+            windowInfo.cbSize = sizeof(windowInfo);
+            windowInfo.fMask = kSifRange | kSifPage | kSifPos;
+            windowInfo.nMin = 4;
+            windowInfo.nMax = 40;
+            windowInfo.nPage = 5;
+            windowInfo.nPos = 15;
+            const bool ownerSet = SetScrollInfo(app->hwnd, kSbVert,
+                &windowInfo, FALSE) == 15;
+            SCROLLINFO windowReadback{};
+            windowReadback.cbSize = sizeof(windowReadback);
+            windowReadback.fMask = windowInfo.fMask;
+            const bool ownerReadback = GetScrollInfo(app->hwnd, kSbVert,
+                &windowReadback) && windowReadback.nMin == 4 &&
+                windowReadback.nMax == 40 && windowReadback.nPage == 5 &&
+                windowReadback.nPos == 15;
+            int32_t oldWindowPosition = SetScrollPos(app->hwnd, kSbVert,
+                18, FALSE);
+            const bool ownerPosition = oldWindowPosition == 15 &&
+                GetScrollPos(app->hwnd, kSbVert) == 18;
+            const bool ownerRange = SetScrollRange(app->hwnd, kSbVert,
+                0, 50, FALSE) && GetScrollRange(app->hwnd, kSbVert,
+                &windowReadback.nMin, &windowReadback.nMax) &&
+                windowReadback.nMin == 0 && windowReadback.nMax == 50;
+            const bool ownerArrows = EnableScrollBar(app->hwnd, kSbVert,
+                kEsbDisableDown) != FALSE;
+            g.themeWindowScrollProbeReported = ownerSet && ownerReadback &&
+                ownerPosition && ownerRange && ownerArrows;
+            PrintLine(g.themeWindowScrollProbeReported
+                ? "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified"
+                : "[MicaNT Theme] Window SB_VERT state message mismatch");
         } else {
             PrintLine("[MicaNT Theme] Production User32 SCROLLBAR creation failed");
         }
+    }
+    if (view == View::MyComputer && g.themeMenuApiReported &&
+        !g.themeMenuPopupStarted) {
+        g.themeMenuPopupStarted = true;
+        constexpr UINT kMfDisabled = 0x0002u;
+        constexpr UINT kMfChecked = 0x0008u;
+        HMENU popup = CreatePopupMenu();
+        const bool populated = popup &&
+            AppendMenuW(popup, MF_STRING, 0x8844u, L"Open item") &&
+            AppendMenuW(popup, kMfDisabled, 0x8845u, L"Unavailable") &&
+            AppendMenuW(popup, kMfChecked, 0x8846u, L"Pinned item");
+        if (populated) {
+            PrintLine("[MicaNT Theme] Production User32 popup mouse selection ready");
+            const bool mouseTrack = TrackPopupMenu(popup, 0, 680, 200, 0,
+                app->hwnd, nullptr) != FALSE;
+            PrintLine(mouseTrack && g.themeMenuMouseCommand
+                ? "[MicaNT Theme] Production User32 popup mouse selection delivered WM_COMMAND"
+                : "[MicaNT Theme] Production User32 popup mouse selection failed");
+            PrintLine("[MicaNT Theme] Production User32 popup keyboard selection ready");
+            const bool keyboardTrack = TrackPopupMenu(popup, 0, 680, 200, 0,
+                app->hwnd, nullptr) != FALSE;
+            PrintLine(keyboardTrack && g.themeMenuKeyboardCommand
+                ? "[MicaNT Theme] Production User32 popup keyboard selection delivered WM_COMMAND"
+                : "[MicaNT Theme] Production User32 popup keyboard selection failed");
+        } else {
+            PrintLine("[MicaNT Theme] Production User32 popup creation failed");
+        }
+        if (popup) (void)DestroyMenu(popup);
     }
 }
 
@@ -2222,6 +2288,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (message == WM_COMMAND && LOWORD(wParam) == 0x777u &&
         HIWORD(wParam) == 0x0300u) {
         ++g.themeEditChangeNotifications;
+        return 0;
+    }
+    if (message == WM_COMMAND && !lParam && HIWORD(wParam) == 0 &&
+        LOWORD(wParam) == 0x8844u) {
+        g.themeMenuMouseCommand = true;
+        PrintLine("[MicaNT Theme] User32 popup mouse owner command received");
+        return 0;
+    }
+    if (message == WM_COMMAND && !lParam && HIWORD(wParam) == 0 &&
+        LOWORD(wParam) == 0x8846u) {
+        g.themeMenuKeyboardCommand = true;
+        PrintLine("[MicaNT Theme] User32 popup keyboard owner command received");
         return 0;
     }
     if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&

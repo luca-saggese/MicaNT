@@ -423,15 +423,19 @@ def verify_mouse(
                         "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
                         "[MicaNT Theme] Production User32 menu ownership and query round-trip verified" in serial and
+                        "[MicaNT Theme] Production User32 popup mouse selection ready" in serial and
                         "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified" in serial and
                         "[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified" in serial and
                         "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial and
-                        "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified" in serial):
+                        "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified" in serial and
+                        "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified" in serial):
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
                     raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
                 if "[MicaNT Theme] Production User32 menu round-trip failed" in serial:
                     raise RuntimeError("Production User32 menu API round-trip failed")
+                if "[MicaNT Theme] Production User32 popup creation failed" in serial:
+                    raise RuntimeError("Production User32 popup menu could not be created")
                 if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
                     raise RuntimeError("Production User32 BUTTON state or notification failed")
                 if "[MicaNT Theme] BUTTON text message mismatch" in serial:
@@ -451,9 +455,55 @@ def verify_mouse(
                 if "[MicaNT Theme] Production User32 SCROLLBAR message mismatch" in serial or \
                         "[MicaNT Theme] Production User32 SCROLLBAR creation failed" in serial:
                     raise RuntimeError("Production User32 SCROLLBAR behavior failed")
+                if "[MicaNT Theme] Window SB_VERT state message mismatch" in serial:
+                    raise RuntimeError("Production User32 window scrollbar state failed")
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")
+            menu_popup = screen("theme-menu-popup.ppm")
+            menu_changed = sum(
+                pixel_at(before, x, y) != pixel_at(menu_popup, x, y)
+                for y in range(198, 278) for x in range(678, 922)
+            )
+            if menu_changed < 100:
+                raise RuntimeError("Themed User32 popup did not change its screen pixels")
+            move_to(720, 213)
+            set_left_button(True)
+            time.sleep(0.1)
+            set_left_button(False)
+            menu_mouse_command = "[MicaNT Theme] User32 popup mouse owner command received"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if menu_mouse_command in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("User32 popup mouse selection did not send WM_COMMAND")
+            keyboard_ready = "[MicaNT Theme] Production User32 popup keyboard selection ready"
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if keyboard_ready in serial_path.read_text(
+                        encoding="utf-8", errors="replace"):
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("User32 popup did not reopen for keyboard selection")
+            for qcode in ("down", "ret"):
+                for down in (True, False):
+                    execute("input-send-event", {"events": [{
+                        "type": "key", "data": {"down": down,
+                            "key": {"type": "qcode", "data": qcode}},
+                    }]})
+            keyboard_command = "[MicaNT Theme] User32 popup keyboard owner command received"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if keyboard_command in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("User32 popup keyboard selection did not send WM_COMMAND")
             checkbox_normal = screen("theme-checkbox-unchecked.ppm")
             move_to(590, 364)
             checkbox_hover = screen("theme-checkbox-hover.ppm")

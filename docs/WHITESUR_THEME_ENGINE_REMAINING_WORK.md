@@ -220,9 +220,17 @@ the evidence named here, not just declarations or a successful compile.
   Ring 3/DIB assertion and latest integrated --verify-input run all passed.
 - [ ] Complete production menu drawing, popup hit testing, selection and
   command dispatch. The canonical `user32_boot` now exports bounded menu
-  creation, item mutation/query, submenu ownership and HWND attachment APIs;
-  unsupported popup display and `DrawMenuBar` fail explicitly until those
-  interactions are implemented. Explorer's QEMU round-trip marker passed.
+  creation, item mutation/query, submenu ownership and HWND attachment APIs.
+  `TrackPopupMenu`/`TrackPopupMenuEx` now open a bounded modal popup, draw menu,
+  selected, checked and disabled rows through MENU UxTheme with clipped GDI
+  Base fallback, support mouse hover/click and arrow/Enter/Escape selection,
+  and send `WM_COMMAND` to the owner. Destroying the source menu or owner closes
+  the popup. `DrawMenuBar` and nested submenu display remain unsupported. The
+  Explorer QEMU probe covers popup pixels, mouse command and keyboard selection;
+  all three passed in `/private/tmp/micant-theme-controls-popup-final`. The
+  full input suite later stopped at the Control Panel text-color pixel
+  assertion, so only the focused menu evidence is claimed. Attached menu bars
+  (`DrawMenuBar`) and nested submenu display remain unsupported.
   `BUTTON`, `EDIT`, `SysTabControl32`, and `SCROLLBAR` have production
   UxTheme/GDI renderers with explicit fallbacks.
 - [x] The canonical `user32_boot` now registers `BUTTON` lazily and renders
@@ -291,18 +299,24 @@ the evidence named here, not just declarations or a successful compile.
   after focus loss; Space activation and focus-loss/no-activation checks pass.
   The same QEMU run passed SCROLLBAR range/page/position readback, hover pixels,
   arrow input, `WM_HSCROLL`, and thumb movement, plus the production menu
-  ownership/query round-trip. It later stopped at the Explorer Control Panel
-  text-color pixel assertion. Menu popup rendering/input and complete disabled,
-  clipping, auto-radio exclusivity, tab traversal, and per-thread capture
-  coverage remain open.
+  ownership/query round-trip. Popup rendering/input passed separately in
+  `/private/tmp/micant-theme-controls-popup-final`; mouse and keyboard both
+  delivered the expected owner commands. That run also verified window-owned
+  SB_VERT range/page/position and arrow-enable API round trips. The full input
+  suite later stopped at the Explorer Control Panel text-color pixel assertion.
+  Window-owned scrollbar state is not yet drawn or input-routed. Complete
+  disabled/clipping, auto-radio exclusivity, tab traversal, per-thread capture,
+  attached-window scrollbar visuals/input and attached menu bar coverage remain
+  open.
   A production `SCROLLBAR` child class now owns bounded range/page/position
   state, exports SB_CTL get/set APIs, paints UxTheme parts with a Base fallback,
   and supports arrow/page/thumb input with capture and parent scroll
   notifications. QEMU verified its range/page/position readback, hover pixels,
   arrow input, `WM_HSCROLL` and thumb movement in
-  `/private/tmp/micant-theme-controls-focus-verified`. Only
-  `SB_CTL` is implemented; attached-window scrollbars, repeat timers, and
-  complete disabled/clipping coverage remain open. Menus also remain open.
+  `/private/tmp/micant-theme-controls-popup-final`. SB_CTL is fully rendered;
+  attached-window SB_HORZ/SB_VERT APIs now retain bounded range/page/position
+  state, but their visuals and input are not implemented. Repeat timers and
+  complete disabled/clipping coverage remain open.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
