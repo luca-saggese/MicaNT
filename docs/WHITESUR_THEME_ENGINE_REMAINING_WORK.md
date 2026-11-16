@@ -512,6 +512,10 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 9. Fallback and robustness
 
+- [x] After queue exhaustion, unavailable-profile and malformed-snapshot
+  failures, reload a valid Dark profile and then restore the original profile.
+  QEMU confirmed both publications succeeded and the full interactive suite
+  remained operational (`/private/tmp/micant-theme-point9-valid-recovery-1794806800`).
 - [ ] Add repeatable QEMU cases for missing package/profile, malformed CSS,
   missing assets and bounded allocation/compile/render failure.
 - [ ] For each case, verify Explorer, input, focus, move/resize and presentation

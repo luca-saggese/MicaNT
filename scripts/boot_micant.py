@@ -372,7 +372,8 @@ def verify_mouse(
                         "[MicaNT Theme] Unavailable profile kept the previous complete theme" in startup_serial and
                         "[MicaNT Compositor] Window opacity, radius, shadow and Base pixels verified" in startup_serial and
                         "[MicaNT Theme] Auto schedule boundary Light/Dark pixels verified" in startup_serial and
-                        "[MicaNT Theme] Malformed theme snapshot kept the previous complete theme" in startup_serial):
+                        "[MicaNT Theme] Malformed theme snapshot kept the previous complete theme" in startup_serial and
+                        "[MicaNT Theme] Valid profile recovered and original theme restored" in startup_serial):
                     break
                 time.sleep(0.1)
             else:
