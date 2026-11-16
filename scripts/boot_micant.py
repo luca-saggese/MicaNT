@@ -370,7 +370,8 @@ def verify_mouse(
                         "[MicaNT Theme] Userenv resolved profile path from current token SID" in startup_serial and
                         "[MicaNT Theme] Full notification queue rejected theme atomically and recovered" in startup_serial and
                         "[MicaNT Theme] Unavailable profile kept the previous complete theme" in startup_serial and
-                        "[MicaNT Compositor] Window opacity, radius, shadow and Base pixels verified" in startup_serial):
+                        "[MicaNT Compositor] Window opacity, radius, shadow and Base pixels verified" in startup_serial and
+                        "[MicaNT Theme] Auto schedule boundary Light/Dark pixels verified" in startup_serial):
                     break
                 time.sleep(0.1)
             else:

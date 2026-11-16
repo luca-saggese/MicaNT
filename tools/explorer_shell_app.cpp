@@ -1559,6 +1559,45 @@ void updateAutomaticTheme() noexcept {
         : "[MicaNT Theme] Auto schedule changed to Dark");
 }
 
+void verifyAutomaticThemeBoundary() noexcept {
+    if (!g.visualThemeReady || !g.taskbarPixels) {
+        PrintLine("[MicaNT Theme] Auto boundary pixel probe unavailable");
+        return;
+    }
+    g.themeRollbackProbe = g.visualTheme;
+    char previousProfile[sizeof(g.themeProfile)]{};
+    std::memcpy(previousProfile, g.themeProfile, sizeof(previousProfile));
+    const bool previousAuto = g.themeAuto;
+    const MicaWin32kSystemTime previousTime = g.systemTime;
+    const size_t pixelIndex = 5u * g.screenW + 90u;
+
+    g.themeAuto = true;
+    g.systemTime.hour = 17;
+    g.systemTime.minute = 59;
+    updateAutomaticTheme();
+    const uint32_t lightPixel = g.taskbarPixels[pixelIndex];
+    const bool lightSelected = themeProfileEquals(g.themeProfile, "WhiteSur/Light") &&
+        lightPixel == activeShellPalette().selected;
+
+    g.systemTime.hour = 18;
+    g.systemTime.minute = 0;
+    updateAutomaticTheme();
+    const uint32_t darkPixel = g.taskbarPixels[pixelIndex];
+    const bool darkSelected = themeProfileEquals(g.themeProfile, "WhiteSur/Dark") &&
+        darkPixel == activeShellPalette().selected && darkPixel != lightPixel;
+
+    loadActiveVisualTheme(previousProfile);
+    const bool restored = themeProfileEquals(g.themeProfile, previousProfile) &&
+        MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
+        std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
+                    sizeof(g.themeRollbackProbe)) == 0;
+    g.themeAuto = previousAuto;
+    g.systemTime = previousTime;
+    PrintLine(lightSelected && darkSelected && restored
+        ? "[MicaNT Theme] Auto schedule boundary Light/Dark pixels verified"
+        : "[MicaNT Theme] Auto schedule boundary pixel probe failed");
+}
+
 DWORD WINAPI themeScheduleWorker(void* context) noexcept {
     const HWND desktop = static_cast<HWND>(context);
     for (;;) {
@@ -3088,6 +3127,7 @@ extern "C" void _start(const char* = nullptr) {
     redrawDesktop();
     updateClock();
     verifyThemeChangeQueueRollback();
+    verifyAutomaticThemeBoundary();
     HCURSOR busyCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32514));
     if (busyCursor && g.desktop) {
         HCURSOR previousCursor = SetCursor(busyCursor);

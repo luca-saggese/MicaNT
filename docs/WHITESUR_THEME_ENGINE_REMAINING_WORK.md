@@ -447,9 +447,11 @@ the evidence named here, not just declarations or a successful compile.
   the matching snapshot in the existing process. QEMU verified worker startup,
   Auto selection from Purple and the current `Dark (18:00-06:00)` effective
   choice in serial (`/private/tmp/micant-theme-point5-input-run11`).
-- [ ] Verify an actual scheduled Light/Dark boundary crossing and its resulting
-  pixels with a deterministic QEMU clock fixture; the current run verified the
-  active policy and periodic worker, but did not wait for a boundary.
+- [x] Exercise the scheduled update path with a deterministic 17:59 → 18:00
+  QEMU clock fixture. Explorer published Light then Dark, checked that the
+  taskbar DIB pixel changed with the effective theme, restored its prior
+  snapshot/profile, and the full input run passed
+  (`/private/tmp/micant-theme-point5-auto-boundary-1794806259`).
 
 ### 6. Preferences and multiuser settings
 
