@@ -174,6 +174,7 @@ MICANT_WIN32K_API intptr_t MicaWin32kSetWindowLongPtrW(void*, int32_t, intptr_t)
 MICANT_WIN32K_API intptr_t MicaWin32kGetWindowLongPtrW(void*, int32_t);
 MICANT_WIN32K_API intptr_t MicaWin32kDefWindowProcW(void*, uint32_t, uintptr_t, intptr_t);
 MICANT_WIN32K_API void* MicaWin32kGetDC(void*);
+MICANT_WIN32K_API int32_t MicaWin32kGetDCSurface(void*, uint32_t**, uint32_t*, uint32_t*, uint32_t*);
 MICANT_WIN32K_API int32_t MicaWin32kReleaseDC(void*, void*);
 MICANT_WIN32K_API void* MicaWin32kCreateCompatibleDC(void*);
 MICANT_WIN32K_API int32_t MicaWin32kDeleteDC(void*);

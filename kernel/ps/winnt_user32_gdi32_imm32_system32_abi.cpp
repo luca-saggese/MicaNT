@@ -775,6 +775,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kGetWindowLongPtrW);
     MICA_WIN32K_PROC(MicaWin32kDefWindowProcW);
     MICA_WIN32K_PROC(MicaWin32kGetDC);
+    MICA_WIN32K_PROC(MicaWin32kGetDCSurface);
     MICA_WIN32K_PROC(MicaWin32kReleaseDC);
     MICA_WIN32K_PROC(MicaWin32kCreateCompatibleDC);
     MICA_WIN32K_PROC(MicaWin32kDeleteDC);
@@ -4018,7 +4019,7 @@ void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
     if (!hdc || !h) return nullptr;
 #if defined(BUILD_SYSTEM32_GDI32_DLL)
     if (GdiFontObject* font = FindGdiFont(h)) {
-        GdiDcSelection* dc = FindGdiDc(hdc, false);
+        GdiDcSelection* dc = FindGdiDc(hdc, true);
         if (!dc) return nullptr;
         void* previous = dc->font ? static_cast<void*>(dc->font) : Gdi32_GetStockObject(13);
         if (!previous) return nullptr;
@@ -4110,7 +4111,7 @@ void* Gdi32_CreateFontW(int32_t height, int32_t width, int32_t escapement,
 }
 
 int32_t Gdi32_SetTextColor(void* hdc, uint32_t color) noexcept {
-    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    GdiDcSelection* dc = FindGdiDc(hdc, true);
     if (!dc) return static_cast<int32_t>(0xFFFFFFFFu);
     const uint32_t previous = dc->textColor;
     dc->textColor = color & 0x00FFFFFFu;
@@ -4119,7 +4120,7 @@ int32_t Gdi32_SetTextColor(void* hdc, uint32_t color) noexcept {
 
 int32_t Gdi32_SetBkMode(void* hdc, int32_t mode) noexcept {
     if (mode != 1) return 0; // Opaque backgrounds are not part of this renderer subset.
-    GdiDcSelection* dc = FindGdiDc(hdc, false);
+    GdiDcSelection* dc = FindGdiDc(hdc, true);
     if (!dc) return 0;
     const int32_t previous = dc->backgroundMode;
     dc->backgroundMode = mode;
@@ -4131,8 +4132,22 @@ int32_t Gdi32_TextOutW(void* hdc, int32_t x, int32_t y,
     if (!hdc || !text || count <= 0 || count > 4096) return 0;
     GdiDcSelection* dc = FindGdiDc(hdc, false);
     if (!dc || !dc->font || dc->backgroundMode != 1) return 0;
+    GdiBitmapSurface windowSurface{};
     GdiBitmapSurface* bitmap = FindGdiBitmap(dc->bitmap);
-    if (!bitmap || !bitmap->pixels || !bitmap->topDown) return 0;
+    if (!bitmap) {
+        using SurfaceFn = int32_t (*)(void*, uint32_t**, uint32_t*, uint32_t*, uint32_t*);
+        const auto getSurface = Win32kProc<SurfaceFn>("MicaWin32kGetDCSurface");
+        uint32_t* pixels{};
+        uint32_t clientWidth{}, clientHeight{}, stride{};
+        if (!getSurface || !getSurface(hdc, &pixels, &clientWidth, &clientHeight, &stride) ||
+            !pixels || !clientWidth || !clientHeight || stride < clientWidth) return 0;
+        windowSurface = {nullptr, pixels, stride, clientHeight, true};
+        bitmap = &windowSurface;
+        if (dc->clip.right <= dc->clip.left || dc->clip.bottom <= dc->clip.top)
+            dc->clip = {0, 0, static_cast<int32_t>(clientWidth),
+                        static_cast<int32_t>(clientHeight)};
+    }
+    if (!bitmap->pixels || !bitmap->topDown) return 0;
     char utf8[16385]{};
     if (!Utf16ToUtf8(text, count, utf8, sizeof(utf8))) return 0;
     const uint32_t r = dc->textColor & 0xFF;

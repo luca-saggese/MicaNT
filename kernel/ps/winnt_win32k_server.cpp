@@ -573,6 +573,32 @@ void* MicaWin32kGetDC(void* window) {
     return context ? reinterpret_cast<void*>(context->handle) : nullptr;
 }
 
+int32_t MicaWin32kGetDCSurface(void* dc, uint32_t** pixels,
+                               uint32_t* clientWidth, uint32_t* clientHeight,
+                               uint32_t* stride) {
+    if (pixels) *pixels = nullptr;
+    if (clientWidth) *clientWidth = 0;
+    if (clientHeight) *clientHeight = 0;
+    if (stride) *stride = 0;
+    auto* context = findContext(dc);
+    if (!context || context->memory || !context->window || !pixels ||
+        !clientWidth || !clientHeight || !stride) return 0;
+    uint32_t surfaceWidth{}, surfaceHeight{};
+    auto* surface = pixelsFor(*context, surfaceWidth, surfaceHeight);
+    if (!surface || !surfaceWidth || !surfaceHeight) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(context->window);
+    if (!request(MICANT_WIN32K_OP_GET_CLIENT_RECT, value) || !value.result ||
+        value.rect.right <= value.rect.left || value.rect.bottom <= value.rect.top ||
+        static_cast<uint32_t>(value.rect.right) > surfaceWidth ||
+        static_cast<uint32_t>(value.rect.bottom) > surfaceHeight) return 0;
+    *pixels = surface;
+    *clientWidth = static_cast<uint32_t>(value.rect.right - value.rect.left);
+    *clientHeight = static_cast<uint32_t>(value.rect.bottom - value.rect.top);
+    *stride = MICANT_COMPOSITOR_SCREEN_WIDTH;
+    return 1;
+}
+
 int32_t MicaWin32kReleaseDC(void* window, void* dc) {
     auto* context = findContext(dc);
     if (!context || context->memory || context->window != window) return 0;
