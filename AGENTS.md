@@ -59,3 +59,5 @@ Before ending a milestone assignment, check all of the following:
 - Were the user's restrictions on tests, QEMU, commits, and local changes respected?
 - Is the verification status truthful, including any deferred checks?
 If an acceptance item remains and a concrete edit can still advance it, continue implementing instead of presenting a final completion report. If an actual runtime limit interrupts the job, clearly report an interrupted task and a precise resume point; do not claim the milestone is finished.
+
+- **QEMU execution:** Always run QEMU commands with elevated sandbox permissions (`sandbox_permissions: "require_escalated"`) from the very first attempt. Never attempt to launch QEMU inside the restricted sandbox. Request authorization if required by the execution environment, and do not fall back to sandboxed execution.
