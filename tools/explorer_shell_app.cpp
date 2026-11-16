@@ -109,6 +109,10 @@ struct ShellState {
     HWND themeEditProbe{};
     bool themeEditProbeReported{};
     uint32_t themeEditChangeNotifications{};
+    HWND themeTabProbe{};
+    bool themeTabProbeReported{};
+    bool themeTabInputReported{};
+    uint32_t themeTabSelectionNotifications{};
     HWND themeThreeStateProbe{};
     HWND themeRadioProbe{};
     uint32_t themeThreeStateNotifications{};
@@ -1985,6 +1989,94 @@ void openView(View view) noexcept {
             PrintLine("[MicaNT Theme] Production User32 EDIT creation failed");
         }
     }
+    if (view == View::MyComputer && !g.themeTabProbeReported) {
+        constexpr uint32_t kIccTab = 0x00000008u;
+        constexpr uint32_t kTcmFirst = 0x1300u;
+        constexpr uint32_t kTcmGetItemCount = kTcmFirst + 4u;
+        constexpr uint32_t kTcmDeleteItem = kTcmFirst + 8u;
+        constexpr uint32_t kTcmGetCurSel = kTcmFirst + 11u;
+        constexpr uint32_t kTcmSetCurSel = kTcmFirst + 12u;
+        constexpr uint32_t kTcmInsertItemW = kTcmFirst + 62u;
+        constexpr uint32_t kTcmGetItemW = kTcmFirst + 60u;
+        constexpr uint32_t kTcmSetItemW = kTcmFirst + 61u;
+        constexpr uint32_t kWmGetDlgCode = 0x0087u;
+        constexpr uint32_t kTcifText = 0x0001u;
+        constexpr uint32_t kTcifParam = 0x0008u;
+        struct InitArgs { uint32_t size, classes; } initArgs{sizeof(InitArgs), kIccTab};
+        struct TabItemW {
+            uint32_t mask, state, stateMask;
+            wchar_t* text;
+            int32_t textCapacity, image;
+            intptr_t parameter;
+        };
+        const auto sameText = [](const wchar_t* left, const wchar_t* right) noexcept {
+            if (!left || !right) return false;
+            for (size_t index = 0; index < 32; ++index) {
+                if (left[index] != right[index]) return false;
+                if (!left[index]) return true;
+            }
+            return false;
+        };
+        const bool initialized = InitCommonControlsEx(&initArgs) != 0;
+        g.themeTabProbe = initialized ? CreateWindowExW(0, L"SysTabControl32", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 260, 320, 30, app->hwnd,
+            reinterpret_cast<HMENU>(0x77Au), nullptr, nullptr) : nullptr;
+        if (g.themeTabProbe) {
+            wchar_t files[] = L"Files";
+            wchar_t details[] = L"Details";
+            wchar_t revised[] = L"Details+";
+            TabItemW first{kTcifText | kTcifParam, 0, 0, files, 32, -1, 11};
+            TabItemW second{kTcifText | kTcifParam, 0, 0, details, 32, -1, 22};
+            const intptr_t insertedFirst = SendMessageW(g.themeTabProbe,
+                kTcmInsertItemW, static_cast<WPARAM>(-1),
+                reinterpret_cast<LPARAM>(&first));
+            const intptr_t insertedSecond = SendMessageW(g.themeTabProbe,
+                kTcmInsertItemW, static_cast<WPARAM>(-1),
+                reinterpret_cast<LPARAM>(&second));
+            wchar_t itemText[32]{};
+            TabItemW getSecond{kTcifText | kTcifParam, 0, 0, itemText, 32, -1, 0};
+            const bool getRoundTrip = SendMessageW(g.themeTabProbe, kTcmGetItemW,
+                1, reinterpret_cast<LPARAM>(&getSecond)) != 0 &&
+                getSecond.parameter == 22 && sameText(itemText, L"Details");
+            TabItemW updateSecond{kTcifText, 0, 0, revised, 32, -1, 0};
+            const bool setRoundTrip = SendMessageW(g.themeTabProbe, kTcmSetItemW,
+                1, reinterpret_cast<LPARAM>(&updateSecond)) != 0;
+            TabItemW verifySecond{kTcifText, 0, 0, itemText, 32, -1, 0};
+            const bool updatedText = setRoundTrip && SendMessageW(g.themeTabProbe,
+                kTcmGetItemW, 1, reinterpret_cast<LPARAM>(&verifySecond)) != 0 &&
+                sameText(itemText, L"Details+");
+            const intptr_t firstSelection = SendMessageW(g.themeTabProbe,
+                kTcmSetCurSel, 1, 0);
+            const intptr_t secondSelection = SendMessageW(g.themeTabProbe,
+                kTcmSetCurSel, 0, 0);
+            const bool selected = firstSelection == 0 && secondSelection == 1 &&
+                SendMessageW(g.themeTabProbe, kTcmGetCurSel, 0, 0) == 0;
+            const bool deleted = SendMessageW(g.themeTabProbe, kTcmDeleteItem,
+                1, 0) != 0 && SendMessageW(g.themeTabProbe, kTcmGetItemCount,
+                0, 0) == 1 && SendMessageW(g.themeTabProbe, kTcmGetCurSel, 0, 0) == 0;
+            second.text = revised;
+            const bool reinserted = SendMessageW(g.themeTabProbe, kTcmInsertItemW,
+                static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(&second)) == 1 &&
+                SendMessageW(g.themeTabProbe, kTcmGetItemCount, 0, 0) == 2;
+            (void)SendMessageW(g.themeTabProbe, kTcmSetCurSel, 0, 0);
+            (void)SetFocus(g.themeTabProbe);
+            const bool focusAndArrowRequest = GetFocus() == g.themeTabProbe &&
+                SendMessageW(g.themeTabProbe, kWmGetDlgCode, 0, 0) == 0x0001u;
+            if (focusAndArrowRequest)
+                PrintLine("[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified");
+            ShowWindow(g.themeTabProbe, SW_SHOW);
+            UpdateWindow(g.themeTabProbe);
+            g.themeTabProbeReported = insertedFirst == 0 && insertedSecond == 1 &&
+                getRoundTrip && updatedText && selected && deleted && reinserted &&
+                focusAndArrowRequest &&
+                SendMessageW(g.themeTabProbe, kTcmGetCurSel, 0, 0) == 0;
+            PrintLine(g.themeTabProbeReported
+                ? "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified"
+                : "[MicaNT Theme] SysTabControl32 message or creation mismatch");
+        } else {
+            PrintLine("[MicaNT Theme] SysTabControl32 initialization or creation failed");
+        }
+    }
 }
 
 void toggleStart() noexcept {
@@ -2059,6 +2151,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         LOWORD(wParam) == 0x775u) {
         ++g.themeRadioNotifications;
         return 0;
+    }
+    if (message == WM_NOTIFY && lParam && g.themeTabProbe) {
+        struct NotifyHeader { HWND hwndFrom; UINT_PTR idFrom; int32_t code; };
+        const auto* header = reinterpret_cast<const NotifyHeader*>(lParam);
+        if (header->hwndFrom == g.themeTabProbe && header->idFrom == 0x77Au &&
+            header->code == -551) { // TCN_SELCHANGE
+            ++g.themeTabSelectionNotifications;
+            const intptr_t selection = SendMessageW(g.themeTabProbe, 0x130Bu, 0, 0);
+            if (g.themeTabProbeReported && g.themeTabSelectionNotifications == 1 &&
+                selection == 1)
+                PrintLine("[MicaNT Theme] SysTabControl32 mouse selection notification verified");
+            if (g.themeTabProbeReported && g.themeTabSelectionNotifications == 2 &&
+                selection == 0) {
+                g.themeTabInputReported = true;
+                PrintLine("[MicaNT Theme] SysTabControl32 keyboard selection notification verified");
+            }
+            return 0;
+        }
     }
     if (hwnd == g.desktop &&
         (message == 0x001A /* WM_SETTINGCHANGE */ ||

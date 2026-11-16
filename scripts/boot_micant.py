@@ -422,6 +422,8 @@ def verify_mouse(
                         "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
+                        "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified" in serial and
+                        "[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified" in serial and
                         "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial):
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
@@ -436,6 +438,9 @@ def verify_mouse(
                 if "[MicaNT Theme] User32 3-state/radio message mismatch" in serial or \
                         "[MicaNT Theme] User32 3-state/radio creation failed" in serial:
                     raise RuntimeError("Production User32 three-state/radio behavior failed")
+                if "[MicaNT Theme] SysTabControl32 message or creation mismatch" in serial or \
+                        "[MicaNT Theme] SysTabControl32 initialization or creation failed" in serial:
+                    raise RuntimeError("Production SysTabControl32 message behavior failed")
                 if "[MicaNT Theme] Production User32 EDIT message mismatch" in serial or \
                         "[MicaNT Theme] Production User32 EDIT creation failed" in serial:
                     raise RuntimeError("Production User32 EDIT behavior failed")
@@ -479,6 +484,41 @@ def verify_mouse(
                            for y in range(300, 328) for x in range(200, 480))
             if edit_region_changed(edit_normal, edit_focused) < 1:
                 raise RuntimeError("User32 EDIT focus did not change its rendered pixels")
+            tab_normal = screen("theme-tab-normal.ppm")
+            move_to(440, 275)
+            set_left_button(True)
+            time.sleep(0.1)
+            set_left_button(False)
+            mouse_notification = "[MicaNT Theme] SysTabControl32 mouse selection notification verified"
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if mouse_notification in serial_path.read_text(
+                        encoding="utf-8", errors="replace"):
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("SysTabControl32 mouse selection did not notify its parent")
+            move_to(590, 500)
+            tab_selected = screen("theme-tab-selected.ppm")
+            def tab_region_changed(left: bytes, right: bytes) -> int:
+                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
+                           for y in range(260, 290) for x in range(200, 520))
+            if tab_region_changed(tab_normal, tab_selected) < 4:
+                raise RuntimeError("SysTabControl32 selection did not change tab pixels")
+            send_key("left", True)
+            send_key("left", False)
+            keyboard_notification = "[MicaNT Theme] SysTabControl32 keyboard selection notification verified"
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if keyboard_notification in serial_path.read_text(
+                        encoding="utf-8", errors="replace"):
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("SysTabControl32 left-key selection did not notify its parent")
+            tab_keyboard_selected = screen("theme-tab-keyboard-selected.ppm")
+            if tab_region_changed(tab_selected, tab_keyboard_selected) < 4:
+                raise RuntimeError("SysTabControl32 keyboard selection did not change tab pixels")
             button_normal = screen("theme-button-normal.ppm")
             move_to(590, 320)
             button_hover = screen("theme-button-hover.ppm")

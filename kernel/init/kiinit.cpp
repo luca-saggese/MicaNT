@@ -4136,34 +4136,45 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 if (!km::hid::KbdClassPopInputData(packet)) break;
                 uint16_t virtualKey = 0;
                 uint8_t character = 0;
-                switch (packet.MakeCode) {
-                    case 0x01: virtualKey = 0x1B; break;
-                    case 0x0E: virtualKey = 0x08; break;
-                    case 0x0F: virtualKey = 0x09; break;
-                    case 0x1C: virtualKey = 0x0D; break;
-                    case 0x3D: virtualKey = 0x72; break;
-                    case 0x1D: virtualKey = 0x11; break;
-                    case 0x2A: case 0x36: virtualKey = 0x10; break;
-                    case 0x38: virtualKey = 0x12; break;
-                    case 0x39: virtualKey = 0x20; character = ' '; break;
-                    default:
-                        if (packet.MakeCode >= 0x10 && packet.MakeCode <= 0x19) {
-                            constexpr char row[] = "qwertyuiop";
-                            character = static_cast<uint8_t>(row[packet.MakeCode - 0x10]);
-                        } else if (packet.MakeCode >= 0x1E && packet.MakeCode <= 0x26) {
-                            constexpr char row[] = "asdfghjkl";
-                            character = static_cast<uint8_t>(row[packet.MakeCode - 0x1E]);
-                        } else if (packet.MakeCode >= 0x2C && packet.MakeCode <= 0x32) {
-                            constexpr char row[] = "zxcvbnm";
-                            character = static_cast<uint8_t>(row[packet.MakeCode - 0x2C]);
-                        } else if (packet.MakeCode >= 0x02 && packet.MakeCode <= 0x0A) {
-                            character = static_cast<uint8_t>('1' + packet.MakeCode - 0x02);
-                        } else if (packet.MakeCode == 0x0B) {
-                            character = '0';
-                        }
-                        if (character) virtualKey = character >= 'a' && character <= 'z'
-                            ? static_cast<uint16_t>(character - 'a' + 'A') : character;
-                        break;
+                if (packet.Flags & km::hid::KEY_E0) {
+                    switch (packet.MakeCode) {
+                        case 0x48: virtualKey = 0x26; break; // VK_UP
+                        case 0x4B: virtualKey = 0x25; break; // VK_LEFT
+                        case 0x4D: virtualKey = 0x27; break; // VK_RIGHT
+                        case 0x50: virtualKey = 0x28; break; // VK_DOWN
+                        default: break;
+                    }
+                }
+                if (!virtualKey) {
+                    switch (packet.MakeCode) {
+                        case 0x01: virtualKey = 0x1B; break;
+                        case 0x0E: virtualKey = 0x08; break;
+                        case 0x0F: virtualKey = 0x09; break;
+                        case 0x1C: virtualKey = 0x0D; break;
+                        case 0x3D: virtualKey = 0x72; break;
+                        case 0x1D: virtualKey = 0x11; break;
+                        case 0x2A: case 0x36: virtualKey = 0x10; break;
+                        case 0x38: virtualKey = 0x12; break;
+                        case 0x39: virtualKey = 0x20; character = ' '; break;
+                        default:
+                            if (packet.MakeCode >= 0x10 && packet.MakeCode <= 0x19) {
+                                constexpr char row[] = "qwertyuiop";
+                                character = static_cast<uint8_t>(row[packet.MakeCode - 0x10]);
+                            } else if (packet.MakeCode >= 0x1E && packet.MakeCode <= 0x26) {
+                                constexpr char row[] = "asdfghjkl";
+                                character = static_cast<uint8_t>(row[packet.MakeCode - 0x1E]);
+                            } else if (packet.MakeCode >= 0x2C && packet.MakeCode <= 0x32) {
+                                constexpr char row[] = "zxcvbnm";
+                                character = static_cast<uint8_t>(row[packet.MakeCode - 0x2C]);
+                            } else if (packet.MakeCode >= 0x02 && packet.MakeCode <= 0x0A) {
+                                character = static_cast<uint8_t>('1' + packet.MakeCode - 0x02);
+                            } else if (packet.MakeCode == 0x0B) {
+                                character = '0';
+                            }
+                            if (character) virtualKey = character >= 'a' && character <= 'z'
+                                ? static_cast<uint16_t>(character - 'a' + 'A') : character;
+                            break;
+                    }
                 }
                 if (!virtualKey) continue;
                 MicaWin32kKeyboardEvent key{};

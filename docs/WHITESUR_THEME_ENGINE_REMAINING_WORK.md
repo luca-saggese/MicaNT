@@ -275,10 +275,16 @@ the evidence named here, not just declarations or a successful compile.
   probe verified text round-trip, input, readonly, unsupported-style rejection,
   and GDI-rendered text/focus pixels. QEMU also passed checkbox state pixels,
   EDIT focus pixels, BUTTON hover/pressed/capture and Space activation. The
-  latest full run still fails the BUTTON focus-clear pixel check after clicking
-  the parent client (`/private/tmp/micant-theme-controls-parent-focus`);
-  focus transfer/paint invalidation remains open. Menus, tabs, scrollbars,
-  Tab traversal and full control state/clipping coverage remain open.
+  latest full run `/private/tmp/micant-theme-tab-final` verified
+  `SysTabControl32` initialization, item round-trips, selection pixels, mouse
+  notification, focused-arrow notification and keyboard selection pixels. The
+  production comctl32 implementation has bounded item storage and supports
+  insert/delete/get/set/current-selection/hit-test messages, themed GDI paint,
+  mouse and focused-arrow selection, and `WM_NOTIFY/TCN_SELCHANGE`. The
+  integrated run then failed the BUTTON focus-clear pixel assertion: Win32k
+  focus state and Space behavior work, but the focus indicator does not visibly
+  clear after focus moves. Menus, scrollbars, disabled-state and clipping
+  coverage remain open.
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
