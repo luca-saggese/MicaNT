@@ -47,7 +47,7 @@ void DrawStartMenu(uint32_t* pixels, uint32_t width, uint32_t height,
          bodyHeight, palette.surfaceAlt);
 
     static constexpr const char* left[] = {
-        "Internet", "E-mail", "----------------", "My Documents", "My Pictures",
+        "Theme Test", "Internet", "E-mail", "----------------", "My Documents", "My Pictures",
         "My Music", "My Computer", "Control Panel", "Connect To", "Printers",
         "Help and Support", "Search", "Run..."
     };
@@ -86,12 +86,13 @@ StartMenuAction HitTestStartMenu(int32_t x, int32_t y,
     if (x < divider) {
         const int32_t row = (y - 63) / 23;
         switch (row) {
-            case 3: case 4: case 5: return StartMenuAction::MyDocuments;
-            case 6: return StartMenuAction::MyComputer;
-            case 7: return StartMenuAction::ControlPanel;
-            case 8: return StartMenuAction::Network;
-            case 11: return StartMenuAction::Search;
-            case 12: return StartMenuAction::Run;
+            case 0: return StartMenuAction::ThemeTest;
+            case 4: case 5: case 6: return StartMenuAction::MyDocuments;
+            case 7: return StartMenuAction::MyComputer;
+            case 8: return StartMenuAction::ControlPanel;
+            case 9: return StartMenuAction::Network;
+            case 12: return StartMenuAction::Search;
+            case 13: return StartMenuAction::Run;
             default: return StartMenuAction::Dismiss;
         }
     }

@@ -36,6 +36,7 @@ struct NotifyHeader { void* hwndFrom; uintptr_t idFrom; uint32_t code; };
 
 constexpr uint32_t kIccProgress = 0x00000020u;
 constexpr uint32_t kIccTab = 0x00000008u;
+constexpr uint32_t kIccTreeView = 0x00000002u;
 constexpr uint32_t kWmCreate = 0x0001u;
 constexpr uint32_t kWmDestroy = 0x0002u;
 constexpr uint32_t kWmNCCreate = 0x0081u;
@@ -67,6 +68,9 @@ constexpr size_t kProgressCapacity = 64;
 constexpr size_t kTabCapacity = 32;
 constexpr size_t kTabItemCapacity = 32;
 constexpr size_t kTabTextCapacity = 128;
+constexpr size_t kTreeCapacity = 4;
+constexpr size_t kTreeNodeCapacity = 32;
+constexpr size_t kTreeTextCapacity = 96;
 constexpr uint32_t kTcmFirst = 0x1300u;
 constexpr uint32_t kTcmGetItemCount = kTcmFirst + 4u;
 constexpr uint32_t kTcmDeleteItem = kTcmFirst + 8u;
@@ -81,6 +85,56 @@ constexpr uint32_t kTcifText = 0x0001u;
 constexpr uint32_t kTcifImage = 0x0002u;
 constexpr uint32_t kTcifParam = 0x0008u;
 constexpr uint32_t kTcsStyleMask = 0x0000FFFEu;
+constexpr uint32_t kTvmFirst = 0x1100u;
+constexpr uint32_t kTvmInsertItemW = kTvmFirst + 50u;
+constexpr uint32_t kTvmDeleteItem = kTvmFirst + 1u;
+constexpr uint32_t kTvmExpand = kTvmFirst + 2u;
+constexpr uint32_t kTvmGetCount = kTvmFirst + 5u;
+constexpr uint32_t kTvmGetNextItem = kTvmFirst + 10u;
+constexpr uint32_t kTvmSelectItem = kTvmFirst + 11u;
+constexpr intptr_t kTvRoot = -0x10000;
+constexpr intptr_t kTvFirst = -0x0FFFF;
+constexpr intptr_t kTvLast = -0x0FFFE;
+constexpr uint32_t kTvExpanded = 0x0020u;
+constexpr uint32_t kTvExpand = 0x0002u;
+constexpr uint32_t kTvCollapse = 0x0001u;
+constexpr uint32_t kTvSelect = 0x0009u;
+constexpr uint32_t kTvNext = 0x0001u;
+constexpr uint32_t kTvPrevious = 0x0002u;
+constexpr uint32_t kTvFirstVisible = 0x0005u;
+constexpr uint32_t kTvNextVisible = 0x0006u;
+constexpr uint32_t kTvLastVisible = 0x000Au;
+constexpr uint32_t kTvGetSelection = 0x0009u;
+constexpr uint32_t kTvifText = 0x0001u;
+constexpr uint32_t kTvifParam = 0x0004u;
+constexpr uint32_t kTvsHasButtons = 0x0001u;
+constexpr uint32_t kTvsHasLines = 0x0002u;
+constexpr uint32_t kTvsLinesAtRoot = 0x0004u;
+constexpr int32_t kTreeIndent = 18;
+constexpr int32_t kTreeRowHeight = 22;
+
+struct TreeItemW {
+    uint32_t mask;
+    void* item;
+    uint32_t state, stateMask;
+    wchar_t* text;
+    int32_t textCapacity, image, selectedImage, children;
+    intptr_t parameter;
+};
+struct TreeInsertW { void* parent; void* insertAfter; TreeItemW item; };
+struct TreeNode {
+    bool used{}, expanded{};
+    int16_t parent{-1};
+    wchar_t text[kTreeTextCapacity]{};
+    intptr_t parameter{};
+};
+struct TreeState {
+    void* hwnd{};
+    uint32_t style{};
+    int16_t selected{-1}, hot{-1};
+    bool enabled{true}, focused{};
+    TreeNode nodes[kTreeNodeCapacity]{};
+};
 
 struct ProgressState {
     void* hwnd{};
@@ -112,6 +166,8 @@ struct TabState {
 };
 TabState g_tabs[kTabCapacity]{};
 std::atomic<uint32_t> g_tabRegistrationState{0};
+TreeState g_trees[kTreeCapacity]{};
+std::atomic<uint32_t> g_treeRegistrationState{0};
 
 struct StateGuard {
     StateGuard() noexcept {
@@ -343,6 +399,43 @@ intptr_t ProgressBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
 TabState* findTab(void* hwnd) noexcept {
     for (auto& state : g_tabs) if (state.hwnd == hwnd) return &state;
     return nullptr;
+}
+
+TreeState* findTree(void* hwnd) noexcept {
+    for (auto& state : g_trees) if (state.hwnd == hwnd) return &state;
+    return nullptr;
+}
+
+int16_t visibleTreeItem(const TreeState& state, int32_t visibleIndex) noexcept {
+    if (visibleIndex < 0) return -1;
+    int32_t current = 0;
+    for (int16_t i = 0; i < static_cast<int16_t>(kTreeNodeCapacity); ++i) {
+        if (!state.nodes[i].used) continue;
+        int16_t parent = state.nodes[i].parent;
+        bool visible = true;
+        while (parent >= 0) {
+            if (!state.nodes[parent].expanded) { visible = false; break; }
+            parent = state.nodes[parent].parent;
+        }
+        if (!visible) continue;
+        if (current++ == visibleIndex) return i;
+    }
+    return -1;
+}
+
+int32_t treeVisibleCount(const TreeState& state) noexcept {
+    int32_t count = 0;
+    for (int16_t i = 0; i < static_cast<int16_t>(kTreeNodeCapacity); ++i) {
+        if (!state.nodes[i].used) continue;
+        int16_t parent = state.nodes[i].parent;
+        bool visible = true;
+        while (parent >= 0) {
+            if (!state.nodes[parent].expanded) { visible = false; break; }
+            parent = state.nodes[parent].parent;
+        }
+        if (visible) ++count;
+    }
+    return count;
 }
 
 TabState* acquireTab(void* hwnd) noexcept {
@@ -695,6 +788,323 @@ bool registerTabClass() noexcept {
     return registered;
 }
 
+intptr_t TreeViewWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
+                         intptr_t lParam) noexcept {
+    if (!hwnd) return 0;
+    if (message == kWmNCCreate) return 1;
+    if (message == kWmCreate) {
+        const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
+        if (!create) return -1;
+        TreeState initial{};
+        initial.hwnd = hwnd;
+        initial.style = static_cast<uint32_t>(create->style);
+        initial.enabled = (initial.style & 0x08000000u) == 0;
+        StateGuard guard;
+        for (auto& entry : g_trees) {
+            if (entry.hwnd) continue;
+            entry = initial;
+            return 0;
+        }
+        return -1;
+    }
+    if (message == kWmDestroy) {
+        StateGuard guard;
+        if (auto* state = findTree(hwnd)) *state = {};
+        return 0;
+    }
+
+    TreeState snapshot{};
+    bool repaint = false;
+    {
+        StateGuard guard;
+        auto* state = findTree(hwnd);
+        if (!state) return 0;
+        switch (message) {
+        case kTvmGetCount: {
+            int32_t count = 0;
+            for (const auto& node : state->nodes) if (node.used) ++count;
+            return count;
+        }
+        case kTvmInsertItemW: {
+            if (!lParam) return 0;
+            const auto* insert = reinterpret_cast<const TreeInsertW*>(lParam);
+            const auto& item = insert->item;
+            if ((item.mask & ~(kTvifText | kTvifParam)) != 0 ||
+                (item.mask & kTvifText && !item.text)) return 0;
+            int16_t parent = -1;
+            if (insert->parent && reinterpret_cast<intptr_t>(insert->parent) != kTvRoot) {
+                const uintptr_t handle = reinterpret_cast<uintptr_t>(insert->parent);
+                if (!handle || handle > kTreeNodeCapacity || !state->nodes[handle - 1].used)
+                    return 0;
+                parent = static_cast<int16_t>(handle - 1);
+            }
+            int16_t slot = -1;
+            for (int16_t i = 0; i < static_cast<int16_t>(kTreeNodeCapacity); ++i)
+                if (!state->nodes[i].used) { slot = i; break; }
+            if (slot < 0) return 0;
+            TreeNode node{};
+            node.used = true;
+            node.parent = parent;
+            node.expanded = (item.state & kTvExpanded) != 0;
+            if (item.mask & kTvifParam) node.parameter = item.parameter;
+            if (item.mask & kTvifText) {
+                size_t length = 0;
+                while (length + 1 < kTreeTextCapacity && item.text[length]) {
+                    node.text[length] = item.text[length];
+                    ++length;
+                }
+                node.text[length] = L'\0';
+            }
+            state->nodes[slot] = node;
+            snapshot = *state;
+            repaint = true;
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return static_cast<intptr_t>(slot + 1);
+        }
+        case kTvmExpand: {
+            const uintptr_t handle = wParam;
+            if (!handle || handle > kTreeNodeCapacity || !state->nodes[handle - 1].used)
+                return 0;
+            bool hasChildren = false;
+            for (const auto& node : state->nodes)
+                if (node.used && node.parent == static_cast<int16_t>(handle - 1))
+                    hasChildren = true;
+            const bool expanded = (static_cast<uint32_t>(lParam) & kTvExpand) != 0;
+            state->nodes[handle - 1].expanded = hasChildren && expanded;
+            snapshot = *state;
+            repaint = true;
+            break;
+        }
+        case kTvmSelectItem: {
+            if (wParam != kTvSelect) return 0;
+            const uintptr_t handle = static_cast<uintptr_t>(lParam);
+            if (handle > kTreeNodeCapacity || (handle && !state->nodes[handle - 1].used))
+                return 0;
+            state->selected = handle ? static_cast<int16_t>(handle - 1) : -1;
+            snapshot = *state;
+            repaint = true;
+            break;
+        }
+        case kTvmGetNextItem: {
+            const uint32_t relation = static_cast<uint32_t>(wParam);
+            if (relation == kTvGetSelection)
+                return state->selected >= 0 ? state->selected + 1 : 0;
+            const uintptr_t handle = static_cast<uintptr_t>(lParam);
+            if (relation == kTvFirstVisible) {
+                const int16_t first = visibleTreeItem(*state, 0);
+                return first >= 0 ? first + 1 : 0;
+            }
+            if (!handle || handle > kTreeNodeCapacity || !state->nodes[handle - 1].used)
+                return 0;
+            const int32_t visibleCount = treeVisibleCount(*state);
+            int32_t index = 0;
+            for (; index < visibleCount; ++index)
+                if (visibleTreeItem(*state, index) == static_cast<int16_t>(handle - 1)) break;
+            int16_t result = -1;
+            if (relation == kTvNextVisible) result = visibleTreeItem(*state, index + 1);
+            else if (relation == kTvLastVisible)
+                result = visibleTreeItem(*state, visibleCount - 1);
+            else if (relation == kTvNext || relation == kTvPrevious) {
+                const int16_t parent = state->nodes[handle - 1].parent;
+                for (int16_t i = static_cast<int16_t>(handle - 1) +
+                        (relation == kTvNext ? 1 : -1);
+                     i >= 0 && i < static_cast<int16_t>(kTreeNodeCapacity);
+                     i += relation == kTvNext ? 1 : -1) {
+                    if (state->nodes[i].used && state->nodes[i].parent == parent) {
+                        result = i;
+                        break;
+                    }
+                }
+            }
+            return result >= 0 ? result + 1 : 0;
+        }
+        case kTvmDeleteItem: {
+            const uintptr_t handle = static_cast<uintptr_t>(lParam);
+            if (static_cast<intptr_t>(handle) == kTvRoot) {
+                for (auto& node : state->nodes) node = {};
+                state->selected = -1;
+            } else {
+                if (!handle || handle > kTreeNodeCapacity || !state->nodes[handle - 1].used)
+                    return 0;
+                bool removed[kTreeNodeCapacity]{};
+                removed[handle - 1] = true;
+                bool changed = true;
+                while (changed) {
+                    changed = false;
+                    for (size_t i = 0; i < kTreeNodeCapacity; ++i)
+                        if (state->nodes[i].used && state->nodes[i].parent >= 0 &&
+                            removed[state->nodes[i].parent] && !removed[i]) {
+                            removed[i] = true;
+                            changed = true;
+                        }
+                }
+                for (size_t i = 0; i < kTreeNodeCapacity; ++i) {
+                    if (removed[i]) state->nodes[i] = {};
+                    if (state->selected == static_cast<int16_t>(i) && removed[i])
+                        state->selected = -1;
+                }
+            }
+            snapshot = *state;
+            repaint = true;
+            break;
+        }
+        case kWmMouseMove: {
+            const int32_t y = static_cast<int16_t>(
+                (static_cast<uintptr_t>(lParam) >> 16) & 0xFFFFu);
+            const int16_t hot = state->enabled ? visibleTreeItem(*state,
+                std::max(0, (y - 4) / kTreeRowHeight)) : -1;
+            repaint = hot != state->hot;
+            state->hot = hot;
+            snapshot = *state;
+            break;
+        }
+        case kWmLButtonUp: {
+            const int32_t y = static_cast<int16_t>((static_cast<uintptr_t>(lParam) >> 16) & 0xFFFFu);
+            const int32_t x = static_cast<int16_t>(static_cast<uintptr_t>(lParam) & 0xFFFFu);
+            const int16_t index = visibleTreeItem(*state,
+                std::max(0, (y - 4) / kTreeRowHeight));
+            if (index >= 0 && state->enabled) {
+                int32_t depth = 0;
+                int16_t parent = state->nodes[index].parent;
+                while (parent >= 0 && depth < static_cast<int32_t>(kTreeNodeCapacity)) {
+                    ++depth;
+                    parent = state->nodes[parent].parent;
+                }
+                if (x < 12 + depth * kTreeIndent + 17) {
+                    bool hasChildren = false;
+                    for (const auto& node : state->nodes)
+                        if (node.used && node.parent == index) hasChildren = true;
+                    if (hasChildren) state->nodes[index].expanded = !state->nodes[index].expanded;
+                }
+                state->selected = index;
+                state->focused = true;
+                snapshot = *state;
+                repaint = true;
+            }
+            break;
+        }
+        case kWmSetFocus: state->focused = true; repaint = true; snapshot = *state; break;
+        case kWmKillFocus: state->focused = false; repaint = true; snapshot = *state; break;
+        case kWmThemeChanged: (void)InvalidateRect(hwnd, nullptr, 1); return 0;
+        case kWmPaint: snapshot = *state; break;
+        default:
+            if (message >= kTvmFirst && message < kTvmFirst + 128u) return -1;
+            return 0;
+        }
+    }
+    if (repaint) (void)InvalidateRect(hwnd, nullptr, 1);
+    if (message != kWmPaint) {
+        if (message == kWmLButtonUp) (void)SetFocus(hwnd);
+        return 0;
+    }
+
+    PaintStruct paint{};
+    void* hdc = BeginPaint(hwnd, &paint);
+    if (!hdc) return 0;
+    Rect bounds{};
+    if (!GetClientRect(hwnd, &bounds) || bounds.right <= bounds.left ||
+        bounds.bottom <= bounds.top) {
+        (void)EndPaint(hwnd, &paint);
+        return 0;
+    }
+    void* theme = OpenThemeData(hwnd, L"WINDOW");
+    uint32_t background = 0x00F0F0F0u;
+    if (theme) {
+        uint32_t color{};
+        if (GetThemeColor(theme, 1, 1, 3802, &color) == 0) background = color;
+    }
+    bool painted = fillWithColor(hdc, bounds, background);
+    void* buttonTheme = OpenThemeData(hwnd, L"BUTTON");
+    const int32_t visibleCount = treeVisibleCount(snapshot);
+    const int32_t rowCount = std::min<int32_t>(visibleCount,
+        (bounds.bottom - bounds.top) / kTreeRowHeight + 1);
+    for (int32_t row = 0; row < rowCount; ++row) {
+        const int16_t index = visibleTreeItem(snapshot, row);
+        if (index < 0) continue;
+        const auto& node = snapshot.nodes[index];
+        int32_t depth = 0;
+        int16_t parent = node.parent;
+        while (parent >= 0 && depth < static_cast<int32_t>(kTreeNodeCapacity)) {
+            ++depth;
+            parent = snapshot.nodes[parent].parent;
+        }
+        Rect rowRect{bounds.left + 2, bounds.top + 3 + row * kTreeRowHeight,
+            bounds.right - 2, bounds.top + 3 + (row + 1) * kTreeRowHeight};
+        const bool selected = snapshot.selected == index;
+        const int32_t state = !snapshot.enabled ? 4 : selected ? 3 :
+            snapshot.hot == index ? 2 : 1;
+        if (selected || snapshot.hot == index) {
+            const bool themed = buttonTheme &&
+                DrawThemeBackground(buttonTheme, hdc, 1, state, &rowRect, nullptr) == 0;
+            if (!themed) painted &= fillWithColor(hdc, rowRect,
+                selected ? 0x00DCEBFAu : 0x00E8F3FCu);
+        }
+        bool hasChildren = false;
+        for (const auto& child : snapshot.nodes)
+            if (child.used && child.parent == index) hasChildren = true;
+        const int32_t glyphX = bounds.left + 7 + depth * kTreeIndent;
+        if (hasChildren && (snapshot.style & kTvsHasButtons)) {
+            Rect box{glyphX, rowRect.top + 6, glyphX + 10, rowRect.top + 16};
+            painted &= fillWithColor(hdc, box, background);
+            Rect top{box.left, box.top, box.right, box.top + 1};
+            Rect bottom{box.left, box.bottom - 1, box.right, box.bottom};
+            Rect left{box.left, box.top, box.left + 1, box.bottom};
+            Rect right{box.right - 1, box.top, box.right, box.bottom};
+            painted &= fillWithColor(hdc, top, 0x00808080u) &&
+                fillWithColor(hdc, bottom, 0x00808080u) &&
+                fillWithColor(hdc, left, 0x00808080u) &&
+                fillWithColor(hdc, right, 0x00808080u);
+            Rect minus{box.left + 3, box.top + 4, box.right - 3, box.top + 5};
+            painted &= fillWithColor(hdc, minus, 0x00000000u);
+            if (!node.expanded) {
+                Rect plus{box.left + 4, box.top + 2, box.left + 5, box.bottom - 2};
+                painted &= fillWithColor(hdc, plus, 0x00000000u);
+            }
+        }
+        Rect textRect{glyphX + 15, rowRect.top, bounds.right - 4, rowRect.bottom};
+        int32_t length = 0;
+        while (length + 1 < static_cast<int32_t>(kTreeTextCapacity) && node.text[length]) ++length;
+        if (length) {
+            const bool themed = theme && DrawThemeText(theme, hdc, 1, 1, node.text,
+                length, 0x00000020u | 0x00000800u, 0, &textRect) == 0;
+            if (!themed) {
+                uint32_t color = snapshot.enabled ? 0x00000000u : 0x00808080u;
+                uint32_t themedColor{};
+                if (theme && GetThemeColor(theme, 1, 1, 3803, &themedColor) == 0)
+                    color = themedColor;
+                const uint32_t oldColor = SetTextColor(hdc, color);
+                const int32_t oldMode = SetBkMode(hdc, 1);
+                const bool drawn = oldColor != 0xFFFFFFFFu && oldMode > 0 &&
+                    TextOutW(hdc, textRect.left, textRect.top + 3, node.text, length) != 0;
+                if (oldMode > 0) (void)SetBkMode(hdc, oldMode);
+                if (oldColor != 0xFFFFFFFFu) (void)SetTextColor(hdc, oldColor);
+                painted &= drawn;
+            }
+        }
+    }
+    if (buttonTheme) (void)CloseThemeData(buttonTheme);
+    if (theme) (void)CloseThemeData(theme);
+    return painted && EndPaint(hwnd, &paint) != 0 ? 1 : 0;
+}
+
+bool registerTreeClass() noexcept {
+    uint32_t state = g_treeRegistrationState.load(std::memory_order_acquire);
+    for (;;) {
+        if (state == 2) return true;
+        if (state == 3) return false;
+        if (state == 0 && g_treeRegistrationState.compare_exchange_weak(
+                state, 1, std::memory_order_acq_rel, std::memory_order_acquire)) break;
+        state = g_treeRegistrationState.load(std::memory_order_acquire);
+    }
+    MicaWin32kWindowClassEx wc{};
+    wc.cbSize = sizeof(wc);
+    wc.wndProc = reinterpret_cast<void*>(TreeViewWndProc);
+    wc.className = L"SysTreeView32";
+    const bool registered = RegisterClassExW(&wc) != 0;
+    g_treeRegistrationState.store(registered ? 2u : 3u, std::memory_order_release);
+    return registered;
+}
+
 } // namespace
 
 extern "C" {
@@ -704,9 +1114,10 @@ bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 __declspec(dllexport) int32_t InitCommonControlsEx(
     const InitCommonControlsExArgs* args) noexcept {
     if (!args || args->size != sizeof(InitCommonControlsExArgs) ||
-        (args->classes & ~(kIccProgress | kIccTab)) != 0) return 0;
+        (args->classes & ~(kIccProgress | kIccTab | kIccTreeView)) != 0) return 0;
     if ((args->classes & kIccProgress) && !registerProgressClass()) return 0;
     if ((args->classes & kIccTab) && !registerTabClass()) return 0;
+    if ((args->classes & kIccTreeView) && !registerTreeClass()) return 0;
     return 1;
 }
 

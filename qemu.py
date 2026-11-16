@@ -242,6 +242,10 @@ def main() -> int:
     parser.add_argument("--ovmf-code", type=Path, help="OVMF x86_64 code firmware image")
     parser.add_argument("--display", help="QEMU display backend (auto-detected by default)")
     parser.add_argument(
+        "--resize", action="store_true",
+        help="enable QEMU display zoom-to-fit so the guest display follows window resizing",
+    )
+    parser.add_argument(
         "--graphics-backend", choices=("auto", "virtio2d", "virgl"), default="auto",
         help="select VirtIO-GPU 2D, or attempt VirGL only when QEMU and the display support it",
     )
@@ -351,6 +355,14 @@ def main() -> int:
             if qemu and not args.headless
             else None
         )
+        if args.resize:
+            if args.headless:
+                parser.error("--resize requires a graphical display")
+            if display is None:
+                parser.error("--resize requires a graphical display backend")
+            display_options = display.split(",")
+            if not any(option.startswith("zoom-to-fit=") for option in display_options[1:]):
+                display = f"{display},zoom-to-fit=on"
 
         run(
             [

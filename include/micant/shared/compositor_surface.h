@@ -41,6 +41,10 @@
 /* Keep the shared views above the first image and bootstrap stack allocations. */
 #define MICANT_COMPOSITOR_METADATA_BASE (((uint64_t)133u << 39) + 0x10000000u)
 #define MICANT_COMPOSITOR_PIXELS_BASE (MICANT_COMPOSITOR_METADATA_BASE + 0x10000u)
+#if defined(__cplusplus)
+static_assert(MICANT_COMPOSITOR_PIXEL_STORE_SIZE <= 0x04000000u,
+              "Compositor pixel store must not overlap decoration storage");
+#endif
 
 #define MICANT_COMPOSITOR_STORE_MAGIC 0x4D434F4Du /* MCOM */
 #define MICANT_COMPOSITOR_STORE_VERSION 6u

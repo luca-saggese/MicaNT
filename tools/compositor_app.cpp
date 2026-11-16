@@ -322,44 +322,52 @@ void applyWindowBackdropBlur(int64_t left, int64_t top,
 }
 
 void blendWindowShadow(int64_t left, int64_t top, int64_t right, int64_t bottom,
-                       uint32_t width, uint32_t height) noexcept {
-    // Shadow work is bounded to six strips around the window, not its area.
-    const auto draw = [&](int64_t x, int64_t y, int64_t dx, int64_t dy) noexcept {
-        if (x < g_composeClip.left || x >= g_composeClip.right ||
-            y < g_composeClip.top || y >= g_composeClip.bottom ||
-            x < 0 || x >= width || y < 0 || y >= height) return;
-        const int64_t distanceSquared = dx * dx + dy * dy;
-        const uint32_t alpha = distanceSquared < 4 ? 44u :
-            distanceSquared < 9 ? 36u : distanceSquared < 16 ? 28u :
-            distanceSquared < 25 ? 20u : distanceSquared < 36 ? 12u : 0u;
-        if (!alpha) return;
-        const size_t destination = static_cast<size_t>(y) * width +
-            static_cast<size_t>(x);
-        g_frame[destination] = blend(alpha << 24, g_frame[destination]);
+                       int64_t radius, uint32_t width, uint32_t height) noexcept {
+    const auto integerSqrt = [](uint64_t value) noexcept {
+        uint64_t result = 0;
+        uint64_t bit = uint64_t{1} << 62;
+        while (bit > value) bit >>= 2;
+        while (bit) {
+            if (value >= result + bit) {
+                value -= result + bit;
+                result = (result >> 1) + bit;
+            } else result >>= 1;
+            bit >>= 2;
+        }
+        return static_cast<int64_t>(result);
     };
-    for (int64_t y = top - kWindowShadowExtent; y < top; ++y) {
-        const int64_t dy = top - y;
+    // Signed distance to the rounded rectangle, in half-pixel units. The
+    // rounded silhouette now controls the shadow at the corners as well as
+    // along the straight edges.
+    for (int64_t y = top - kWindowShadowExtent;
+         y < bottom + kWindowShadowExtent; ++y) {
+        if (y < g_composeClip.top || y >= g_composeClip.bottom ||
+            y < 0 || y >= height) continue;
         for (int64_t x = left - kWindowShadowExtent;
              x < right + kWindowShadowExtent; ++x) {
-            const int64_t dx = x < left ? left - x :
-                x >= right ? x - right + 1 : 0;
-            draw(x, y, dx, dy);
+            if (x < g_composeClip.left || x >= g_composeClip.right ||
+                x < 0 || x >= width) continue;
+            const int64_t qx = (2 * x + 1 < left + right
+                ? left + right - (2 * x + 1) : (2 * x + 1) - left - right) -
+                (right - left - 2 * radius);
+            const int64_t qy = (2 * y + 1 < top + bottom
+                ? top + bottom - (2 * y + 1) : (2 * y + 1) - top - bottom) -
+                (bottom - top - 2 * radius);
+            const int64_t outsideX = std::max<int64_t>(qx, 0);
+            const int64_t outsideY = std::max<int64_t>(qy, 0);
+            const int64_t signedDistance2 =
+                integerSqrt(static_cast<uint64_t>(outsideX * outsideX +
+                                                   outsideY * outsideY)) +
+                std::min<int64_t>(std::max(qx, qy), 0) - 2 * radius;
+            if (signedDistance2 <= 0 || signedDistance2 >
+                2 * static_cast<int64_t>(kWindowShadowExtent)) continue;
+            const uint32_t alpha = signedDistance2 <= 2 ? 42u :
+                signedDistance2 <= 5 ? 34u : signedDistance2 <= 8 ? 26u :
+                signedDistance2 <= 11 ? 18u : 10u;
+            const size_t destination = static_cast<size_t>(y) * width +
+                static_cast<size_t>(x);
+            g_frame[destination] = blend(alpha << 24, g_frame[destination]);
         }
-    }
-    for (int64_t y = bottom; y < bottom + kWindowShadowExtent; ++y) {
-        const int64_t dy = y - bottom + 1;
-        for (int64_t x = left - kWindowShadowExtent;
-             x < right + kWindowShadowExtent; ++x) {
-            const int64_t dx = x < left ? left - x :
-                x >= right ? x - right + 1 : 0;
-            draw(x, y, dx, dy);
-        }
-    }
-    for (int64_t y = top; y < bottom; ++y) {
-        for (int64_t x = left - kWindowShadowExtent; x < left; ++x)
-            draw(x, y, left - x, 0);
-        for (int64_t x = right; x < right + kWindowShadowExtent; ++x)
-            draw(x, y, x - right + 1, 0);
     }
 }
 
@@ -394,17 +402,8 @@ void applyWindowCornerMask(int64_t left, int64_t top,
                            int64_t right, int64_t bottom,
                            int64_t radius, uint32_t width,
                            uint32_t height) noexcept {
-    const int64_t radiusSquared = radius * radius;
     for (int64_t y = 0; y < radius; ++y) {
         for (int64_t x = 0; x < radius; ++x) {
-            const int64_t leftCenterX = 2 * x + 1 - 2 * radius;
-            const int64_t rightCenterX = 2 * x + 1;
-            const int64_t topCenterY = 2 * y + 1 - 2 * radius;
-            const int64_t bottomCenterY = 2 * y + 1;
-            const int64_t centerX[4]{leftCenterX, rightCenterX,
-                                     leftCenterX, rightCenterX};
-            const int64_t centerY[4]{topCenterY, topCenterY,
-                                     bottomCenterY, bottomCenterY};
             const size_t offset = static_cast<size_t>(
                 y * kWindowEffectRadiusLimit + x);
             const int64_t px[4]{left + x, right - radius + x,
@@ -412,18 +411,44 @@ void applyWindowCornerMask(int64_t left, int64_t top,
             const int64_t py[4]{top + y, top + y,
                                 bottom - radius + y, bottom - radius + y};
             for (size_t corner = 0; corner < 4; ++corner) {
-                if (centerX[corner] * centerX[corner] +
-                    centerY[corner] * centerY[corner] <= 4 * radiusSquared)
-                    continue;
                 if (px[corner] < g_composeClip.left ||
                     px[corner] >= g_composeClip.right ||
                     py[corner] < g_composeClip.top ||
                     py[corner] >= g_composeClip.bottom ||
                     px[corner] < 0 || px[corner] >= width ||
                     py[corner] < 0 || py[corner] >= height) continue;
-                g_frame[static_cast<size_t>(py[corner]) * width +
-                        static_cast<size_t>(px[corner])] =
-                    g_windowCornerBackdrop[corner][offset];
+                uint32_t covered = 0;
+                const int64_t centerX = (corner == 0 || corner == 2)
+                    ? radius : 0;
+                const int64_t centerY = corner < 2 ? radius : 0;
+                for (int sy = 0; sy < 4; ++sy) {
+                    for (int sx = 0; sx < 4; ++sx) {
+                        const int64_t sampleX = 4 * x + sx;
+                        const int64_t sampleY = 4 * y + sy;
+                        const int64_t dx = sampleX - 4 * centerX;
+                        const int64_t dy = sampleY - 4 * centerY;
+                        if (dx * dx + dy * dy <= 16 * radius * radius)
+                            ++covered;
+                    }
+                }
+                if (covered == 16) continue;
+                const size_t destination = static_cast<size_t>(py[corner]) * width +
+                    static_cast<size_t>(px[corner]);
+                if (!covered) {
+                    g_frame[destination] = g_windowCornerBackdrop[corner][offset];
+                    continue;
+                }
+                const uint32_t foreground = g_frame[destination];
+                const uint32_t backdrop = g_windowCornerBackdrop[corner][offset];
+                uint32_t result = 0;
+                for (uint32_t channel = 0; channel < 4; ++channel) {
+                    const uint32_t shift = channel * 8;
+                    const uint32_t a = (foreground >> shift) & 0xFFu;
+                    const uint32_t b = (backdrop >> shift) & 0xFFu;
+                    result |= ((a * covered + b * (16u - covered) + 8u) / 16u)
+                        << shift;
+                }
+                g_frame[destination] = result;
             }
         }
     }
@@ -618,7 +643,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         if (blurWindow) captureWindowBlurBackdrop(width, height);
         if (radius > 0) {
             blendWindowShadow(windowLeft, windowTop, windowRight, windowBottom,
-                              width, height);
+                              radius, width, height);
             saveWindowCornerBackdrop(windowLeft, windowTop, windowRight,
                                      windowBottom, radius, width, height);
         }
@@ -1263,7 +1288,7 @@ bool verifyWindowEffectsRasterizer() noexcept {
     const uint32_t unblurredClient =
         micant::shared::graphics::PremultipliedSourceOver(
             0x40404040u, background);
-    const uint32_t expectedShadow = blend(0x2C000000u, 0xFFFFFFFFu);
+    const uint32_t expectedShadow = blend(0x2A000000u, 0xFFFFFFFFu);
     const size_t corner = 100u * MICANT_COMPOSITOR_SCREEN_WIDTH + 100u;
     const size_t client = 140u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
     const size_t shadow = 99u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;

@@ -502,7 +502,25 @@ Window* rootWindow(Window* window) noexcept {
         if (!parent || parent->ownerProcessId != window->ownerProcessId) break;
         window = parent;
     }
-    return window;
+    return window->parent ? nullptr : window;
+}
+
+bool ensureCompositorSlot(Window& window) noexcept {
+    auto* root = rootWindow(&window);
+    if (!root) return false;
+    if (root->compositorSlot == UINT32_MAX) {
+        bool occupied[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+        for (const auto& candidate : g_windows)
+            if (candidate.active && candidate.compositorSlot <
+                MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                occupied[candidate.compositorSlot] = true;
+        size_t slot = 0;
+        while (slot < MICANT_COMPOSITOR_SURFACE_CAPACITY && occupied[slot]) ++slot;
+        if (slot == MICANT_COMPOSITOR_SURFACE_CAPACITY) return false;
+        root->compositorSlot = static_cast<uint32_t>(slot);
+    }
+    window.compositorSlot = root->compositorSlot;
+    return true;
 }
 
 uint64_t visibleOrder(const Window& window) noexcept {
@@ -983,21 +1001,35 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_GET_WINDOW_SURFACE: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
-            if (window->compositorSlot == UINT32_MAX) {
-                bool occupied[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
-                for (const auto& candidate : g_windows)
-                    if (candidate.active && candidate.compositorSlot <
-                        MICANT_COMPOSITOR_SURFACE_CAPACITY)
-                        occupied[candidate.compositorSlot] = true;
-                size_t slot = 0;
-                while (slot < MICANT_COMPOSITOR_SURFACE_CAPACITY && occupied[slot])
-                    ++slot;
-                if (slot == MICANT_COMPOSITOR_SURFACE_CAPACITY)
-                    return NtStatus::InsufficientResources;
-                window->compositorSlot = static_cast<uint32_t>(slot);
-            }
-            request.result = static_cast<uint64_t>(window->compositorSlot) + 1;
-            request.rect = {0, 0, window->width, window->height};
+            if (!ensureCompositorSlot(*window)) return NtStatus::InsufficientResources;
+            auto* root = rootWindow(window);
+            int64_t windowX{}, windowY{}, rootX{}, rootY{};
+            if (!root || !windowScreenOrigin(*window, windowX, windowY) ||
+                !windowScreenOrigin(*root, rootX, rootY))
+                return NtStatus::InvalidParameter;
+            const int32_t frame = frameInset(*window);
+            const int32_t caption = captionHeight(*window);
+            const int32_t clientWidth = std::max(1, window->width - frame * 2);
+            const int32_t clientHeight = std::max(1,
+                window->height - frame * 2 - caption);
+            const int32_t rootFrame = frameInset(*root);
+            const int32_t rootCaption = captionHeight(*root);
+            const int32_t rootClientWidth = std::max(1,
+                root->width - rootFrame * 2);
+            const int32_t rootClientHeight = std::max(1,
+                root->height - rootFrame * 2 - rootCaption);
+            const int64_t clientX = window == root ? 0
+                : windowX - rootX - rootFrame + frame;
+            const int64_t clientY = window == root ? 0
+                : windowY - rootY - rootFrame - rootCaption + frame + caption;
+            if (clientX < 0 || clientY < 0 ||
+                clientX + clientWidth > rootClientWidth ||
+                clientY + clientHeight > rootClientHeight)
+                return NtStatus::InvalidParameter;
+            request.result = static_cast<uint64_t>(root->compositorSlot) + 1;
+            request.rect = {static_cast<int32_t>(clientX), static_cast<int32_t>(clientY),
+                static_cast<int32_t>(clientX + clientWidth),
+                static_cast<int32_t>(clientY + clientHeight)};
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_PRESENT_WINDOW: {
@@ -1088,20 +1120,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t command = static_cast<int32_t>(request.args[1]);
-            if (command && !window->parent &&
-                window->compositorSlot == UINT32_MAX) {
-                bool occupied[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
-                for (const auto& candidate : g_windows)
-                    if (candidate.active && candidate.compositorSlot <
-                        MICANT_COMPOSITOR_SURFACE_CAPACITY)
-                        occupied[candidate.compositorSlot] = true;
-                size_t slot = 0;
-                while (slot < MICANT_COMPOSITOR_SURFACE_CAPACITY && occupied[slot])
-                    ++slot;
-                if (slot == MICANT_COMPOSITOR_SURFACE_CAPACITY)
-                    return NtStatus::InsufficientResources;
-                window->compositorSlot = static_cast<uint32_t>(slot);
-            }
+            if (command && !window->parent && !ensureCompositorSlot(*window))
+                return NtStatus::InsufficientResources;
             const bool wasVisible = window->visible;
             const bool wasIconic = window->iconic;
             const bool minimize = command == kSwShowMinimized || command == kSwMinimize;
@@ -1757,6 +1777,22 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     return buttonDelivered;
 }
 
+void initializeCursorPosition(int32_t x, int32_t y) noexcept {
+    StateLockGuard lock;
+    const int32_t left = std::max(0, g_cursorClip.left);
+    const int32_t top = std::max(0, g_cursorClip.top);
+    const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
+    const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
+    x = std::clamp(x, left, std::max(left, right - 1));
+    y = std::clamp(y, top, std::max(top, bottom - 1));
+    if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+    g_mouseX = x;
+    g_mouseY = y;
+    g_mouseButtons = 0;
+    g_mousePositionValid = true;
+    markCursorBounds(g_mouseX, g_mouseY);
+}
+
 bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
     StateLockGuard lock;
     auto* target = findWindow(g_focusedWindow, g_focusedWindowOwner);
@@ -1830,7 +1866,8 @@ void publishCompositorSurfaces() noexcept {
         info = {};
         const Window* windowPointer = nullptr;
         for (const auto& candidate : g_windows)
-            if (candidate.active && candidate.compositorSlot == index) {
+            if (candidate.active && !candidate.parent &&
+                candidate.compositorSlot == index) {
                 windowPointer = &candidate;
                 break;
             }
@@ -1916,7 +1953,9 @@ void publishCompositorSurfaces() noexcept {
         info.dirtyRight = window.dirtyRight;
         info.dirtyBottom = window.dirtyBottom;
         info.contentGeneration = window.contentGeneration;
-        info.activeWriters = window.activeWriters;
+        for (const auto& candidate : g_windows)
+            if (candidate.active && candidate.compositorSlot == index)
+                info.activeWriters += candidate.activeWriters;
         info.style = window.style;
         info.animationFlags = window.animationFlags;
         info.animationTarget = {

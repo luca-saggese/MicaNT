@@ -2675,6 +2675,88 @@ void publishCompositorSurfacesInCompositorSpace() noexcept {
         ke::KeUnstackDetachProcess(&attachState);
     }
 }
+
+bool waitForCompositorPresentation(uint64_t timeoutTicks) noexcept {
+    using namespace micant;
+    auto* compositor = g_compositorProcessObject;
+    if (!compositor || !g_compositorMetadata) return false;
+    ke::KAPC_STATE attachState{};
+    ke::KeStackAttachProcess(compositor, &attachState);
+    if (ke::KeGetCurrentProcess() != compositor) {
+        ke::KeUnstackDetachProcess(&attachState);
+        return false;
+    }
+    const uint64_t start = hal::amd64::bootstrapSchedulerClockTicks();
+    LargeInteger waitInterval{};
+    waitInterval.quadPart = -100000; // 10 ms; block so Ring 3 can be scheduled.
+    bool presented = false;
+    for (uint64_t spin = 0; spin < 2000000; ++spin) {
+        const uint64_t sequence = __atomic_load_n(
+            &g_compositorMetadata->frameSequence, __ATOMIC_ACQUIRE);
+        const uint64_t acknowledged = __atomic_load_n(
+            &g_compositorMetadata->compositorAckSequence, __ATOMIC_ACQUIRE);
+        if (sequence && !(sequence & 1u) && acknowledged == sequence) {
+            presented = true;
+            break;
+        }
+        if (timeoutTicks && hal::amd64::bootstrapSchedulerClockTicks() - start >=
+            timeoutTicks) break;
+        (void)sys::NtDelayExecution(false, &waitInterval);
+    }
+    ke::KeUnstackDetachProcess(&attachState);
+    return presented;
+}
+
+bool hasVisibleExplorerSurface() noexcept {
+    using namespace micant;
+    auto* compositor = g_compositorProcessObject;
+    if (!compositor || !g_compositorMetadata || !g_explorerProcessId) return false;
+    ke::KAPC_STATE attachState{};
+    ke::KeStackAttachProcess(compositor, &attachState);
+    if (ke::KeGetCurrentProcess() != compositor) {
+        ke::KeUnstackDetachProcess(&attachState);
+        return false;
+    }
+    bool found = false;
+    for (unsigned attempt = 0; attempt < 4 && !found; ++attempt) {
+        const uint64_t sequence = __atomic_load_n(
+            &g_compositorMetadata->frameSequence, __ATOMIC_ACQUIRE);
+        if (sequence & 1u) continue;
+        for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
+            const volatile auto& surface = g_compositorMetadata->surfaces[index];
+            const uint32_t flags = surface.flags;
+            if (surface.ownerProcessId == static_cast<uint64_t>(g_explorerProcessId) &&
+                (flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                          MICANT_COMPOSITOR_SURFACE_VISIBLE)) ==
+                    (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                     MICANT_COMPOSITOR_SURFACE_VISIBLE) &&
+                surface.width && surface.height) {
+                const uint64_t after = __atomic_load_n(
+                    &g_compositorMetadata->frameSequence, __ATOMIC_ACQUIRE);
+                found = sequence == after && !(after & 1u);
+                break;
+            }
+        }
+    }
+    ke::KeUnstackDetachProcess(&attachState);
+    return found;
+}
+
+bool waitForExplorerDesktopPresentation(uint64_t timeoutTicks) noexcept {
+    const uint64_t start = micant::hal::amd64::bootstrapSchedulerClockTicks();
+    micant::LargeInteger waitInterval{};
+    waitInterval.quadPart = -100000;
+    for (uint64_t spin = 0; spin < 4000000; ++spin) {
+        if (hasVisibleExplorerSurface()) {
+            if (waitForCompositorPresentation(timeoutTicks)) return true;
+        }
+        if (timeoutTicks &&
+            micant::hal::amd64::bootstrapSchedulerClockTicks() - start >= timeoutTicks)
+            return false;
+        (void)micant::sys::NtDelayExecution(false, &waitInterval);
+    }
+    return false;
+}
 uint32_t g_explorerApplicationWindowCount{};
 uint64_t g_explorerApplicationWindowHandles[MICANT_WIN32K_WINDOW_CAPACITY]{};
 std::atomic_flag g_userSurfaceImageCopyLock = ATOMIC_FLAG_INIT;
@@ -4962,8 +5044,18 @@ void pollKeyboardInput() noexcept {
     if (!launchCompositorProcess())
         stopWithError("[MicaNT Compositor] Ring 3 launch failed\r\n");
     serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
+    micant::win32k::freestanding::initializeCursorPosition(
+        static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH / 2u),
+        static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT / 2u));
+    publishCompositorSurfacesInCompositorSpace();
+    if (!waitForCompositorPresentation(clockActive ? 1000u : 0u))
+        stopWithError("[MicaNT Compositor] Initial cursor frame timed out\r\n");
+    serialWrite("[MicaNT Win32k] Cursor presented before Explorer startup\r\n");
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
+    if (!waitForExplorerDesktopPresentation(clockActive ? 8000u : 0u))
+        stopWithError("[MicaNT Explorer] Desktop presentation timed out\r\n");
+    serialWrite("[MicaNT Explorer] Visible desktop presented; shell startup continues\r\n");
 #if defined(MICANT_BOOTSTRAP_THEME_TEST)
     serialWrite("[MicaNT ThemeTest] Launching dedicated control test app\r\n");
     micant::Handle themeTestProcessHandle = 0;

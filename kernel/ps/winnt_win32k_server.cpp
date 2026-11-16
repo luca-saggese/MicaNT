@@ -143,6 +143,7 @@ uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
         value.args[0] = reinterpret_cast<uint64_t>(context.window);
         if (!request(MICANT_WIN32K_OP_GET_WINDOW_SURFACE, value) ||
             !value.result || value.result > MICANT_COMPOSITOR_SURFACE_CAPACITY ||
+            value.rect.left < 0 || value.rect.top < 0 ||
             value.rect.right <= value.rect.left || value.rect.bottom <= value.rect.top ||
             value.rect.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
             value.rect.bottom > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT))
@@ -150,7 +151,9 @@ uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
         width = static_cast<uint32_t>(value.rect.right - value.rect.left);
         height = static_cast<uint32_t>(value.rect.bottom - value.rect.top);
         return reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_PIXELS_BASE) +
-            (value.result - 1) * kSurfacePixels;
+            (value.result - 1) * kSurfacePixels +
+            static_cast<size_t>(value.rect.top) * MICANT_COMPOSITOR_SCREEN_WIDTH +
+            static_cast<uint32_t>(value.rect.left);
     }
     if (context.bitmap) {
         auto& bitmap = g_bitmaps[context.bitmap - 1];

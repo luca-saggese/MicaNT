@@ -21,6 +21,7 @@ micant::NtStatus setWindowTitleSurface(MicaWin32kRequest& request,
 micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence,
                                          uint64_t timeout100ns = 0) noexcept;
 bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept;
+void initializeCursorPosition(int32_t x, int32_t y) noexcept;
 bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept;
 micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
                                 uint64_t ownerProcessId) noexcept;

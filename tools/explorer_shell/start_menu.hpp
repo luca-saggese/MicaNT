@@ -7,6 +7,7 @@ namespace micant::explorer {
 
 enum class StartMenuAction : uint8_t {
     Dismiss,
+    ThemeTest,
     MyComputer,
     MyDocuments,
     ControlPanel,

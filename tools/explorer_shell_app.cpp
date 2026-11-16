@@ -43,7 +43,7 @@ using namespace micant_gui;
 
 constexpr uint32_t TASKBAR_H = 40;
 constexpr uint32_t MENU_W = 344;
-constexpr uint32_t MENU_H = 390;
+constexpr uint32_t MENU_H = 430;
 constexpr size_t MAX_APP_WINDOWS = 8;
 constexpr UINT WM_THEME_SCHEDULE_TICK = 0x8001u;
 constexpr UINT WM_THEME_QUEUE_PRESSURE_PROBE = 0x8002u;
@@ -963,6 +963,31 @@ bool appendSystemRoot(wchar_t* path, size_t capacity, size_t& cursor) noexcept {
     return true;
 }
 
+void launchThemeTest() noexcept {
+    wchar_t imagePath[512]{};
+    size_t cursor = 0;
+    constexpr wchar_t suffix[] = L"\\System32\\theme_test.exe";
+    if (!appendSystemRoot(imagePath, std::size(imagePath), cursor) ||
+        cursor + std::size(suffix) > std::size(imagePath)) {
+        PrintLine("[MicaNT Explorer] Could not build theme_test.exe path");
+        return;
+    }
+    for (size_t i = 0; i < std::size(suffix); ++i) imagePath[cursor++] = suffix[i];
+
+    wchar_t commandLine[512]{};
+    for (size_t i = 0; i < cursor; ++i) commandLine[i] = imagePath[i];
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(imagePath, commandLine, nullptr, nullptr, FALSE, 0,
+                        nullptr, nullptr, &startup, &process)) {
+        PrintLine("[MicaNT Explorer] Starting theme_test.exe failed");
+        return;
+    }
+    (void)CloseHandle(process.hThread);
+    (void)CloseHandle(process.hProcess);
+}
+
 bool appendWide(wchar_t* path, size_t capacity, size_t& cursor,
                 const wchar_t* suffix, size_t length) noexcept {
     if (length > capacity || cursor > capacity - length - 1) return false;
@@ -1485,79 +1510,7 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     g.themeProfile[profileBytes] = '\0';
 }
 
-void createThemeProgressProbe(HWND parent) noexcept {
-    if (!parent || g.themeProgressProbe) return;
-    struct InitCommonControlsExArgs { uint32_t size, classes; } args{
-        sizeof(InitCommonControlsExArgs), 0x00000020u};
-    if (!InitCommonControlsEx(&args)) {
-        PrintLine("[MicaNT Theme] comctl32 progress class registration failed");
-        return;
-    }
-    constexpr uint32_t kSetRange32 = 0x0406u;
-    constexpr uint32_t kSetPosition = 0x0402u;
-    constexpr uint32_t kGetPosition = 0x0408u;
-    g.themeProgressProbe = CreateWindowExW(0, L"msctls_progress32", L"",
-        WS_CHILD | WS_VISIBLE, 520, 220, 180, 20,
-        parent, nullptr, nullptr, nullptr);
-    if (!g.themeProgressProbe) {
-        PrintLine("[MicaNT Theme] comctl32 progress window creation failed");
-        return;
-    }
-    (void)SendMessageW(g.themeProgressProbe, kSetRange32, 0, 100);
-    (void)SendMessageW(g.themeProgressProbe, kSetPosition, 50, 0);
-    UpdateWindow(g.themeProgressProbe);
-    const bool positionPassed =
-        SendMessageW(g.themeProgressProbe, kGetPosition, 0, 0) == 50;
-    HDC source = GetDC(g.themeProgressProbe);
-    HDC target = CreateCompatibleDC(nullptr);
-    void* dibBits = nullptr;
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = 180;
-    info.bmiHeader.biHeight = -20;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    HBITMAP bitmap = target
-        ? CreateDIBSection(target, &info, DIB_RGB_COLORS, &dibBits, nullptr, 0) : nullptr;
-    void* previousBitmap = target && bitmap ? SelectObject(target, bitmap) : nullptr;
-    const bool copied = source && target && bitmap && dibBits &&
-        BitBlt(target, 0, 0, 180, 20, source, 0, 0, SRCCOPY);
-    const auto* pixels = static_cast<const uint32_t*>(dibBits);
-    const auto* trough = themeStyle(7, 0);
-    const auto* fill = themeStyle(7, 6);
-    const uint32_t expectedTrough = trough &&
-        (trough->flags & MICANT_THEME_HAS_BACKGROUND)
-        ? themePixel(trough->background, 0xFF000000u) : 0xFF000000u;
-    const uint32_t expectedFill = fill &&
-        (fill->flags & MICANT_THEME_HAS_BACKGROUND)
-        ? themePixel(fill->background, 0xFF000000u) : 0xFF000000u;
-    const bool pixelsPassed = copied && trough && fill &&
-        (trough->flags & MICANT_THEME_HAS_BACKGROUND) &&
-        (fill->flags & MICANT_THEME_HAS_BACKGROUND) &&
-        pixels[10u * 180u + 20u] == expectedFill &&
-        pixels[10u * 180u + 150u] == expectedTrough;
-    if (source) (void)ReleaseDC(g.themeProgressProbe, source);
-    if (target && previousBitmap) (void)SelectObject(target, previousBitmap);
-    if (target) (void)DeleteDC(target);
-    if (bitmap) (void)DeleteObject(bitmap);
-    if (positionPassed && pixelsPassed) {
-        PrintLine("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels");
-        g.commonControlsProgressReported = true;
-    } else {
-        PrintThemeWin32Error("[MicaNT Theme] Progress position", positionPassed);
-        PrintThemeWin32Error("[MicaNT Theme] Progress DIB copy", copied);
-        PrintThemeWin32Error("[MicaNT Theme] Progress style flags",
-            (trough ? trough->flags : 0u) | (fill ? fill->flags << 16 : 0u));
-        if (copied && pixels) {
-            PrintThemeWin32Error("[MicaNT Theme] Progress fill pixel", pixels[10u * 180u + 20u]);
-            PrintThemeWin32Error("[MicaNT Theme] Progress trough pixel", pixels[10u * 180u + 150u]);
-        }
-        PrintThemeWin32Error("[MicaNT Theme] Progress expected fill", expectedFill);
-        PrintThemeWin32Error("[MicaNT Theme] Progress expected trough", expectedTrough);
-        PrintLine("[MicaNT Theme] Production comctl32 progress range or pixel check failed");
-    }
-}
+
 
 bool themeProfileEquals(const char* left, const char* right) noexcept {
     if (!left || !right) return false;
@@ -2058,14 +2011,11 @@ void openView(View view) noexcept {
     if (systemRootLength > 3) --systemRootLength;
     app->directoryPath[systemRootLength] = L'\0';
     app->directoryRowCount = 0;
-    // My Computer doubles as the visible theme-control test host. Keep enough
-    // client area for every probe so none of them spill onto the desktop or
-    // get clipped by the Explorer window.
-    const uint32_t kInitialWindowWidth = view == View::MyComputer ? 760u : 500u;
-    const uint32_t kInitialWindowHeight = view == View::MyComputer ? 590u : 320u;
+    const uint32_t kInitialWindowWidth = 500u;
+    const uint32_t kInitialWindowHeight = 320u;
     const int32_t appIndex = static_cast<int32_t>(app - g.apps);
     app->hwnd = CreateWindowExW(0, kClassName,
-        view == View::MyComputer ? L"WhiteSur Theme Controls Test" :
+        view == View::MyComputer ? L"My Computer" :
         view == View::MyDocuments ? L"My Documents" :
         view == View::ControlPanel ? L"Control Panel" :
         view == View::RecycleBin ? L"Recycle Bin" :
@@ -2087,47 +2037,7 @@ void openView(View view) noexcept {
     app->height = static_cast<uint32_t>(clientRect.bottom - clientRect.top);
     app->open = true;
     app->minimized = false;
-    if (view == View::MyComputer) createThemeProgressProbe(app->hwnd);
-    if (!g.themeMenuApiReported) {
-        HMENU menu = CreateMenu();
-        HMENU submenu = CreatePopupMenu();
-        bool passed = menu && submenu &&
-            AppendMenuW(menu, MF_STRING, 0x8801u, L"Open") &&
-            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), L"More") &&
-            GetMenuItemCount(menu) == 2 && GetMenuItemID(menu, 0) == 0x8801u;
-        MENUITEMINFOW update{};
-        wchar_t updatedText[] = L"Open item";
-        update.cbSize = sizeof(update);
-        update.fMask = MIIM_ID | MIIM_STATE | MIIM_STRING;
-        update.wID = 0x8802u;
-        update.fState = MFS_CHECKED;
-        update.dwTypeData = updatedText;
-        update.cch = static_cast<UINT>(std::size(updatedText));
-        passed = passed && SetMenuItemInfoW(menu, 0, TRUE, &update);
-        wchar_t readback[32]{};
-        MENUITEMINFOW query{};
-        query.cbSize = sizeof(query);
-        query.fMask = MIIM_ID | MIIM_STATE | MIIM_STRING;
-        query.dwTypeData = readback;
-        query.cch = static_cast<UINT>(std::size(readback));
-        passed = passed && GetMenuItemInfoW(menu, 0, TRUE, &query) &&
-            query.wID == 0x8802u && query.fState == MFS_CHECKED &&
-            readback[0] == L'O' && readback[8] == L'm' && readback[9] == L'\0';
-        passed = passed && SetMenu(app->hwnd, menu) && GetMenu(app->hwnd) == menu;
-        passed = passed && RemoveMenu(menu, 1, MF_BYPOSITION) &&
-            GetMenuItemCount(menu) == 1 && DestroyMenu(submenu);
-        passed = passed && DeleteMenu(menu, 0, MF_BYPOSITION) &&
-            GetMenuItemCount(menu) == 0 && DestroyMenu(menu) && GetMenu(app->hwnd) == nullptr;
-        if (menu) {
-            if (GetMenu(app->hwnd) == menu) (void)SetMenu(app->hwnd, nullptr);
-            if (GetMenuItemCount(menu) >= 0) (void)DestroyMenu(menu);
-        }
-        if (submenu && GetMenuItemCount(submenu) >= 0) (void)DestroyMenu(submenu);
-        g.themeMenuApiReported = passed;
-        PrintLine(passed
-            ? "[MicaNT Theme] Production User32 menu ownership and query round-trip verified"
-            : "[MicaNT Theme] Production User32 menu round-trip failed");
-    }
+
     if (view == View::MyComputer || view == View::MyDocuments) {
         if (!enumerateDirectory(*app))
             PrintLine("[MicaNT Explorer] Native directory open/enumeration failed");
@@ -2168,509 +2078,7 @@ void openView(View view) noexcept {
     drawAppWindow(*app);
     redrawDesktop();
     present(app->hwnd);
-    if (view == View::MyComputer && !g.themeButtonProbe) {
-        constexpr uintptr_t kThemeButtonId = 0x771u;
-        PrintLine("[MicaNT Theme] BUTTON probe creation starting");
-        g.themeButtonProbe = CreateWindowExW(0, L"BUTTON", L"Theme button",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 530, 300, 120, 40,
-            app->hwnd, reinterpret_cast<HMENU>(kThemeButtonId), nullptr, nullptr);
-        if (g.themeButtonProbe) {
-            PrintLine("[MicaNT Theme] BUTTON probe created");
-            ShowWindow(g.themeButtonProbe, SW_SHOW);
-            PrintLine("[MicaNT Theme] BUTTON probe shown");
-            UpdateWindow(g.themeButtonProbe);
-            PrintLine("[MicaNT Theme] BUTTON probe painted");
-            const HWND focusBeforeButton = GetFocus();
-            const bool focusApiPassed = focusBeforeButton &&
-                SetFocus(g.themeButtonProbe) == focusBeforeButton &&
-                GetFocus() == g.themeButtonProbe &&
-                SetFocus(focusBeforeButton) == g.themeButtonProbe &&
-                GetFocus() == focusBeforeButton;
-            PrintLine(focusApiPassed
-                ? "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified"
-                : "[MicaNT Theme] User32 child focus round trip mismatch");
-            constexpr UINT kBmGetState = 0x00F2u;
-            constexpr UINT kBmClick = 0x00F5u;
-            constexpr UINT kWmSetText = 0x000Cu;
-            constexpr UINT kWmGetText = 0x000Du;
-            constexpr UINT kWmGetTextLength = 0x000Eu;
-            const bool initialState = SendMessageW(g.themeButtonProbe,
-                kBmGetState, 0, 0) == 0;
-            constexpr wchar_t kReplacementText[] = L"WhiteSur button";
-            const bool textSet = SendMessageW(g.themeButtonProbe, kWmSetText, 0,
-                reinterpret_cast<LPARAM>(kReplacementText)) != 0;
-            wchar_t textReadback[32]{};
-            const intptr_t textLength = SendMessageW(g.themeButtonProbe,
-                kWmGetTextLength, 0, 0);
-            const intptr_t textCopied = SendMessageW(g.themeButtonProbe,
-                kWmGetText, std::size(textReadback),
-                reinterpret_cast<LPARAM>(textReadback));
-            bool textMatches = textCopied == 15 && textLength == 15;
-            for (size_t i = 0; i < 15 && textMatches; ++i)
-                textMatches = textReadback[i] == kReplacementText[i];
-            textMatches &= textReadback[15] == L'\0';
-            wchar_t oversizedText[129]{};
-            for (size_t i = 0; i < 128; ++i) oversizedText[i] = L'X';
-            const bool oversizedRejected = SendMessageW(g.themeButtonProbe,
-                kWmSetText, 0, reinterpret_cast<LPARAM>(oversizedText)) == 0 &&
-                SendMessageW(g.themeButtonProbe, kWmGetTextLength, 0, 0) == 15;
-            constexpr wchar_t kOriginalText[] = L"Theme button";
-            const bool textRestored = SendMessageW(g.themeButtonProbe, kWmSetText, 0,
-                reinterpret_cast<LPARAM>(kOriginalText)) != 0 &&
-                SendMessageW(g.themeButtonProbe, kWmGetTextLength, 0, 0) == 12;
-            const bool buttonTextMessagesPassed = textSet && textMatches &&
-                oversizedRejected && textRestored;
-            UpdateWindow(g.themeButtonProbe);
-            PrintLine(buttonTextMessagesPassed
-                ? "[MicaNT Theme] BUTTON text messages update, read back and reject overflow"
-                : "[MicaNT Theme] BUTTON text message mismatch");
-            (void)SendMessageW(g.themeButtonProbe, kBmClick, 0, 0);
-            if (initialState && g.themeButtonProbeReported)
-                PrintLine("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered");
-            else
-                PrintLine("[MicaNT Theme] Production User32 BUTTON state/notification mismatch");
-            constexpr uintptr_t kThemeCheckId = 0x772u;
-            constexpr uintptr_t kThemeManualCheckId = 0x773u;
-            constexpr UINT kBmGetCheck = 0x00F0u;
-            constexpr UINT kBmSetCheck = 0x00F1u;
-            constexpr UINT kBsAutoCheckBox = 0x0003u;
-            constexpr UINT kBsCheckBox = 0x0002u;
-            g.themeCheckProbe = CreateWindowExW(0, L"BUTTON", L"Auto checkbox",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | kBsAutoCheckBox, 530, 350, 150, 28,
-                app->hwnd, reinterpret_cast<HMENU>(kThemeCheckId), nullptr, nullptr);
-            HWND manualCheck = CreateWindowExW(0, L"BUTTON", L"Manual checkbox",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | kBsCheckBox, 530, 382, 150, 28,
-                app->hwnd, reinterpret_cast<HMENU>(kThemeManualCheckId), nullptr, nullptr);
-            if (g.themeCheckProbe && manualCheck) {
-                ShowWindow(g.themeCheckProbe, SW_SHOW);
-                ShowWindow(manualCheck, SW_SHOW);
-                UpdateWindow(g.themeCheckProbe);
-                UpdateWindow(manualCheck);
-                const bool unchecked = SendMessageW(g.themeCheckProbe, kBmGetCheck, 0, 0) == 0;
-                (void)SendMessageW(g.themeCheckProbe, kBmClick, 0, 0);
-                const bool checked = SendMessageW(g.themeCheckProbe, kBmGetCheck, 0, 0) == 1;
-                (void)SendMessageW(g.themeCheckProbe, kBmClick, 0, 0);
-                const bool reset = SendMessageW(g.themeCheckProbe, kBmGetCheck, 0, 0) == 0;
-                (void)SendMessageW(manualCheck, kBmClick, 0, 0);
-                const bool manualStable = SendMessageW(manualCheck, kBmGetCheck, 0, 0) == 0;
-                (void)SendMessageW(manualCheck, kBmSetCheck, 1, 0);
-                const bool manualSet = SendMessageW(manualCheck, kBmGetCheck, 0, 0) == 1;
-                (void)SendMessageW(manualCheck, kBmSetCheck, 0, 0);
-                UpdateWindow(g.themeCheckProbe);
-                UpdateWindow(manualCheck);
-                const bool notified = g.themeCheckNotifications == 3;
-                PrintLine(unchecked && checked && reset && manualStable && manualSet && notified
-                    ? "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified"
-                    : "[MicaNT Theme] User32 checkbox state/notification mismatch");
-            } else {
-                PrintLine("[MicaNT Theme] User32 checkbox creation failed");
-            }
-        } else {
-            PrintLine("[MicaNT Theme] Production User32 BUTTON creation failed");
-        }
-    }
-    if (view == View::MyComputer && !g.themeStateProbeAttempted) {
-        g.themeStateProbeAttempted = true;
-        constexpr uintptr_t kThemeThreeStateId = 0x774u;
-        constexpr uintptr_t kThemeRadioId = 0x775u;
-        constexpr UINT kBmGetCheck = 0x00F0u;
-        constexpr UINT kBmSetCheck = 0x00F1u;
-        constexpr UINT kBmClick = 0x00F5u;
-        constexpr UINT kBsAuto3State = 0x0006u;
-        constexpr UINT kBs3State = 0x0005u;
-        constexpr UINT kBsRadioButton = 0x0004u;
-        constexpr UINT kStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
-        g.themeThreeStateProbe = CreateWindowExW(0, L"BUTTON", L"Three state",
-            kStyle | kBsAuto3State, 200, 320, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(kThemeThreeStateId), nullptr, nullptr);
-        HWND manualThreeState = CreateWindowExW(0, L"BUTTON", L"Manual 3-state",
-            kStyle | kBs3State, 360, 320, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(0x776u), nullptr, nullptr);
-        g.themeRadioProbe = CreateWindowExW(0, L"BUTTON", L"Radio",
-            kStyle | kBsRadioButton, 200, 382, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(kThemeRadioId), nullptr, nullptr);
-        if (g.themeThreeStateProbe && manualThreeState && g.themeRadioProbe) {
-            ShowWindow(g.themeThreeStateProbe, SW_SHOW);
-            ShowWindow(manualThreeState, SW_SHOW);
-            ShowWindow(g.themeRadioProbe, SW_SHOW);
-            UpdateWindow(g.themeThreeStateProbe);
-            UpdateWindow(manualThreeState);
-            UpdateWindow(g.themeRadioProbe);
-            const bool beginsClear = SendMessageW(g.themeThreeStateProbe,
-                kBmGetCheck, 0, 0) == 0;
-            (void)SendMessageW(g.themeThreeStateProbe, kBmClick, 0, 0);
-            const bool cyclesChecked = SendMessageW(g.themeThreeStateProbe,
-                kBmGetCheck, 0, 0) == 1;
-            (void)SendMessageW(g.themeThreeStateProbe, kBmClick, 0, 0);
-            const bool cyclesMixed = SendMessageW(g.themeThreeStateProbe,
-                kBmGetCheck, 0, 0) == 2;
-            (void)SendMessageW(g.themeThreeStateProbe, kBmClick, 0, 0);
-            const bool cyclesClear = SendMessageW(g.themeThreeStateProbe,
-                kBmGetCheck, 0, 0) == 0;
-            (void)SendMessageW(manualThreeState, kBmSetCheck, 2, 0);
-            (void)SendMessageW(manualThreeState, kBmClick, 0, 0);
-            const bool manualMixedStable = SendMessageW(manualThreeState,
-                kBmGetCheck, 0, 0) == 2;
-            (void)SendMessageW(g.themeRadioProbe, kBmSetCheck, 1, 0);
-            (void)SendMessageW(g.themeRadioProbe, kBmClick, 0, 0);
-            const bool radioCheckedStable = SendMessageW(g.themeRadioProbe,
-                kBmGetCheck, 0, 0) == 1;
-            const bool notificationCounts = g.themeThreeStateNotifications == 4 &&
-                g.themeRadioNotifications == 1;
-            PrintLine(beginsClear && cyclesChecked && cyclesMixed && cyclesClear &&
-                manualMixedStable && radioCheckedStable && notificationCounts
-                ? "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified"
-                : "[MicaNT Theme] User32 3-state/radio message mismatch");
-        } else {
-            PrintLine("[MicaNT Theme] User32 3-state/radio creation failed");
-        }
-        constexpr UINT kBsAutoRadioButton = 0x0009u;
-        constexpr uintptr_t kAutoRadioAId = 0x77Eu;
-        constexpr uintptr_t kAutoRadioBId = 0x77Fu;
-        constexpr uintptr_t kAutoRadioCId = 0x780u;
-        constexpr uintptr_t kAutoRadioDId = 0x781u;
-        const UINT kAutoRadioStyle = kStyle | kBsAutoRadioButton;
-        g.themeAutoRadioA = CreateWindowExW(0, L"BUTTON", L"Auto radio A",
-            kAutoRadioStyle | WS_GROUP, 200, 414, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(kAutoRadioAId), nullptr, nullptr);
-        g.themeAutoRadioB = CreateWindowExW(0, L"BUTTON", L"Auto radio B",
-            kAutoRadioStyle, 360, 414, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(kAutoRadioBId), nullptr, nullptr);
-        g.themeAutoRadioC = CreateWindowExW(0, L"BUTTON", L"Auto radio C",
-            kAutoRadioStyle | WS_GROUP, 200, 446, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(kAutoRadioCId), nullptr, nullptr);
-        g.themeAutoRadioD = CreateWindowExW(0, L"BUTTON", L"Auto radio D",
-            kAutoRadioStyle, 360, 446, 150, 28, app->hwnd,
-            reinterpret_cast<HMENU>(kAutoRadioDId), nullptr, nullptr);
-        if (g.themeAutoRadioA && g.themeAutoRadioB &&
-            g.themeAutoRadioC && g.themeAutoRadioD) {
-            ShowWindow(g.themeAutoRadioA, SW_SHOW);
-            ShowWindow(g.themeAutoRadioB, SW_SHOW);
-            ShowWindow(g.themeAutoRadioC, SW_SHOW);
-            ShowWindow(g.themeAutoRadioD, SW_SHOW);
-            const bool initiallyClear =
-                SendMessageW(g.themeAutoRadioA, kBmGetCheck, 0, 0) == 0 &&
-                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 0 &&
-                SendMessageW(g.themeAutoRadioC, kBmGetCheck, 0, 0) == 0 &&
-                SendMessageW(g.themeAutoRadioD, kBmGetCheck, 0, 0) == 0;
-            (void)SendMessageW(g.themeAutoRadioA, kBmClick, 0, 0);
-            const bool firstSelected =
-                SendMessageW(g.themeAutoRadioA, kBmGetCheck, 0, 0) == 1 &&
-                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 0;
-            (void)SendMessageW(g.themeAutoRadioB, kBmClick, 0, 0);
-            const bool secondExclusive =
-                SendMessageW(g.themeAutoRadioA, kBmGetCheck, 0, 0) == 0 &&
-                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 1;
-            (void)SendMessageW(g.themeAutoRadioC, kBmClick, 0, 0);
-            const bool groupsIndependent =
-                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 1 &&
-                SendMessageW(g.themeAutoRadioC, kBmGetCheck, 0, 0) == 1;
-            (void)SendMessageW(g.themeAutoRadioD, kBmClick, 0, 0);
-            const bool secondGroupExclusive =
-                SendMessageW(g.themeAutoRadioC, kBmGetCheck, 0, 0) == 0 &&
-                SendMessageW(g.themeAutoRadioD, kBmGetCheck, 0, 0) == 1 &&
-                SendMessageW(g.themeAutoRadioB, kBmGetCheck, 0, 0) == 1;
-            const bool notificationCounts = g.themeAutoRadioNotifications == 4;
-            PrintLine(initiallyClear && firstSelected && secondExclusive &&
-                groupsIndependent && secondGroupExclusive && notificationCounts
-                ? "[MicaNT Theme] User32 auto-radio exclusive groups verified"
-                : "[MicaNT Theme] User32 auto-radio exclusivity mismatch");
-        } else {
-            PrintLine("[MicaNT Theme] User32 auto-radio group creation failed");
-        }
-    }
-    if (view == View::MyComputer && !g.themeEditProbeReported) {
-        constexpr uintptr_t kThemeEditId = 0x777u;
-        constexpr UINT kWmSetText = 0x000Cu;
-        constexpr UINT kWmGetText = 0x000Du;
-        constexpr UINT kWmGetTextLength = 0x000Eu;
-        constexpr UINT kWmChar = 0x0102u;
-        g.themeEditProbe = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 300, 280, 28,
-            app->hwnd, reinterpret_cast<HMENU>(kThemeEditId), nullptr, nullptr);
-        if (g.themeEditProbe) {
-            constexpr wchar_t kInitialText[] = L"Theme text";
-            const bool set = SendMessageW(g.themeEditProbe, kWmSetText, 0,
-                reinterpret_cast<LPARAM>(kInitialText)) != 0;
-            wchar_t copied[32]{};
-            const intptr_t length = SendMessageW(g.themeEditProbe,
-                kWmGetTextLength, 0, 0);
-            const intptr_t count = SendMessageW(g.themeEditProbe, kWmGetText,
-                std::size(copied), reinterpret_cast<LPARAM>(copied));
-            const bool readback = set && length == 10 && count == 10 &&
-                copied[10] == L'\0';
-            bool same = readback;
-            for (size_t index = 0; index < 10 && same; ++index)
-                same = copied[index] == kInitialText[index];
-            (void)SetFocus(g.themeEditProbe);
-            SendMessageW(g.themeEditProbe, kWmChar, L'!', 0);
-            HWND readOnly = CreateWindowExW(0, L"EDIT", L"locked",
-                WS_CHILD | 0x00000800u, 200, 300, 120, 24, app->hwnd,
-                reinterpret_cast<HMENU>(0x778u), nullptr, nullptr);
-            HWND unsupportedStyle = CreateWindowExW(0, L"EDIT", L"",
-                WS_CHILD | 0x00000004u, 200, 300, 120, 24, app->hwnd,
-                reinterpret_cast<HMENU>(0x779u), nullptr, nullptr);
-            const bool readOnlyWorks = readOnly &&
-                SendMessageW(readOnly, kWmGetTextLength, 0, 0) == 6;
-            if (readOnly) SendMessageW(readOnly, kWmChar, L'!', 0);
-            const bool readOnlyBlocksInput = readOnly &&
-                SendMessageW(readOnly, kWmGetTextLength, 0, 0) == 6;
-            if (readOnly) DestroyWindow(readOnly);
-            if (unsupportedStyle) DestroyWindow(unsupportedStyle);
-            ShowWindow(g.themeEditProbe, SW_SHOW);
-            const bool painted = SendMessageW(g.themeEditProbe, 0x000Fu, 0, 0) != 0;
-            g.themeEditProbeReported = same &&
-                SendMessageW(g.themeEditProbe, kWmGetTextLength, 0, 0) == 11 &&
-                readOnlyWorks && readOnlyBlocksInput && !unsupportedStyle &&
-                g.themeEditChangeNotifications == 2 && painted;
-            UpdateWindow(g.themeEditProbe);
-            PrintLine(g.themeEditProbeReported
-                ? "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified"
-                : "[MicaNT Theme] Production User32 EDIT message mismatch");
-        } else {
-            PrintLine("[MicaNT Theme] Production User32 EDIT creation failed");
-        }
-    }
-    if (view == View::MyComputer && !g.themeTabProbeReported) {
-        constexpr uint32_t kIccTab = 0x00000008u;
-        constexpr uint32_t kTcmFirst = 0x1300u;
-        constexpr uint32_t kTcmGetItemCount = kTcmFirst + 4u;
-        constexpr uint32_t kTcmDeleteItem = kTcmFirst + 8u;
-        constexpr uint32_t kTcmGetCurSel = kTcmFirst + 11u;
-        constexpr uint32_t kTcmSetCurSel = kTcmFirst + 12u;
-        constexpr uint32_t kTcmInsertItemW = kTcmFirst + 62u;
-        constexpr uint32_t kTcmGetItemW = kTcmFirst + 60u;
-        constexpr uint32_t kTcmSetItemW = kTcmFirst + 61u;
-        constexpr uint32_t kWmGetDlgCode = 0x0087u;
-        constexpr uint32_t kTcifText = 0x0001u;
-        constexpr uint32_t kTcifParam = 0x0008u;
-        struct InitArgs { uint32_t size, classes; } initArgs{sizeof(InitArgs), kIccTab};
-        struct TabItemW {
-            uint32_t mask, state, stateMask;
-            wchar_t* text;
-            int32_t textCapacity, image;
-            intptr_t parameter;
-        };
-        const auto sameText = [](const wchar_t* left, const wchar_t* right) noexcept {
-            if (!left || !right) return false;
-            for (size_t index = 0; index < 32; ++index) {
-                if (left[index] != right[index]) return false;
-                if (!left[index]) return true;
-            }
-            return false;
-        };
-        const bool initialized = InitCommonControlsEx(&initArgs) != 0;
-        g.themeTabProbe = initialized ? CreateWindowExW(0, L"SysTabControl32", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 260, 320, 30, app->hwnd,
-            reinterpret_cast<HMENU>(0x77Au), nullptr, nullptr) : nullptr;
-        if (g.themeTabProbe) {
-            wchar_t files[] = L"Files";
-            wchar_t details[] = L"Details";
-            wchar_t revised[] = L"Details+";
-            TabItemW first{kTcifText | kTcifParam, 0, 0, files, 32, -1, 11};
-            TabItemW second{kTcifText | kTcifParam, 0, 0, details, 32, -1, 22};
-            const intptr_t insertedFirst = SendMessageW(g.themeTabProbe,
-                kTcmInsertItemW, static_cast<WPARAM>(-1),
-                reinterpret_cast<LPARAM>(&first));
-            const intptr_t insertedSecond = SendMessageW(g.themeTabProbe,
-                kTcmInsertItemW, static_cast<WPARAM>(-1),
-                reinterpret_cast<LPARAM>(&second));
-            wchar_t itemText[32]{};
-            TabItemW getSecond{kTcifText | kTcifParam, 0, 0, itemText, 32, -1, 0};
-            const bool getRoundTrip = SendMessageW(g.themeTabProbe, kTcmGetItemW,
-                1, reinterpret_cast<LPARAM>(&getSecond)) != 0 &&
-                getSecond.parameter == 22 && sameText(itemText, L"Details");
-            TabItemW updateSecond{kTcifText, 0, 0, revised, 32, -1, 0};
-            const bool setRoundTrip = SendMessageW(g.themeTabProbe, kTcmSetItemW,
-                1, reinterpret_cast<LPARAM>(&updateSecond)) != 0;
-            TabItemW verifySecond{kTcifText, 0, 0, itemText, 32, -1, 0};
-            const bool updatedText = setRoundTrip && SendMessageW(g.themeTabProbe,
-                kTcmGetItemW, 1, reinterpret_cast<LPARAM>(&verifySecond)) != 0 &&
-                sameText(itemText, L"Details+");
-            const intptr_t firstSelection = SendMessageW(g.themeTabProbe,
-                kTcmSetCurSel, 1, 0);
-            const intptr_t secondSelection = SendMessageW(g.themeTabProbe,
-                kTcmSetCurSel, 0, 0);
-            const bool selected = firstSelection == 0 && secondSelection == 1 &&
-                SendMessageW(g.themeTabProbe, kTcmGetCurSel, 0, 0) == 0;
-            const bool deleted = SendMessageW(g.themeTabProbe, kTcmDeleteItem,
-                1, 0) != 0 && SendMessageW(g.themeTabProbe, kTcmGetItemCount,
-                0, 0) == 1 && SendMessageW(g.themeTabProbe, kTcmGetCurSel, 0, 0) == 0;
-            second.text = revised;
-            const bool reinserted = SendMessageW(g.themeTabProbe, kTcmInsertItemW,
-                static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(&second)) == 1 &&
-                SendMessageW(g.themeTabProbe, kTcmGetItemCount, 0, 0) == 2;
-            (void)SendMessageW(g.themeTabProbe, kTcmSetCurSel, 0, 0);
-            (void)SetFocus(g.themeTabProbe);
-            const bool focusAndArrowRequest = GetFocus() == g.themeTabProbe &&
-                SendMessageW(g.themeTabProbe, kWmGetDlgCode, 0, 0) == 0x0001u;
-            if (focusAndArrowRequest)
-                PrintLine("[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified");
-            ShowWindow(g.themeTabProbe, SW_SHOW);
-            UpdateWindow(g.themeTabProbe);
-            g.themeTabProbeReported = insertedFirst == 0 && insertedSecond == 1 &&
-                getRoundTrip && updatedText && selected && deleted && reinserted &&
-                focusAndArrowRequest &&
-                SendMessageW(g.themeTabProbe, kTcmGetCurSel, 0, 0) == 0;
-            PrintLine(g.themeTabProbeReported
-                ? "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified"
-                : "[MicaNT Theme] SysTabControl32 message or creation mismatch");
-        } else {
-            PrintLine("[MicaNT Theme] SysTabControl32 initialization or creation failed");
-        }
-    }
-    if (view == View::MyComputer && !g.themeScrollProbeReported &&
-        !g.themeScrollProbe) {
-        constexpr uintptr_t kThemeScrollId = 0x77Au;
-        constexpr UINT kSifRange = 0x0001u;
-        constexpr UINT kSifPage = 0x0002u;
-        constexpr UINT kSifPos = 0x0004u;
-        g.themeScrollProbe = CreateWindowExW(0, L"SCROLLBAR", L"",
-            WS_CHILD | WS_VISIBLE, 370, 380, 180, 18, app->hwnd,
-            reinterpret_cast<HMENU>(kThemeScrollId), nullptr, nullptr);
-        if (g.themeScrollProbe) {
-            SCROLLINFO info{};
-            info.cbSize = sizeof(info);
-            info.fMask = kSifRange | kSifPage | kSifPos;
-            info.nMin = 0;
-            info.nMax = 100;
-            info.nPage = 20;
-            info.nPos = 35;
-            const bool setAccepted = SetScrollInfo(g.themeScrollProbe, 2, &info, TRUE) == 35;
-            SCROLLINFO readback{};
-            readback.cbSize = sizeof(readback);
-            readback.fMask = info.fMask;
-            const bool readbackSucceeded = GetScrollInfo(g.themeScrollProbe, 2,
-                &readback) && readback.nMin == 0 && readback.nMax == 100 &&
-                readback.nPage == 20 && readback.nPos == 35;
-            const int oldPosition = SetScrollPos(g.themeScrollProbe, 2, 42, TRUE);
-            const bool positionMessages = oldPosition == 35 &&
-                GetScrollPos(g.themeScrollProbe, 2) == 42;
-            ShowWindow(g.themeScrollProbe, SW_SHOW);
-            UpdateWindow(g.themeScrollProbe);
-            g.themeScrollProbeReported = setAccepted && readbackSucceeded &&
-                positionMessages;
-            PrintLine(g.themeScrollProbeReported
-                ? "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified"
-                : "[MicaNT Theme] Production User32 SCROLLBAR message mismatch");
 
-            constexpr int32_t kSbVert = 1;
-            constexpr uint32_t kEsbDisableDown = 0x0002u;
-            SCROLLINFO windowInfo{};
-            windowInfo.cbSize = sizeof(windowInfo);
-            windowInfo.fMask = kSifRange | kSifPage | kSifPos;
-            windowInfo.nMin = 4;
-            windowInfo.nMax = 40;
-            windowInfo.nPage = 5;
-            windowInfo.nPos = 15;
-            const bool ownerSet = SetScrollInfo(app->hwnd, kSbVert,
-                &windowInfo, FALSE) == 15;
-            SCROLLINFO windowReadback{};
-            windowReadback.cbSize = sizeof(windowReadback);
-            windowReadback.fMask = windowInfo.fMask;
-            const bool ownerReadback = GetScrollInfo(app->hwnd, kSbVert,
-                &windowReadback) && windowReadback.nMin == 4 &&
-                windowReadback.nMax == 40 && windowReadback.nPage == 5 &&
-                windowReadback.nPos == 15;
-            int32_t oldWindowPosition = SetScrollPos(app->hwnd, kSbVert,
-                18, FALSE);
-            const bool ownerPosition = oldWindowPosition == 15 &&
-                GetScrollPos(app->hwnd, kSbVert) == 18;
-            const bool ownerRange = SetScrollRange(app->hwnd, kSbVert,
-                0, 50, FALSE) && GetScrollRange(app->hwnd, kSbVert,
-                &windowReadback.nMin, &windowReadback.nMax) &&
-                windowReadback.nMin == 0 && windowReadback.nMax == 50;
-            const bool ownerArrows = EnableScrollBar(app->hwnd, kSbVert,
-                kEsbDisableDown) != FALSE;
-            g.themeWindowScrollProbeReported = ownerSet && ownerReadback &&
-                ownerPosition && ownerRange && ownerArrows;
-            PrintLine(g.themeWindowScrollProbeReported
-                ? "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified"
-                : "[MicaNT Theme] Window SB_VERT state message mismatch");
-
-            constexpr int32_t kSbHorz = 0;
-            constexpr uint32_t kWsHScroll = 0x00100000u;
-            constexpr uint32_t kWsVScroll = 0x00200000u;
-            g.themeAttachedScrollProbe = CreateWindowExW(0,
-                kThemeAttachedScrollClassName, L"",
-                WS_CHILD | WS_VISIBLE | kWsHScroll | kWsVScroll,
-                200, 180, 150, 120, app->hwnd,
-                reinterpret_cast<HMENU>(0x77Bu), nullptr, nullptr);
-            if (g.themeAttachedScrollProbe) {
-                SCROLLINFO attachedInfo{};
-                attachedInfo.cbSize = sizeof(attachedInfo);
-                attachedInfo.fMask = kSifRange | kSifPage | kSifPos;
-                attachedInfo.nMin = 0;
-                attachedInfo.nMax = 60;
-                attachedInfo.nPage = 5;
-                attachedInfo.nPos = 20;
-                const bool hSet = SetScrollInfo(g.themeAttachedScrollProbe,
-                    kSbHorz, &attachedInfo, TRUE) == 20;
-                const bool vSet = SetScrollInfo(g.themeAttachedScrollProbe,
-                    kSbVert, &attachedInfo, TRUE) == 20;
-                SCROLLINFO attachedReadback{};
-                attachedReadback.cbSize = sizeof(attachedReadback);
-                attachedReadback.fMask = attachedInfo.fMask;
-                const bool hReadback = GetScrollInfo(g.themeAttachedScrollProbe,
-                    kSbHorz, &attachedReadback) && attachedReadback.nPos == 20;
-                const bool vReadback = GetScrollInfo(g.themeAttachedScrollProbe,
-                    kSbVert, &attachedReadback) && attachedReadback.nPos == 20;
-                ShowWindow(g.themeAttachedScrollProbe, SW_SHOW);
-                UpdateWindow(g.themeAttachedScrollProbe);
-                g.themeAttachedScrollProbeReported = hSet && vSet && hReadback && vReadback;
-                PrintLine(g.themeAttachedScrollProbeReported
-                    ? "[MicaNT Theme] Attached WS_HSCROLL/WS_VSCROLL pixels and range/page/position ready"
-                    : "[MicaNT Theme] Attached scrollbar state setup failed");
-            } else {
-                PrintLine("[MicaNT Theme] Attached scrollbar probe window creation failed");
-            }
-        } else {
-            PrintLine("[MicaNT Theme] Production User32 SCROLLBAR creation failed");
-        }
-    }
-    if (view == View::MyComputer && g.themeMenuApiReported &&
-        !g.themeMenuPopupStarted) {
-        g.themeMenuPopupStarted = true;
-        constexpr UINT kMfDisabled = 0x0002u;
-        constexpr UINT kMfChecked = 0x0008u;
-        HMENU popup = CreatePopupMenu();
-        const bool populated = popup &&
-            AppendMenuW(popup, MF_STRING, 0x8844u, L"Open item") &&
-            AppendMenuW(popup, kMfDisabled, 0x8845u, L"Unavailable") &&
-            AppendMenuW(popup, kMfChecked, 0x8846u, L"Pinned item");
-        if (populated) {
-            PrintLine("[MicaNT Theme] Production User32 popup mouse selection ready");
-            const bool mouseTrack = TrackPopupMenu(popup, 0, 680, 200, 0,
-                app->hwnd, nullptr) != FALSE;
-            PrintLine(mouseTrack && g.themeMenuMouseCommand
-                ? "[MicaNT Theme] Production User32 popup mouse selection delivered WM_COMMAND"
-                : "[MicaNT Theme] Production User32 popup mouse selection failed");
-            PrintLine("[MicaNT Theme] Production User32 popup keyboard selection ready");
-            const bool keyboardTrack = TrackPopupMenu(popup, 0, 680, 200, 0,
-                app->hwnd, nullptr) != FALSE;
-            PrintLine(keyboardTrack && g.themeMenuKeyboardCommand
-                ? "[MicaNT Theme] Production User32 popup keyboard selection delivered WM_COMMAND"
-                : "[MicaNT Theme] Production User32 popup keyboard selection failed");
-        } else {
-            PrintLine("[MicaNT Theme] Production User32 popup creation failed");
-        }
-        if (popup) (void)DestroyMenu(popup);
-    }
-    if (view == View::MyComputer && g.themeMenuApiReported &&
-        g.themeMenuPopupStarted && !g.themeMenuBarStarted) {
-        g.themeMenuBarStarted = true;
-        HMENU barMenu = CreateMenu();
-        const bool ready = barMenu &&
-            AppendMenuW(barMenu, MF_STRING, 0x8850u, L"Run") &&
-            SetMenu(app->hwnd, barMenu) && DrawMenuBar(app->hwnd);
-        if (ready) {
-            g.themeMenuBarProbe = barMenu;
-            PrintLine("[MicaNT Theme] Production User32 menu bar attached and painted");
-        } else {
-            PrintLine("[MicaNT Theme] Production User32 menu bar creation failed");
-            if (barMenu) (void)DestroyMenu(barMenu);
-        }
-    }
 }
 
 void toggleStart() noexcept {
@@ -2935,6 +2343,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         g.startOpen = false;
         ShowWindow(g.startMenu, SW_HIDE);
         switch (action) {
+            case micant::explorer::StartMenuAction::ThemeTest: launchThemeTest(); break;
             case micant::explorer::StartMenuAction::MyComputer: openView(View::MyComputer); break;
             case micant::explorer::StartMenuAction::MyDocuments: openView(View::MyDocuments); break;
             case micant::explorer::StartMenuAction::ControlPanel: openView(View::ControlPanel); break;

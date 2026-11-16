@@ -54,6 +54,15 @@ constexpr UINT kTcmInsertItemW = 0x133Eu;
 constexpr UINT kTcmSetCurSel = 0x130Cu;
 constexpr UINT kSbmSetRange = 0x00E2u;
 constexpr UINT kSbmSetPos = 0x00E0u;
+constexpr UINT kTvmInsertItemW = 0x1132u;
+constexpr UINT kTvmExpand = 0x1102u;
+constexpr UINT kTvmGetCount = 0x1105u;
+constexpr UINT kTvmSelectItem = 0x110Bu;
+constexpr intptr_t kTvRoot = -0x10000;
+constexpr intptr_t kTvLast = -0x0FFFE;
+constexpr UINT kTvifText = 0x0001u;
+constexpr UINT kTvSelect = 0x0009u;
+constexpr UINT kTvExpandFlag = 0x0002u;
 HWND g_window{};
 HWND g_focusEdit{};
 MicaThemeHandle g_initialThemeHandle{};
@@ -75,15 +84,59 @@ struct TabItemW {
     int32_t textCapacity, image;
     LPARAM parameter;
 };
+struct TreeItemW {
+    UINT mask;
+    void* item;
+    UINT state, stateMask;
+    wchar_t* text;
+    int32_t textCapacity, image, selectedImage, children;
+    LPARAM parameter;
+};
+struct TreeInsertW { void* parent; void* insertAfter; TreeItemW item; };
+
+void createTreeControl(HWND parent, DWORD child) noexcept {
+    HWND tree = CreateWindowExW(0, L"SysTreeView32", L"", child,
+        462, 202, 244, 176, parent, reinterpret_cast<HMENU>(1080), nullptr, nullptr);
+    if (!tree) return;
+    const auto insert = [&](void* parentItem, wchar_t* label) noexcept -> LPARAM {
+        TreeInsertW entry{};
+        entry.parent = parentItem;
+        entry.insertAfter = reinterpret_cast<void*>(kTvLast);
+        entry.item.mask = kTvifText;
+        entry.item.text = label;
+        entry.item.textCapacity = 96;
+        return SendMessageW(tree, kTvmInsertItemW, 0,
+                            reinterpret_cast<LPARAM>(&entry));
+    };
+    wchar_t rootText[] = L"WhiteSur";
+    wchar_t lightText[] = L"Light";
+    wchar_t darkText[] = L"Dark";
+    wchar_t baseText[] = L"Base fallback";
+    const LPARAM root = insert(reinterpret_cast<void*>(kTvRoot), rootText);
+    const LPARAM light = root ? insert(reinterpret_cast<void*>(root), lightText) : 0;
+    const LPARAM dark = root ? insert(reinterpret_cast<void*>(root), darkText) : 0;
+    const LPARAM base = insert(reinterpret_cast<void*>(kTvRoot), baseText);
+    if (root) (void)SendMessageW(tree, kTvmExpand, static_cast<WPARAM>(root), kTvExpandFlag);
+    if (light) (void)SendMessageW(tree, kTvmSelectItem, kTvSelect, light);
+    const bool populated = root && light && dark && base &&
+        SendMessageW(tree, kTvmGetCount, 0, 0) == 4;
+    micant_gui::PrintLine(populated
+        ? "[MicaNT ThemeTest] Production TreeView created with expanded hierarchy"
+        : "[MicaNT ThemeTest] Production TreeView initialization failed");
+    (void)UpdateWindow(tree);
+}
 
 void createControlMatrix(HWND parent) noexcept {
     const DWORD child = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
-    CreateWindowExW(0, L"BUTTON", L"Push button", child,
+    HWND push = CreateWindowExW(0, L"BUTTON", L"Push button", child,
         18, 20, 142, 30, parent, reinterpret_cast<HMENU>(1030), nullptr, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Default button", child | 0x00000001u,
+    HWND defaultButton = CreateWindowExW(0, L"BUTTON", L"Default button", child | 0x00000001u,
         170, 20, 142, 30, parent, reinterpret_cast<HMENU>(1031), nullptr, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Disabled button", child | WS_DISABLED,
+    HWND disabledButton = CreateWindowExW(0, L"BUTTON", L"Disabled button", child | WS_DISABLED,
         322, 20, 142, 30, parent, reinterpret_cast<HMENU>(1032), nullptr, nullptr);
+    if (push) (void)UpdateWindow(push);
+    if (defaultButton) (void)UpdateWindow(defaultButton);
+    if (disabledButton) (void)UpdateWindow(disabledButton);
 
     HWND check = CreateWindowExW(0, L"BUTTON", L"Checked checkbox",
         child | 0x00000003u, 18, 66, 176, 28, parent,
@@ -91,11 +144,14 @@ void createControlMatrix(HWND parent) noexcept {
     HWND threeState = CreateWindowExW(0, L"BUTTON", L"Mixed checkbox",
         child | 0x00000006u, 202, 66, 176, 28, parent,
         reinterpret_cast<HMENU>(kThreeStateId), nullptr, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Disabled checkbox",
+    HWND disabledCheck = CreateWindowExW(0, L"BUTTON", L"Disabled checkbox",
         child | WS_DISABLED | 0x00000003u, 386, 66, 176, 28, parent,
         reinterpret_cast<HMENU>(kDisabledCheckId), nullptr, nullptr);
     if (check) (void)SendMessageW(check, kBmSetCheck, 1, 0);
     if (threeState) (void)SendMessageW(threeState, kBmSetCheck, 2, 0);
+    if (check) (void)UpdateWindow(check);
+    if (threeState) (void)UpdateWindow(threeState);
+    if (disabledCheck) (void)UpdateWindow(disabledCheck);
 
     HWND radioOne = CreateWindowExW(0, L"BUTTON", L"Selected radio",
         child | 0x00000009u, 18, 108, 170, 28, parent,
@@ -105,19 +161,24 @@ void createControlMatrix(HWND parent) noexcept {
         reinterpret_cast<HMENU>(kRadioTwoId), nullptr, nullptr);
     if (radioOne) (void)SendMessageW(radioOne, kBmSetCheck, 1, 0);
     if (radioTwo) (void)SendMessageW(radioTwo, kBmSetCheck, 0, 0);
+    if (radioOne) (void)UpdateWindow(radioOne);
+    if (radioTwo) (void)UpdateWindow(radioTwo);
 
     g_focusEdit = CreateWindowExW(0, L"EDIT", L"Text entry with focus",
         child, 18, 154, 250, 30, parent,
         reinterpret_cast<HMENU>(1040), nullptr, nullptr);
-    CreateWindowExW(0, L"EDIT", L"WhiteSur",
+    HWND password = CreateWindowExW(0, L"EDIT", L"WhiteSur",
         child | 0x00000020u, 280, 154, 180, 30, parent,
         reinterpret_cast<HMENU>(1041), nullptr, nullptr);
-    CreateWindowExW(0, L"EDIT", L"Disabled text",
+    HWND disabledEdit = CreateWindowExW(0, L"EDIT", L"Disabled text",
         child | WS_DISABLED, 472, 154, 180, 30, parent,
         reinterpret_cast<HMENU>(1042), nullptr, nullptr);
+    if (g_focusEdit) (void)UpdateWindow(g_focusEdit);
+    if (password) (void)UpdateWindow(password);
+    if (disabledEdit) (void)UpdateWindow(disabledEdit);
 
     HWND tabs = CreateWindowExW(0, L"SysTabControl32", L"",
-        child, 18, 202, 620, 176, parent,
+        child, 18, 202, 426, 176, parent,
         reinterpret_cast<HMENU>(1050), nullptr, nullptr);
     if (tabs) {
         wchar_t first[] = L"General";
@@ -135,7 +196,9 @@ void createControlMatrix(HWND parent) noexcept {
         (void)SendMessageW(tabs, kTcmInsertItemW, 2,
                            reinterpret_cast<LPARAM>(&item));
         (void)SendMessageW(tabs, kTcmSetCurSel, 1, 0);
+        (void)UpdateWindow(tabs);
     }
+    createTreeControl(parent, child);
 
     HWND progress = CreateWindowExW(0, L"msctls_progress32", L"",
         child, 18, 394, 430, 28, parent,
@@ -143,6 +206,7 @@ void createControlMatrix(HWND parent) noexcept {
     if (progress) {
         (void)SendMessageW(progress, kPbmSetRange32, 0, 100);
         (void)SendMessageW(progress, kPbmSetPos, 64, 0);
+        (void)UpdateWindow(progress);
     }
     HWND horizontal = CreateWindowExW(0, L"SCROLLBAR", L"",
         child, 18, 440, 620, 24, parent,
@@ -150,6 +214,7 @@ void createControlMatrix(HWND parent) noexcept {
     if (horizontal) {
         (void)SendMessageW(horizontal, kSbmSetRange, 0, 100);
         (void)SendMessageW(horizontal, kSbmSetPos, 0, 35);
+        (void)UpdateWindow(horizontal);
     }
     HWND vertical = CreateWindowExW(0, L"SCROLLBAR", L"",
         child | 0x00000001u, 654, 202, 24, 176, parent,
@@ -157,8 +222,24 @@ void createControlMatrix(HWND parent) noexcept {
     if (vertical) {
         (void)SendMessageW(vertical, kSbmSetRange, 0, 100);
         (void)SendMessageW(vertical, kSbmSetPos, 0, 35);
+        (void)UpdateWindow(vertical);
     }
     micant_gui::PrintLine("[MicaNT ThemeTest] Production common-control matrix created");
+}
+
+void createThemeControls(HWND window) noexcept {
+    HWND light = CreateWindowExW(0, L"BUTTON", L"WhiteSur Light", WS_CHILD | WS_VISIBLE,
+        690, 18, 146, 28, window, reinterpret_cast<HMENU>(kLightId), nullptr, nullptr);
+    HWND dark = CreateWindowExW(0, L"BUTTON", L"WhiteSur Dark", WS_CHILD | WS_VISIBLE,
+        690, 52, 146, 28, window, reinterpret_cast<HMENU>(kDarkId), nullptr, nullptr);
+    HWND base = CreateWindowExW(0, L"BUTTON", L"Base fallback", WS_CHILD | WS_VISIBLE,
+        690, 86, 146, 28, window, reinterpret_cast<HMENU>(kBaseId), nullptr, nullptr);
+    if (light) (void)UpdateWindow(light);
+    if (dark) (void)UpdateWindow(dark);
+    if (base) (void)UpdateWindow(base);
+    createControlMatrix(window);
+    (void)InvalidateRect(window, nullptr, TRUE);
+    (void)UpdateWindow(window);
 }
 
 bool appendSystemRoot(wchar_t* path, size_t capacity, size_t& cursor) noexcept {
@@ -377,13 +458,6 @@ bool publishSnapshot(const MicaThemeSnapshot& candidate,
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE: {
-        CreateWindowExW(0, L"BUTTON", L"WhiteSur Light", WS_CHILD | WS_VISIBLE,
-            690, 18, 146, 28, window, reinterpret_cast<HMENU>(kLightId), nullptr, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"WhiteSur Dark", WS_CHILD | WS_VISIBLE,
-            690, 52, 146, 28, window, reinterpret_cast<HMENU>(kDarkId), nullptr, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Base fallback", WS_CHILD | WS_VISIBLE,
-            690, 86, 146, 28, window, reinterpret_cast<HMENU>(kBaseId), nullptr, nullptr);
-        createControlMatrix(window);
         return 0;
     }
     case WM_COMMAND:
@@ -420,11 +494,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
 extern "C" void _start() noexcept {
     micant_gui::PrintLine("[MicaNT ThemeTest TEMP] user entry reached");
-    InitCommonControlsExArgs commonControls{sizeof(commonControls), 0x00000028u};
+    InitCommonControlsExArgs commonControls{sizeof(commonControls), 0x0000002Au};
     if (!InitCommonControlsEx(&commonControls))
         micant_gui::PrintLine("[MicaNT ThemeTest] Common control class initialization failed");
     else
-        micant_gui::PrintLine("[MicaNT ThemeTest] Progress and tab classes initialized");
+        micant_gui::PrintLine("[MicaNT ThemeTest] Progress, tab, and tree classes initialized");
     WNDCLASSEXW klass{};
     klass.cbSize = sizeof(klass);
     klass.lpfnWndProc = WindowProc;
@@ -469,6 +543,7 @@ extern "C" void _start() noexcept {
     micant_gui::PrintLine("[MicaNT ThemeTest] Initial HTHEME snapshot pinned");
     micant_gui::PrintLine("[MicaNT ThemeTest TEMP] notification queue probe starting");
     const auto wasVisible = ShowWindow(g_window, SW_SHOW);
+    createThemeControls(g_window);
     if (g_focusEdit) (void)SetFocus(g_focusEdit);
     UpdateWindow(g_window);
     micant_gui::PrintLine(wasVisible
