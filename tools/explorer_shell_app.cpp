@@ -1040,11 +1040,23 @@ void verifyThemeChangeQueueRollback() noexcept {
         MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
         std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
                     sizeof(g.themeRollbackProbe)) == 0;
+
+    g.themeCandidate = g.themeRollbackProbe;
+    ++g.themeCandidate.version;
+    const bool malformedSnapshotRejected =
+        !MicaThemeSnapshotIsValid(&g.themeCandidate, sizeof(g.themeCandidate)) &&
+        !MicaWin32kSetThemeSnapshot(&g.themeCandidate) &&
+        MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
+        std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
+                    sizeof(g.themeRollbackProbe)) == 0;
     PrintLine(queueRollback && missingProfileRollback
         ? "[MicaNT Theme] Full notification queue rejected theme atomically and recovered"
         : "[MicaNT Theme] Full notification queue rollback probe failed");
     if (missingProfileRollback)
         PrintLine("[MicaNT Theme] Unavailable profile kept the previous complete theme");
+    PrintLine(malformedSnapshotRejected
+        ? "[MicaNT Theme] Malformed theme snapshot kept the previous complete theme"
+        : "[MicaNT Theme] Malformed theme snapshot rollback probe failed");
 }
 
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,

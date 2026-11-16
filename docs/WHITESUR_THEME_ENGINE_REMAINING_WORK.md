@@ -487,8 +487,12 @@ the evidence named here, not just declarations or a successful compile.
   Explorer profile and full Win32k snapshot to the previous state. QEMU logged
   the fallback and rollback markers before completing the input/move/resize
   suite (`/private/tmp/micant-theme-point7-missing-profile-retry-1794805309`).
-- [ ] Test malformed profile data that passes file lookup but fails snapshot
-  validation; unavailable profile and queue exhaustion paths are covered.
+- [x] Corrupt the snapshot version after reading a valid snapshot, reject it
+  before publication, and verify that the previous complete snapshot remains
+  active in QEMU (`/private/tmp/micant-theme-point7-malformed-snapshot-1794806550`).
+- [ ] Exercise `loadActiveVisualTheme` against a file that exists but contains
+  malformed compiled-style bytes; the direct invalid-version publication path
+  is covered, but no corrupt package fixture exists yet.
 
 ### 8. Compositor effects
 
