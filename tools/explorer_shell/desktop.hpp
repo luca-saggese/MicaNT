@@ -26,7 +26,8 @@ void DrawIconImage(uint32_t* pixels, uint32_t width, uint32_t height,
 
 void DrawDesktop(uint32_t* pixels, uint32_t width, uint32_t height,
                  const uint32_t* wallpaper = nullptr,
-                 const DesktopIconSet* icons = nullptr) noexcept;
+                 const DesktopIconSet* icons = nullptr,
+                 uint32_t labelForeground = 0xFFFFFFFFu) noexcept;
 DesktopAction HitTestDesktop(int32_t x, int32_t y) noexcept;
 
 } // namespace micant::explorer

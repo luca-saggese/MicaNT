@@ -727,7 +727,7 @@ void drawAppWindow(AppWindow& app) noexcept {
         if (!findCachedIcon(icon, 16)) (void)loadPackagedIcon(icon, 16);
         const auto image = iconImage(icon, 16);
         if (image.pixels) micant::explorer::DrawIconImage(p, w, h, 174, y, 16, image);
-        else fill(p, w, h, 174, y, 16, 16, rgb(236, 190, 67));
+        else fill(p, w, h, 174, y, 16, 16, activeShellPalette().accent);
         text(p, w, h, 199, y + 4, displayName, rowForeground);
         if (app.view == View::DateTime) {
             char value[16]{};
@@ -878,7 +878,7 @@ size_t collectTaskbarButtons(micant::explorer::TaskbarButton* buttons) noexcept 
     for (size_t i = 0; buttons && i < g.taskSwitch.count; ++i) {
         auto& button = buttons[i];
         button.title = g.taskSwitch.entries[i].title;
-        button.iconColor = rgb(236, 190, 67);
+        button.iconColor = activeShellPalette().accent;
         button.active = g.taskSwitch.entries[i].active;
     }
     return g.taskSwitch.count;
@@ -926,7 +926,8 @@ void redrawDesktop() noexcept {
         iconImage(micant::explorer::IconId::TrashEmpty, 48),
     };
     micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
-                                  g.wallpaperPixels, &icons);
+                                  g.wallpaperPixels, &icons,
+                                  activeShellPalette().accentForeground);
     if (g.fontReady) micant_gui::DrawStringClipped(g.desktopPixels, g.screenW,
         g.screenH - TASKBAR_H, 420, 48, "MicaNT — Città, perché? e\xCC\x81 Ĉ ƀ", rgb(255, 255, 255));
 
@@ -1739,7 +1740,7 @@ LRESULT CALLBACK ThemeAttachedScrollProc(HWND hwnd, UINT message,
         if (BeginPaint(hwnd, &paint)) {
             RECT client{};
             if (GetClientRect(hwnd, &client)) {
-                HBRUSH background = CreateSolidBrush(RGB(248, 248, 248));
+                HBRUSH background = CreateSolidBrush(activeShellPalette().surfaceAlt);
                 if (background) {
                     (void)FillRect(paint.hdc, &client, background);
                     (void)DeleteObject(background);
@@ -2824,6 +2825,9 @@ extern "C" void _start(const char* = nullptr) {
         PrintLine(windowClass.hIcon
             ? "[MicaNT Theme] WhiteSur window icon loaded for caption"
             : "[MicaNT Theme] WhiteSur window icon load failed");
+        if (!windowClass.hIcon)
+            PrintThemeWin32Error("[MicaNT Theme] WhiteSur window icon load error",
+                                 GetLastError());
     }
     windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     PrintLine(windowClass.hCursor

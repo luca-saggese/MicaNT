@@ -420,11 +420,16 @@ def verify_mouse(
             )
             if title_text_rows <= 8:
                 raise RuntimeError("Caption title did not use the shared GDI font raster")
-            title_icon_ink = sum(
-                pixel_at(opened, x, y) != title_background
-                for y in range(95, 121) for x in range(204, 236)
-            )
-            if title_icon_ink < 24:
+            if "[MicaNT Theme] WhiteSur window icon loaded for caption" not in serial_path.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                raise RuntimeError("Explorer did not load a WhiteSur caption icon")
+            title_icon_colors = {
+                pixel_at(opened, x, y)
+                for y in range(95, 105) for x in range(204, 236)
+                if pixel_at(opened, x, y) != title_background
+            }
+            if len(title_icon_colors) < 3:
                 raise RuntimeError("WhiteSur window icon did not reach the caption pixels")
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -1204,6 +1209,7 @@ def verify_mouse(
                     desktop_light = wait_for_changed_screen(
                         desktop_light, "live-window-light.ppm", 5000)
                     light_title_pixel = pixel_at(desktop_light, 230, 126)
+                    light_address_field_pixel = pixel_at(desktop_light, 280, 160)
                     light_start_surface_pixel = pixel_at(desktop_light, 90, 733)
 
                     def click_left() -> None:
@@ -1215,7 +1221,9 @@ def verify_mouse(
                     move_to(50, 748)
                     click_left()
                     time.sleep(0.3)
-                    wait_for_changed_screen(desktop_light, "theme-menu-light.ppm", 5000)
+                    light_start_menu = wait_for_changed_screen(
+                        desktop_light, "theme-menu-light.ppm", 5000)
+                    light_start_menu_pixel = pixel_at(light_start_menu, 330, 440)
                     move_to(250, 536)
                     click_left()
                     deadline = time.monotonic() + 15
@@ -1234,6 +1242,16 @@ def verify_mouse(
                         raise RuntimeError("Live titlebar pixel did not follow the Dark theme")
                     if pixel_at(dark_screen, 90, 733) == light_start_surface_pixel:
                         raise RuntimeError("Taskbar Start surface pixel did not follow the Dark theme")
+                    if pixel_at(dark_screen, 280, 160) == light_address_field_pixel:
+                        raise RuntimeError("Explorer address field pixel did not follow the Dark theme")
+                    move_to(50, 748)
+                    click_left()
+                    time.sleep(0.3)
+                    dark_start_menu = screen("theme-menu-dark.ppm")
+                    if pixel_at(dark_start_menu, 330, 440) == light_start_menu_pixel:
+                        raise RuntimeError("Start menu surface pixel did not follow the Dark theme")
+                    move_to(50, 748)
+                    click_left()
                     if serial_path.read_text(encoding="utf-8", errors="replace").count(
                         "[MicaNT Theme] GetThemeSysColor resolves themed button face") < 2:
                         raise RuntimeError("GetThemeSysColor did not follow the runtime theme reload")

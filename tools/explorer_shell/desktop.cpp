@@ -62,10 +62,11 @@ void drawIcon(uint32_t* pixels, uint32_t width, uint32_t height,
 
 void drawDesktopIcon(uint32_t* pixels, uint32_t width, uint32_t height,
                      int32_t y, Icon icon, const char* label,
-                     const DesktopIconImage* image) noexcept {
+                     const DesktopIconImage* image,
+                     uint32_t labelForeground) noexcept {
     drawIcon(pixels, width, height, 18, y, icon, image);
     text(pixels, width, height, 16, y + (image && image->pixels ? 51 : 36),
-         label, color(255, 255, 255));
+         label, labelForeground);
 }
 
 } // namespace
@@ -114,7 +115,8 @@ void DrawIconImage(uint32_t* pixels, uint32_t width, uint32_t height,
 }
 
 void DrawDesktop(uint32_t* pixels, uint32_t width, uint32_t height,
-                 const uint32_t* wallpaper, const DesktopIconSet* icons) noexcept {
+                 const uint32_t* wallpaper, const DesktopIconSet* icons,
+                 uint32_t labelForeground) noexcept {
     if (!pixels || width == 0 || height == 0) return;
     if (wallpaper) {
         const size_t count = static_cast<size_t>(width) * height;
@@ -130,13 +132,13 @@ void DrawDesktop(uint32_t* pixels, uint32_t width, uint32_t height,
         }
     }
     drawDesktopIcon(pixels, width, height, 28, Icon::Computer, "My Computer",
-                    icons ? &icons->computer : nullptr);
+                    icons ? &icons->computer : nullptr, labelForeground);
     drawDesktopIcon(pixels, width, height, 124, Icon::Documents, "My Documents",
-                    icons ? &icons->documents : nullptr);
+                    icons ? &icons->documents : nullptr, labelForeground);
     drawDesktopIcon(pixels, width, height, 220, Icon::Network, "Network Places",
-                    icons ? &icons->network : nullptr);
+                    icons ? &icons->network : nullptr, labelForeground);
     drawDesktopIcon(pixels, width, height, 316, Icon::RecycleBin, "Recycle Bin",
-                    icons ? &icons->recycleBin : nullptr);
+                    icons ? &icons->recycleBin : nullptr, labelForeground);
 }
 
 DesktopAction HitTestDesktop(int32_t x, int32_t y) noexcept {

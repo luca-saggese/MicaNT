@@ -8,8 +8,6 @@
 namespace micant::explorer {
 namespace {
 
-using micant_gui::PackBGRA;
-
 void fill(uint32_t* pixels, uint32_t width, uint32_t height, int32_t x, int32_t y,
           int32_t rectWidth, int32_t rectHeight, uint32_t color) noexcept {
     if (!pixels || rectWidth <= 0 || rectHeight <= 0) return;
@@ -89,7 +87,7 @@ void DrawTaskbar(uint32_t* pixels, uint32_t screenWidth, uint32_t screenHeight,
              buttons[i].active ? palette.selected : palette.surfaceAlt);
         fill(pixels, screenWidth, screenHeight, taskX + 1, barY + 9, taskWidth - 6, 1, palette.separator);
         fill(pixels, screenWidth, screenHeight, taskX + 5, barY + 14, 13, 13,
-             buttons[i].iconColor ? buttons[i].iconColor : PackBGRA(70, 130, 190));
+             buttons[i].iconColor ? buttons[i].iconColor : palette.accent);
         const int32_t textX = taskX + 24;
         const int32_t availableChars = (taskWidth - 31) / 8;
         char clipped[32]{};

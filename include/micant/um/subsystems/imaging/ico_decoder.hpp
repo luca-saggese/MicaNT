@@ -441,10 +441,16 @@ inline ImageStatus DecodeIconFile(const wchar_t* path, ImageFrame& output,
     limits.maxIntermediateBytes -= fileSize;
     limits.maxDecodedBytes = std::min(limits.maxDecodedBytes, limits.maxIntermediateBytes);
     ImageFrame frame{};
-    const ImageStatus decoded = DecodeIcon(encoded.span(),
-                                            desiredWidth ? desiredWidth : 32,
-                                            desiredHeight ? desiredHeight : 32,
-                                            frame, allocator, limits);
+    const auto bytes = encoded.span();
+    static constexpr std::array<uint8_t, 8> pngSignature{
+        137, 80, 78, 71, 13, 10, 26, 10};
+    const bool standalonePng = bytes.size() >= pngSignature.size() &&
+        std::equal(pngSignature.begin(), pngSignature.end(), bytes.begin());
+    const ImageStatus decoded = standalonePng
+        ? DecodeIconResourcePayload(bytes, frame, allocator, limits)
+        : DecodeIcon(bytes, desiredWidth ? desiredWidth : 32,
+                     desiredHeight ? desiredHeight : 32,
+                     frame, allocator, limits);
     if (decoded != ImageStatus::Success) return decoded;
     const uint32_t targetWidth = desiredWidth ? desiredWidth : frame.width;
     const uint32_t targetHeight = desiredHeight ? desiredHeight : frame.height;

@@ -359,7 +359,11 @@ the evidence named here, not just declarations or a successful compile.
   section is writable only in the trusted compositor mapping, leaving window
   content pixels read-only there. The shared surface pool is 20 slots to
   accommodate live control probes and reopened windows within QEMU memory.
-  QEMU confirmed both caption text and WhiteSur folder icon pixels.
+  `DecodeIconFile` now accepts a standalone PNG payload as well as an ICO
+  container, so User32 `LoadImageW(..., IMAGE_ICON, LR_LOADFROMFILE)` can load
+  the packaged WhiteSur folder image. QEMU requires the load marker and
+  distinct pixels above the title text; the earlier overlapping-pixel probe
+  alone could mistake a title glyph for an icon.
 - [x] Win32k clamps resize against client-area minima, accounting for the
   active frame and caption metrics on all four edges/corners; the minimum
   outer size therefore preserves a 160x100 client. The QEMU input test now
@@ -384,7 +388,7 @@ the evidence named here, not just declarations or a successful compile.
   maximize/restore, caption dragging, all eight resize edges/corners, minimum
   client dimensions, close/reopen cycles and live Light-to-Dark switching;
   compositor surface allocation remained available through the reopen matrix
-  (`/private/tmp/micant-item3-title-icon-pixel-2`).
+  (`/private/tmp/micant-icon-real-pixel`).
 
 ### 4. Explorer theme coverage
 
@@ -415,10 +419,17 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-theme-explorer-row-text-run/serial.log`. The later
   filesystem-navigation assertion still fails on the concurrently changed
   root directory path, after this theme check passed.
-- [ ] Route remaining fixed-color shell surfaces and text through the active
-  theme model or UxTheme/GDI.
-- [ ] Capture and compare QEMU pixels for Explorer chrome, titlebar, toolbar,
-  address field, taskbar, Start menu and notification area in each profile.
+- [x] Route remaining semantic shell colors through the active theme palette:
+  desktop labels use the theme accent foreground, task switch and missing-icon
+  glyphs use the active accent, and the attached-scrollbar probe uses the
+  theme surface color. Address, toolbar, sidebar, status, Start, taskbar and
+  notification colors already consume the snapshot-derived palette; packaged
+  multicolor Windows marks remain artwork.
+- [x] QEMU now samples the Explorer address field and Start-menu surface across
+  the live Light-to-Dark switch, alongside the existing titlebar, taskbar,
+  notification and accent checks. The complete input run passed the address
+  and Start-menu pixel comparisons together with window move/resize and reopen
+  (`/private/tmp/micant-icon-real-pixel`).
 
 ### 5. Variants and accents
 

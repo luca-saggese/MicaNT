@@ -1486,9 +1486,19 @@ void* User32_LoadImageW(void* instance, const wchar_t* name, uint32_t type,
     imaging::ImageFrame frame{};
     const auto status = imaging::DecodeIconFile(name, frame,
         imaging::NativeImageAllocator(), width, height, limits);
-    if (status != imaging::ImageStatus::Success) return nullptr;
-    return winuser::ProcessIconHandles().create(std::move(frame),
+    if (status != imaging::ImageStatus::Success) {
+        const uint32_t error = status == imaging::ImageStatus::AccessDenied ? 5u :
+            status == imaging::ImageStatus::IoFailure ? 2u :
+            status == imaging::ImageStatus::OutOfMemory ? 8u :
+            status == imaging::ImageStatus::UnsupportedFeature ? 50u :
+            status == imaging::ImageStatus::UnknownFormat ? 1813u : 13u;
+        setThreadLastError(error);
+        return nullptr;
+    }
+    void* icon = winuser::ProcessIconHandles().create(std::move(frame),
         imaging::NativeImageAllocator(), false);
+    if (!icon) setThreadLastError(8); // ERROR_NOT_ENOUGH_MEMORY.
+    return icon;
 }
 
 void* User32_LoadCursorFromFileW(const wchar_t* path) noexcept {
