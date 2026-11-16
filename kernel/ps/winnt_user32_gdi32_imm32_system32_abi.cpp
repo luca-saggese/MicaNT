@@ -2152,20 +2152,30 @@ void drawButtonFallback(void* dc, int32_t width, int32_t height,
     (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
 }
 
-void drawButtonFocus(void* dc, int32_t width, int32_t height,
-                     uint32_t color) noexcept {
-    auto* brush = CreateSolidBrush(colorRef(color));
-    if (!brush) return;
+bool drawButtonFocus(void* dc, int32_t width, int32_t height) noexcept {
     constexpr int32_t inset = 3;
-    const WinNtRect top{inset, inset, width - inset, inset + 1};
-    const WinNtRect bottom{inset, height - inset - 1, width - inset, height - inset};
-    const WinNtRect left{inset, inset, inset + 1, height - inset};
-    const WinNtRect right{width - inset - 1, inset, width - inset, height - inset};
-    (void)FillRect(dc, &top, brush);
-    (void)FillRect(dc, &bottom, brush);
-    (void)FillRect(dc, &left, brush);
-    (void)FillRect(dc, &right, brush);
-    (void)DeleteObject(brush);
+    constexpr int32_t thickness = 2;
+    if (!dc || width <= inset * 2 + thickness || height <= inset * 2 + thickness)
+        return false;
+    constexpr uint32_t focusColor = 0xFF0860F2u;
+    const WinNtRect top{inset, inset, width - inset, inset + thickness};
+    const WinNtRect bottom{inset, height - inset - thickness,
+                           width - inset, height - inset};
+    const WinNtRect left{inset, inset, inset + thickness, height - inset};
+    const WinNtRect right{width - inset - thickness, inset,
+                          width - inset, height - inset};
+    const auto fillFocusRect = [dc, focusColor](const WinNtRect& rect) noexcept {
+        using FillFn = int32_t (*)(void*, const MicaWin32kRect*, uint32_t);
+        const auto fill = Win32kProc<FillFn>("MicaWin32kFillRect");
+        if (fill && fill(dc, reinterpret_cast<const MicaWin32kRect*>(&rect),
+                         colorRef(focusColor))) return true;
+        return fillButtonRect(dc, rect, focusColor);
+    };
+    const bool topDrawn = fillFocusRect(top);
+    const bool bottomDrawn = fillFocusRect(bottom);
+    const bool leftDrawn = fillFocusRect(left);
+    const bool rightDrawn = fillFocusRect(right);
+    return topDrawn && bottomDrawn && leftDrawn && rightDrawn;
 }
 
 bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
@@ -2270,15 +2280,19 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
                            static_cast<int32_t>(textLength));
         }
     }
-    if (button.state & kButtonFocused) drawButtonFocus(memoryDc, width, height, textColor);
     const int32_t copied = BitBlt(targetDc, 0, 0, width, height,
                                    memoryDc, 0, 0, 0x00CC0020u);
+    // Draw on the window DC after copying the themed DIB. In this path the
+    // window DC is the presented surface; fillButtonRect also falls back to
+    // Win32k's direct software fill when GDI FillRect rejects that DC.
+    const bool focusDrawn = !(button.state & kButtonFocused) ||
+        drawButtonFocus(targetDc, width, height);
     if (theme) (void)CloseThemeData(theme);
     (void)SelectObject(memoryDc, oldFont);
     (void)SelectObject(memoryDc, oldBitmap);
     const int32_t bitmapDeleted = DeleteObject(bitmap);
     const int32_t dcDeleted = DeleteDC(memoryDc);
-    return copied && bitmapDeleted && dcDeleted;
+    return copied && focusDrawn && bitmapDeleted && dcDeleted;
 }
 } // namespace
 
@@ -2562,7 +2576,12 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
     if (acquireMouse) (void)User32_SetCapture(hwnd);
     if (releaseMouse) (void)User32_ReleaseCapture();
     if (message == kWmLButtonDown) (void)User32_SetFocus(hwnd);
-    if (repaint) invalidateButton(hwnd);
+    if (repaint) {
+        if (message == kWmSetFocus || message == kWmKillFocus)
+            (void)User32_SendMessageW(hwnd, kWmPaint, 0, 0);
+        else
+            invalidateButton(hwnd);
+    }
     if (message == kWmPaint) {
         ButtonState button{};
         {
@@ -2571,6 +2590,8 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             if (!current) return 0;
             button = *current;
         }
+        if (User32_GetFocus() == hwnd) button.state |= kButtonFocused;
+        else button.state &= ~kButtonFocused;
         WinNtPaintStruct paint{};
         void* targetDc = User32_BeginPaint(hwnd, &paint);
         if (!targetDc) return 0;
@@ -2581,8 +2602,11 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         bool drawn = false;
         if (hasRect && client.right > 0 && client.bottom > 0)
             drawn = renderButton(hwnd, button, targetDc, client.right, client.bottom);
-        if (!drawn && hasRect && client.right > 0 && client.bottom > 0)
+        if (!drawn && hasRect && client.right > 0 && client.bottom > 0) {
             drawButtonFallback(targetDc, client.right, client.bottom, button);
+            if (button.state & kButtonFocused)
+                (void)drawButtonFocus(targetDc, client.right, client.bottom);
+        }
         (void)User32_EndPaint(hwnd, &paint);
         return hasRect && client.right > 0 && client.bottom > 0;
     }

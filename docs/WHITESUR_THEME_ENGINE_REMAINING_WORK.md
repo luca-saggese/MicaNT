@@ -218,8 +218,13 @@ the evidence named here, not just declarations or a successful compile.
   and 50 position, copies its rendered surface to a DIB, and compares both
   sample pixels with the active snapshot colors in QEMU. The build, focused
   Ring 3/DIB assertion and latest integrated --verify-input run all passed.
-- [ ] Connect actual production DLL renderers for buttons, checkboxes, radio
-  buttons, textboxes, menus, tabs and scrollbars to UxTheme/GDI.
+- [ ] Complete production menu drawing, popup hit testing, selection and
+  command dispatch. The canonical `user32_boot` now exports bounded menu
+  creation, item mutation/query, submenu ownership and HWND attachment APIs;
+  unsupported popup display and `DrawMenuBar` fail explicitly until those
+  interactions are implemented. Explorer's QEMU round-trip marker passed.
+  `BUTTON`, `EDIT`, `SysTabControl32`, and `SCROLLBAR` have production
+  UxTheme/GDI renderers with explicit fallbacks.
 - [x] The canonical `user32_boot` now registers `BUTTON` lazily and renders
   `BS_PUSHBUTTON`/`BS_DEFPUSHBUTTON` through UxTheme/GDI, with a Base fallback
   when theme/DC resources fail. It implements pressed/focus/disabled/hover
@@ -281,20 +286,21 @@ the evidence named here, not just declarations or a successful compile.
   production comctl32 implementation has bounded item storage and supports
   insert/delete/get/set/current-selection/hit-test messages, themed GDI paint,
   mouse and focused-arrow selection, and `WM_NOTIFY/TCN_SELCHANGE`. The
-  integrated run `/private/tmp/micant-theme-controls-focus-authority-final`
-  confirmed the SCROLLBAR range/page/position messages, hover pixels, arrow
-  input, `WM_HSCROLL`, and thumb movement before stopping at the BUTTON focus
-  pixel assertion. Pixel audit showed the focused and ordinary hover captures
-  are identical, even though focus ownership and Space activation work; the
-  focus ring is not being painted. Its pixel assertions remain open while the
-  input test proceeds to focus-loss/no-activation checks.
+  integrated run `/private/tmp/micant-theme-controls-focus-verified` now
+  confirms that the focused BUTTON ring differs from ordinary hover and clears
+  after focus loss; Space activation and focus-loss/no-activation checks pass.
+  The same QEMU run passed SCROLLBAR range/page/position readback, hover pixels,
+  arrow input, `WM_HSCROLL`, and thumb movement, plus the production menu
+  ownership/query round-trip. It later stopped at the Explorer Control Panel
+  text-color pixel assertion. Menu popup rendering/input and complete disabled,
+  clipping, auto-radio exclusivity, tab traversal, and per-thread capture
+  coverage remain open.
   A production `SCROLLBAR` child class now owns bounded range/page/position
   state, exports SB_CTL get/set APIs, paints UxTheme parts with a Base fallback,
   and supports arrow/page/thumb input with capture and parent scroll
   notifications. QEMU verified its range/page/position readback, hover pixels,
   arrow input, `WM_HSCROLL` and thumb movement in
-  `/private/tmp/micant-theme-controls-scroll-focus-loss`; that full run later
-  stopped at an Explorer Control Panel text-color pixel assertion. Only
+  `/private/tmp/micant-theme-controls-focus-verified`. Only
   `SB_CTL` is implemented; attached-window scrollbars, repeat timers, and
   complete disabled/clipping coverage remain open. Menus also remain open.
 - [x] Implement PBM range, position, step and color messages; render the real

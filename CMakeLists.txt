@@ -648,6 +648,7 @@ if (MICANT_ENABLE_BAREMETAL)
     # User32 owns per-process icon pixels and file-backed icon loading through
     # the native file/memory system calls. Those operations remain in Ring 3.
     target_link_libraries(user32_boot PRIVATE ntdll_boot gdi32_boot uxtheme_boot)
+    target_sources(user32_boot PRIVATE kernel/ps/winnt_user32_menu_abi.cpp)
     target_compile_definitions(user32_boot PRIVATE MICANT_GDI32_IMPORTS MICANT_UXTHEME_IMPORTS)
     target_link_libraries(gdi32_boot PRIVATE ntdll_boot)
 

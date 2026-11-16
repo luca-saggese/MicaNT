@@ -121,6 +121,7 @@ struct ShellState {
     uint32_t themeThreeStateNotifications{};
     uint32_t themeRadioNotifications{};
     bool themeStateProbeAttempted{};
+    bool themeMenuApiReported{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -1752,6 +1753,46 @@ void openView(View view) noexcept {
     app->height = static_cast<uint32_t>(clientRect.bottom - clientRect.top);
     app->open = true;
     app->minimized = false;
+    if (!g.themeMenuApiReported) {
+        HMENU menu = CreateMenu();
+        HMENU submenu = CreatePopupMenu();
+        bool passed = menu && submenu &&
+            AppendMenuW(menu, MF_STRING, 0x8801u, L"Open") &&
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), L"More") &&
+            GetMenuItemCount(menu) == 2 && GetMenuItemID(menu, 0) == 0x8801u;
+        MENUITEMINFOW update{};
+        wchar_t updatedText[] = L"Open item";
+        update.cbSize = sizeof(update);
+        update.fMask = MIIM_ID | MIIM_STATE | MIIM_STRING;
+        update.wID = 0x8802u;
+        update.fState = MFS_CHECKED;
+        update.dwTypeData = updatedText;
+        update.cch = static_cast<UINT>(std::size(updatedText));
+        passed = passed && SetMenuItemInfoW(menu, 0, TRUE, &update);
+        wchar_t readback[32]{};
+        MENUITEMINFOW query{};
+        query.cbSize = sizeof(query);
+        query.fMask = MIIM_ID | MIIM_STATE | MIIM_STRING;
+        query.dwTypeData = readback;
+        query.cch = static_cast<UINT>(std::size(readback));
+        passed = passed && GetMenuItemInfoW(menu, 0, TRUE, &query) &&
+            query.wID == 0x8802u && query.fState == MFS_CHECKED &&
+            readback[0] == L'O' && readback[8] == L'm' && readback[9] == L'\0';
+        passed = passed && SetMenu(app->hwnd, menu) && GetMenu(app->hwnd) == menu;
+        passed = passed && RemoveMenu(menu, 1, MF_BYPOSITION) &&
+            GetMenuItemCount(menu) == 1 && DestroyMenu(submenu);
+        passed = passed && DeleteMenu(menu, 0, MF_BYPOSITION) &&
+            GetMenuItemCount(menu) == 0 && DestroyMenu(menu) && GetMenu(app->hwnd) == nullptr;
+        if (menu) {
+            if (GetMenu(app->hwnd) == menu) (void)SetMenu(app->hwnd, nullptr);
+            if (GetMenuItemCount(menu) >= 0) (void)DestroyMenu(menu);
+        }
+        if (submenu && GetMenuItemCount(submenu) >= 0) (void)DestroyMenu(submenu);
+        g.themeMenuApiReported = passed;
+        PrintLine(passed
+            ? "[MicaNT Theme] Production User32 menu ownership and query round-trip verified"
+            : "[MicaNT Theme] Production User32 menu round-trip failed");
+    }
     if (view == View::MyComputer || view == View::MyDocuments) {
         if (!enumerateDirectory(*app))
             PrintLine("[MicaNT Explorer] Native directory open/enumeration failed");

@@ -422,6 +422,7 @@ def verify_mouse(
                         "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
+                        "[MicaNT Theme] Production User32 menu ownership and query round-trip verified" in serial and
                         "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified" in serial and
                         "[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified" in serial and
                         "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial and
@@ -429,6 +430,8 @@ def verify_mouse(
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
                     raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
+                if "[MicaNT Theme] Production User32 menu round-trip failed" in serial:
+                    raise RuntimeError("Production User32 menu API round-trip failed")
                 if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
                     raise RuntimeError("Production User32 BUTTON state or notification failed")
                 if "[MicaNT Theme] BUTTON text message mismatch" in serial:
@@ -605,6 +608,8 @@ def verify_mouse(
                 encoding="utf-8", errors="replace").count(notification)
             move_to(590, 320)
             button_keyboard_hover = screen("theme-button-keyboard-hover.ppm")
+            if button_region_changed(button_hover, button_keyboard_hover) < 4:
+                raise RuntimeError("Focused BUTTON pixels did not differ from ordinary hover")
             send_key("spc", True)
             button_space_pressed = screen("theme-button-space-pressed.ppm")
             if button_region_changed(button_keyboard_hover, button_space_pressed) < 4:
@@ -627,6 +632,8 @@ def verify_mouse(
             time.sleep(0.2)
             move_to(590, 320)
             button_unfocused_hover = screen("theme-button-unfocused-hover.ppm")
+            if button_region_changed(button_keyboard_hover, button_unfocused_hover) < 4:
+                raise RuntimeError("BUTTON focus indicator did not clear after focus moved")
             unfocused_baseline = serial_path.read_text(
                 encoding="utf-8", errors="replace").count(notification)
             send_key("spc", True)
