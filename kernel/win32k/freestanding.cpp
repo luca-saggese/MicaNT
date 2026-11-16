@@ -92,6 +92,7 @@ struct Window {
     int32_t restoreX{}, restoreY{}, restoreWidth{}, restoreHeight{};
     uint32_t style{}, extendedStyle{};
     uint32_t animationFlags{};
+    uint32_t compositorSlot{UINT32_MAX};
     uint64_t animationGeneration{};
     MicaWin32kRect taskbarButtonBounds{};
     MicaWin32kRect animationTarget{};
@@ -829,10 +830,20 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_GET_WINDOW_SURFACE: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
-            const size_t slot = static_cast<size_t>(window - g_windows);
-            if (slot >= MICANT_COMPOSITOR_SURFACE_CAPACITY)
-                return NtStatus::InsufficientResources;
-            request.result = static_cast<uint64_t>(slot) + 1;
+            if (window->compositorSlot == UINT32_MAX) {
+                bool occupied[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+                for (const auto& candidate : g_windows)
+                    if (candidate.active && candidate.compositorSlot <
+                        MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                        occupied[candidate.compositorSlot] = true;
+                size_t slot = 0;
+                while (slot < MICANT_COMPOSITOR_SURFACE_CAPACITY && occupied[slot])
+                    ++slot;
+                if (slot == MICANT_COMPOSITOR_SURFACE_CAPACITY)
+                    return NtStatus::InsufficientResources;
+                window->compositorSlot = static_cast<uint32_t>(slot);
+            }
+            request.result = static_cast<uint64_t>(window->compositorSlot) + 1;
             request.rect = {0, 0, window->width, window->height};
             return NtStatus::Success;
         }
@@ -1607,8 +1618,14 @@ void publishCompositorSurfaces() noexcept {
     for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
         auto& info = store->surfaces[index];
         info = {};
-        if (index >= kWindowCapacity) continue;
-        const auto& window = g_windows[index];
+        const Window* windowPointer = nullptr;
+        for (const auto& candidate : g_windows)
+            if (candidate.active && candidate.compositorSlot == index) {
+                windowPointer = &candidate;
+                break;
+            }
+        if (!windowPointer) continue;
+        const auto& window = *windowPointer;
         if (!window.active) continue;
         info.window = window.handle;
         info.ownerProcessId = window.ownerProcessId;

@@ -106,6 +106,14 @@ struct ShellState {
     HWND themeCheckProbe{};
     uint32_t themeCheckNotifications{};
     bool themeCheckInputReported{};
+    HWND themeEditProbe{};
+    bool themeEditProbeReported{};
+    uint32_t themeEditChangeNotifications{};
+    HWND themeThreeStateProbe{};
+    HWND themeRadioProbe{};
+    uint32_t themeThreeStateNotifications{};
+    uint32_t themeRadioNotifications{};
+    bool themeStateProbeAttempted{};
     bool windowTtfDrawReported{};
     uint32_t* wallpaperPixels{};
     size_t wallpaperBytes{};
@@ -1869,6 +1877,114 @@ void openView(View view) noexcept {
             PrintLine("[MicaNT Theme] Production User32 BUTTON creation failed");
         }
     }
+    if (view == View::MyComputer && !g.themeStateProbeAttempted) {
+        g.themeStateProbeAttempted = true;
+        constexpr uintptr_t kThemeThreeStateId = 0x774u;
+        constexpr uintptr_t kThemeRadioId = 0x775u;
+        constexpr UINT kBmGetCheck = 0x00F0u;
+        constexpr UINT kBmSetCheck = 0x00F1u;
+        constexpr UINT kBmClick = 0x00F5u;
+        constexpr UINT kBsAuto3State = 0x0006u;
+        constexpr UINT kBs3State = 0x0005u;
+        constexpr UINT kBsRadioButton = 0x0004u;
+        constexpr UINT kStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+        g.themeThreeStateProbe = CreateWindowExW(0, L"BUTTON", L"Three state",
+            kStyle | kBsAuto3State, 200, 320, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(kThemeThreeStateId), nullptr, nullptr);
+        HWND manualThreeState = CreateWindowExW(0, L"BUTTON", L"Manual 3-state",
+            kStyle | kBs3State, 360, 320, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(0x776u), nullptr, nullptr);
+        g.themeRadioProbe = CreateWindowExW(0, L"BUTTON", L"Radio",
+            kStyle | kBsRadioButton, 200, 382, 150, 28, app->hwnd,
+            reinterpret_cast<HMENU>(kThemeRadioId), nullptr, nullptr);
+        if (g.themeThreeStateProbe && manualThreeState && g.themeRadioProbe) {
+            ShowWindow(g.themeThreeStateProbe, SW_SHOW);
+            ShowWindow(manualThreeState, SW_SHOW);
+            ShowWindow(g.themeRadioProbe, SW_SHOW);
+            UpdateWindow(g.themeThreeStateProbe);
+            UpdateWindow(manualThreeState);
+            UpdateWindow(g.themeRadioProbe);
+            const bool beginsClear = SendMessageW(g.themeThreeStateProbe,
+                kBmGetCheck, 0, 0) == 0;
+            (void)SendMessageW(g.themeThreeStateProbe, kBmClick, 0, 0);
+            const bool cyclesChecked = SendMessageW(g.themeThreeStateProbe,
+                kBmGetCheck, 0, 0) == 1;
+            (void)SendMessageW(g.themeThreeStateProbe, kBmClick, 0, 0);
+            const bool cyclesMixed = SendMessageW(g.themeThreeStateProbe,
+                kBmGetCheck, 0, 0) == 2;
+            (void)SendMessageW(g.themeThreeStateProbe, kBmClick, 0, 0);
+            const bool cyclesClear = SendMessageW(g.themeThreeStateProbe,
+                kBmGetCheck, 0, 0) == 0;
+            (void)SendMessageW(manualThreeState, kBmSetCheck, 2, 0);
+            (void)SendMessageW(manualThreeState, kBmClick, 0, 0);
+            const bool manualMixedStable = SendMessageW(manualThreeState,
+                kBmGetCheck, 0, 0) == 2;
+            (void)SendMessageW(g.themeRadioProbe, kBmSetCheck, 1, 0);
+            (void)SendMessageW(g.themeRadioProbe, kBmClick, 0, 0);
+            const bool radioCheckedStable = SendMessageW(g.themeRadioProbe,
+                kBmGetCheck, 0, 0) == 1;
+            const bool notificationCounts = g.themeThreeStateNotifications == 4 &&
+                g.themeRadioNotifications == 1;
+            PrintLine(beginsClear && cyclesChecked && cyclesMixed && cyclesClear &&
+                manualMixedStable && radioCheckedStable && notificationCounts
+                ? "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified"
+                : "[MicaNT Theme] User32 3-state/radio message mismatch");
+        } else {
+            PrintLine("[MicaNT Theme] User32 3-state/radio creation failed");
+        }
+    }
+    if (view == View::MyComputer && !g.themeEditProbeReported) {
+        constexpr uintptr_t kThemeEditId = 0x777u;
+        constexpr UINT kWmSetText = 0x000Cu;
+        constexpr UINT kWmGetText = 0x000Du;
+        constexpr UINT kWmGetTextLength = 0x000Eu;
+        constexpr UINT kWmChar = 0x0102u;
+        g.themeEditProbe = CreateWindowExW(0, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 300, 280, 28,
+            app->hwnd, reinterpret_cast<HMENU>(kThemeEditId), nullptr, nullptr);
+        if (g.themeEditProbe) {
+            constexpr wchar_t kInitialText[] = L"Theme text";
+            const bool set = SendMessageW(g.themeEditProbe, kWmSetText, 0,
+                reinterpret_cast<LPARAM>(kInitialText)) != 0;
+            wchar_t copied[32]{};
+            const intptr_t length = SendMessageW(g.themeEditProbe,
+                kWmGetTextLength, 0, 0);
+            const intptr_t count = SendMessageW(g.themeEditProbe, kWmGetText,
+                std::size(copied), reinterpret_cast<LPARAM>(copied));
+            const bool readback = set && length == 10 && count == 10 &&
+                copied[10] == L'\0';
+            bool same = readback;
+            for (size_t index = 0; index < 10 && same; ++index)
+                same = copied[index] == kInitialText[index];
+            (void)SetFocus(g.themeEditProbe);
+            SendMessageW(g.themeEditProbe, kWmChar, L'!', 0);
+            HWND readOnly = CreateWindowExW(0, L"EDIT", L"locked",
+                WS_CHILD | 0x00000800u, 200, 300, 120, 24, app->hwnd,
+                reinterpret_cast<HMENU>(0x778u), nullptr, nullptr);
+            HWND unsupportedStyle = CreateWindowExW(0, L"EDIT", L"",
+                WS_CHILD | 0x00000004u, 200, 300, 120, 24, app->hwnd,
+                reinterpret_cast<HMENU>(0x779u), nullptr, nullptr);
+            const bool readOnlyWorks = readOnly &&
+                SendMessageW(readOnly, kWmGetTextLength, 0, 0) == 6;
+            if (readOnly) SendMessageW(readOnly, kWmChar, L'!', 0);
+            const bool readOnlyBlocksInput = readOnly &&
+                SendMessageW(readOnly, kWmGetTextLength, 0, 0) == 6;
+            if (readOnly) DestroyWindow(readOnly);
+            if (unsupportedStyle) DestroyWindow(unsupportedStyle);
+            ShowWindow(g.themeEditProbe, SW_SHOW);
+            const bool painted = SendMessageW(g.themeEditProbe, 0x000Fu, 0, 0) != 0;
+            g.themeEditProbeReported = same &&
+                SendMessageW(g.themeEditProbe, kWmGetTextLength, 0, 0) == 11 &&
+                readOnlyWorks && readOnlyBlocksInput && !unsupportedStyle &&
+                g.themeEditChangeNotifications == 2 && painted;
+            UpdateWindow(g.themeEditProbe);
+            PrintLine(g.themeEditProbeReported
+                ? "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified"
+                : "[MicaNT Theme] Production User32 EDIT message mismatch");
+        } else {
+            PrintLine("[MicaNT Theme] Production User32 EDIT creation failed");
+        }
+    }
 }
 
 void toggleStart() noexcept {
@@ -1927,6 +2043,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             g.themeCheckInputReported = true;
             PrintLine("[MicaNT Theme] Physical checkbox input toggled checked state");
         }
+        return 0;
+    }
+    if (message == WM_COMMAND && LOWORD(wParam) == 0x777u &&
+        HIWORD(wParam) == 0x0300u) {
+        ++g.themeEditChangeNotifications;
+        return 0;
+    }
+    if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
+        (LOWORD(wParam) == 0x774u || LOWORD(wParam) == 0x776u)) {
+        ++g.themeThreeStateNotifications;
+        return 0;
+    }
+    if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED &&
+        LOWORD(wParam) == 0x775u) {
+        ++g.themeRadioNotifications;
         return 0;
     }
     if (hwnd == g.desktop &&

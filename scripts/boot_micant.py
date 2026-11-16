@@ -420,7 +420,9 @@ def verify_mouse(
                 if ("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
                         "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial and
                         "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
-                        "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial):
+                        "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
+                        "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
+                        "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial):
                     break
                 if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
                     raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
@@ -431,6 +433,12 @@ def verify_mouse(
                 if "[MicaNT Theme] User32 checkbox state/notification mismatch" in serial or \
                         "[MicaNT Theme] User32 checkbox creation failed" in serial:
                     raise RuntimeError("Production User32 checkbox state or notification failed")
+                if "[MicaNT Theme] User32 3-state/radio message mismatch" in serial or \
+                        "[MicaNT Theme] User32 3-state/radio creation failed" in serial:
+                    raise RuntimeError("Production User32 three-state/radio behavior failed")
+                if "[MicaNT Theme] Production User32 EDIT message mismatch" in serial or \
+                        "[MicaNT Theme] Production User32 EDIT creation failed" in serial:
+                    raise RuntimeError("Production User32 EDIT behavior failed")
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")

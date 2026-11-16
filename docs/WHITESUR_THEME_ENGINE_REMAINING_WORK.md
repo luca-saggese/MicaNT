@@ -267,7 +267,15 @@ the evidence named here, not just declarations or a successful compile.
   `/private/tmp/micant-theme-checkbox-radio-block1-escalated`. The full
   `qemu.py` run later stopped at the preexisting push-button pressed-pixel
   assertion, so complete input-suite success is not claimed. Auto-radio group
-  exclusivity and explicit three-state/radio pixel probes remain open.
+  exclusivity and explicit three-state/radio pixel probes remain open. Added
+  automatic/manual three-state and manual radio message/notification checks;
+  they passed on QEMU serial. Added a production `EDIT` class with bounded text
+  storage, text messages, `WM_CHAR` append/backspace, readonly behavior,
+  `EN_CHANGE`, themed UxTheme/GDI drawing and Base fallback. Explorer's QEMU
+  probe verified text round-trip, input, readonly, unsupported-style rejection
+  and focus pixel change. The latest run passed these probes plus the checkbox
+  and radio serial checks, then stopped at the preexisting BUTTON pressed-pixel
+  assertion (`/private/tmp/micant-theme-edit-surface-slots-block2-final`).
 - [x] Implement PBM range, position, step and color messages; render the real
   production progress class through UxTheme/GDI with explicit-color precedence
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active

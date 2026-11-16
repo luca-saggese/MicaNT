@@ -34,6 +34,7 @@ namespace micant::um::winnt_user32_gdi32_imm32_abi {
 
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 intptr_t User32_ButtonWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+intptr_t User32_EditWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 void* User32_BeginPaint(void*, WinNtPaintStruct*) noexcept;
 int32_t User32_EndPaint(void*, const WinNtPaintStruct*) noexcept;
 intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
@@ -89,9 +90,20 @@ struct ButtonState {
     uint32_t checkState{};
     wchar_t text[128]{};
 };
+struct EditState {
+    void* hwnd{};
+    void* parent{};
+    uintptr_t id{};
+    uint32_t state{};
+    uint32_t style{};
+    uint16_t length{};
+    wchar_t text[512]{};
+};
 std::array<ButtonState, 64> g_buttons{};
+std::array<EditState, 64> g_edits{};
 void* g_hotButton{};
 uint32_t g_buttonClassState{};
+uint32_t g_editClassState{};
 constexpr uint32_t kButtonHot = 0x01;
 constexpr uint32_t kButtonPressed = 0x02;
 constexpr uint32_t kButtonFocused = 0x04;
@@ -106,9 +118,16 @@ constexpr uint32_t kBsAutoCheckBox = 3u;
 constexpr uint32_t kBsRadioButton = 4u;
 constexpr uint32_t kBs3State = 5u;
 constexpr uint32_t kBsAuto3State = 6u;
+constexpr uint32_t kEsReadOnly = 0x00000800u;
+constexpr uint32_t kEsUnsupportedMask = 0x000037FFu;
+constexpr uint32_t kEsControlMask = 0x00003FFFu;
+constexpr uint32_t kVkBack = 0x08u;
+constexpr uint32_t kWmChar = 0x0102u;
 constexpr uint32_t kWmNcCreate = 0x0081u;
 constexpr uint32_t kWmDestroy = 0x0002u;
 constexpr uint32_t kWmNcDestroy = 0x0082u;
+constexpr uint32_t kWmSettingChange = 0x001Au;
+constexpr uint32_t kWmThemeChanged = 0x031Au;
 constexpr uint32_t kWmPaint = 0x000Fu;
 constexpr uint32_t kWmSetText = 0x000Cu;
 constexpr uint32_t kWmGetText = 0x000Du;
@@ -131,6 +150,7 @@ constexpr uint32_t kBmClick = 0x00F5u;
 constexpr uint32_t kBmGetCheck = 0x00F0u;
 constexpr uint32_t kBmSetCheck = 0x00F1u;
 constexpr uint32_t kBnClicked = 0u;
+constexpr uint32_t kEnChange = 0x0300u;
 constexpr uint32_t kMkLButton = 0x0001u;
 constexpr uint32_t kVkSpace = 0x20u;
 constexpr uint32_t kDtCenter = 0x00000001u;
@@ -1444,6 +1464,42 @@ uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
     return atom;
 }
 
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+bool isClassName(const wchar_t* candidate, const wchar_t* expected) noexcept {
+    if (!candidate || !expected || reinterpret_cast<uintptr_t>(candidate) <= UINT16_MAX)
+        return false;
+    size_t index{};
+    for (; expected[index]; ++index) {
+        wchar_t actual = candidate[index];
+        wchar_t wanted = expected[index];
+        if (actual >= L'a' && actual <= L'z') actual -= L'a' - L'A';
+        if (wanted >= L'a' && wanted <= L'z') wanted -= L'a' - L'A';
+        if (actual != wanted) return false;
+    }
+    return candidate[index] == L'\0';
+}
+
+bool ensureBuiltinClass(const wchar_t* name, void* wndProc,
+                        uint32_t& registrationState) noexcept {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(&registrationState, &expected, 1u,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        using RegisterFn = uint16_t (*)(const wchar_t*, void*);
+        const auto registerClass = Win32kProc<RegisterFn>("MicaWin32kRegisterClassW");
+        const uint16_t atom = registerClass ? registerClass(name, wndProc) : 0;
+        __atomic_store_n(&registrationState, atom ? 2u : 0u, __ATOMIC_RELEASE);
+        return atom != 0;
+    }
+    for (uint32_t spins = 0; spins < 1000000; ++spins) {
+        const uint32_t state = __atomic_load_n(&registrationState, __ATOMIC_ACQUIRE);
+        if (state == 2) return true;
+        if (state == 0) return false;
+        __asm__ __volatile__("pause" ::: "memory");
+    }
+    return false;
+}
+#endif
+
 void* User32_CreateWindowExW(
     uint32_t dwExStyle,
     const wchar_t* lpClassName,
@@ -1458,40 +1514,24 @@ void* User32_CreateWindowExW(
     void* hInstance,
     void* lpParam) noexcept {
 #if defined(BUILD_SYSTEM32_USER32_DLL)
-    bool buttonClass = false;
-    if (reinterpret_cast<uintptr_t>(lpClassName) > UINT16_MAX) {
-        constexpr wchar_t name[] = L"BUTTON";
-        buttonClass = true;
-        for (size_t i = 0; i < std::size(name); ++i) {
-            wchar_t character = lpClassName[i];
-            if (character >= L'a' && character <= L'z') character -= L'a' - L'A';
-            if (character != name[i]) { buttonClass = false; break; }
-        }
-    }
-    if (buttonClass) {
+    if (isClassName(lpClassName, L"BUTTON")) {
         const uint32_t type = dwStyle & kBsTypeMask;
         if (!isSupportedButtonType(type)) {
             setThreadLastError(87); // ERROR_INVALID_PARAMETER: unsupported BS_* type.
             return nullptr;
         }
-        uint32_t expected = 0;
-        if (__atomic_compare_exchange_n(&g_buttonClassState, &expected, 1u,
-                                        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            using RegisterFn = uint16_t (*)(const wchar_t*, void*);
-            const auto registerClass = Win32kProc<RegisterFn>("MicaWin32kRegisterClassW");
-            const uint16_t atom = registerClass
-                ? registerClass(L"BUTTON", reinterpret_cast<void*>(&User32_ButtonWndProc)) : 0;
-            __atomic_store_n(&g_buttonClassState, atom ? 2u : 0u, __ATOMIC_RELEASE);
-            if (!atom) return nullptr;
-        } else {
-            for (uint32_t spins = 0; spins < 1000000; ++spins) {
-                const uint32_t state = __atomic_load_n(&g_buttonClassState, __ATOMIC_ACQUIRE);
-                if (state == 2) break;
-                if (state == 0) return nullptr;
-                __asm__ __volatile__("pause" ::: "memory");
-                if (spins == 999999) return nullptr;
-            }
+        if (!ensureBuiltinClass(L"BUTTON",
+                reinterpret_cast<void*>(&User32_ButtonWndProc), g_buttonClassState))
+            return nullptr;
+    } else if (isClassName(lpClassName, L"EDIT")) {
+        const uint32_t editStyles = dwStyle & kEsControlMask;
+        if (editStyles & kEsUnsupportedMask) {
+            setThreadLastError(87); // Unsupported ES_* styles fail explicitly.
+            return nullptr;
         }
+        if (!ensureBuiltinClass(L"EDIT",
+                reinterpret_cast<void*>(&User32_EditWndProc), g_editClassState))
+            return nullptr;
     }
 #endif
     using Fn = void* (*)(uint32_t,const wchar_t*,const wchar_t*,uint32_t,int32_t,int32_t,int32_t,int32_t,void*,void*,void*,void*);
@@ -1699,6 +1739,23 @@ void notifyButtonClicked(void* hwnd) noexcept {
     }
 }
 
+EditState* findEdit(void* hwnd) noexcept;
+
+void notifyEditChanged(void* hwnd) noexcept {
+    EditState copy{};
+    {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* edit = findEdit(hwnd);
+        if (!edit) return;
+        copy = *edit;
+    }
+    if (copy.parent) {
+        const uintptr_t command = (copy.id & 0xFFFFu) | (kEnChange << 16);
+        (void)User32_SendMessageW(copy.parent, kWmCommand, command,
+                                  reinterpret_cast<intptr_t>(hwnd));
+    }
+}
+
 uint32_t colorRef(uint32_t argb) noexcept {
     return ((argb >> 16) & 0xFFu) | (argb & 0x0000FF00u) |
            ((argb & 0xFFu) << 16);
@@ -1724,6 +1781,141 @@ bool fillButtonRect(void* dc, const WinNtRect& rect, uint32_t color) noexcept {
     const auto fill = Win32kProc<FillFn>("MicaWin32kFillRect");
     return fill && fill(dc, reinterpret_cast<const MicaWin32kRect*>(&rect),
                         colorRef(color));
+}
+
+EditState* findEdit(void* hwnd) noexcept {
+    for (auto& edit : g_edits) if (edit.hwnd == hwnd && hwnd) return &edit;
+    return nullptr;
+}
+
+void invalidateEdit(void* hwnd) noexcept {
+    using PostFn = int32_t (*)(void*, uint32_t, uintptr_t, intptr_t);
+    const auto post = Win32kProc<PostFn>("MicaWin32kPostMessageW");
+    if (post) (void)post(hwnd, kWmPaint, 0, 0);
+}
+
+bool drawEdit(void* hwnd, const EditState& edit, void* dc,
+              int32_t width, int32_t height) noexcept {
+    if (!dc || width <= 0 || height <= 0 || width > 4096 || height > 4096)
+        return false;
+    void* targetDc = dc;
+    void* memoryDc = CreateCompatibleDC(nullptr);
+    if (!memoryDc) return false;
+    ButtonDibInfo info{};
+    info.width = width;
+    info.height = -height;
+    void* pixels{};
+    void* bitmap = CreateDIBSection(nullptr, &info, 0, &pixels, nullptr, 0);
+    if (!bitmap || !pixels) {
+        if (bitmap) (void)DeleteObject(bitmap);
+        (void)DeleteDC(memoryDc);
+        return false;
+    }
+    void* oldBitmap = SelectObject(memoryDc, bitmap);
+    void* stockFont = GetStockObject(kStockDefaultGuiFont);
+    void* oldFont = stockFont ? SelectObject(memoryDc, stockFont) : nullptr;
+    if (!oldBitmap || !oldFont) {
+        if (oldFont) (void)SelectObject(memoryDc, oldFont);
+        if (oldBitmap) (void)SelectObject(memoryDc, oldBitmap);
+        (void)DeleteObject(bitmap);
+        (void)DeleteDC(memoryDc);
+        return false;
+    }
+    dc = memoryDc;
+    const WinNtRect bounds{0, 0, width, height};
+    const int32_t themeState = (edit.state & kButtonDisabled) ? 4 :
+        (edit.state & kButtonFocused) ? 5 : 1;
+    void* theme = OpenThemeData(hwnd, L"EDIT");
+    const bool themed = theme && DrawThemeBackground(theme, dc, 1, themeState,
+                                                       &bounds, nullptr) == 0;
+    if (!themed) {
+        const uint32_t background = (edit.state & kButtonDisabled)
+            ? kColorButtonDisabled : 0xFFFFFFFFu;
+        (void)fillButtonRect(dc, bounds, background);
+        (void)fillButtonRect(dc, {0, 0, width, 1}, kColorBorder);
+        (void)fillButtonRect(dc, {0, height - 1, width, height}, kColorBorder);
+        (void)fillButtonRect(dc, {0, 0, 1, height}, kColorBorder);
+        (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
+    }
+    uint32_t themedBorder{};
+    if (themed && GetThemeColor(theme, 1, themeState, 3801, &themedBorder) != 0) {
+        (void)fillButtonRect(dc, {0, 0, width, 1}, kColorBorder);
+        (void)fillButtonRect(dc, {0, height - 1, width, height}, kColorBorder);
+        (void)fillButtonRect(dc, {0, 0, 1, height}, kColorBorder);
+        (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
+    }
+
+    uint32_t textColor = (edit.state & kButtonDisabled) ? 0xFF777777u : kColorWindowText;
+    if (theme) {
+        uint32_t queried{};
+        if (GetThemeColor(theme, 1, themeState, 3803, &queried) == 0) {
+            textColor = 0xFF000000u | ((queried & 0xFFu) << 16) |
+                (queried & 0x0000FF00u) | ((queried >> 16) & 0xFFu);
+        }
+    }
+    const int32_t textLeft = std::min(5, width);
+    const int32_t textTop = std::min(1, height);
+    const WinNtRect textBounds{textLeft, textTop,
+        std::max(textLeft, width - 4), std::max(textTop, height - 1)};
+    const bool hasTextBounds = textBounds.right > textBounds.left &&
+                               textBounds.bottom > textBounds.top;
+    bool textDrawn = edit.length == 0 || !hasTextBounds || (theme &&
+        DrawThemeText(theme, dc, 1, themeState, edit.text, edit.length,
+                      0x00000020u | 0x00000800u, 0, &textBounds) == 0);
+    if (!textDrawn && edit.length && hasTextBounds) {
+        void* clipToken{};
+        const bool clipped = MicaGdiPushClipRect(dc, &textBounds, &clipToken) != 0 && clipToken;
+        if (clipped) {
+            const uint32_t previousColor = SetTextColor(dc, colorRef(textColor));
+            const int32_t previousMode = SetBkMode(dc, 1);
+            textDrawn = previousColor != 0xFFFFFFFFu && previousMode > 0 &&
+                TextOutW(dc, textBounds.left, std::max(1, (height - 14) / 2),
+                         edit.text, edit.length) != 0;
+            if (previousMode > 0) (void)SetBkMode(dc, previousMode);
+            if (previousColor != 0xFFFFFFFFu) (void)SetTextColor(dc, previousColor);
+            textDrawn = (MicaGdiPopClipRect(dc, clipToken) != 0) && textDrawn;
+        }
+    }
+    if (theme) (void)CloseThemeData(theme);
+    const bool copied = BitBlt(targetDc, 0, 0, width, height,
+        memoryDc, 0, 0, 0x00CC0020u) != 0;
+    const bool fontRestored = SelectObject(memoryDc, oldFont) != nullptr;
+    const bool bitmapRestored = SelectObject(memoryDc, oldBitmap) != nullptr;
+    const bool bitmapDeleted = DeleteObject(bitmap) != 0;
+    const bool dcDeleted = DeleteDC(memoryDc) != 0;
+    return textDrawn && copied && fontRestored && bitmapRestored &&
+        bitmapDeleted && dcDeleted;
+}
+
+bool drawEditFallback(void* dc, const EditState& edit,
+                      int32_t width, int32_t height) noexcept {
+    if (!dc || width <= 0 || height <= 0) return false;
+    const WinNtRect bounds{0, 0, width, height};
+    const uint32_t background = (edit.state & kButtonDisabled)
+        ? kColorButtonDisabled : 0xFFFFFFFFu;
+    const uint32_t border = (edit.state & kButtonFocused)
+        ? 0xFF4A90D9u : kColorBorder;
+    bool surfaceDrawn = fillButtonRect(dc, bounds, background);
+    surfaceDrawn &= fillButtonRect(dc, {0, 0, width, 1}, border);
+    surfaceDrawn &= fillButtonRect(dc, {0, height - 1, width, height}, border);
+    surfaceDrawn &= fillButtonRect(dc, {0, 0, 1, height}, border);
+    surfaceDrawn &= fillButtonRect(dc, {width - 1, 0, width, height}, border);
+    if (edit.length) {
+        void* stockFont = GetStockObject(kStockDefaultGuiFont);
+        void* oldFont = stockFont ? SelectObject(dc, stockFont) : nullptr;
+        const uint32_t color = (edit.state & kButtonDisabled)
+            ? 0xFF777777u : kColorWindowText;
+        const uint32_t oldColor = SetTextColor(dc, colorRef(color));
+        const int32_t oldMode = SetBkMode(dc, 1);
+        const bool textDrawn = oldColor != 0xFFFFFFFFu && oldMode > 0 &&
+            TextOutW(dc, std::min(5, width), std::max(1, (height - 14) / 2),
+                     edit.text, edit.length) != 0;
+        if (oldMode > 0) (void)SetBkMode(dc, oldMode);
+        if (oldColor != 0xFFFFFFFFu) (void)SetTextColor(dc, oldColor);
+        if (oldFont) (void)SelectObject(dc, oldFont);
+        (void)textDrawn;
+    }
+    return surfaceDrawn;
 }
 
 void drawButtonFallback(void* dc, int32_t width, int32_t height,
@@ -2173,6 +2365,155 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         return hasRect && client.right > 0 && client.bottom > 0;
     }
     if (click) notifyButtonClicked(hwnd);
+    return User32_DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+intptr_t User32_EditWndProc(void* hwnd, uint32_t message,
+                            uintptr_t wParam, intptr_t lParam) noexcept {
+    if (message == kWmNcCreate) {
+        const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
+        if (!create || (static_cast<uint32_t>(create->style) & kEsUnsupportedMask))
+            return 0;
+        EditState initial{};
+        initial.hwnd = hwnd;
+        initial.parent = create->parent;
+        initial.id = reinterpret_cast<uintptr_t>(create->menu);
+        initial.style = static_cast<uint32_t>(create->style);
+        if (initial.style & kWsDisabled) initial.state |= kButtonDisabled;
+        if (create->title) {
+            while (initial.length < std::size(initial.text) - 1 &&
+                   create->title[initial.length]) {
+                initial.text[initial.length] = create->title[initial.length];
+                ++initial.length;
+            }
+            if (create->title[initial.length]) return 0;
+        }
+        ButtonLockGuard guard(g_buttonLock);
+        for (auto& entry : g_edits) {
+            if (entry.hwnd) continue;
+            entry = initial;
+            return 1;
+        }
+        return 0;
+    }
+    if (message == kWmSetText) {
+        EditState replacement{};
+        replacement.hwnd = hwnd;
+        const auto* source = reinterpret_cast<const wchar_t*>(lParam);
+        if (source) {
+            while (replacement.length < std::size(replacement.text) - 1 &&
+                   source[replacement.length]) {
+                replacement.text[replacement.length] = source[replacement.length];
+                ++replacement.length;
+            }
+            if (source[replacement.length]) return 0;
+        }
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* edit = findEdit(hwnd);
+            if (!edit) return 0;
+            void* parent = edit->parent;
+            const uintptr_t id = edit->id;
+            const uint32_t state = edit->state;
+            const uint32_t style = edit->style;
+            *edit = replacement;
+            edit->parent = parent;
+            edit->id = id;
+            edit->state = state;
+            edit->style = style;
+        }
+        invalidateEdit(hwnd);
+        notifyEditChanged(hwnd);
+        return 1;
+    }
+    if (message == kWmGetTextLength) {
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* edit = findEdit(hwnd);
+        return edit ? edit->length : 0;
+    }
+    if (message == kWmGetText) {
+        if (!lParam || !wParam) return 0;
+        ButtonLockGuard guard(g_buttonLock);
+        const auto* edit = findEdit(hwnd);
+        if (!edit) return 0;
+        const size_t copied = std::min<size_t>(edit->length, wParam - 1);
+        auto* destination = reinterpret_cast<wchar_t*>(lParam);
+        if (copied) std::memcpy(destination, edit->text, copied * sizeof(wchar_t));
+        destination[copied] = L'\0';
+        return static_cast<intptr_t>(copied);
+    }
+    if (message == kWmDestroy || message == kWmNcDestroy) {
+        ButtonLockGuard guard(g_buttonLock);
+        if (auto* edit = findEdit(hwnd)) *edit = {};
+        return 0;
+    }
+    bool repaint = false;
+    if (message == kWmSetFocus || message == kWmKillFocus || message == kWmEnable ||
+        message == kWmThemeChanged || message == kWmSettingChange) {
+        ButtonLockGuard guard(g_buttonLock);
+        auto* edit = findEdit(hwnd);
+        if (!edit) return 0;
+        const uint32_t oldState = edit->state;
+        if (message == kWmSetFocus) edit->state |= kButtonFocused;
+        else if (message == kWmKillFocus) edit->state &= ~kButtonFocused;
+        else if (message == kWmEnable) {
+            if (wParam) edit->state &= ~kButtonDisabled;
+            else edit->state |= kButtonDisabled;
+        }
+        repaint = oldState != edit->state || message == kWmThemeChanged ||
+                  message == kWmSettingChange;
+    }
+    if (message == kWmChar) {
+        bool changed = false;
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            auto* edit = findEdit(hwnd);
+            if (!edit || (edit->state & kButtonDisabled) ||
+                (edit->style & kEsReadOnly)) return 0;
+            if (wParam == 8u) {
+                if (edit->length) {
+                    --edit->length;
+                    edit->text[edit->length] = L'\0';
+                    repaint = changed = true;
+                }
+            } else if (wParam >= 0x20u && wParam <= 0xFFFFu &&
+                       edit->length < std::size(edit->text) - 1) {
+                edit->text[edit->length++] = static_cast<wchar_t>(wParam);
+                edit->text[edit->length] = L'\0';
+                repaint = changed = true;
+            }
+        }
+        if (changed) notifyEditChanged(hwnd);
+    }
+    if (repaint) invalidateEdit(hwnd);
+    if (message == kWmLButtonDown) (void)User32_SetFocus(hwnd);
+    if (message == kWmPaint) {
+        EditState edit{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            const auto* current = findEdit(hwnd);
+            if (!current) return 0;
+            edit = *current;
+        }
+        WinNtPaintStruct paint{};
+        void* targetDc = User32_BeginPaint(hwnd, &paint);
+        if (!targetDc) {
+            return 0;
+        }
+        MicaWin32kRect client{};
+        using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
+        const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
+        const bool hasRect = getRect && getRect(hwnd, &client);
+        bool drawn = false;
+        if (hasRect) drawn = drawEdit(hwnd, edit, targetDc, client.right, client.bottom);
+        if (!drawn && hasRect && client.right > client.left && client.bottom > client.top)
+            drawn = drawEditFallback(targetDc, edit, client.right, client.bottom);
+        const bool presented = User32_EndPaint(hwnd, &paint) != 0;
+        const uint8_t paintStatus = !hasRect ? 3 :
+            (client.right <= client.left || client.bottom <= client.top) ? 4 :
+            drawn && presented ? 6 : 5;
+        return paintStatus == 6;
+    }
     return User32_DefWindowProcW(hwnd, message, wParam, lParam);
 }
 #endif
