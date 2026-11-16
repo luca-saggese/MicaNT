@@ -147,6 +147,10 @@ inline void Test_GtkCss_FailurePreservesOutputAndReportsUnsupportedSyntax() {
     TEST_ASSERT(compileGtkCss("button { color #fff; }", compiled, &error) == CssStatus::Malformed &&
                     error.offset > 0,
                 "malformed declarations report a source offset");
+    std::string oversizedCss(kMaxCssBytes + 1, ' ');
+    TEST_ASSERT(compileGtkCss(oversizedCss, compiled, &error) == CssStatus::InputTooLarge &&
+                compiled.rules.size() == oldCount,
+                "oversized CSS is rejected before parsing without replacing the last valid theme");
     TEST_ASSERT(compileGtkCss("", compiled) == CssStatus::EmptyInput,
                 "empty input is not treated as a valid theme");
 }

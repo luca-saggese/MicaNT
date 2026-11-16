@@ -363,8 +363,7 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if ("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in startup_serial and
-                        "[MicaNT Theme] GetThemeSysColor resolves themed button face" in startup_serial and
+                if ("[MicaNT Theme] GetThemeSysColor resolves themed button face" in startup_serial and
                         "[MicaNT Theme] GetThemeSysFont returns GDI font metadata and metrics" in startup_serial and
                         "[MicaNT Theme] GetThemeFont combines CSS snapshot fields with the GDI system face" in startup_serial and
                         "[MicaNT Theme] Userenv resolved profile path from current token SID" in startup_serial and
@@ -378,7 +377,7 @@ def verify_mouse(
                     break
                 time.sleep(0.1)
             else:
-                raise RuntimeError("Explorer did not verify the production comctl32 progress pixels")
+                raise RuntimeError("Explorer did not complete the pre-window theme probes")
             execute("input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": 40}},
                 {"type": "rel", "data": {"axis": "y", "value": 20}},
@@ -455,7 +454,8 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if ("[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
+                if ("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in serial and
+                        "[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
                         "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial and
                         "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
                         "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
@@ -1100,9 +1100,9 @@ def verify_mouse(
 
             for close_index in range(2):
                 if close_index == 0:
-                    # At the end of the edge/min-size matrix the second app is
-                    # 170px wide at x=672; activate its drawn close target.
-                    move_to(821, 425)
+                    # The larger WhiteSur Theme Controls Test host is now the
+                    # older window brought to front above; close its caption.
+                    move_to(930, 116)
                     set_left_button(True)
                     set_left_button(False)
                 else:

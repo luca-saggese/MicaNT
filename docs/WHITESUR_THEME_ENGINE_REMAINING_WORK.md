@@ -338,6 +338,18 @@ the evidence named here, not just declarations or a successful compile.
   and Base fallback. QEMU confirmed trough/fill DIB pixels against the active
   WhiteSur snapshot. This focused probe passed; the enclosing `--verify-input`
   run still stops at the concurrent parent-folder navigation assertion.
+- [x] Group the visible common-control probes in the `WhiteSur Theme Controls
+  Test` Explorer window. The progress bar is now a child of the same host as
+  BUTTON, checkbox/radio, EDIT, tab, scrollbar and attached-scroll probes; the
+  host is large enough for their current coordinates. `boot_micant.py` waits
+  for the progress pixel assertion with the rest of the window probes, after
+  the test window opens. Full `python3 qemu.py --headless --verify-input`
+  passed, including caption close, window move/resize, reopen and Light-to-Dark
+  checks. Screenshot and serial evidence:
+  `/private/tmp/micant-theme-controls-window-final-2026-11-16`.
+  The Unicode font probe string was subsequently moved from the desktop surface
+  into this test window. Its final bare-metal build/link passed; the following
+  QEMU run was interrupted before the relocated string was visually verified.
 - [ ] Verify normal, hover, pressed, checked and disabled states, dimensions,
   clipping, Tab traversal and complete mouse input/thread capture behavior
   across all controls in QEMU.

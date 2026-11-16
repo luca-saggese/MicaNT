@@ -802,6 +802,9 @@ void drawAppWindow(AppWindow& app) noexcept {
     }
     fill(p, w, h, 0, h - 25, w, 1, separator);
     text(p, w, h, 12, h - 17, "3 objects", statusBarForeground);
+    if (app.view == View::MyComputer && g.fontReady && h > 64)
+        micant_gui::DrawStringClipped(p, w, h, 18, h - 46,
+            "MicaNT — Città, perché? e\xCC\x81 Ĉ ƀ", secondaryForeground);
     if (!g.bufferedPaintReported && app.dc && w >= 16 && h >= 16) {
         constexpr int32_t kBufferWidth = 16;
         constexpr int32_t kBufferHeight = 16;
@@ -940,9 +943,6 @@ void redrawDesktop() noexcept {
     micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
                                   g.wallpaperPixels, &icons,
                                   activeShellPalette().accentForeground);
-    if (g.fontReady) micant_gui::DrawStringClipped(g.desktopPixels, g.screenW,
-        g.screenH - TASKBAR_H, 420, 48, "MicaNT — Città, perché? e\xCC\x81 Ĉ ƀ", rgb(255, 255, 255));
-
     present(g.desktop);
     redrawTaskbar();
 }
@@ -1094,6 +1094,16 @@ void verifyThemeChangeQueueRollback() noexcept {
     PrintLine(malformedFileRollback
         ? "[MicaNT Theme] Malformed compiled-style file kept the previous complete theme"
         : "[MicaNT Theme] Malformed compiled-style file rollback probe failed");
+
+    loadActiveVisualTheme("WhiteSur/../Light");
+    const bool traversalProfileRejected =
+        std::memcmp(g.themeProfile, previousProfile, sizeof(previousProfile)) == 0 &&
+        MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
+        std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
+                    sizeof(g.themeRollbackProbe)) == 0;
+    PrintLine(traversalProfileRejected
+        ? "[MicaNT Theme] Traversal profile path kept the previous complete theme"
+        : "[MicaNT Theme] Traversal profile rejection changed the active theme");
 }
 
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
@@ -1458,7 +1468,8 @@ void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
     g.themeProfile[profileBytes] = '\0';
 }
 
-void createThemeProgressProbe() noexcept {
+void createThemeProgressProbe(HWND parent) noexcept {
+    if (!parent || g.themeProgressProbe) return;
     struct InitCommonControlsExArgs { uint32_t size, classes; } args{
         sizeof(InitCommonControlsExArgs), 0x00000020u};
     if (!InitCommonControlsEx(&args)) {
@@ -1469,8 +1480,8 @@ void createThemeProgressProbe() noexcept {
     constexpr uint32_t kSetPosition = 0x0402u;
     constexpr uint32_t kGetPosition = 0x0408u;
     g.themeProgressProbe = CreateWindowExW(0, L"msctls_progress32", L"",
-        WS_POPUP | WS_VISIBLE, 800, 60, 180, 20,
-        nullptr, nullptr, nullptr, nullptr);
+        WS_CHILD | WS_VISIBLE, 520, 220, 180, 20,
+        parent, nullptr, nullptr, nullptr);
     if (!g.themeProgressProbe) {
         PrintLine("[MicaNT Theme] comctl32 progress window creation failed");
         return;
@@ -2030,11 +2041,14 @@ void openView(View view) noexcept {
     if (systemRootLength > 3) --systemRootLength;
     app->directoryPath[systemRootLength] = L'\0';
     app->directoryRowCount = 0;
-    constexpr uint32_t kInitialWindowWidth = 500;
-    constexpr uint32_t kInitialWindowHeight = 320;
+    // My Computer doubles as the visible theme-control test host. Keep enough
+    // client area for every probe so none of them spill onto the desktop or
+    // get clipped by the Explorer window.
+    const uint32_t kInitialWindowWidth = view == View::MyComputer ? 760u : 500u;
+    const uint32_t kInitialWindowHeight = view == View::MyComputer ? 590u : 320u;
     const int32_t appIndex = static_cast<int32_t>(app - g.apps);
     app->hwnd = CreateWindowExW(0, kClassName,
-        view == View::MyComputer ? L"My Computer" :
+        view == View::MyComputer ? L"WhiteSur Theme Controls Test" :
         view == View::MyDocuments ? L"My Documents" :
         view == View::ControlPanel ? L"Control Panel" :
         view == View::RecycleBin ? L"Recycle Bin" :
@@ -2056,6 +2070,7 @@ void openView(View view) noexcept {
     app->height = static_cast<uint32_t>(clientRect.bottom - clientRect.top);
     app->open = true;
     app->minimized = false;
+    if (view == View::MyComputer) createThemeProgressProbe(app->hwnd);
     if (!g.themeMenuApiReported) {
         HMENU menu = CreateMenu();
         HMENU submenu = CreatePopupMenu();
@@ -3158,7 +3173,6 @@ extern "C" void _start(const char* = nullptr) {
         WS_POPUP | WS_VISIBLE, 0, taskbarY, static_cast<int32_t>(g.screenW), TASKBAR_H,
         nullptr, nullptr, nullptr, nullptr);
     if (!g.taskbar) for (;;) __asm__ __volatile__("pause");
-    createThemeProgressProbe();
     g.taskbarDc = CreateCompatibleDC(nullptr);
     void* taskbarBits = nullptr;
     BITMAPINFO taskbarInfo{};
