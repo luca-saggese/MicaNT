@@ -45,6 +45,7 @@ constexpr uint32_t MENU_W = 344;
 constexpr uint32_t MENU_H = 390;
 constexpr size_t MAX_APP_WINDOWS = 8;
 constexpr UINT WM_THEME_SCHEDULE_TICK = 0x8001u;
+constexpr UINT WM_THEME_QUEUE_PRESSURE_PROBE = 0x8002u;
 
 enum class View : uint8_t { MyComputer, MyDocuments, ControlPanel, Network, RecycleBin, DateTime };
 
@@ -985,6 +986,9 @@ void PrintThemeWin32Error(const char* prefix, uint32_t error) noexcept {
     PrintLine(message);
 }
 
+bool themeProfileEquals(const char* left, const char* right) noexcept;
+void loadActiveVisualTheme(const char* selectedProfile) noexcept;
+
 void verifyCurrentUserThemeProfilePath() noexcept {
     wchar_t profile[128]{};
     uint32_t characters = static_cast<uint32_t>(std::size(profile));
@@ -998,6 +1002,37 @@ void verifyCurrentUserThemeProfilePath() noexcept {
     PrintLine(hasSidPrefix
         ? "[MicaNT Theme] Userenv resolved profile path from current token SID"
         : "[MicaNT Theme] Userenv current token profile lookup failed");
+}
+
+void verifyThemeChangeQueueRollback() noexcept {
+    if (!g.visualThemeReady || !g.desktop) {
+        PrintLine("[MicaNT Theme] Queue pressure rollback probe unavailable");
+        return;
+    }
+    const MicaThemeSnapshot previous = g.visualTheme;
+    char previousProfile[sizeof(g.themeProfile)]{};
+    std::memcpy(previousProfile, g.themeProfile, sizeof(previousProfile));
+    size_t queued = 0;
+    while (queued < 512 && PostMessageW(g.desktop,
+            WM_THEME_QUEUE_PRESSURE_PROBE, 0, 0)) ++queued;
+
+    // A full queue must reject snapshot publication before changing the
+    // compositor's snapshot. Keep the selected profile and visible theme too.
+    loadActiveVisualTheme("WhiteSur/Dark");
+    MicaThemeSnapshot observed{};
+    const bool unchanged = queued != 0 && !themeProfileEquals(g.themeProfile, "WhiteSur/Dark") &&
+        std::memcmp(g.themeProfile, previousProfile, sizeof(previousProfile)) == 0 &&
+        MicaWin32kGetThemeSnapshot(&observed) &&
+        std::memcmp(&observed, &previous, sizeof(previous)) == 0;
+
+    MSG message{};
+    size_t drained = 0;
+    while (drained <= queued && PeekMessageW(&message, g.desktop,
+            WM_THEME_QUEUE_PRESSURE_PROBE, WM_THEME_QUEUE_PRESSURE_PROBE, PM_REMOVE))
+        ++drained;
+    PrintLine(unchanged && drained == queued
+        ? "[MicaNT Theme] Full notification queue rejected theme atomically and recovered"
+        : "[MicaNT Theme] Full notification queue rollback probe failed");
 }
 
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
@@ -3040,6 +3075,7 @@ extern "C" void _start(const char* = nullptr) {
     verifyDirectWriteFonts();
     redrawDesktop();
     updateClock();
+    verifyThemeChangeQueueRollback();
     HCURSOR busyCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32514));
     if (busyCursor && g.desktop) {
         HCURSOR previousCursor = SetCursor(busyCursor);

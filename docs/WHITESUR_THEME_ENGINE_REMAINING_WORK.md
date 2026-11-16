@@ -477,8 +477,12 @@ the evidence named here, not just declarations or a successful compile.
   lock; Explorer redraws app windows on receipt.
 - [x] Exercise Light-to-Dark selection in QEMU; the profile-specific serial
   marker arrived after Explorer redrew existing surfaces without restarting.
-- [ ] Test queue exhaustion and failed reload preserve the previous complete
-  theme.
+- [x] Fill the Win32k notification queue, attempt a Dark snapshot publication,
+  then verify in Explorer and QEMU that the prior profile and full snapshot are
+  unchanged and the queue drains cleanly
+  (`/private/tmp/micant-theme-point7-queue-1794805019`).
+- [ ] Test malformed or unavailable profile reload preserves the previous
+  complete theme; the queue exhaustion path covers publication failure only.
 
 ### 8. Compositor effects
 
