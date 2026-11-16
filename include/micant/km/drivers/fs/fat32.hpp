@@ -15,6 +15,7 @@
  */
 
 #include <cstdint>
+#include <array>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -450,8 +451,11 @@ public:
         NtStatus st = getClusterChain(dirCluster, chain);
         if (!NT_SUCCESS(st)) return st;
 
-        std::wstring currentLfn;
+        std::array<char16_t, 260> lfnUnits{};
+        size_t lfnUnitCount = 0;
         uint8_t lfnChecksum = 0;
+        uint8_t expectedLfnOrder = 0;
+        bool lfnValid = false;
 
         std::vector<uint8_t> clusterBuf(bytesPerCluster_);
 
@@ -470,39 +474,50 @@ public:
                     return NtStatus::Success; // No more entries
                 }
                 if (firstByte == 0xE5) {
-                    currentLfn.clear();
+                    lfnValid = false;
+                    expectedLfnOrder = 0;
                     continue; // Deleted entry
                 }
 
                 // Check if LFN entry
                 if (de.attr == ATTR_LONG_NAME) {
                     const auto* lfn = reinterpret_cast<const LfnEntry*>(&de);
-                    std::wstring chunk;
-                    bool reachedEnd = false;
-                    for (int k = 0; k < 5; ++k) {
-                        if (lfn->name1[k] == 0 || lfn->name1[k] == 0xFFFF) { reachedEnd = true; break; }
-                        chunk.push_back(static_cast<wchar_t>(lfn->name1[k]));
+                    const uint8_t rawOrder = lfn->order;
+                    const uint8_t order = rawOrder & 0x1F;
+                    const bool isLast = (rawOrder & 0x40) != 0;
+                    const bool validEntry = (rawOrder & 0xA0) == 0 && order != 0 && order <= 20 &&
+                        lfn->type == 0 && lfn->firstClusterLow == 0;
+                    if (!validEntry || (isLast && expectedLfnOrder != 0) ||
+                        (!isLast && (expectedLfnOrder == 0 || order != expectedLfnOrder)) ||
+                        (isLast && order > 20)) {
+                        lfnValid = false;
+                        expectedLfnOrder = 0;
+                        continue;
                     }
-                    if (!reachedEnd) {
-                        for (int k = 0; k < 6; ++k) {
-                            if (lfn->name2[k] == 0 || lfn->name2[k] == 0xFFFF) { reachedEnd = true; break; }
-                            chunk.push_back(static_cast<wchar_t>(lfn->name2[k]));
-                        }
+                    if (isLast) {
+                        lfnUnits.fill(0xFFFF);
+                        lfnUnitCount = static_cast<size_t>(order) * 13;
+                        lfnChecksum = lfn->checksum;
+                        expectedLfnOrder = order;
+                        lfnValid = true;
                     }
-                    if (!reachedEnd) {
-                        for (int k = 0; k < 2; ++k) {
-                            if (lfn->name3[k] == 0 || lfn->name3[k] == 0xFFFF) { reachedEnd = true; break; }
-                            chunk.push_back(static_cast<wchar_t>(lfn->name3[k]));
-                        }
+                    if (!lfnValid || lfn->checksum != lfnChecksum || order != expectedLfnOrder) {
+                        lfnValid = false;
+                        expectedLfnOrder = 0;
+                        continue;
                     }
-                    currentLfn = chunk + currentLfn;
-                    lfnChecksum = lfn->checksum;
+                    const size_t base = static_cast<size_t>(order - 1) * 13;
+                    for (size_t k = 0; k < 5; ++k) lfnUnits[base + k] = lfn->name1[k];
+                    for (size_t k = 0; k < 6; ++k) lfnUnits[base + 5 + k] = lfn->name2[k];
+                    for (size_t k = 0; k < 2; ++k) lfnUnits[base + 11 + k] = lfn->name3[k];
+                    expectedLfnOrder = static_cast<uint8_t>(order - 1);
                     continue;
                 }
 
                 // Volume ID entry (skip unless directory)
                 if ((de.attr & ATTR_VOLUME_ID) && !(de.attr & ATTR_DIRECTORY)) {
-                    currentLfn.clear();
+                    lfnValid = false;
+                    expectedLfnOrder = 0;
                     continue;
                 }
 
@@ -512,12 +527,27 @@ public:
                 info.fileSize = de.fileSize;
                 info.isDirectory = (de.attr & ATTR_DIRECTORY) != 0;
 
-                if (!currentLfn.empty() && lfnChecksum == calculateShortNameChecksum(de.name)) {
-                    info.name = currentLfn;
+                if (lfnValid && expectedLfnOrder == 0 && lfnChecksum == calculateShortNameChecksum(de.name)) {
+                    size_t length = 0;
+                    while (length < lfnUnitCount && lfnUnits[length] != 0 && lfnUnits[length] != 0xFFFF) ++length;
+                    // FAT LFN stores UTF-16. This interface uses wchar_t; reject invalid
+                    // surrogate pairs instead of silently corrupting a path.
+                    bool validUtf16 = length != 0 && length <= 255;
+                    for (size_t n = 0; n < length; ++n) {
+                        const uint16_t u = lfnUnits[n];
+                        if (u >= 0xD800 && u <= 0xDBFF) {
+                            if (n + 1 >= length || lfnUnits[n + 1] < 0xDC00 || lfnUnits[n + 1] > 0xDFFF) { validUtf16 = false; break; }
+                            ++n;
+                        } else if (u >= 0xDC00 && u <= 0xDFFF) { validUtf16 = false; break; }
+                    }
+                    if (validUtf16) {
+                        for (size_t n = 0; n < length; ++n) info.name.push_back(static_cast<wchar_t>(lfnUnits[n]));
+                    } else info.name = formatShortName(de.name);
                 } else {
                     info.name = formatShortName(de.name);
                 }
-                currentLfn.clear();
+                lfnValid = false;
+                expectedLfnOrder = 0;
 
                 // Skip "." and ".." in root listing or general results if desired, or keep them
                 if (info.name != L"." && info.name != L"..") {
@@ -647,6 +677,7 @@ public:
         }
 
         const std::wstring& fileName = parts.back();
+        if (!isValidLongName(fileName)) return NtStatus::InvalidParameter;
 
         // 1. Allocate cluster chain for file data
         uint32_t firstCluster = 0;
@@ -705,6 +736,7 @@ public:
         }
 
         const std::wstring& dirName = parts.back();
+        if (!isValidLongName(dirName)) return NtStatus::InvalidParameter;
 
         // Allocate a cluster for the directory entries
         uint32_t newDirCluster = 0;
@@ -736,6 +768,16 @@ public:
     }
 
 private:
+    static bool isValidLongName(std::wstring_view name) noexcept {
+        if (name.empty() || name.size() > 255 || name.back() == L' ' || name.back() == L'.') return false;
+        for (wchar_t ch : name) {
+            if (ch < 0x20 || ch == L'"' || ch == L'*' || ch == L'/' || ch == L':' ||
+                ch == L'<' || ch == L'>' || ch == L'?' || ch == L'\\' || ch == L'|') return false;
+            if (static_cast<uint32_t>(ch) > 0xFFFF || (ch >= 0xD800 && ch <= 0xDFFF)) return false;
+        }
+        return name != L"." && name != L"..";
+    }
+
     static uint8_t calculateShortNameChecksum(const char name[11]) noexcept {
         uint8_t sum = 0;
         for (int i = 0; i < 11; ++i) {
