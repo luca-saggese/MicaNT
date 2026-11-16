@@ -3706,6 +3706,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
     if (number == sys::SSN_NtTestAlert)
         return status(sys::NtTestAlert());
     if (number == sys::SSN_NtQueryInformationProcess || number == sys::SSN_NtQueryInformationThread ||
+        number == sys::SSN_NtQueryInformationToken ||
         number == sys::SSN_NtReadVirtualMemory) {
         uint64_t fifth{};
         if (args.userStack > UINT64_MAX - 40 ||
@@ -3725,6 +3726,10 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             : number == sys::SSN_NtQueryInformationThread
             ? sys::NtQueryInformationThread(static_cast<Handle>(first),
                 static_cast<ThreadInformationClass>(second), reinterpret_cast<void*>(args.third),
+                static_cast<uint32_t>(args.fourth), reinterpret_cast<uint32_t*>(fifth))
+            : number == sys::SSN_NtQueryInformationToken
+            ? sys::NtQueryInformationToken(static_cast<Handle>(first),
+                static_cast<uint32_t>(second), reinterpret_cast<void*>(args.third),
                 static_cast<uint32_t>(args.fourth), reinterpret_cast<uint32_t*>(fifth))
             : sys::NtReadVirtualMemory(static_cast<Handle>(first), reinterpret_cast<const void*>(second),
                 reinterpret_cast<void*>(args.third), static_cast<size_t>(args.fourth), reinterpret_cast<size_t*>(fifth));

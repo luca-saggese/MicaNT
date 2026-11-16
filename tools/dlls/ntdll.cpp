@@ -1629,6 +1629,11 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtQueryInformationThread(
                          ", %rax\n\tsyscall\n\tret\n\t");
 }
 
+__attribute__((naked)) __declspec(dllexport) int32_t NtQueryInformationToken(
+    void*, uint32_t, void*, uint32_t, uint32_t*) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovq $0x186, %rax\n\tsyscall\n\tret\n\t");
+}
+
 __attribute__((naked)) __declspec(dllexport) int32_t NtDelayExecution(
     uint8_t /*alertable*/, const int64_t* /*delayInterval*/) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovq $0x34, %rax\n\tsyscall\n\tret\n\t");

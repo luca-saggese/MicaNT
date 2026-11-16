@@ -453,8 +453,20 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 6. Preferences and multiuser settings
 
-- [ ] Add validated, versioned per-user theme/accent/effect preferences using
-  the established Cm/Userenv/profile owner and access controls.
+- [x] Define a validated, versioned 32-byte preference record for theme,
+  Light/Dark/Auto mode, accent, schedule and effect flags. The parser rejects
+  unsupported versions, malformed lengths, unknown values and reserved bits;
+  focused validation cases were added to the theme suite.
+- [x] Add the native `NtQueryInformationToken(TokenUser)` path for the current
+  process token, with a shared ABI, NTDLL export, syscall dispatch, output
+  validation and explicit failures for unsupported classes and token handles.
+  QEMU exercised the invalid-class/invalid-handle CPL3 cases, then Explorer
+  successfully resolved `C:\Users\S-...` from its real token SID
+  (`/private/tmp/micant-theme-point6-token-1794804678`).
+- [ ] Connect these preferences to per-user profile storage through the
+  established Cm/Userenv/profile owner and access controls. Current work only
+  resolves a SID-based profile path; it does not create the profile directory,
+  enforce its ACL or persist preferences.
 - [ ] Persist only after successful theme publication; test corrupt/missing
   settings, rollback, restart persistence and distinct settings for two users.
 

@@ -3,6 +3,7 @@
 #include "micant/km/hal/amd64_irql.hpp"
 #include "micant/km/hal/cpu.hpp"
 #include "micant/shared/user_graphics.hpp"
+#include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/user_syscall.hpp"
 #include "micant/shared/syscall_numbers.hpp"
 #include "micant/shared/win32k_client.h"
@@ -1581,6 +1582,17 @@ void MicantSyscallClientProgram() {
     auto createEvent = reinterpret_cast<CreateEvent>(exports[6]);
     auto setEvent = reinterpret_cast<SetEvent>(exports[7]);
     auto wait = reinterpret_cast<Wait>(exports[8]);
+    using QueryToken = int32_t (*)(void*, uint32_t, void*, uint32_t, uint32_t*);
+    auto queryToken = reinterpret_cast<QueryToken>(exports[9]);
+    auto* tokenUser = reinterpret_cast<micant::native_nt::NativeTokenUser*>(kUserBase + 4096 + 1024);
+    auto* tokenLength = reinterpret_cast<uint32_t*>(kUserBase + 4096 + 1088);
+    *tokenLength = 0xfeedbeef;
+    if (queryToken(reinterpret_cast<void*>(micant::native_nt::CurrentProcessTokenPseudoHandle),
+            0xffffffffu, tokenUser, 56, tokenLength) != static_cast<int32_t>(0xc0000003u) ||
+        *tokenLength != 0 ||
+        queryToken(reinterpret_cast<void*>(0x1234), micant::native_nt::TokenUserInformationClass,
+            tokenUser, 56, tokenLength) != static_cast<int32_t>(0xc0000008u) ||
+        *tokenLength != 0) __builtin_trap();
     void* event{};
     int64_t poll = 0;
     int32_t previous = -1;
@@ -3668,9 +3680,9 @@ bool verifyNativeImageLoading() noexcept {
     }
     constexpr const char* names[]{"NtCreateSection", "NtMapViewOfSection", "NtUnmapViewOfSection", "NtClose",
                                   "NtAllocateVirtualMemory", "NtFreeVirtualMemory", "NtCreateEvent", "NtSetEvent",
-                                  "NtWaitForSingleObject"};
+                                  "NtWaitForSingleObject", "NtQueryInformationToken"};
     auto* exports = reinterpret_cast<uint64_t*>(kUserBase + 4096 + 768);
-    for (size_t index = 0; index < 9; ++index) {
+    for (size_t index = 0; index < 10; ++index) {
         if (g_nativeProbeModules.resolve("ntdll.dll", names[index], 0, exports[index]) != micant::NtStatus::Success ||
             !bootstrapUserRange(exports[index], 1, false, true)) return false;
     }

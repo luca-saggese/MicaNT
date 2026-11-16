@@ -80,6 +80,7 @@ inline constexpr uint32_t SSN_NtSetValueKey              = 0x0060;
 inline constexpr uint32_t SSN_NtOpenProcessToken         = 0x00BE;
 // MicaNT profile slot for the standard NtQueueApcThread native service.
 inline constexpr uint32_t SSN_NtQueueApcThread            = 0x00BF;
+inline constexpr uint32_t SSN_NtQueryInformationToken     = 0x0186;
 inline constexpr uint32_t SSN_NtAccessCheck              = 0x0182;
 
 // Advanced Local Procedure Call (ALPC) SSNs
@@ -469,6 +470,13 @@ NtStatus NtQueryInformationThread(
     ThreadInformationClass threadInformationClass,
     void* threadInformation,
     uint32_t threadInformationLength,
+    uint32_t* returnLength
+);
+NtStatus NtQueryInformationToken(
+    Handle tokenHandle,
+    uint32_t tokenInformationClass,
+    void* tokenInformation,
+    uint32_t tokenInformationLength,
     uint32_t* returnLength
 );
 NtStatus NtAlertThread(Handle threadHandle);

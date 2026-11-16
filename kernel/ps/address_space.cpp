@@ -10,6 +10,7 @@
 #include "micant/km/executive/ps_objects.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/shared/context.hpp"
+#include "micant/shared/native_nt_api.hpp"
 #include "micant/km/win32k/freestanding.hpp"
 #include <algorithm>
 #include <cstring>
@@ -2530,6 +2531,92 @@ NtStatus NtQueryInformationProcess(Handle handle, ProcessInformationClass inform
         if (copy != NtStatus::Success) result = copy;
     }
     if (reference) ob::ObDereferenceObject(reference);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return result;
+}
+
+NtStatus NtQueryInformationToken(Handle tokenHandle, uint32_t informationClass,
+                                 void* information, uint32_t length,
+                                 uint32_t* returnLength) {
+    auto* thread = ke::KeGetCurrentThread();
+    const auto mode = thread && thread->previousUserMode ? mm::UserMode : mm::KernelMode;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+
+    NtStatus result = NtStatus::Success;
+    if (!returnLength) result = NtStatus::InvalidParameter;
+    else result = ex::ProbeForWrite(returnLength, sizeof(*returnLength),
+                                    alignof(uint32_t), mode);
+    // NT callers must not observe a stale required size on any failing query.
+    // Clear it once the pointer has been validated; publish the required size
+    // below only after the information class and token have been validated.
+    if (result == NtStatus::Success) {
+        const uint32_t noLength = 0;
+        result = ex::ExSafeCopyToUser(returnLength, &noLength, sizeof(noLength), mode);
+    }
+    if (result == NtStatus::Success && informationClass != 1u) {
+        result = NtStatus::InvalidInfoClass;
+    }
+
+    ps::EProcess* process{};
+    ob::ObjectHeader* processReference{};
+    se::FreestandingAccessToken* token{};
+    ob::ObjectHeader* tokenReference{};
+    if (result == NtStatus::Success) {
+        if (tokenHandle != static_cast<Handle>(-4)) result = NtStatus::InvalidHandle;
+        else {
+            result = ps::detail::referenceCurrentProcess(process, processReference);
+            if (result == NtStatus::Success)
+                result = process->referencePrimaryToken(token, tokenReference);
+        }
+    }
+
+    uint32_t required = 0;
+    std::array<uint8_t, sizeof(micant::native_nt::NativeTokenUser) + 8 + 8 * sizeof(uint32_t)> staged{};
+    if (result == NtStatus::Success) {
+        if (!token || token->UserSid.Revision != 1 ||
+            token->UserSid.SubAuthorityCount > std::size(token->UserSid.SubAuthority)) {
+            result = NtStatus::InvalidParameter;
+        } else {
+            constexpr uint32_t sidHeaderSize = 8;
+            const uint32_t sidBytes = sidHeaderSize +
+                static_cast<uint32_t>(token->UserSid.SubAuthorityCount) * sizeof(uint32_t);
+            required = sizeof(micant::native_nt::NativeTokenUser) + sidBytes;
+            if (length < required) {
+                result = NtStatus::BufferTooSmall;
+            } else if (!information ||
+                       reinterpret_cast<uintptr_t>(information) >
+                           UINTPTR_MAX - sizeof(micant::native_nt::NativeTokenUser)) {
+                result = NtStatus::InvalidParameter;
+            } else {
+                micant::native_nt::NativeTokenUser tokenUser{};
+                tokenUser.user.sid = reinterpret_cast<void*>(
+                    reinterpret_cast<uintptr_t>(information) + sizeof(tokenUser));
+                std::memcpy(staged.data(), &tokenUser, sizeof(tokenUser));
+                auto* sid = staged.data() + sizeof(tokenUser);
+                // SID's public wire layout has an 8-byte fixed header. The
+                // kernel SidValue has naturally aligned SubAuthority storage,
+                // so serialize each field instead of copying its padded struct.
+                std::memcpy(sid, &token->UserSid.Revision, 1);
+                std::memcpy(sid + 1, &token->UserSid.SubAuthorityCount, 1);
+                std::memcpy(sid + 2, token->UserSid.IdentifierAuthority, 6);
+                for (uint32_t index = 0; index < token->UserSid.SubAuthorityCount; ++index)
+                    std::memcpy(sid + sidHeaderSize + index * sizeof(uint32_t),
+                                &token->UserSid.SubAuthority[index], sizeof(uint32_t));
+                result = ex::ProbeForWrite(information, required,
+                    alignof(micant::native_nt::NativeTokenUser), mode);
+                if (result == NtStatus::Success)
+                    result = ex::ExSafeCopyToUser(information, staged.data(), required, mode);
+            }
+        }
+    }
+
+    if (returnLength && required) {
+        const auto copy = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+        if (copy != NtStatus::Success) result = copy;
+    }
+    if (tokenReference) ob::ObDereferenceObject(tokenReference);
+    if (processReference) ob::ObDereferenceObject(processReference);
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
     return result;
 }

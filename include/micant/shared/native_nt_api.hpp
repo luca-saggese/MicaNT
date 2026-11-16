@@ -7,6 +7,22 @@
 // user DLLs include this header instead of Executive/dispatcher headers.
 namespace micant::native_nt {
 
+inline constexpr uint32_t TokenUserInformationClass = 1u;
+inline constexpr micant::Handle CurrentProcessTokenPseudoHandle =
+    static_cast<micant::Handle>(-4);
+
+// Windows TOKEN_USER / SID_AND_ATTRIBUTES ABI. The SID bytes are returned
+// immediately after NativeTokenUser by NtQueryInformationToken(TokenUser).
+struct NativeSidAndAttributes {
+    void* sid{};
+    uint32_t attributes{};
+};
+struct NativeTokenUser {
+    NativeSidAndAttributes user{};
+};
+static_assert(sizeof(NativeSidAndAttributes) == 16);
+static_assert(sizeof(NativeTokenUser) == 16);
+
 #if defined(MICANT_NATIVE_USERMODE) && defined(_WIN32)
 #define MICANT_NT_API_IMPORT __declspec(dllimport)
 #else
@@ -15,6 +31,10 @@ namespace micant::native_nt {
 
 extern "C" {
 MICANT_NT_API_IMPORT micant::NtStatus NtClose(micant::Handle handle) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtQueryInformationToken(
+    micant::Handle tokenHandle, uint32_t informationClass,
+    void* information, uint32_t informationLength,
+    uint32_t* returnLength) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtCreateThreadEx(
     micant::Handle* threadHandle, uint32_t desiredAccess,
     micant::ObjectAttributes* attributes, micant::Handle processHandle,

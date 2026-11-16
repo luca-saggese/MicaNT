@@ -454,6 +454,7 @@ int main(int argc, char* argv[]) {
     }
     if (argc > 1 && std::string(argv[1]) == "--theme") {
         RUN_TEST(Test_GtkCss_BoundedRulesAndHexColors);
+        RUN_TEST(Test_ThemePreferences_VersionedRecordValidation);
         RUN_TEST(Test_GtkCss_GroupedSelectorsAndColorDefinitions);
         RUN_TEST(Test_GtkCss_FailurePreservesOutputAndReportsUnsupportedSyntax);
         RUN_TEST(Test_NativeTheme_ColorExpressionsAndControlCascade);

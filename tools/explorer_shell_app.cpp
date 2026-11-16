@@ -24,6 +24,9 @@
 #include "micant/shared/theme_snapshot.h"
 #include "micant/shared/native_uxtheme_api.h"
 #include "gui_common.hpp"
+#define MICANT_USERENV_NO_EXPORT_REGISTRATION
+#include "micant/um/subsystems/mgmt/userenv.hpp"
+#undef MICANT_USERENV_NO_EXPORT_REGISTRATION
 #include "explorer_shell/taskbar.hpp"
 #include "explorer_shell/start_menu.hpp"
 #include "explorer_shell/desktop.hpp"
@@ -980,6 +983,21 @@ void PrintThemeWin32Error(const char* prefix, uint32_t error) noexcept {
     while (digitCount && length + 1 < sizeof(message))
         message[length++] = digits[--digitCount];
     PrintLine(message);
+}
+
+void verifyCurrentUserThemeProfilePath() noexcept {
+    wchar_t profile[128]{};
+    uint32_t characters = static_cast<uint32_t>(std::size(profile));
+    const bool resolved = micant::userenv::GetUserProfileDirectoryW(
+        reinterpret_cast<void*>(micant::native_nt::CurrentProcessTokenPseudoHandle),
+        profile, &characters) != 0;
+    constexpr wchar_t expectedPrefix[] = L"C:\\Users\\S-";
+    bool hasSidPrefix = resolved && characters > std::size(expectedPrefix);
+    for (size_t index = 0; hasSidPrefix && index + 1 < std::size(expectedPrefix); ++index)
+        hasSidPrefix = profile[index] == expectedPrefix[index];
+    PrintLine(hasSidPrefix
+        ? "[MicaNT Theme] Userenv resolved profile path from current token SID"
+        : "[MicaNT Theme] Userenv current token profile lookup failed");
 }
 
 bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
@@ -2858,6 +2876,7 @@ extern "C" void _start(const char* = nullptr) {
     if (video.width) g.screenW = video.width;
     if (video.height) g.screenH = video.height;
     if (g.screenW < 640 || g.screenH < 480) { g.screenW = 1024; g.screenH = 768; }
+    verifyCurrentUserThemeProfilePath();
     loadActiveVisualTheme();
     PrintLine(g.visualThemeReady
         ? "[MicaNT Theme] Native style snapshot accepted"

@@ -1,10 +1,82 @@
 #pragma once
 
 #include "micant/um/subsystems/theme/native_theme.hpp"
+#include "micant/shared/theme_preferences.h"
 
+#include <array>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
+
+inline void Test_ThemePreferences_VersionedRecordValidation() {
+    MicaThemePreferences defaults{};
+    MicaThemePreferencesInitializeDefaults(&defaults);
+    TEST_ASSERT(MicaThemePreferencesIsValid(&defaults) &&
+                defaults.themeId == MICANT_THEME_PREFERENCE_THEME_WHITESUR &&
+                defaults.mode == MICANT_THEME_PREFERENCE_MODE_LIGHT &&
+                defaults.accentId == MICANT_THEME_PREFERENCE_ACCENT_DEFAULT &&
+                defaults.dayStartMinute == 360 && defaults.nightStartMinute == 1080,
+                "theme preferences initialize to a valid per-user default record");
+
+    auto selected = defaults;
+    selected.mode = MICANT_THEME_PREFERENCE_MODE_AUTO;
+    selected.accentId = MICANT_THEME_PREFERENCE_ACCENT_PURPLE;
+    selected.effects = MICANT_THEME_PREFERENCE_EFFECT_TRANSPARENCY |
+        MICANT_THEME_PREFERENCE_EFFECT_ROUNDED_CORNERS |
+        MICANT_THEME_PREFERENCE_EFFECT_SHADOWS |
+        MICANT_THEME_PREFERENCE_EFFECT_BLUR |
+        MICANT_THEME_PREFERENCE_EFFECT_REDUCED_MOTION;
+    std::array<uint8_t, sizeof(selected) + 1> unaligned{};
+    std::memcpy(unaligned.data() + 1, &selected, sizeof(selected));
+    MicaThemePreferences parsed{};
+    TEST_ASSERT(MicaThemePreferencesParse(unaligned.data() + 1, sizeof(selected), &parsed) &&
+                parsed.mode == MICANT_THEME_PREFERENCE_MODE_AUTO &&
+                parsed.accentId == MICANT_THEME_PREFERENCE_ACCENT_PURPLE &&
+                parsed.effects == MICANT_THEME_PREFERENCE_KNOWN_EFFECTS,
+                "versioned preferences parse the supported mode, accent and effect flags");
+
+    auto rejected = selected;
+    rejected.magic ^= 1u;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject an invalid signature");
+    rejected = selected;
+    ++rejected.version;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject an unknown version");
+    rejected = selected;
+    rejected.byteSize--;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject a mismatched record size");
+    rejected = selected;
+    rejected.themeId = 2;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject an unknown packaged theme");
+    rejected = selected;
+    rejected.mode = 3;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject an unknown theme mode");
+    rejected = selected;
+    rejected.accentId = 2;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject an unavailable accent ID");
+    rejected = selected;
+    rejected.effects |= 1u << 31;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject unknown effect flags");
+    rejected = selected;
+    rejected.dayStartMinute = 1440;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject an out-of-day schedule value");
+    rejected = selected;
+    rejected.nightStartMinute = rejected.dayStartMinute;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject identical day and night boundaries");
+    rejected = selected;
+    rejected.reserved = 1;
+    TEST_ASSERT(!MicaThemePreferencesIsValid(&rejected), "preferences reject nonzero reserved fields");
+    TEST_ASSERT(!MicaThemePreferencesParse(&selected, sizeof(selected) - 1, &parsed) &&
+                !MicaThemePreferencesParse(&selected, sizeof(selected) + 1, &parsed),
+                "preferences reject truncated and trailing data");
+
+    auto preserved = defaults;
+    rejected = selected;
+    rejected.effects |= 1u << 31;
+    TEST_ASSERT(!MicaThemePreferencesParse(&rejected, sizeof(rejected), &preserved) &&
+                std::memcmp(&preserved, &defaults, sizeof(defaults)) == 0,
+                "failed preference parsing leaves the caller's last valid record intact");
+}
 
 inline void Test_GtkCss_BoundedRulesAndHexColors() {
     using namespace micant::um::theme;
