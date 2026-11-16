@@ -41,6 +41,7 @@ constexpr uint32_t TASKBAR_H = 40;
 constexpr uint32_t MENU_W = 344;
 constexpr uint32_t MENU_H = 390;
 constexpr size_t MAX_APP_WINDOWS = 8;
+constexpr UINT WM_THEME_SCHEDULE_TICK = 0x8001u;
 
 enum class View : uint8_t { MyComputer, MyDocuments, ControlPanel, Network, RecycleBin, DateTime };
 
@@ -89,6 +90,7 @@ struct ShellState {
     MicaThemeSnapshot themeVerify{};
     bool visualThemeReady{};
     char themeProfile[96]{};
+    bool themeAuto{};
     bool themeGdiDrawReported{};
     bool themeFontMetadataProbeReported{};
     bool themeGdiEditDrawReported{};
@@ -196,8 +198,13 @@ micant::explorer::ThemePalette activeShellPalette() noexcept {
         return themePixel(flag == MICANT_THEME_HAS_BACKGROUND ? style->background :
                           flag == MICANT_THEME_HAS_FOREGROUND ? style->foreground : style->border);
     };
-    const uint32_t accent = color(13, MICANT_THEME_HAS_BACKGROUND, rgb(36, 91, 174));
-    const uint32_t accentForeground = color(13, MICANT_THEME_HAS_FOREGROUND, rgb(255, 255, 255));
+    const auto* accentStyle = themeStyle(0, 2);
+    const uint32_t accent = accentStyle &&
+        (accentStyle->flags & MICANT_THEME_HAS_BACKGROUND)
+        ? themePixel(accentStyle->background) : rgb(36, 91, 174);
+    const uint32_t accentForeground = accentStyle &&
+        (accentStyle->flags & MICANT_THEME_HAS_FOREGROUND)
+        ? themePixel(accentStyle->foreground) : rgb(255, 255, 255);
     const uint32_t toolbarForeground = color(10, MICANT_THEME_HAS_FOREGROUND, rgb(242, 246, 251));
     return {
         color(14, MICANT_THEME_HAS_BACKGROUND, rgb(243, 243, 243)),
@@ -1410,31 +1417,40 @@ void createThemeProgressProbe() noexcept {
     }
 }
 
+bool themeProfileEquals(const char* left, const char* right) noexcept {
+    if (!left || !right) return false;
+    size_t i = 0;
+    while (i < 96 && left[i] && right[i] && left[i] == right[i]) ++i;
+    return i < 96 && left[i] == right[i];
+}
+
 void selectNextThemeProfile() noexcept {
     constexpr const char* profiles[] = {
-        "WhiteSur/Light", "WhiteSur/Dark", "WhiteSur/LightPurple"
+        "WhiteSur/Light", "WhiteSur/Dark", "WhiteSur/LightPurple", "Auto"
     };
     size_t current = 0;
-    const auto equalProfile = [](const char* left, const char* right) noexcept {
-        if (!left || !right) return false;
-        size_t i = 0;
-        while (i < 96 && left[i] && right[i] && left[i] == right[i]) ++i;
-        return i < 96 && left[i] == right[i];
-    };
-    for (size_t i = 0; i < std::size(profiles); ++i)
-        if (equalProfile(g.themeProfile, profiles[i])) current = i;
+    for (size_t i = 0; i < std::size(profiles); ++i) {
+        if (i == 3 ? g.themeAuto : themeProfileEquals(g.themeProfile, profiles[i]))
+            current = i;
+    }
     const char* next = profiles[(current + 1) % std::size(profiles)];
+    const bool selectingAuto = themeProfileEquals(next, "Auto");
+    const char* effectiveProfile = selectingAuto
+        ? (g.systemTime.hour >= 6 && g.systemTime.hour < 18
+            ? "WhiteSur/Light" : "WhiteSur/Dark")
+        : next;
     const bool hadTheme = g.visualThemeReady;
     const auto oldTheme = g.visualTheme;
     char oldProfile[sizeof(g.themeProfile)]{};
     std::memcpy(oldProfile, g.themeProfile, sizeof(oldProfile));
-    loadActiveVisualTheme(next);
-    if (!equalProfile(g.themeProfile, next)) {
+    loadActiveVisualTheme(effectiveProfile);
+    if (!themeProfileEquals(g.themeProfile, effectiveProfile)) {
         g.visualTheme = oldTheme;
         g.visualThemeReady = hadTheme;
         std::memcpy(g.themeProfile, oldProfile, sizeof(oldProfile));
         return;
     }
+    g.themeAuto = selectingAuto;
     for (auto& app : g.apps) {
         if (!app.open || !app.hwnd || !app.pixels) continue;
         drawAppWindow(app);
@@ -1447,11 +1463,43 @@ void selectNextThemeProfile() noexcept {
                                         activeShellPalette());
         present(g.startMenu);
     }
-    PrintLine(equalProfile(next, profiles[1])
+    PrintLine(selectingAuto
+        ? (themeProfileEquals(effectiveProfile, profiles[0])
+            ? "[MicaNT Theme] Auto policy selected Light (06:00-18:00)"
+            : "[MicaNT Theme] Auto policy selected Dark (18:00-06:00)")
+        : themeProfileEquals(next, profiles[1])
         ? "[MicaNT Theme] Runtime profile switch to Dark passed"
-        : equalProfile(next, profiles[2])
+        : themeProfileEquals(next, profiles[2])
             ? "[MicaNT Theme] Runtime profile switch to Light Purple passed"
             : "[MicaNT Theme] Runtime profile switch to Light passed");
+}
+
+void updateAutomaticTheme() noexcept {
+    if (!g.themeAuto) return;
+    const char* scheduledProfile = g.systemTime.hour >= 6 && g.systemTime.hour < 18
+        ? "WhiteSur/Light" : "WhiteSur/Dark";
+    if (themeProfileEquals(g.themeProfile, scheduledProfile)) return;
+
+    loadActiveVisualTheme(scheduledProfile);
+    if (!themeProfileEquals(g.themeProfile, scheduledProfile)) return;
+    for (auto& app : g.apps) {
+        if (!app.open || !app.hwnd || !app.pixels) continue;
+        drawAppWindow(app);
+        present(app.hwnd);
+    }
+    redrawDesktop();
+    redrawTaskbar();
+    PrintLine(scheduledProfile[9] == 'L'
+        ? "[MicaNT Theme] Auto schedule changed to Light"
+        : "[MicaNT Theme] Auto schedule changed to Dark");
+}
+
+DWORD WINAPI themeScheduleWorker(void* context) noexcept {
+    const HWND desktop = static_cast<HWND>(context);
+    for (;;) {
+        Sleep(1000);
+        if (!PostMessageW(desktop, WM_THEME_SCHEDULE_TICK, 0, 0)) return 1;
+    }
 }
 
 void loadPackagedWallpaper() noexcept {
@@ -2458,6 +2506,11 @@ void updateClock() noexcept {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NCCREATE) return 1;
+    if (hwnd == g.desktop && message == WM_THEME_SCHEDULE_TICK) {
+        updateClock();
+        updateAutomaticTheme();
+        return 0;
+    }
     if (message == WM_COMMAND && reinterpret_cast<HWND>(lParam) == g.themeButtonProbe &&
         LOWORD(wParam) == 0x771u && HIWORD(wParam) == BN_CLICKED) {
         g.themeButtonProbeReported = true;
@@ -3004,22 +3057,23 @@ extern "C" void _start(const char* = nullptr) {
     } else {
         PrintLine("[MicaNT Cursor] IDC_APPSTARTING system ANI load failed");
     }
-    uint64_t lastClockUpdate = GetTickCount64();
+    micant::Handle themeSchedule{};
+    const auto scheduleStatus = micant::native_nt::NtCreateThreadEx(&themeSchedule,
+        0x00100002u, nullptr, static_cast<micant::Handle>(-1),
+        reinterpret_cast<void*>(themeScheduleWorker), g.desktop, 0, 0, 0, 0, nullptr);
+    if (scheduleStatus == micant::NtStatus::Success && themeSchedule) {
+        (void)micant::native_nt::NtClose(themeSchedule);
+        PrintLine("[MicaNT Theme] Auto schedule worker started");
+    } else {
+        PrintLine("[MicaNT Theme] Auto schedule worker unavailable");
+    }
     for (;;) {
         MSG msg{};
         const int32_t result = GetMessageW(&msg, nullptr, 0, 0);
         if (result > 0) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
-        } else if (result == 0) {
-            break;
-        } else {
-            Sleep(10);
-        }
-        const uint64_t now = GetTickCount64();
-        if (now >= lastClockUpdate && now - lastClockUpdate >= 1000) {
-            updateClock();
-            lastClockUpdate = now;
-        }
+        } else if (result == 0) break;
+        else Sleep(10);
     }
 }

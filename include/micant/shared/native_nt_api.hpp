@@ -15,6 +15,12 @@ namespace micant::native_nt {
 
 extern "C" {
 MICANT_NT_API_IMPORT micant::NtStatus NtClose(micant::Handle handle) noexcept;
+MICANT_NT_API_IMPORT micant::NtStatus NtCreateThreadEx(
+    micant::Handle* threadHandle, uint32_t desiredAccess,
+    micant::ObjectAttributes* attributes, micant::Handle processHandle,
+    void* startRoutine, void* argument, uint32_t createFlags,
+    uintptr_t zeroBits, size_t stackSize, size_t maximumStackSize,
+    void* attributeList) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtQuerySystemTime(micant::LargeInteger* systemTime) noexcept;
 MICANT_NT_API_IMPORT micant::NtStatus NtQueryPerformanceCounter(
     micant::LargeInteger* counter, micant::LargeInteger* frequency) noexcept;

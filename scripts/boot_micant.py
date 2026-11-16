@@ -1208,7 +1208,7 @@ def verify_mouse(
                         }]})
                     desktop_light = wait_for_changed_screen(
                         desktop_light, "live-window-light.ppm", 5000)
-                    light_title_pixel = pixel_at(desktop_light, 230, 126)
+                    light_title_pixel = pixel_at(desktop_light, 240, 126)
                     light_address_field_pixel = pixel_at(desktop_light, 280, 160)
                     light_start_surface_pixel = pixel_at(desktop_light, 90, 733)
 
@@ -1238,7 +1238,7 @@ def verify_mouse(
                     dark_screen = screen("theme-dark.ppm")
                     if changed_pixels(desktop_light, dark_screen) == 0:
                         raise RuntimeError("Runtime theme switch produced no scanout change")
-                    if pixel_at(dark_screen, 230, 126) == light_title_pixel:
+                    if pixel_at(dark_screen, 240, 126) == light_title_pixel:
                         raise RuntimeError("Live titlebar pixel did not follow the Dark theme")
                     if pixel_at(dark_screen, 90, 733) == light_start_surface_pixel:
                         raise RuntimeError("Taskbar Start surface pixel did not follow the Dark theme")
@@ -1337,7 +1337,28 @@ def verify_mouse(
                     if purple_accent_pixel != bytes((0x9A, 0x57, 0xA3)):
                         raise RuntimeError(
                             f"Light Purple caption button pixel was {purple_accent_pixel}, expected (154, 87, 163)")
+                    move_to(50, 748)
+                    click_left()
+                    time.sleep(0.3)
+                    purple_start = screen("theme-menu-purple.ppm")
+                    purple_start_pixel = pixel_at(purple_start, 100, 360)
+                    if purple_start_pixel != bytes((0x9A, 0x57, 0xA3)):
+                        raise RuntimeError(
+                            f"Light Purple Start surface pixel was {purple_start_pixel}, expected (154, 87, 163)")
+                    move_to(250, 536)
+                    click_left()
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                        if ("[MicaNT Theme] Auto policy selected Light (06:00-18:00)" in serial or
+                                "[MicaNT Theme] Auto policy selected Dark (18:00-06:00)" in serial):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("Explorer did not expose the automatic theme policy")
 
+                    move_to(500, 146)
+                    click_left()
                     destroyed_count = serial.count(
                         "[MicaNT Explorer] Application window destroyed by its owner")
                     for down in (True, False):

@@ -423,8 +423,10 @@ the evidence named here, not just declarations or a successful compile.
   desktop labels use the theme accent foreground, task switch and missing-icon
   glyphs use the active accent, and the attached-scrollbar probe uses the
   theme surface color. Address, toolbar, sidebar, status, Start, taskbar and
-  notification colors already consume the snapshot-derived palette; packaged
-  multicolor Windows marks remain artwork.
+  notification colors already consume the snapshot-derived palette. Explorer
+  reads the accent from the compiled button state that carries the profile
+  accent, so Light Purple reaches Start and taskbar surfaces as well as caption
+  decorations; packaged multicolor Windows marks remain artwork.
 - [x] QEMU now samples the Explorer address field and Start-menu surface across
   the live Light-to-Dark switch, alongside the existing titlebar, taskbar,
   notification and accent checks. The complete input run passed the address
@@ -433,11 +435,21 @@ the evidence named here, not just declarations or a successful compile.
 
 ### 5. Variants and accents
 
-- [ ] Verify Light and Dark selection in QEMU, not only profile loading/build.
-- [ ] Make accent selection available through the user-facing settings path
-  and verify an alternate accent in controls, shell surfaces and decorations.
-- [ ] Implement Auto policy and verify effective theme changes on schedule or
-  system preference notification without restarting Explorer.
+- [x] Verify Light and Dark selection and the live Light-to-Dark switch in the
+  QEMU input matrix, including titlebar, address field, Start menu, taskbar and
+  post-switch move/resize pixels (`/private/tmp/micant-theme-point5-input-run11`).
+- [x] Light Purple is available through Start → Theme Appearance. QEMU verified
+  the exact `(154,87,163)` accent in the pressed caption button and Start header
+  (`caption-purple-pressed.ppm`, `theme-menu-purple.ppm` in the same run).
+- [x] Add an Auto choice to the same user-facing selector. It chooses Light
+  from 06:00 through 17:59 and Dark otherwise, then a Ring 3 worker posts a
+  private schedule tick every second; Explorer reloads/publishes and redraws
+  the matching snapshot in the existing process. QEMU verified worker startup,
+  Auto selection from Purple and the current `Dark (18:00-06:00)` effective
+  choice in serial (`/private/tmp/micant-theme-point5-input-run11`).
+- [ ] Verify an actual scheduled Light/Dark boundary crossing and its resulting
+  pixels with a deterministic QEMU clock fixture; the current run verified the
+  active policy and periodic worker, but did not wait for a boundary.
 
 ### 6. Preferences and multiuser settings
 
