@@ -2512,6 +2512,7 @@ void publishCompositorSurfacesInCompositorSpace() noexcept {
     }
 }
 uint32_t g_explorerApplicationWindowCount{};
+uint64_t g_explorerApplicationWindowHandles[MICANT_WIN32K_WINDOW_CAPACITY]{};
 
 bool launchUserImageProcess(const char16_t* imageName,
                             micant::Handle& processHandle,
@@ -4209,7 +4210,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const NtStatus resultStatus = ex::ExSafeCopyToUser(
             reinterpret_cast<void*>(first), &request, sizeof(request));
         static bool explorerEntryObserved = false;
-        static uint32_t explorerWindowCreateCount = 0;
+        static bool explorerFirstWindowObserved = false;
+        static uint32_t explorerCaptionWindowCreateCount = 0;
         const auto* currentProcess = ke::KeGetCurrentProcess();
         const bool fromExplorer = g_explorerProcessId && currentProcess &&
             currentProcess->processId() == g_explorerProcessId;
@@ -4220,24 +4222,49 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         }
         if (fromExplorer && resultStatus == NtStatus::Success &&
             request.operation == MICANT_WIN32K_OP_CREATE_WINDOW) {
-            ++explorerWindowCreateCount;
-            if (explorerWindowCreateCount == 1)
+            if (!explorerFirstWindowObserved) {
+                explorerFirstWindowObserved = true;
                 serialWrite("[MicaNT Explorer] First user-mode window created\r\n");
-            else if (explorerWindowCreateCount == 4) {
-                ++g_explorerApplicationWindowCount;
-                serialWrite("[MicaNT Explorer] First application window created\r\n");
-            } else if (explorerWindowCreateCount == 5) {
-                ++g_explorerApplicationWindowCount;
-                serialWrite("[MicaNT Explorer] Second overlapping application window created\r\n");
-            } else if (explorerWindowCreateCount >= 6) {
-                ++g_explorerApplicationWindowCount;
+            }
+            constexpr uint32_t kWsCaptionStyle = 0x00C00000u;
+            constexpr uint32_t kWsVisibleStyle = 0x10000000u;
+            const uint32_t windowStyle = static_cast<uint32_t>(request.args[1]);
+            if (!request.args[6] &&
+                (windowStyle & (kWsCaptionStyle | kWsVisibleStyle)) ==
+                    (kWsCaptionStyle | kWsVisibleStyle)) {
+                ++explorerCaptionWindowCreateCount;
+                if (explorerCaptionWindowCreateCount >= 1) {
+                    for (auto& tracked : g_explorerApplicationWindowHandles) {
+                        if (tracked) continue;
+                        tracked = request.result;
+                        ++g_explorerApplicationWindowCount;
+                        break;
+                    }
+                    if (explorerCaptionWindowCreateCount == 1)
+                        serialWrite("[MicaNT Explorer] First application window created\r\n");
+                    constexpr char16_t kSecondViewTitle[] = u"My Documents";
+                    bool secondView = true;
+                    for (size_t index = 0; index < sizeof(kSecondViewTitle) /
+                            sizeof(kSecondViewTitle[0]); ++index) {
+                        if (request.title[index] != static_cast<uint16_t>(kSecondViewTitle[index])) {
+                            secondView = false;
+                            break;
+                        }
+                    }
+                    if (explorerCaptionWindowCreateCount >= 2 && secondView)
+                        serialWrite("[MicaNT Explorer] Second overlapping application window created\r\n");
+                }
             }
         }
         if (fromExplorer && resultStatus == NtStatus::Success &&
-            request.operation == MICANT_WIN32K_OP_DESTROY_WINDOW &&
-            g_explorerApplicationWindowCount) {
-            --g_explorerApplicationWindowCount;
-            serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
+            request.operation == MICANT_WIN32K_OP_DESTROY_WINDOW) {
+            for (auto& tracked : g_explorerApplicationWindowHandles) {
+                if (tracked != request.args[0]) continue;
+                tracked = 0;
+                if (g_explorerApplicationWindowCount) --g_explorerApplicationWindowCount;
+                serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
+                break;
+            }
         }
         return status(resultStatus);
     }

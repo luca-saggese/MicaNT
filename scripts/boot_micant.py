@@ -810,29 +810,9 @@ def verify_mouse(
                     {"type": "btn", "data": {"button": "left", "down": False}},
                 ]})
 
-            # Render a static Control Panel row so theme text pixels are
-            # covered even when the concurrent C:\ root enumeration is empty.
-            click_at(40, 748)
-            time.sleep(0.2)
-            click_at(40, 562)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] Explorer row text uses active theme pixel" in serial:
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError("Explorer Control Panel row missed the active theme text color")
-            # Escape closes the focused Control Panel window without relying
-            # on titlebar geometry or screen scaling.
-            for down in (True, False):
-                execute("input-send-event", {"events": [{
-                    "type": "key", "data": {
-                        "down": down,
-                        "key": {"type": "qcode", "data": "esc"},
-                    },
-                }]})
-            time.sleep(0.3)
+            if "[MicaNT Theme] Explorer row text uses active theme pixel" not in \
+                    serial_path.read_text(encoding="utf-8", errors="replace"):
+                raise RuntimeError("Explorer file row missed the active theme text color")
 
             serial = serial_path.read_text(encoding="utf-8", errors="replace")
             if "[MicaNT Explorer] Initial filesystem directory is empty" not in serial:
@@ -875,10 +855,15 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not create its second overlapping user-mode window")
-            overlapping = wait_for_changed_screen(opened, "overlapping-windows.ppm", 5000)
-            inactive_caption = pixel_at(overlapping, 280, 105)
-            active_caption = pixel_at(overlapping, 385, 132)
-            if inactive_caption == active_caption:
+            caption_deadline = time.monotonic() + 5
+            while time.monotonic() < caption_deadline:
+                overlapping = screen("overlapping-windows.ppm")
+                inactive_caption = pixel_at(overlapping, 280, 105)
+                active_caption = pixel_at(overlapping, 385, 132)
+                if inactive_caption != active_caption:
+                    break
+                time.sleep(0.1)
+            else:
                 raise RuntimeError("Active and inactive caption pixels did not differ")
             # The second window starts at (222,119), size 500x320. Probe a
             # pixel inside its maximize button but away from the glyph/cursor.

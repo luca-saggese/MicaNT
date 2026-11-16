@@ -1819,6 +1819,7 @@ void openView(View view) noexcept {
     RECT clientRect{};
     if (!GetClientRect(app->hwnd, &clientRect) || clientRect.right <= clientRect.left ||
         clientRect.bottom <= clientRect.top) {
+        PrintLine("[MicaNT Explorer] App window client geometry was invalid");
         DestroyWindow(app->hwnd);
         *app = {};
         return;
@@ -1893,6 +1894,11 @@ void openView(View view) noexcept {
         app->bitmap = appBitmap;
         app->pixels = static_cast<uint32_t*>(appBits);
     } else {
+        PrintLine(!app->dc
+            ? "[MicaNT Explorer] App window compatible DC allocation failed"
+            : !appBitmap
+                ? "[MicaNT Explorer] App window DIB allocation failed"
+                : "[MicaNT Explorer] App window DIB pixels unavailable");
         DestroyWindow(app->hwnd);
         if (app->dc) DeleteDC(app->dc);
         if (appBitmap) DeleteObject(appBitmap);

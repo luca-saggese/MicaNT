@@ -3861,12 +3861,18 @@ void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
     if (previous) {
         GdiDcSelection* dc = FindGdiDc(hdc, false);
         GdiBitmapSurface* bitmap = FindGdiBitmap(h);
-        if (bitmap) {
-            if (!dc) {
-                (void)fn(hdc, previous); // Roll back when local tracking cannot be reserved.
-                return nullptr;
-            }
-            dc->bitmap = h;
+        if (!dc && bitmap) {
+            (void)fn(hdc, previous); // Roll back when local tracking cannot be reserved.
+            return nullptr;
+        }
+        if (dc) {
+            // Selecting the DC's stock/default bitmap must clear the old
+            // DIB reference too; otherwise DeleteObject sees a stale local
+            // selection and leaks every temporary DIB used by themed paint.
+            dc->bitmap = bitmap ? h : nullptr;
+            if (!bitmap) dc->clip = {};
+        }
+        if (bitmap && dc) {
             GdiBitmapSurface* surface = FindGdiBitmap(h);
             dc->clip = {0, 0, static_cast<int32_t>(surface->width),
                         static_cast<int32_t>(surface->height)};

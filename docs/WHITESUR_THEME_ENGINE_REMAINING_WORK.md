@@ -252,6 +252,15 @@ the evidence named here, not just declarations or a successful compile.
   and notification counts in
   `/private/tmp/micant-theme-button-capture-verified`. Capture ownership is
   process-scoped; Win32 per-thread capture routing remains unsupported.
+- [x] GDI32 now clears its local DIB selection when `SelectObject` restores the
+  stock/default bitmap. Previously the local DC table kept reporting the DIB
+  selected, so `DeleteObject` rejected cleanup and repeated themed control
+  paints exhausted Win32k bitmap slots. QEMU verified the fix by creating and
+  retaining a second Explorer window after the common-control probes; active
+  and inactive caption pixels differed (`#FAFAFA` / `#FFFFFF`) in
+  `/private/tmp/micant-item3-dib-selection-fix`. The integrated run continued
+  through caption, drag and resize checks, then stopped at the later reopen
+  screenshot area threshold.
 - [x] Production User32 `SetFocus`/`GetFocus` now track a focused HWND
   separately from the foreground top-level window. Win32k sends focus change
   messages, routes keyboard input to the focused control, and restores the
