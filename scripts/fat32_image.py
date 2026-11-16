@@ -13,6 +13,13 @@ RESERVED_SECTORS = 32
 FAT_COUNT = 2
 FAT_SECTORS = 1024
 DATA_START = RESERVED_SECTORS + FAT_COUNT * FAT_SECTORS
+# Private GPT type GUID for the dedicated, raw LuceOS crash-record partition.
+# GPT stores GUID fields in on-disk little-endian form; keep these bytes as the
+# canonical on-disk representation shared with the kernel's partition probe.
+LUCEOS_CRASHDUMP_TYPE_GUID = bytes.fromhex(
+    "4c554344-4d50-4f53-8000-4c5543454f53".replace("-", "")
+)
+LUCEOS_CRASHDUMP_SECTORS = 8192
 
 
 def _short_name(name: str, used: set[bytes]) -> bytes:
@@ -192,13 +199,15 @@ def create_fat32_image(source: Path, destination: Path) -> None:
         output.write(image)
 
 
-def create_gpt_disk_image(volume: Path, destination: Path) -> None:
-    """Place a FAT32 volume in a standards-shaped GPT Basic Data partition."""
+def create_gpt_disk_image(volume: Path, destination: Path, *,
+                          reserve_crash_dump: bool = False) -> None:
+    """Place a FAT32 volume in GPT; optionally reserve a private raw dump partition."""
     volume_sectors = volume.stat().st_size // SECTOR_SIZE
     if volume_sectors == 0 or volume.stat().st_size % SECTOR_SIZE:
         raise ValueError("GPT partition image must contain whole sectors")
     partition_start = 2048
-    total_sectors = partition_start + volume_sectors + 4096
+    crash_sectors = LUCEOS_CRASHDUMP_SECTORS if reserve_crash_dump else 0
+    total_sectors = partition_start + volume_sectors + crash_sectors + 4096
     backup_header_lba = total_sectors - 1
     backup_entries_lba = backup_header_lba - 32
     first_usable = 34
@@ -214,6 +223,17 @@ def create_gpt_disk_image(volume: Path, destination: Path) -> None:
     entry[32:40] = partition_start.to_bytes(8, "little")
     entry[40:48] = partition_last.to_bytes(8, "little")
     entry[56:72] = "MICA_SYS".encode("utf-16le")
+    if reserve_crash_dump:
+        # Slot four intentionally leaves the three positions consumed by the
+        # current FAT boot mapper untouched. The reserved range starts exactly
+        # after the FAT volume and ends before GPT's backup metadata area.
+        crash = memoryview(entries)[3 * 128:4 * 128]
+        crash[0:16] = LUCEOS_CRASHDUMP_TYPE_GUID
+        crash[16:32] = bytes.fromhex("4c5543444d504f530001000000000001")
+        crash_start = partition_start + volume_sectors
+        crash[32:40] = crash_start.to_bytes(8, "little")
+        crash[40:48] = (crash_start + crash_sectors - 1).to_bytes(8, "little")
+        crash[56:88] = "LUCEOS_CRASHDUMP".encode("utf-16le")
     entries_crc = zlib.crc32(entries) & 0xFFFFFFFF
     disk_guid = bytes(range(0xA0, 0xB0))
 

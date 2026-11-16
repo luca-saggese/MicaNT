@@ -12,6 +12,7 @@
 #include "micant/km/executive/io_file.hpp"
 #include "micant/km/executive/usermode.hpp"
 #include "micant/km/core/ke.hpp"
+#include "micant/km/core/crash_record.hpp"
 #include "micant/km/core/clock_timer.hpp"
 #include "micant/km/core/passive_work.hpp"
 #include <atomic>
@@ -1837,6 +1838,43 @@ void MicantProbePageFault(const uint64_t* frame) noexcept {
         if (g_log) {
             g_log("[MicaNT Hal] Unexpected bootstrap page fault\r\n");
         }
+        // This is the active bootstrap #PF fatal path. Preserve an allocator-
+        // free record before any further diagnostic work. The #PF entry saves
+        // 15 GPRs immediately below the hardware error/RIP/CS/RFLAGS frame.
+        micant::ke::KTrapFrame trap{};
+        micant::ke::CrashRecord evidence{};
+        const uint64_t* captureSaved = frame - 15;
+        trap.r15 = captureSaved[0]; trap.r14 = captureSaved[1]; trap.r13 = captureSaved[2];
+        trap.r12 = captureSaved[3]; trap.r11 = captureSaved[4]; trap.r10 = captureSaved[5];
+        trap.r9 = captureSaved[6]; trap.r8 = captureSaved[7]; trap.rdi = captureSaved[8];
+        trap.rsi = captureSaved[9]; trap.rbp = captureSaved[10]; trap.rbx = captureSaved[11];
+        trap.rdx = captureSaved[12]; trap.rcx = captureSaved[13]; trap.rax = captureSaved[14];
+        trap.errorCode = static_cast<uint32_t>(frame[0]);
+        trap.rip = frame[1];
+        trap.segCs = static_cast<uint16_t>(frame[2]);
+        trap.eFlags = static_cast<uint32_t>(frame[3]);
+        trap.rsp = (frame[2] & 3u) != 0
+            ? frame[4] : reinterpret_cast<uintptr_t>(frame + 4);
+        trap.faultAddress = faultAddress;
+        micant::ke::captureCrashRecord(evidence,
+            0x1000000eu, 14, trap.errorCode, trap.rip, faultAddress, &trap, 0);
+        logTrapValue("[LuceOS Crash] Stop code=0x", evidence.bugCheckCode);
+        logTrapValue("[LuceOS Crash] param1(vector)=0x", evidence.parameters[0]);
+        logTrapValue("[LuceOS Crash] param2(error)=0x", evidence.parameters[1]);
+        logTrapValue("[LuceOS Crash] param3(RIP)=0x", evidence.parameters[2]);
+        logTrapValue("[LuceOS Crash] param4(CR2)=0x", evidence.parameters[3]);
+        logTrapValue("[LuceOS Crash] RIP=0x", evidence.rip);
+        logTrapValue("[LuceOS Crash] RSP=0x", evidence.rsp);
+        logTrapValue("[LuceOS Crash] RFLAGS=0x", evidence.rflags);
+        logTrapValue("[LuceOS Crash] CR2=0x", evidence.cr2);
+        logTrapValue("[LuceOS Crash] PID=0x", evidence.pid);
+        logTrapValue("[LuceOS Crash] TID=0x", evidence.tid);
+        logTrapValue("[LuceOS Crash] bounded stack bytes=0x", evidence.stackBytes);
+        for (size_t i = 0; i < 16; ++i)
+            logTrapValue("[LuceOS Crash] AMD64 GPR=0x", evidence.gpr[i]);
+        logTrapValue("[LuceOS Crash] build ID=0x", evidence.buildId);
+        logTrapValue("[LuceOS Crash] record CRC32=0x", evidence.crc32);
+        logTrapValue("[LuceOS Crash] evidence is stack-local; persistent dump unavailable=", 1);
         logTrapValue("[MicaNT Hal] PF CR2=0x", faultAddress);
         logTrapValue("[MicaNT Hal] PF error=0x", frame[0]);
         logTrapValue("[MicaNT Hal] PF RIP=0x", frame[1]);
@@ -2033,6 +2071,54 @@ void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noex
     // Keep timer delivery from recursively entering this diagnostic path and
     // interleaving or overwriting the exception report.
     __asm__ __volatile__("cli" : : : "memory");
+    micant::ke::KTrapFrame trap{};
+    micant::ke::CrashRecord evidence{};
+    if (frame) {
+        // Exception entry saves GPRs in reverse stack order immediately
+        // before the hardware error/RIP/CS/RFLAGS frame. Same-CPL RSP is
+        // therefore the address immediately following those four words.
+        const uint64_t* saved = frame - 16;
+        trap.r15 = saved[0]; trap.r14 = saved[1]; trap.r13 = saved[2];
+        trap.r12 = saved[3]; trap.r11 = saved[4]; trap.r10 = saved[5];
+        trap.r9 = saved[6]; trap.r8 = saved[7]; trap.rdi = saved[8];
+        trap.rsi = saved[9]; trap.rbp = saved[10]; trap.rbx = saved[11];
+        trap.rdx = saved[12]; trap.rcx = saved[13]; trap.rax = saved[14];
+        trap.errorCode = static_cast<uint32_t>(frame[0]);
+        trap.rip = frame[1];
+        trap.segCs = static_cast<uint16_t>(frame[2]);
+        trap.eFlags = static_cast<uint32_t>(frame[3]);
+        trap.rsp = (frame[2] & 3u) != 0
+            ? frame[4] : reinterpret_cast<uintptr_t>(frame + 4);
+        uint64_t cr2{};
+        __asm__ __volatile__("movq %%cr2, %0" : "=r"(cr2));
+        trap.faultAddress = cr2;
+        micant::ke::captureCrashRecord(evidence,
+            0x10000000u | static_cast<uint32_t>(vector), // MicaNT-private exception reason
+            vector, trap.errorCode, trap.rip, trap.faultAddress, &trap, 0);
+        logTrapValue("[LuceOS Crash] Stop code=0x", evidence.bugCheckCode);
+        logTrapValue("[LuceOS Crash] RIP=0x", evidence.rip);
+        logTrapValue("[LuceOS Crash] RSP=0x", evidence.rsp);
+        logTrapValue("[LuceOS Crash] RFLAGS=0x", evidence.rflags);
+        logTrapValue("[LuceOS Crash] CR2=0x", evidence.cr2);
+        logTrapValue("[LuceOS Crash] PID=0x", evidence.pid);
+        logTrapValue("[LuceOS Crash] TID=0x", evidence.tid);
+        logTrapValue("[LuceOS Crash] bounded stack bytes=0x", evidence.stackBytes);
+        logTrapValue("[LuceOS Crash] param1=0x", evidence.parameters[0]);
+        logTrapValue("[LuceOS Crash] param2=0x", evidence.parameters[1]);
+        logTrapValue("[LuceOS Crash] param3=0x", evidence.parameters[2]);
+        logTrapValue("[LuceOS Crash] param4=0x", evidence.parameters[3]);
+        static constexpr const char* gprNames[16] = {
+            "RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI",
+            "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"};
+        for (size_t i = 0; i < 16; ++i) {
+            logTrapValue(gprNames[i], evidence.gpr[i]);
+        }
+        logTrapValue("[LuceOS Crash] build ID=0x", evidence.buildId);
+        logTrapValue("[LuceOS Crash] evidence CRC32=0x", evidence.crc32);
+        logTrapValue("[LuceOS Crash] record is stack-local and not recoverable; build ID absent=",
+                     evidence.buildId == 0 ? 1 : 0);
+        logTrapValue("[LuceOS Crash] persistent dump unavailable (no backend connected)=", 1);
+    }
     logTrapValue("[MicaNT Hal] Unhandled exception vector=0x", vector);
     if (frame) {
         logTrapValue("[MicaNT Hal] Unhandled exception RIP=0x", frame[1]);

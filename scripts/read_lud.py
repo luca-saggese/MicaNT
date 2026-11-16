@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode a LuceOS .LUD process dump into a readable text report."""
+"""Decode and validate LuceOS process and kernel crash dumps."""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ DATA = struct.Struct("<QII")
 PROCESS = struct.Struct("<IIIHH")
 MODULE = struct.Struct("<QQHHHH")
 THREAD_SIZE = 104  # 80-byte SYSTEM_THREAD_INFORMATION + TEB and stack bounds
+CRASH_FLAG = 1 << 2
+CRASH_CONTEXT_SIZE = 248
+CRASH_CONTEXT_PREFIX = struct.Struct("<4sHHII4QQ4I4Q16QQQ")
+CRASH_STACK_MAX = 512
 
 
 def crc32(data: bytes) -> int:
@@ -51,6 +55,7 @@ def parse(path: Path, extract: Path | None) -> tuple[dict, list[dict], bool, lis
         "flags": flags,
         "live_best_effort": bool(flags & 1),
         "mini_dump": bool(flags & 2),
+        "kernel_crash": bool(flags & CRASH_FLAG),
         "pid": pid,
         "kernel_build_id": build_id,
         "capture_time": capture_time,
@@ -60,6 +65,8 @@ def parse(path: Path, extract: Path | None) -> tuple[dict, list[dict], bool, lis
     offset = header_size
     ended = False
     data_index = 0
+    crash_context: dict | None = None
+    crash_stack_seen = False
     while offset < len(raw):
         if len(raw) - offset < RECORD.size:
             errors.append(f"truncated record header at file offset 0x{offset:x}")
@@ -154,10 +161,81 @@ def parse(path: Path, extract: Path | None) -> tuple[dict, list[dict], bool, lis
                     errors.append("invalid module path length")
                 item.update(base=base, image_size=image_size,
                             path=u16(name[:path_bytes]), reserved=[r0, r1, r2])
+        elif kind == 7:
+            if size != CRASH_CONTEXT_SIZE:
+                errors.append(f"kernel crash context is {size} bytes; expected {CRASH_CONTEXT_SIZE}")
+            else:
+                if crash_context is not None:
+                    errors.append("multiple kernel crash context records")
+                fields = CRASH_CONTEXT_PREFIX.unpack(payload[:CRASH_CONTEXT_PREFIX.size])
+                magic, crash_version, context_size, stop_code, crash_flags = fields[:5]
+                params = fields[5:9]
+                build_id = fields[9]
+                cpu, crash_pid, tid, stack_bytes = fields[10:14]
+                rip, rsp, rflags, cr2 = fields[14:18]
+                gprs = fields[18:34]
+                stack_limit, stack_base = fields[34:36]
+                if magic != b"CRSH":
+                    errors.append("kernel crash context has invalid CRSH signature")
+                if crash_version != 1 or context_size != CRASH_CONTEXT_SIZE:
+                    errors.append(f"unsupported kernel crash context version/size {crash_version}/{context_size}")
+                if stack_bytes > CRASH_STACK_MAX:
+                    errors.append(f"kernel crash stack length {stack_bytes} exceeds {CRASH_STACK_MAX}")
+                crash_context = {
+                    "stop_code": stop_code, "flags": crash_flags,
+                    "parameters": list(params), "build_id": build_id,
+                    "cpu": cpu, "pid": crash_pid, "tid": tid,
+                    "stack_bytes": stack_bytes, "rip": rip, "rsp": rsp,
+                    "rflags": rflags, "cr2": cr2,
+                    "gprs": list(gprs), "stack_limit": stack_limit,
+                    "stack_base": stack_base,
+                }
+                item.update(crash_context)
+                if header["kernel_build_id"] not in (0, build_id):
+                    errors.append("kernel crash context build ID disagrees with dump header")
+                if header["pid"] != 0:
+                    errors.append("kernel crash dump header PID must be zero")
+        elif kind == 8:
+            if size < DATA.size:
+                errors.append(f"short kernel stack record ({size} bytes)")
+            else:
+                base, byte_count, data_crc = DATA.unpack_from(payload)
+                chunk = payload[DATA.size:]
+                valid_data_crc = len(chunk) == byte_count and crc32(chunk) == data_crc
+                if len(chunk) != byte_count:
+                    errors.append(f"kernel stack record length says {byte_count}, contains {len(chunk)}")
+                if byte_count > CRASH_STACK_MAX:
+                    errors.append(f"kernel stack length {byte_count} exceeds {CRASH_STACK_MAX}")
+                if not valid_data_crc:
+                    errors.append("kernel stack data CRC/length mismatch")
+                if crash_stack_seen:
+                    errors.append("multiple kernel crash stack records")
+                crash_stack_seen = True
+                if crash_context is None:
+                    errors.append("kernel stack record precedes crash context")
+                else:
+                    if byte_count != crash_context["stack_bytes"]:
+                        errors.append("kernel stack record length disagrees with crash context")
+                    if base != crash_context["rsp"]:
+                        errors.append("kernel stack record base disagrees with captured RSP")
+                item.update(base=base, byte_count=byte_count, data_crc32=data_crc,
+                            data_crc_valid=valid_data_crc,
+                            preview=chunk[:32].hex(" "))
+                if extract is not None:
+                    extract.mkdir(parents=True, exist_ok=True)
+                    (extract / f"{data_index:04d}-0x{base:016x}-kernel-stack.bin").write_bytes(chunk)
+                data_index += 1
         else:
             item["unknown_payload_hex"] = payload[:64].hex(" ")
         records.append(item)
 
+    if header["kernel_crash"]:
+        if crash_context is None:
+            errors.append("kernel crash flag is set but type 7 context is missing")
+        if crash_context is not None and crash_context["stack_bytes"] and not crash_stack_seen:
+            errors.append("kernel crash context declares a stack but type 8 record is missing")
+    elif crash_context is not None or crash_stack_seen:
+        errors.append("kernel crash records require the kernel crash header flag")
     return header, records, ended, errors
 
 
@@ -166,8 +244,9 @@ def fmt_addr(value: int) -> str:
 
 
 def report(header: dict, records: list[dict], ended: bool, errors: list[str]) -> str:
-    lines = [f"LuceOS process dump v{header['version']}",
-             f"Process: PID {header['pid']}  |  {header['architecture']}  |  {header['file_size']:,} bytes",
+    dump_kind = "kernel crash dump" if header["kernel_crash"] else "process dump"
+    lines = [f"LuceOS {dump_kind} v{header['version']}",
+             f"Header PID: {header['pid']}  |  {header['architecture']}  |  {header['file_size']:,} bytes",
              f"Capture: {'live best-effort' if header['live_best_effort'] else 'snapshot'}"
              f"{'  |  mini dump' if header['mini_dump'] else '  |  full dump'}",
              f"Kernel build ID: {header['kernel_build_id']}  |  capture time: {header['capture_time']}", ""]
@@ -175,7 +254,8 @@ def report(header: dict, records: list[dict], ended: bool, errors: list[str]) ->
     for rec in records:
         counts[rec["type"]] = counts.get(rec["type"], 0) + 1
     names = {1: "regions", 2: "data blocks", 3: "unreadable ranges", 4: "process records",
-             5: "thread records", 6: "modules", 0xFFFFFFFF: "end markers"}
+             5: "thread records", 6: "modules", 7: "kernel contexts", 8: "kernel stacks",
+             0xFFFFFFFF: "end markers"}
     lines.append("Contents: " + ", ".join(f"{count} {names.get(kind, f'type {kind}') }"
                                             for kind, count in sorted(counts.items())))
     lines.append(f"Capture status: {'complete' if ended else 'PARTIAL (no end marker)'}")
@@ -199,6 +279,16 @@ def report(header: dict, records: list[dict], ended: bool, errors: list[str]) ->
                          f"CRC={'OK' if rec.get('data_crc_valid') else 'BAD'}  preview={rec.get('preview', '')}")
         elif kind == 3:
             lines.append(f"Unreadable {fmt_addr(rec['base'])}: {rec['byte_count']:,} bytes")
+        elif kind == 7:
+            lines += ["", f"Kernel bugcheck: 0x{rec['stop_code']:08X}  |  CPU {rec['cpu']}  |  PID/TID {rec['pid']}/{rec['tid']}",
+                      "  Parameters: " + ", ".join(fmt_addr(value) for value in rec["parameters"]),
+                      f"  RIP {fmt_addr(rec['rip'])}  RSP {fmt_addr(rec['rsp'])}  RFLAGS {fmt_addr(rec['rflags'])}  CR2 {fmt_addr(rec['cr2'])}",
+                      f"  Stack {fmt_addr(rec['stack_limit'])}–{fmt_addr(rec['stack_base'])}  |  captured {rec['stack_bytes']} bytes",
+                      f"  Context build ID: {rec['build_id']}  |  flags 0x{rec['flags']:X}"]
+            lines.append("  GPRs: " + " ".join(fmt_addr(value) for value in rec["gprs"]))
+        elif kind == 8:
+            lines.append(f"Kernel stack {fmt_addr(rec['base'])}: {rec['byte_count']} bytes  "
+                         f"CRC={'OK' if rec.get('data_crc_valid') else 'BAD'}  preview={rec.get('preview', '')}")
     lines += ["", f"Integrity: {'OK' if not errors else f'{len(errors)} issue(s)'}"]
     lines.extend(f"  ERROR: {error}" for error in errors)
     return "\n".join(lines)

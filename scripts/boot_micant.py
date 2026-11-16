@@ -1731,7 +1731,7 @@ def run_qemu(
         fat_volume = temp / "ahci-fat32-volume.img"
         ahci_image = temp / "ahci-gpt-fat32.img"
         create_fat32_image(esp, fat_volume)
-        create_gpt_disk_image(fat_volume, ahci_image)
+        create_gpt_disk_image(fat_volume, ahci_image, reserve_crash_dump=True)
         log_directory = diagnostics_dir if diagnostics_dir is not None else temp
         serial_path = log_directory / "serial.log"
         qemu_output_path = log_directory / "qemu.log"

@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include <span>
 #include <cstring>
 #include "micant/shared/ntdef.hpp"
@@ -152,6 +153,26 @@ public:
                                uint8_t offset, uint32_t value) noexcept;
 
 private:
+    static uint32_t readLe32(const uint8_t* p) noexcept {
+        return static_cast<uint32_t>(p[0]) |
+               (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) |
+               (static_cast<uint32_t>(p[3]) << 24);
+    }
+    static uint64_t readLe64(const uint8_t* p) noexcept {
+        return static_cast<uint64_t>(readLe32(p)) |
+               (static_cast<uint64_t>(readLe32(p + 4)) << 32);
+    }
+    static uint32_t crc32Bytes(const uint8_t* data, size_t length) noexcept {
+        uint32_t crc = 0xFFFFFFFFu;
+        for (size_t i = 0; i < length; ++i) {
+            crc ^= data[i];
+            for (unsigned bit = 0; bit < 8; ++bit)
+                crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+        return crc;
+    }
+
     uint8_t m_pciBus{0};
     uint8_t m_pciDevice{0};
     uint8_t m_pciFunction{0};
@@ -169,6 +190,9 @@ private:
     PciRead32 m_pciRead32{};
     PciWrite32 m_pciWrite32{};
     char     m_diskModel[41]{};
+    uint64_t m_crashDumpFirstLba{};
+    uint64_t m_crashDumpSectorCount{};
+    std::atomic_flag m_crashDumpWriteActive = ATOMIC_FLAG_INIT;
 
 public:
     static BareMetalAhciController& get() noexcept {
@@ -181,6 +205,104 @@ public:
     [[nodiscard]] uint64_t getAbarPhysical() const noexcept { return m_abarPhys; }
     [[nodiscard]] uint64_t getPort1TotalSectors() const noexcept { return m_port1TotalSectors; }
     [[nodiscard]] const char* getDiskModel() const noexcept { return m_diskModel; }
+
+    // Locate and validate the dedicated private GPT crash partition. This is
+    // boot-time setup; the fatal writer below only uses the resulting fixed
+    // extent and bounded polling AHCI commands.
+    bool configureCrashDumpRegion() noexcept {
+        m_crashDumpFirstLba = 0;
+        m_crashDumpSectorCount = 0;
+        if (!m_initialized || !m_port1Online || m_port1TotalSectors < 3) return false;
+
+        alignas(4096) static uint8_t header[512];
+        alignas(4096) static uint8_t array[65536];
+        if (!readSectors(1, 1, header) || std::memcmp(header, "EFI PART", 8) != 0)
+            return false;
+        const uint32_t headerSize = readLe32(header + 12);
+        const uint32_t expectedHeaderCrc = readLe32(header + 16);
+        const uint64_t firstUsable = readLe64(header + 40);
+        const uint64_t lastUsable = readLe64(header + 48);
+        const uint64_t entriesLba = readLe64(header + 72);
+        const uint32_t entryCount = readLe32(header + 80);
+        const uint32_t entrySize = readLe32(header + 84);
+        if (headerSize < 92 || headerSize > sizeof(header) ||
+            readLe64(header + 24) != 1 ||
+            readLe64(header + 32) != m_port1TotalSectors - 1 ||
+            firstUsable > lastUsable || lastUsable >= m_port1TotalSectors ||
+            !entryCount || entryCount > 128 || entrySize != 128 ||
+            entriesLba >= m_port1TotalSectors) return false;
+        uint8_t headerCopy[512];
+        std::memcpy(headerCopy, header, sizeof(headerCopy));
+        std::memset(headerCopy + 16, 0, 4);
+        if ((crc32Bytes(headerCopy, headerSize) ^ 0xFFFFFFFFu) != expectedHeaderCrc)
+            return false;
+        const uint64_t arrayBytes = static_cast<uint64_t>(entryCount) * entrySize;
+        const uint64_t arraySectors = (arrayBytes + 511) / 512;
+        if (!arraySectors || arraySectors > 128 ||
+            entriesLba > m_port1TotalSectors ||
+            arraySectors > m_port1TotalSectors - entriesLba ||
+            !readSectors(entriesLba, static_cast<uint16_t>(arraySectors), array) ||
+            (crc32Bytes(array, static_cast<size_t>(arrayBytes)) ^ 0xFFFFFFFFu) !=
+                readLe32(header + 88)) return false;
+
+        static constexpr uint8_t crashTypeGuid[16] = {
+            0x4c,0x55,0x43,0x44,0x4d,0x50,0x4f,0x53,
+            0x80,0x00,0x4c,0x55,0x43,0x45,0x4f,0x53
+        };
+        uint64_t first = 0, count = 0;
+        uint32_t crashEntryIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < entryCount; ++i) {
+            const uint8_t* entry = array + static_cast<size_t>(i) * entrySize;
+            bool empty = true;
+            for (size_t b = 0; b < 16; ++b) empty &= entry[b] == 0;
+            if (empty) continue;
+            const uint64_t start = readLe64(entry + 32);
+            const uint64_t end = readLe64(entry + 40);
+            if (start < firstUsable || end > lastUsable || end < start) return false;
+            for (uint32_t prior = 0; prior < i; ++prior) {
+                const uint8_t* previous = array + static_cast<size_t>(prior) * entrySize;
+                bool previousEmpty = true;
+                for (size_t b = 0; b < 16; ++b) previousEmpty &= previous[b] == 0;
+                if (previousEmpty) continue;
+                const uint64_t previousStart = readLe64(previous + 32);
+                const uint64_t previousEnd = readLe64(previous + 40);
+                if (start <= previousEnd && previousStart <= end) return false;
+            }
+            if (std::memcmp(entry, crashTypeGuid, sizeof(crashTypeGuid)) != 0) continue;
+            if (count) return false; // Ambiguous reserved extent.
+            first = start;
+            count = end - start + 1;
+            crashEntryIndex = i;
+        }
+        if (!count || crashEntryIndex == UINT32_MAX) return false;
+        m_crashDumpFirstLba = first;
+        m_crashDumpSectorCount = count;
+        return true;
+    }
+
+    [[nodiscard]] uint64_t crashDumpCapacityBytes() const noexcept {
+        return m_crashDumpSectorCount * 512;
+    }
+
+    // Panic-only API: caller supplies a fixed, DMA-addressable buffer. No
+    // filesystem, allocator, Io object, lease, or arbitrary disk LBA is used.
+    bool writeCrashDumpSectors(uint64_t relativeLba, uint16_t sectorCount,
+                               const void* source) noexcept {
+        if (!m_crashDumpSectorCount || !sectorCount || !source ||
+            relativeLba >= m_crashDumpSectorCount ||
+            sectorCount > m_crashDumpSectorCount - relativeLba ||
+            sectorCount > 128 || m_crashDumpFirstLba > UINT64_MAX - relativeLba)
+            return false;
+        if (m_crashDumpWriteActive.test_and_set(std::memory_order_acquire)) return false;
+        const bool written = writeSectors(m_crashDumpFirstLba + relativeLba,
+                                          sectorCount, source);
+        m_crashDumpWriteActive.clear(std::memory_order_release);
+        return written;
+    }
+
+    NtStatus flushCrashDump() noexcept {
+        return m_crashDumpSectorCount ? flushCache() : NtStatus::DeviceNotReady;
+    }
 
     /** Discover and initialize an AHCI controller and its first SATA disk port. */
     bool initialize(MmioMapper mmioMapper, DmaTranslator dmaTranslator,
