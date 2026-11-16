@@ -1708,13 +1708,23 @@ def run_qemu(
         # A relocatable executable used to verify the file-backed SEC_IMAGE
         # main-image path against the mounted volume.
         image_exe = ROOT / "build" / "fileimage.exe"
+        if cmd_test and not image_exe.is_file():
+            raise RuntimeError("CMD process-creation fixture fileimage.exe is missing")
         if image_exe.is_file():
             shutil.copyfile(image_exe, system32_dir / "fileimage.exe")
+            if cmd_test:
+                shutil.copyfile(image_exe, diagnostics_dir / "fileimage.exe")
         usb_proof = system32_dir / "micant-usb-proof.txt"
         usb_proof.write_bytes(b"MicaNT USB mass-storage FAT32 post-EBS proof v1\n")
         tls_peer = M10TlsPeer(esp).start() if network_test else None
         fat_volume = temp / "ahci-fat32-volume.img"
-        ahci_image = temp / "ahci-gpt-fat32.img"
+        if process_memory_selftest:
+            # Keep the disk containing PROCDMP.LUD outside TemporaryDirectory:
+            # the test runner removes that directory as soon as QEMU exits.
+            ahci_image = ROOT / "artifacts" / "process-memory" / "process-memory-dump-disk.img"
+            ahci_image.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            ahci_image = temp / "ahci-gpt-fat32.img"
         create_fat32_image(esp, fat_volume)
         create_gpt_disk_image(fat_volume, ahci_image)
         log_directory = diagnostics_dir if diagnostics_dir is not None else temp
