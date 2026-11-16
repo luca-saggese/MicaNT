@@ -1294,6 +1294,9 @@ extern "C" void _start() noexcept {
     uint32_t sampleCount = 0;
     bool json = false, full = false, mini = false;
     bool top = false;
+#if defined(MICANT_PROCTOP_DEFAULT)
+    top = true;
+#endif
     char16_t output[260]{};
     if (!ParseCommandLine(pid, json, full, mini, top, intervalSeconds, sampleCount,
             output, sizeof(output) / sizeof(output[0]))) {

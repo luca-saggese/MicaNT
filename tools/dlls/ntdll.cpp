@@ -1801,7 +1801,7 @@ __attribute__((naked)) __declspec(dllexport) uint64_t NtQuerySystemInformation(
 #if defined(__x86_64__)
     __asm__ __volatile__(
         "movq %rcx, %r10\n\t"
-        "movq $0x11, %rax\n\t"
+        "movq $0x36, %rax\n\t"
         "movq %rdx, %r8\n\t"
         "syscall\n\t"
         "ret\n\t"

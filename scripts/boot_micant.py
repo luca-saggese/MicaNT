@@ -1539,6 +1539,7 @@ def run_qemu(
     network_test: bool = False,
     memory_mib: int = 1024,
     taskmgr_selftest: bool = False,
+    process_memory_selftest: bool = False,
 ) -> None:
     if memory_mib not in (256, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -1548,6 +1549,8 @@ def run_qemu(
         raise RuntimeError("timer self-test halts before process tests and desktop/input; incompatible runner options")
     if taskmgr_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
         raise RuntimeError("Task Manager self-test requires the unattended desktop boot path")
+    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or taskmgr_selftest):
+        raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
     if verify_usb_input and not usb_test:
         raise RuntimeError("USB HID verification requires --usb-test")
     validate_build_manifest(
@@ -1682,6 +1685,14 @@ def run_qemu(
         if not explorer_image.is_file():
             raise RuntimeError("Explorer image was not built for the QEMU system volume")
         shutil.copyfile(explorer_image, system32_dir / explorer_image.name)
+        procdump_image = ROOT / "build" / "procdump.exe"
+        if not procdump_image.is_file():
+            raise RuntimeError("Process memory diagnostic tool was not built for the system volume")
+        shutil.copyfile(procdump_image, system32_dir / procdump_image.name)
+        proctop_image = ROOT / "build" / "proctop.exe"
+        if not proctop_image.is_file():
+            raise RuntimeError("Process memory top utility was not built for the system volume")
+        shutil.copyfile(proctop_image, system32_dir / proctop_image.name)
         if taskmgr_selftest:
             taskmgr_image = ROOT / "build" / "taskmgr.exe"
             if not taskmgr_image.is_file():
@@ -1791,6 +1802,7 @@ def run_qemu(
         started = time.monotonic()
         complete_since = None
         surface_verified = False
+        process_memory_verified = False
         usb_input_sent = False
         network_outbound_peer_done = False
         network_loss_injected = False
@@ -1919,6 +1931,11 @@ def run_qemu(
                         usb_input_sent = True
                     if serial_has_failure(serial_log):
                         raise RuntimeError(f"Kernel bootstrap failed:\n{serial_log[-8000:]}")
+                    if process_memory_selftest and "[MicaNT ProcessMemoryTest] FAILED" in serial_log:
+                        raise RuntimeError(f"procdump process-memory self-test failed:\n{serial_log[-8000:]}")
+                    if (process_memory_selftest and
+                            "[MicaNT ProcessMemoryTest] report, page read, dump CRC and release verified" in serial_log):
+                        process_memory_verified = True
                     if (not surface_verified and
                             "[MicaNT Test] CPL3 surface presentation completed" in serial_log):
                         verify_cpl3_surface(
@@ -1934,6 +1951,10 @@ def run_qemu(
                         )
                         if not time_evidence:
                             raise RuntimeError("CPL3 time probe reported neither UTC success nor explicit unavailable status")
+                        if process_memory_selftest and not process_memory_verified:
+                            complete_since = None
+                            time.sleep(0.1)
+                            continue
                         if taskmgr_selftest:
                             theme_evidence = (
                                 "Task Manager: system theme loaded." in serial_log or
@@ -2046,6 +2067,7 @@ def run_qemu(
                                 )
                                 print("Explorer input, window cleanup and Light-to-Dark theme switch passed.", flush=True)
                             result = (
+                                "Process-memory self-test" if process_memory_selftest else
                                 "Task Manager process-snapshot self-test" if taskmgr_selftest else
                                 "timer self-test" if timer_selftest else
                                 "C++ runtime self-test" if runtime_selftest else
@@ -2123,6 +2145,7 @@ def main() -> int:
     parser.add_argument("--runtime-selftest", action="store_true")
     parser.add_argument("--timer-selftest", action="store_true")
     parser.add_argument("--taskmgr-selftest", action="store_true")
+    parser.add_argument("--process-memory-selftest", action="store_true")
     args = parser.parse_args()
 
     if args.ovmf_code is None:
@@ -2148,6 +2171,7 @@ def main() -> int:
             args.network_test,
             args.memory_mib,
             args.taskmgr_selftest,
+            process_memory_selftest=args.process_memory_selftest,
         )
     except KeyboardInterrupt:
         return 130

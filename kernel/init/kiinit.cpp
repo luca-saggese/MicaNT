@@ -3129,6 +3129,27 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (ex::ProbeForWrite(ioStatusAddress, sizeof(IoStatusBlock), alignof(IoStatusBlock)) != NtStatus::Success ||
             ex::ProbeForRead(userBuffer, length, 1) != NtStatus::Success)
             return status(NtStatus::AccessViolation);
+        const Handle outputHandle = static_cast<Handle>(first);
+        const bool standardOutput = outputHandle == 0x14 || outputHandle == 0x18 ||
+            outputHandle == static_cast<Handle>(-11) || outputHandle == static_cast<Handle>(-12);
+        if (standardOutput) {
+            if (byteOffsetAddress) return status(NtStatus::InvalidParameter);
+            char chunk[256];
+            size_t written{};
+            while (written < length) {
+                const size_t amount = length - written < sizeof(chunk)
+                    ? length - written : sizeof(chunk);
+                if (ex::ExSafeCopyFromUser(chunk,
+                        static_cast<const uint8_t*>(userBuffer) + written, amount) != NtStatus::Success)
+                    return status(NtStatus::AccessViolation);
+                for (size_t i = 0; i < amount; ++i) serialWriteChar(chunk[i]);
+                written += amount;
+            }
+            const IoStatusBlock ioResult{NtStatus::Success, written};
+            if (ex::ExSafeCopyToUser(ioStatusAddress, &ioResult, sizeof(ioResult)) != NtStatus::Success)
+                return status(NtStatus::AccessViolation);
+            return status(NtStatus::Success);
+        }
         LargeInteger byteOffset{};
         if (byteOffsetAddress && ex::ExSafeCopyFromUser(&byteOffset, byteOffsetAddress,
                 sizeof(byteOffset)) != NtStatus::Success)
@@ -4651,6 +4672,33 @@ void pollKeyboardInput() noexcept {
                                 g_taskmgrProcessId))
         stopWithError("[MicaNT Taskmgr] Ring 3 process launch failed\r\n");
     serialWrite("[MicaNT Taskmgr] QEMU self-test process launched\r\n");
+#endif
+#if defined(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST)
+    serialWrite("[MicaNT ProcessMemoryTest] Launching procdump integration self-test\r\n");
+    micant::Handle processMemoryTestHandle = 0;
+    micant::Handle processMemoryTestId = 0;
+    if (!launchUserImageProcess(u"procdump.exe", processMemoryTestHandle,
+                                processMemoryTestId))
+        stopWithError("[MicaNT ProcessMemoryTest] Ring 3 launch failed\r\n");
+    const auto processMemoryWait = micant::sys::NtWaitForSingleObject(
+        processMemoryTestHandle, false, nullptr);
+    micant::ProcessBasicInformation processMemoryExit{};
+    uint32_t processMemoryExitBytes{};
+    const auto processMemoryQuery = micant::sys::NtQueryInformationProcess(
+        processMemoryTestHandle, micant::ProcessInformationClass::ProcessBasicInformation,
+        &processMemoryExit, sizeof(processMemoryExit), &processMemoryExitBytes);
+    if (processMemoryWait != micant::NtStatus::Success ||
+        processMemoryQuery != micant::NtStatus::Success ||
+        processMemoryExitBytes != sizeof(processMemoryExit) ||
+        processMemoryExit.exitStatus != micant::NtStatus::Success) {
+        serialWrite("[MicaNT ProcessMemoryTest] FAILED status=");
+        serialWriteNumber(static_cast<uint32_t>(processMemoryExit.exitStatus));
+        serialWrite("\r\n");
+        stopWithError("[MicaNT ProcessMemoryTest] procdump integration failed\r\n");
+    }
+    if (micant::sys::NtClose(processMemoryTestHandle) != micant::NtStatus::Success)
+        stopWithError("[MicaNT ProcessMemoryTest] Process handle close failed\r\n");
+    serialWrite("[MicaNT ProcessMemoryTest] report, page read, dump CRC and release verified\r\n");
 #endif
     for (;;) {
         if (clockActive && micant::hal::amd64::bootstrapSchedulerClockFailed())

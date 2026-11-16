@@ -30,6 +30,8 @@ SYSTEM32_TOOLS = [
     ("tools/ipconfig_app.cpp", "build/ipconfig.exe", "ipconfig.exe"),
     ("tools/whoami_app.cpp", "build/whoami.exe", "whoami.exe"),
     ("tools/tasklist_app.cpp", "build/tasklist.exe", "tasklist.exe"),
+    ("tools/procdump_app.cpp", "build/procdump.exe", "procdump.exe"),
+    ("tools/procdump_app.cpp", "build/proctop.exe", "proctop.exe"),
     ("tools/ping_app.cpp", "build/ping.exe", "ping.exe"),
     ("tools/cmd_app.cpp", "build/cmd.exe", "cmd.exe"),
     ("tools/hostname_app.cpp", "build/hostname.exe", "hostname.exe"),

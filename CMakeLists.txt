@@ -12,6 +12,7 @@ option(MICANT_BOOTSTRAP_TIMER_SELFTEST "Halt after isolated scheduler-clock tick
 option(MICANT_BOOTSTRAP_NETWORK_SELFTEST "Enable M10 receive-path fault injection" OFF)
 option(MICANT_BOOTSTRAP_TASKMGR_SELFTEST "Launch taskmgr.exe from the mounted System32 image during QEMU verification" OFF)
 option(MICANT_BOOTSTRAP_THEME_TEST "Launch theme_test.exe for QEMU theme verification" OFF)
+option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-memory integration self-test" OFF)
 
 if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
@@ -590,6 +591,46 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "theme_test"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
+
+    # Native process memory report and dump utility. It reaches process and
+    # virtual-memory services only through the existing NTDLL syscall ABI.
+    add_executable(procdump_boot EXCLUDE_FROM_ALL tools/procdump_app.cpp)
+    target_include_directories(procdump_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_options(procdump_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(procdump_boot PRIVATE
+        -nostdlib -Wl,--subsystem,native -Wl,-e,_start
+    )
+    target_link_libraries(procdump_boot PRIVATE ntdll_boot)
+    set_target_properties(procdump_boot PROPERTIES
+        OUTPUT_NAME "procdump"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+    add_executable(proctop_boot EXCLUDE_FROM_ALL tools/procdump_app.cpp)
+    target_include_directories(proctop_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_options(proctop_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_compile_definitions(proctop_boot PRIVATE MICANT_PROCTOP_DEFAULT)
+    target_link_options(proctop_boot PRIVATE
+        -nostdlib -Wl,--subsystem,native -Wl,-e,_start
+    )
+    target_link_libraries(proctop_boot PRIVATE ntdll_boot)
+    set_target_properties(proctop_boot PROPERTIES
+        OUTPUT_NAME "proctop"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+    if (MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST)
+        target_compile_definitions(procdump_boot PRIVATE MICANT_PROCESS_MEMORY_SELFTEST)
+        target_compile_definitions(procdump_boot PRIVATE MICANT_PROCESS_MEMORY_TEST_DESKTOP_TARGETS)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST)
+        if (MICANT_BOOTSTRAP_THEME_TEST)
+            target_compile_definitions(procdump_boot PRIVATE MICANT_PROCESS_MEMORY_TEST_THEME_TARGET)
+        endif()
+    endif()
     if (MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
         target_compile_definitions(taskmgr_boot PRIVATE MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
     endif()
