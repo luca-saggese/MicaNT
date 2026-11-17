@@ -401,6 +401,31 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             const float ty = clampf((qy + halfHeight) / d.height, 0.0f, 1.0f);
             const float sheen = (1.0f - ty) * mixf(0.040f, 0.030f, d.dark);
             colorR += sheen; colorG += sheen; colorB += sheen;
+            // A broad, slanted environment highlight makes the face read as
+            // polished glass instead of a tinted blur. The narrow band is
+            // the reflected light source; the wider lobe softens its edge.
+            const float reflectionAxis = qy + qx * 0.28f + halfHeight * 0.54f;
+            const float reflectionBand = expNegative(
+                (reflectionAxis / 4.5f) * (reflectionAxis / 4.5f));
+            const float reflectionGlow = expNegative(
+                (reflectionAxis / 17.0f) * (reflectionAxis / 17.0f));
+            const float reflectionX = (qx + halfWidth * 0.18f) /
+                (halfWidth * 0.92f);
+            const float reflectionEnds = expNegative(reflectionX * reflectionX *
+                                                       reflectionX * reflectionX);
+            const float reflectionCornerX = (qx + halfWidth * 0.38f) /
+                (halfWidth * 0.58f);
+            const float reflectionCornerY = (qy + halfHeight * 0.45f) /
+                (halfHeight * 0.26f);
+            const float reflectionCorner = expNegative(
+                reflectionCornerX * reflectionCornerX +
+                reflectionCornerY * reflectionCornerY);
+            const float reflection = d.rim * reflectionEnds *
+                (0.40f * reflectionBand + 0.17f * reflectionGlow) +
+                d.rim * 0.22f * reflectionCorner;
+            colorR += (1.0f - colorR) * reflection;
+            colorG += (1.0f - colorG) * reflection;
+            colorB += (1.0f - colorB) * reflection;
             const float innerK = 1.0f - d.flatInner;
             const float innerOne = 1.0f - 0.12f * expNegative(t / 6.0f) *
                 clampf(gy, 0.0f, 1.0f) * innerK;
@@ -441,10 +466,7 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             colorR += noise * d.grain;
             colorG += noise * d.grain;
             colorB += noise * d.grain;
-            // The backdrop sample is fully opaque on the desktop, but the
-            // glass must still blend a little of the live scene through it.
-            // Using baseAlpha directly made every glass pixel an opaque tile.
-            const float glassAlpha = coverage * baseAlpha * 0.84f;
+            const float glassAlpha = coverage * baseAlpha;
             cache.output[destination] = packPremultiplied(
                 clampf(colorR, 0.0f, 1.0f), clampf(colorG, 0.0f, 1.0f),
                 clampf(colorB, 0.0f, 1.0f), glassAlpha);

@@ -2319,13 +2319,12 @@ void updateClock() noexcept {
         }
 
         SetBkMode(g.clockDc, TRANSPARENT);
-        // The source uses Open Runde Semibold at 11.5 px for the city label.
-        // Arial is the closest installed runtime face; keep the same size and
-        // muted dark-glass label color.
-        SetTextColor(g.clockDc, RGB(142, 142, 148));
-        HFONT font = CreateFontW(12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        // The source uses a small bold Open Runde TTF label. Use the bundled
+        // Selawik Bold TTF at a size that remains clean on the 1024x768 scanout.
+        SetTextColor(g.clockDc, RGB(182, 188, 204));
+        HFONT font = CreateFontW(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Arial");
+            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         if (font) {
             HGDIOBJ old = SelectObject(g.clockDc, font);
             const wchar_t city[] = L"ROME";
@@ -2356,9 +2355,9 @@ void updateClock() noexcept {
         }
         SetTextColor(g.clockDc, RGB(255, 255, 255));
         const int32_t initialFontHeight = static_cast<int32_t>(64.0f * unit + 0.5f);
-        font = CreateFontW(initialFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        font = CreateFontW(initialFontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Arial");
+            DEFAULT_PITCH | FF_SWISS, L"Segoe UI Semibold");
         if (font) {
             HGDIOBJ old = SelectObject(g.clockDc, font);
             SIZE extent{};
@@ -2369,9 +2368,9 @@ void updateClock() noexcept {
                     DeleteObject(font);
                     const int32_t fittedHeight = initialFontHeight * targetWidth / extent.cx;
                     font = CreateFontW(fittedHeight > 0 ? fittedHeight : 1,
-                        0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                        0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Arial");
+                        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Semibold");
                     if (font) old = SelectObject(g.clockDc, font);
                     extent = {};
                     if (font) (void)GetTextExtentPoint32W(g.clockDc, time, timeLength, &extent);
@@ -2896,7 +2895,7 @@ extern "C" void _start(const char* = nullptr) {
             glass.size = sizeof(glass); glass.flags = MICANT_LIQUID_GLASS_ACTIVE;
             glass.left = 10; glass.top = 10; glass.width = CLOCK_CARD; glass.height = CLOCK_CARD;
             glass.radius = 29.8f; glass.bezel = 26.0f; glass.thickness = 30.0f;
-            glass.dispersion = 0.06f; glass.blurPx = 1.0f; glass.tintMix = 0.32f;
+            glass.dispersion = 0.06f; glass.blurPx = 1.0f; glass.tintMix = 0.586f;
             glass.saturation = 1.25f; glass.dark = 1.0f; glass.sourceBlur = 11.2f;
             glass.downsample = 0.5f; glass.pad = 10.0f; glass.rim = 0.45f;
             glass.grain = 0.0045f; glass.magnify = 0.042857f; glass.rimTint = 1.0f;

@@ -471,10 +471,17 @@ private:
                 if (!alpha) continue;
                 uint32_t& target = pixels[static_cast<size_t>(dy) * width + static_cast<uint32_t>(dx)];
                 const uint32_t inverse = 255 - alpha;
-                const uint32_t red = (((color >> 16) & 255) * alpha + ((target >> 16) & 255) * inverse + 127) / 255;
-                const uint32_t green = (((color >> 8) & 255) * alpha + ((target >> 8) & 255) * inverse + 127) / 255;
-                const uint32_t blue = ((color & 255) * alpha + (target & 255) * inverse + 127) / 255;
-                target = 0xFF000000u | (red << 16) | (green << 8) | blue;
+                const uint32_t sourceAlpha = (((color >> 24) & 255) * alpha + 127) / 255;
+                const uint32_t destinationAlpha = (target >> 24) & 255;
+                const uint32_t outAlpha = sourceAlpha +
+                    (destinationAlpha * inverse + 127) / 255;
+                const uint32_t red = ((color >> 16) & 255) * sourceAlpha / 255 +
+                    (((target >> 16) & 255) * inverse + 127) / 255;
+                const uint32_t green = ((color >> 8) & 255) * sourceAlpha / 255 +
+                    (((target >> 8) & 255) * inverse + 127) / 255;
+                const uint32_t blue = (color & 255) * sourceAlpha / 255 +
+                    ((target & 255) * inverse + 127) / 255;
+                target = (outAlpha << 24) | (red << 16) | (green << 8) | blue;
             }
         }
         return true;
