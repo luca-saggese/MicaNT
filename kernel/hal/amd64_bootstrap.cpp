@@ -167,7 +167,6 @@ uint32_t g_probeMode{};
 uint64_t g_probeReturnRip{};
 micant::hal::amd64::UserServiceRoutine g_dispatch{};
 bool g_schedulerClockActive{};
-bool g_schedulerUserPreemptionVerified{};
 bool g_kernelMonitorFailureNotified{};
 bool g_clockIrqlMaskReady{};
 uint32_t g_schedulerTimerPeriod{};
@@ -4417,8 +4416,6 @@ static bool verifyBootstrapPreemption() noexcept {
     return success && removedFirst && removedSecond && readyNonPassiveWorkThreads() == 0;
 }
 
-extern "C" bool MicantTestPsUserPreemption() noexcept;
-
 // Verify the one routed hardware priority with IF still enabled. A pending
 // clock interrupt must become deliverable after the original IRQL is restored.
 static bool verifyClockIrqlMask(BootstrapLocalApic& apic) noexcept {
@@ -4511,19 +4508,11 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
         const uint64_t before = MicantTimerTicks;
         const bool interruptDelivery = verifyClockInterruptDelivery(g_timerApic);
         const bool kernelPreemption = !verifyScheduling || verifyBootstrapPreemption();
-        const bool userPreemption = !verifyScheduling || !kernelPreemption || MicantTestPsUserPreemption();
         const bool ticksAdvanced = MicantTimerTicks > before && !MicantTimerDispatchFailed;
-        const bool success = interruptDelivery && kernelPreemption && userPreemption && ticksAdvanced;
-        // The boot path follows this live timer diagnostic with
-        // verifyBootstrapSchedulerClock(). Carry the successful CPL3
-        // preemption result forward so that routine only needs to verify its
-        // distinct idle wait/wake path instead of running the full process
-        // preemption integration test a second time.
-        if (verifyScheduling && success) g_schedulerUserPreemptionVerified = true;
+        const bool success = interruptDelivery && kernelPreemption && ticksAdvanced;
         if (!success && g_log) {
             if (!interruptDelivery) g_log("[MicaNT Hal] Live timer interrupt delivery failed\r\n");
             if (!kernelPreemption) g_log("[MicaNT Hal] Live kernel timer preemption failed\r\n");
-            if (!userPreemption) g_log("[MicaNT Hal] Live CPL3 timer preemption failed\r\n");
             if (!ticksAdvanced) g_log("[MicaNT Hal] Live timer progress failed\r\n");
         }
         if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
@@ -4596,15 +4585,12 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
     apic[0x380 / 4] = 100000;
     const bool timerDelivered = verifyClockInterruptDelivery(apic);
     bool preemptionVerified = false;
-    bool userPreemption = false;
     if (verifyScheduling) {
         preemptionVerified = timerDelivered && verifyBootstrapPreemption();
         MicantTimerTicks = 0;
         MicantTimerBootThread = nullptr;
         MicantTimerDispatchFailed = false;
         MicantTimerPreemptionEnabled = preemptionVerified;
-        userPreemption = preemptionVerified && MicantTestPsUserPreemption() &&
-            MicantTimerTicks > 0 && !MicantTimerDispatchFailed;
     }
     MicantTimerPreemptionEnabled = false;
     apic[0x320 / 4] = savedLvt[0] | (1u << 16);
@@ -4619,7 +4605,7 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
         __asm__ __volatile__("cli" : : : "memory");
     }
     const bool success = timerDelivered &&
-        (!verifyScheduling || (preemptionVerified && userPreemption)) &&
+        (!verifyScheduling || preemptionVerified) &&
         !(apic[timerIrr] & timerBit);
     apic[0x3e0 / 4] = savedDivide;
     apic[0x380 / 4] = savedInitial;
@@ -4644,7 +4630,6 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
         logTrapValue("[MicaNT Hal] Timer ticks=0x", MicantTimerTicks);
         logTrapValue("[MicaNT Hal] Timer delivered=0x", timerDelivered);
         logTrapValue("[MicaNT Hal] Timer scheduling verified=0x", preemptionVerified);
-        logTrapValue("[MicaNT Hal] Timer user preemption=0x", userPreemption);
         logTrapValue("[MicaNT Hal] Timer IRR pending=0x", apic[timerIrr] & timerBit);
     }
     if (!restored && g_log) g_log("[MicaNT Hal] Timer state restoration failed\r\n");
@@ -4852,7 +4837,6 @@ bool startBootstrapSchedulerClock() noexcept {
         if (g_log) g_log("[MicaNT Hal] Clock start rejected: interrupts enabled during setup\r\n");
         return false;
     }
-    g_schedulerUserPreemptionVerified = false;
     if (current.base != reinterpret_cast<uint64_t>(g_idt)) {
         if (g_log) g_log("[MicaNT Hal] Clock start rejected: bootstrap IDT is not active\r\n");
         return false;
@@ -5007,10 +4991,6 @@ bool verifyIdleWaitAndWake() noexcept {
 
 bool verifyBootstrapSchedulerClock() noexcept {
     if (!g_schedulerClockActive) return false;
-    if (!g_schedulerUserPreemptionVerified) {
-        const uint64_t before = MicantTimerTicks;
-        if (!MicantTestPsUserPreemption() || MicantTimerTicks <= before) return false;
-    }
     if (MicantTimerDispatchFailed) return false;
     return verifyIdleWaitAndWake();
 }

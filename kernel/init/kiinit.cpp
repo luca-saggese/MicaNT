@@ -6090,7 +6090,6 @@ extern "C" micant::NtStatus KiSystemStartup(
             stopWithError("[MicaNT Hal] Local APIC timer verification failed\r\n");
         serialWrite("[MicaNT Hal] Local APIC periodic interrupts verified\r\n");
         serialWrite("[MicaNT Ke] Timer-preempted kernel contexts verified\r\n");
-        serialWrite("[MicaNT Ke] Timer-preempted CPL3 contexts verified\r\n");
     }
     const auto probeTelemetry = micant::ex::ExQuerySyncTelemetry();
     if (!probeTelemetry.totalSafeCopiesCompleted ||

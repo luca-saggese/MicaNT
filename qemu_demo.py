@@ -19,6 +19,17 @@ ROOT = Path(__file__).resolve().parent
 
 def main() -> int:
     forwarded = sys.argv[1:]
+    has_build_dir = any(
+        argument == "--cmake-build-dir" or argument.startswith("--cmake-build-dir=")
+        for argument in forwarded
+    )
+    if not has_build_dir:
+        # Keep the interactive demo's objects out of the shared qemu.py build
+        # tree, which may contain artifacts that cannot be replaced in place.
+        forwarded.extend([
+            "--cmake-build-dir",
+            str(ROOT / "build" / "qemu-demo-cmake"),
+        ])
     disable_debug_hud = "--no-compositor-debug-hud" in forwarded
     if disable_debug_hud:
         forwarded = [argument for argument in forwarded

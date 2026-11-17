@@ -1007,45 +1007,6 @@ void launchThemeTest() noexcept {
     (void)CloseHandle(process.hProcess);
 }
 
-void launchMacShell() noexcept {
-    wchar_t imagePath[512]{};
-    size_t cursor = 0;
-    constexpr wchar_t suffix[] = L"\\System32\\mac_shell.exe";
-    if (!appendSystemRoot(imagePath, std::size(imagePath), cursor) ||
-        cursor + std::size(suffix) > std::size(imagePath)) {
-        PrintLine("[MicaNT Explorer] Could not build mac_shell.exe path");
-        return;
-    }
-    for (size_t i = 0; i < std::size(suffix); ++i) imagePath[cursor++] = suffix[i];
-
-    wchar_t commandLine[560]{};
-    size_t commandLength = cursor - 1;
-    for (size_t i = 0; i < commandLength; ++i) commandLine[i] = imagePath[i];
-    commandLine[commandLength++] = L' ';
-    uint64_t owner = reinterpret_cast<uintptr_t>(g.desktop);
-    wchar_t digits[24]{};
-    size_t digitCount = 0;
-    do {
-        digits[digitCount++] = static_cast<wchar_t>(L'0' + owner % 10);
-        owner /= 10;
-    } while (owner && digitCount < std::size(digits));
-    if (commandLength + digitCount >= std::size(commandLine)) return;
-    while (digitCount) commandLine[commandLength++] = digits[--digitCount];
-    commandLine[commandLength] = L'\0';
-
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(imagePath, commandLine, nullptr, nullptr, FALSE, 0,
-                        nullptr, nullptr, &startup, &process)) {
-        PrintLine("[MicaNT Explorer] Starting mac_shell.exe failed");
-        return;
-    }
-    (void)CloseHandle(process.hThread);
-    (void)CloseHandle(process.hProcess);
-    PrintLine("[MicaNT Explorer] mac_shell.exe started as the widget owner");
-}
-
 bool appendWide(wchar_t* path, size_t capacity, size_t& cursor,
                 const wchar_t* suffix, size_t length) noexcept {
     if (length > capacity || cursor > capacity - length - 1) return false;
@@ -2792,7 +2753,6 @@ extern "C" void _start(const char* = nullptr) {
     verifyDirectWriteFonts();
     redrawDesktop();
     updateClock();
-    launchMacShell();
     verifyThemeChangeQueueRollback();
     verifyAutomaticThemeBoundary();
     verifyMissingDesktopIconFallback();
