@@ -37,8 +37,6 @@
 #include "explorer_shell/task_switcher.hpp"
 
 extern "C" __declspec(dllimport) int32_t InitCommonControlsEx(const void*) noexcept;
-extern "C" __declspec(dllimport) int32_t LuceGlassSetWindow(void*, const MicaLiquidGlassDescriptor*) noexcept;
-
 namespace {
 
 using namespace micant_gui;
@@ -46,8 +44,6 @@ using namespace micant_gui;
 constexpr uint32_t TASKBAR_H = 40;
 constexpr uint32_t MENU_W = 344;
 constexpr uint32_t MENU_H = 430;
-constexpr uint32_t CLOCK_CARD = 168;
-constexpr uint32_t CLOCK_WINDOW = 188;
 constexpr size_t MAX_APP_WINDOWS = 8;
 constexpr UINT WM_THEME_SCHEDULE_TICK = 0x8001u;
 constexpr UINT WM_THEME_QUEUE_PRESSURE_PROBE = 0x8002u;
@@ -76,16 +72,6 @@ struct AppWindow {
     bool firstPaintPresented{};
 };
 
-struct GlassSurface {
-    HWND hwnd{};
-    HDC dc{};
-    HBITMAP bitmap{};
-    uint32_t* pixels{};
-    int32_t x{}, y{};
-    uint32_t width{}, height{};
-    uint32_t glassTop{}, glassHeight{};
-};
-
 struct CachedDesktopIcon {
     micant::explorer::IconId id{};
     uint16_t requestedSize{};
@@ -100,12 +86,6 @@ struct ShellState {
     HWND desktop{};
     HDC desktopDc{};
     uint32_t* desktopPixels{};
-    HWND clockWidget{};
-    HDC clockDc{};
-    HBITMAP clockBitmap{};
-    uint32_t* clockPixels{};
-    GlassSurface controlCenter{};
-    GlassSurface dock{};
     HFONT uiFont{};
     bool fontReady{};
     MicaThemeSnapshot visualTheme{};
@@ -187,8 +167,6 @@ struct ShellState {
     micant::explorer::TaskSwitchSnapshot taskSwitch{};
     uint8_t activeApp{0xFF};
     uint8_t clockSecond{0xFF};
-    bool clockPaintReported{};
-    int32_t dockPointerX{-1};
     MicaWin32kSystemTime systemTime{};
     char clockText[12]{"--:--"};
 };
@@ -283,20 +261,6 @@ void fill(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
     }
 }
 
-void roundedFill(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
-                 int32_t rw, int32_t rh, int32_t radius, uint32_t color) noexcept {
-    if (!p || rw <= 0 || rh <= 0) return;
-    const int32_t r = radius < rw / 2 ? (radius < rh / 2 ? radius : rh / 2) : rw / 2;
-    for (int32_t yy = y; yy < y + rh; ++yy) for (int32_t xx = x; xx < x + rw; ++xx) {
-        const int32_t cx = xx < x + r ? x + r : (xx >= x + rw - r ? x + rw - r - 1 : xx);
-        const int32_t cy = yy < y + r ? y + r : (yy >= y + rh - r ? y + rh - r - 1 : yy);
-        const int32_t dx = xx - cx, dy = yy - cy;
-        if (dx * dx + dy * dy <= r * r && xx >= 0 && yy >= 0 &&
-            xx < static_cast<int32_t>(w) && yy < static_cast<int32_t>(h))
-            p[static_cast<size_t>(yy) * w + xx] = color;
-    }
-}
-
 uint32_t overColor(uint32_t under, uint32_t color, uint8_t alpha) noexcept {
     const uint32_t inverse = 255u - alpha;
     const auto channel = [&](unsigned shift) noexcept {
@@ -304,229 +268,6 @@ uint32_t overColor(uint32_t under, uint32_t color, uint8_t alpha) noexcept {
             ((under >> shift) & 0xFFu) * inverse + 127u) / 255u);
     };
     return PackBGRA(channel(16), channel(8), channel(0));
-}
-
-void drawSystemIcon(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
-                    int32_t size, micant::explorer::IconId id) noexcept {
-    const auto icon = iconImage(id, 48);
-    if (!icon.pixels || !icon.width || !icon.height) return;
-    const auto clamp = [](int32_t v, int32_t upper) noexcept {
-        return v < 0 ? 0 : (v >= upper ? upper - 1 : v);
-    };
-    for (int32_t iy = 0; iy < size; ++iy) for (int32_t ix = 0; ix < size; ++ix) {
-        const int32_t dx = x + ix, dy = y + iy;
-        if (dx < 0 || dy < 0 || dx >= static_cast<int32_t>(w) || dy >= static_cast<int32_t>(h)) continue;
-        const float sxRaw = (static_cast<float>(ix) + 0.5f) * icon.width / size - 0.5f;
-        const float syRaw = (static_cast<float>(iy) + 0.5f) * icon.height / size - 0.5f;
-        const float sx = sxRaw < 0 ? 0 : (sxRaw > icon.width - 1 ? icon.width - 1 : sxRaw);
-        const float sy = syRaw < 0 ? 0 : (syRaw > icon.height - 1 ? icon.height - 1 : syRaw);
-        const int32_t sx0 = clamp(static_cast<int32_t>(sx), static_cast<int32_t>(icon.width));
-        const int32_t sy0 = clamp(static_cast<int32_t>(sy), static_cast<int32_t>(icon.height));
-        const int32_t sx1 = clamp(sx0 + 1, static_cast<int32_t>(icon.width));
-        const int32_t sy1 = clamp(sy0 + 1, static_cast<int32_t>(icon.height));
-        const float tx = sx - static_cast<int32_t>(sx), ty = sy - static_cast<int32_t>(sy);
-        const auto sample = [&](int32_t px, int32_t py) noexcept {
-            const auto* row = reinterpret_cast<const uint32_t*>(
-                reinterpret_cast<const uint8_t*>(icon.pixels) + static_cast<size_t>(py) * icon.stride);
-            return row[px];
-        };
-        const uint32_t c00 = sample(sx0, sy0), c10 = sample(sx1, sy0);
-        const uint32_t c01 = sample(sx0, sy1), c11 = sample(sx1, sy1);
-        uint32_t color = 0;
-        for (unsigned shift : {0u, 8u, 16u}) {
-            const auto premul = [shift](uint32_t c) noexcept {
-                return static_cast<float>((c >> shift) & 0xFFu) * (c >> 24) / 255.0f;
-            };
-            const float top = premul(c00) * (1.0f - tx) + premul(c10) * tx;
-            const float bottom = premul(c01) * (1.0f - tx) + premul(c11) * tx;
-            color |= static_cast<uint32_t>(top * (1.0f - ty) + bottom * ty + 0.5f) << shift;
-        }
-        const float aTop = static_cast<float>(c00 >> 24) * (1.0f - tx) + static_cast<float>(c10 >> 24) * tx;
-        const float aBottom = static_cast<float>(c01 >> 24) * (1.0f - tx) + static_cast<float>(c11 >> 24) * tx;
-        const uint8_t alpha = static_cast<uint8_t>(aTop * (1.0f - ty) + aBottom * ty + 0.5f);
-        if (alpha) p[static_cast<size_t>(dy) * w + dx] = color |
-            (static_cast<uint32_t>(alpha) << 24);
-    }
-}
-
-uint32_t premultiplied(uint8_t r, uint8_t green, uint8_t b, uint8_t alpha) noexcept {
-    const auto scale = [alpha](uint8_t c) noexcept {
-        return static_cast<uint8_t>((static_cast<uint32_t>(c) * alpha + 127u) / 255u);
-    };
-    return PackBGRA(scale(r), scale(green), scale(b), alpha);
-}
-
-void drawDisc(uint32_t* pixels, uint32_t width, uint32_t height,
-              int32_t centerX, int32_t centerY, float radius,
-              uint8_t red, uint8_t green, uint8_t blue,
-              uint8_t opacity = 255) noexcept {
-    const int32_t extent = static_cast<int32_t>(radius + 1.0f);
-    for (int32_t y = centerY - extent; y <= centerY + extent; ++y) {
-        if (y < 0 || y >= static_cast<int32_t>(height)) continue;
-        for (int32_t x = centerX - extent; x <= centerX + extent; ++x) {
-            if (x < 0 || x >= static_cast<int32_t>(width)) continue;
-            const float dx = static_cast<float>(x - centerX) + 0.5f;
-            const float dy = static_cast<float>(y - centerY) + 0.5f;
-            const float distance = dx * dx + dy * dy;
-            const float edge = radius + 0.5f;
-            if (distance >= edge * edge) continue;
-            const float coverage = distance <= (radius - 0.5f) * (radius - 0.5f)
-                ? 1.0f : edge - (distance > 0.0f ? __builtin_sqrtf(distance) : 0.0f);
-            const uint32_t alpha = static_cast<uint32_t>(coverage * opacity + 0.5f);
-            const uint32_t inverse = 255u - alpha;
-            const uint32_t source = premultiplied(red, green, blue,
-                static_cast<uint8_t>(alpha));
-            uint32_t& destination = pixels[static_cast<size_t>(y) * width + x];
-            const auto channel = [&](unsigned shift) noexcept {
-                return (((source >> shift) & 255u) +
-                    ((destination >> shift) & 255u) * inverse / 255u) & 255u;
-            };
-            const uint32_t outAlpha = alpha +
-                ((destination >> 24) & 255u) * inverse / 255u;
-            destination = (outAlpha << 24) | (channel(16) << 16) |
-                (channel(8) << 8) | channel(0);
-        }
-    }
-}
-
-void fillGlassTile(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
-                   int32_t rw, int32_t rh, int32_t radius,
-                   uint8_t r, uint8_t green, uint8_t b, uint8_t alpha) noexcept {
-    const uint32_t color = premultiplied(r, green, b, alpha);
-    roundedFill(p, w, h, x, y, rw, rh, radius, color);
-}
-
-void drawControlCenter(GlassSurface& surface) noexcept {
-    if (!surface.pixels) return;
-    uint32_t* p = surface.pixels;
-    const uint32_t w = surface.width, h = surface.height;
-    fill(p, w, h, 0, 0, w, h, 0);
-    const uint32_t white = PackBGRA(248, 249, 253, 255);
-    const uint32_t secondary = PackBGRA(190, 197, 212, 255);
-
-    text(p, w, h, 18, 16, "Control Center", white);
-    constexpr int32_t inset = 12, gap = 8, cardW = 140, cardH = 164;
-    const int32_t cardY = 48;
-    const int32_t leftX = inset;
-    const int32_t rightX = static_cast<int32_t>(w) - inset - cardW;
-    fillGlassTile(p, w, h, leftX, cardY, cardW, cardH, 21, 21, 28, 43, 105);
-    fillGlassTile(p, w, h, rightX, cardY, cardW, cardH, 21, 21, 28, 43, 105);
-    text(p, w, h, leftX + 12, cardY + 11, "Connectivity", white);
-    constexpr const char* connLabels[3] = {"Wi-Fi", "Bluetooth", "AirDrop"};
-    constexpr const char* connStates[3] = {"Home Network", "On", "Contacts Only"};
-    constexpr const char* connGlyphs[3] = {"W", "B", "A"};
-    for (int i = 0; i < 3; ++i) {
-        const int32_t rowY = cardY + 41 + i * 38;
-        fillGlassTile(p, w, h, leftX + 10, rowY, 25, 25, 8,
-                      i == 0 ? 65 : 78, i == 0 ? 142 : 151, 247, 245);
-        text(p, w, h, leftX + 18, rowY + 6, connGlyphs[i], white);
-        text(p, w, h, leftX + 42, rowY + 1, connLabels[i], white);
-        text(p, w, h, leftX + 42, rowY + 15, connStates[i], secondary);
-    }
-
-    text(p, w, h, rightX + 12, cardY + 11, "Now Playing", white);
-    fillGlassTile(p, w, h, rightX + 12, cardY + 39, 48, 48, 11, 139, 87, 210, 220);
-    fill(p, w, h, rightX + 18, cardY + 45, 36, 4, PackBGRA(244, 167, 214));
-    fill(p, w, h, rightX + 18, cardY + 53, 30, 4, PackBGRA(180, 215, 255));
-    fill(p, w, h, rightX + 18, cardY + 61, 24, 4, PackBGRA(255, 207, 143));
-    text(p, w, h, rightX + 12, cardY + 94, "MicaNT Theme", white);
-    text(p, w, h, rightX + 12, cardY + 110, "Ambient", secondary);
-    fillGlassTile(p, w, h, rightX + 17, cardY + 135, 26, 20, 10, 72, 78, 93, 180);
-    fillGlassTile(p, w, h, rightX + 55, cardY + 132, 30, 26, 13, 244, 246, 251, 245);
-    fillGlassTile(p, w, h, rightX + 97, cardY + 135, 26, 20, 10, 72, 78, 93, 180);
-    text(p, w, h, rightX + 26, cardY + 140, "<", white);
-    text(p, w, h, rightX + 65, cardY + 139, ">", PackBGRA(28, 31, 40));
-    text(p, w, h, rightX + 106, cardY + 140, ">", white);
-
-    constexpr int32_t toggleY = 224, toggleW = 66, toggleH = 68, toggleGap = 6;
-    constexpr const char* toggleLabels[4] = {"Airplane", "Focus", "Record", "Night"};
-    constexpr const char* toggleGlyphs[4] = {"A", "Z", "R", "N"};
-    for (int i = 0; i < 4; ++i) {
-        const int32_t x = inset + i * (toggleW + toggleGap);
-        fillGlassTile(p, w, h, x, toggleY, toggleW, toggleH, 18, 27, 34, 51, 100);
-        fillGlassTile(p, w, h, x + 20, toggleY + 7, 26, 26, 13,
-                      i == 1 ? 72 : 82, i == 1 ? 126 : 139, i == 1 ? 239 : 160, 240);
-        text(p, w, h, x + 29, toggleY + 13, toggleGlyphs[i], white);
-        text(p, w, h, x + 7, toggleY + 44, toggleLabels[i], white);
-    }
-
-    constexpr int32_t sliderW = 289, sliderH = 68;
-    const int32_t sliderX = inset;
-    const int32_t displayY = 306, soundY = 394;
-    const auto slider = [&](int32_t y, const char* label, const char* glyph,
-                            int32_t amount) noexcept {
-        const int32_t insetX = 5, insetY = 5;
-        const int32_t trackX = sliderX + insetX;
-        const int32_t trackY = y + insetY;
-        const int32_t trackW = sliderW - insetX * 2;
-        const int32_t trackH = sliderH - insetY * 2;
-        const int32_t centerY = trackY + trackH / 2;
-        const int32_t thumbRadius = 12;
-        const int32_t thumbCenterX = trackX + thumbRadius +
-            (trackW - thumbRadius * 2) * amount / 100;
-
-        // A single continuous capsule is both the control and its track. The
-        // bright section grows beneath the floating thumb like macOS Control
-        // Center, instead of placing a generic slider inside a separate card.
-        fillGlassTile(p, w, h, trackX, trackY, trackW, trackH,
-                      trackH / 2, 28, 34, 48, 145);
-        roundedFill(p, w, h, trackX, trackY,
-                    thumbCenterX - trackX, trackH, trackH / 2,
-                    premultiplied(239, 242, 249, 226));
-        text(p, w, h, trackX + 13, centerY - 8, glyph,
-             amount >= 20 ? PackBGRA(35, 40, 51, 255) : white);
-        text(p, w, h, trackX + 38, centerY - 7, label,
-             amount >= 20 ? PackBGRA(35, 40, 51, 255) : white);
-
-        drawDisc(p, w, h, thumbCenterX, centerY + 1, 13.5f, 0, 0, 0, 100);
-        drawDisc(p, w, h, thumbCenterX, centerY, 12.0f, 199, 207, 221, 255);
-        drawDisc(p, w, h, thumbCenterX, centerY, 10.5f, 255, 255, 255, 255);
-    };
-    slider(displayY, "Display", "+", 78);
-    slider(soundY, "Sound", "S", 67);
-}
-
-void drawDock(GlassSurface& surface) noexcept {
-    if (!surface.pixels) return;
-    uint32_t* p = surface.pixels;
-    const uint32_t w = surface.width, h = surface.height;
-    fill(p, w, h, 0, 0, w, h, 0);
-    constexpr int32_t iconSize = 52, cell = 58, first = 10;
-    constexpr micant::explorer::IconId ids[9] = {
-        micant::explorer::IconId::Computer, micant::explorer::IconId::Network,
-        micant::explorer::IconId::Documents, micant::explorer::IconId::Pictures,
-        micant::explorer::IconId::Music, micant::explorer::IconId::Videos,
-        micant::explorer::IconId::Executable, micant::explorer::IconId::HardDisk,
-        micant::explorer::IconId::TrashEmpty};
-    const int32_t dockTop = static_cast<int32_t>(surface.glassTop) + 8 + iconSize;
-    for (int i = 0; i < 9; ++i) {
-        const int32_t iconCenterX = first + i * cell + iconSize / 2;
-        const int32_t globalCenterX = surface.x + iconCenterX;
-        const float distance = static_cast<float>(g.dockPointerX > globalCenterX
-            ? g.dockPointerX - globalCenterX : globalCenterX - g.dockPointerX);
-        const float t = distance / (cell * 2.0f);
-        const float influence = g.dockPointerX < 0 || t >= 1.0f ? 0.0f :
-            1.0f - t * t * (3.0f - 2.0f * t);
-        const int32_t size = static_cast<int32_t>(iconSize * (1.0f + 0.70f * influence) + 0.5f);
-        drawSystemIcon(p, w, h, iconCenterX - size / 2, dockTop - size, size, ids[i]);
-        if (i < 7) {
-            const uint32_t dot = premultiplied(235, 237, 244,
-                g.dockPointerX >= 0 && influence > 0.75f ? 235 : 145);
-            fill(p, w, h, iconCenterX - 2,
-                 static_cast<int32_t>(surface.glassTop + surface.glassHeight) - 8, 4, 3, dot);
-        }
-    }
-}
-
-void redrawDock() noexcept {
-    drawDock(g.dock);
-    if (g.dock.hwnd && g.dock.pixels) present(g.dock.hwnd);
-}
-
-void redrawGlassSurfaces() noexcept {
-    drawControlCenter(g.controlCenter);
-    if (g.controlCenter.hwnd && g.controlCenter.pixels) present(g.controlCenter.hwnd);
-    redrawDock();
 }
 
 bool decodeUtf8ToUtf16(const char* input, wchar_t* output, size_t capacity, size_t& units) noexcept {
@@ -567,9 +308,7 @@ bool renderExplorerText(uint32_t* pixels, uint32_t width, uint32_t height,
     if (!g.fontReady || !pixels || !value || x < 0 || y < 0) return false;
     HDC dc = nullptr;
     if (pixels == g.desktopPixels) dc = g.desktopDc;
-    else if (pixels == g.controlCenter.pixels) dc = g.controlCenter.dc;
     else if (pixels == g.taskbarPixels) dc = g.taskbarDc;
-    else if (pixels == g.dock.pixels) dc = g.dock.dc;
     else if (pixels == g.menuPixels) dc = g.menuDc;
     else for (auto& app : g.apps) if (pixels == app.pixels) { dc = app.dc; break; }
     if (!dc) return false;
@@ -1197,19 +936,6 @@ void redrawTaskbar() noexcept {
         g.taskbarPixels[i] = overColor(g.taskbarPixels[i], rgb(18, 20, 27), 205);
     fill(g.taskbarPixels, g.screenW, TASKBAR_H, 0, 0, g.screenW, 1,
          rgb(112, 118, 133));
-    // The MacShell Dock has a six-pixel desktop margin. Clear the old taskbar
-    // under its footprint so the compositor samples the wallpaper as glass,
-    // instead of a second, opaque gray bar showing through the capsule.
-    if (g.dock.hwnd && g.dock.width) {
-        const int32_t left = g.dock.x < 0 ? 0 : g.dock.x;
-        const int32_t right = g.dock.x + static_cast<int32_t>(g.dock.width) >
-            static_cast<int32_t>(g.screenW) ? static_cast<int32_t>(g.screenW) :
-            g.dock.x + static_cast<int32_t>(g.dock.width);
-        for (int32_t x = left; x < right; ++x)
-            for (uint32_t y = 0; y < TASKBAR_H; ++y)
-                g.taskbarPixels[static_cast<size_t>(y) * g.screenW +
-                                static_cast<uint32_t>(x)] = 0;
-    }
     if (!g.taskbarThemePixelReported && g.taskbarPixels) {
         const auto palette = activeShellPalette();
         if (g.taskbarPixels[5u * g.screenW + 90u] == palette.selected) {
@@ -1240,7 +966,6 @@ void redrawDesktop() noexcept {
                                   g.wallpaperPixels, &icons,
                                   activeShellPalette().accentForeground);
     present(g.desktop);
-    redrawGlassSurfaces();
     redrawTaskbar();
 }
 
@@ -1280,6 +1005,45 @@ void launchThemeTest() noexcept {
     }
     (void)CloseHandle(process.hThread);
     (void)CloseHandle(process.hProcess);
+}
+
+void launchMacShell() noexcept {
+    wchar_t imagePath[512]{};
+    size_t cursor = 0;
+    constexpr wchar_t suffix[] = L"\\System32\\mac_shell.exe";
+    if (!appendSystemRoot(imagePath, std::size(imagePath), cursor) ||
+        cursor + std::size(suffix) > std::size(imagePath)) {
+        PrintLine("[MicaNT Explorer] Could not build mac_shell.exe path");
+        return;
+    }
+    for (size_t i = 0; i < std::size(suffix); ++i) imagePath[cursor++] = suffix[i];
+
+    wchar_t commandLine[560]{};
+    size_t commandLength = cursor - 1;
+    for (size_t i = 0; i < commandLength; ++i) commandLine[i] = imagePath[i];
+    commandLine[commandLength++] = L' ';
+    uint64_t owner = reinterpret_cast<uintptr_t>(g.desktop);
+    wchar_t digits[24]{};
+    size_t digitCount = 0;
+    do {
+        digits[digitCount++] = static_cast<wchar_t>(L'0' + owner % 10);
+        owner /= 10;
+    } while (owner && digitCount < std::size(digits));
+    if (commandLength + digitCount >= std::size(commandLine)) return;
+    while (digitCount) commandLine[commandLength++] = digits[--digitCount];
+    commandLine[commandLength] = L'\0';
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(imagePath, commandLine, nullptr, nullptr, FALSE, 0,
+                        nullptr, nullptr, &startup, &process)) {
+        PrintLine("[MicaNT Explorer] Starting mac_shell.exe failed");
+        return;
+    }
+    (void)CloseHandle(process.hThread);
+    (void)CloseHandle(process.hProcess);
+    PrintLine("[MicaNT Explorer] mac_shell.exe started as the widget owner");
 }
 
 bool appendWide(wchar_t* path, size_t capacity, size_t& cursor,
@@ -2233,56 +1997,6 @@ AppWindow* appFromHwnd(HWND hwnd) noexcept {
     return nullptr;
 }
 
-bool createGlassSurface(GlassSurface& surface, int32_t x, int32_t y,
-                        uint32_t width, uint32_t height, float radius,
-                        float sourceBlur, uint32_t glassTop = 0,
-                        uint32_t glassHeight = 0) noexcept {
-    if (!width || !height || width > 640 || height > 640) return false;
-    if (!glassHeight) glassHeight = height - glassTop;
-    if (glassTop >= height || !glassHeight || glassHeight > height - glassTop) return false;
-    surface.x = x; surface.y = y; surface.width = width; surface.height = height;
-    surface.glassTop = glassTop; surface.glassHeight = glassHeight;
-    surface.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        kClassName, L"", WS_POPUP | WS_VISIBLE, x, y,
-        static_cast<int32_t>(width), static_cast<int32_t>(height),
-        nullptr, nullptr, nullptr, nullptr);
-    if (!surface.hwnd) return false;
-    surface.dc = CreateCompatibleDC(nullptr);
-    if (!surface.dc) return false;
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = static_cast<LONG>(width);
-    info.bmiHeader.biHeight = -static_cast<LONG>(height);
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    surface.bitmap = CreateDIBSection(surface.dc, &info, DIB_RGB_COLORS,
-                                      &bits, nullptr, 0);
-    if (!surface.bitmap || !bits) return false;
-    SelectObject(surface.dc, surface.bitmap);
-    surface.pixels = static_cast<uint32_t*>(bits);
-
-    MicaLiquidGlassDescriptor glass{};
-    glass.magic = MICANT_LIQUID_GLASS_MAGIC;
-    glass.version = MICANT_LIQUID_GLASS_VERSION;
-    glass.size = sizeof(glass);
-    glass.flags = MICANT_LIQUID_GLASS_ACTIVE;
-    glass.top = static_cast<int32_t>(glassTop);
-    glass.width = width; glass.height = glassHeight;
-    glass.radius = radius; glass.bezel = 18.0f; glass.thickness = 20.0f;
-    glass.dispersion = 0.075f; glass.blurPx = 1.4f; glass.tintMix = 0.25f;
-    glass.saturation = 1.2f; glass.dark = 1.0f; glass.sourceBlur = sourceBlur;
-    glass.downsample = 0.5f; glass.pad = 10.0f; glass.rim = 0.58f;
-    glass.grain = 0.006f; glass.magnify = 0.045f; glass.shadowAmt = 0.42f;
-    glass.rimTint = 1.0f; glass.flatInner = 0.4f; glass.generation = 1;
-    if (!LuceGlassSetWindow(surface.hwnd, &glass)) {
-        ShowWindow(surface.hwnd, SW_HIDE);
-        return false;
-    }
-    return true;
-}
-
 LRESULT CALLBACK ThemeAttachedScrollProc(HWND hwnd, UINT message,
                                           WPARAM wParam, LPARAM lParam) {
     if (message == 0x0081u) return 1; // WM_NCCREATE
@@ -2549,201 +2263,6 @@ void updateClock() noexcept {
     } else {
         std::memcpy(g.clockText, "--:--", 6);
     }
-    if (g.clockPixels) {
-        constexpr float cardWidth = static_cast<float>(CLOCK_CARD);
-        constexpr float cardHeight = static_cast<float>(CLOCK_CARD);
-        constexpr float unit = cardWidth / 158.0f;
-        constexpr float inset = 9.0f * unit;
-        constexpr float halfWidth = cardWidth * 0.5f;
-        constexpr float halfHeight = cardHeight * 0.5f;
-        constexpr float halfBoxWidth = halfWidth - inset;
-        constexpr float halfBoxHeight = halfHeight - inset;
-        constexpr float cornerRadius = 29.8f - inset;
-        constexpr float tickLength = 5.6f * unit;
-        constexpr float kTau = 6.28318530718f;
-        constexpr float kPi = 3.14159265359f;
-        const auto sinCosClock = [kPi, kTau](float angle, float& sine,
-                                      float& cosine) noexcept {
-            while (angle > kPi) angle -= kTau;
-            while (angle < -kPi) angle += kTau;
-            float cosineSign = 1.0f;
-            if (angle > kPi * 0.5f) {
-                angle = kPi - angle;
-                cosineSign = -1.0f;
-            } else if (angle < -kPi * 0.5f) {
-                angle = -kPi - angle;
-                cosineSign = -1.0f;
-            }
-            const float angle2 = angle * angle;
-            const float angle3 = angle * angle2;
-            const float angle4 = angle2 * angle2;
-            const float angle5 = angle3 * angle2;
-            const float angle6 = angle4 * angle2;
-            const float angle7 = angle5 * angle2;
-            sine = angle - angle3 / 6.0f + angle5 / 120.0f - angle7 / 5040.0f;
-            cosine = cosineSign * (1.0f - angle2 / 2.0f + angle4 / 24.0f -
-                                    angle6 / 720.0f);
-        };
-        const auto sqrtClock = [](float value) noexcept {
-            if (value <= 0.0f) return 0.0f;
-            float result = value > 1.0f ? value : 1.0f;
-            for (uint32_t i = 0; i < 7; ++i)
-                result = 0.5f * (result + value / result);
-            return result;
-        };
-        for (uint32_t y = 0; y < CLOCK_WINDOW; ++y)
-            for (uint32_t x = 0; x < CLOCK_WINDOW; ++x)
-                g.clockPixels[y * CLOCK_WINDOW + x] = 0;
-
-        // MacShell places each tick on the inset rounded-rectangle contour.
-        // The former small-radius circle clustered the 60 marks around the
-        // clock center, which made the face look broken.
-        const float seconds = timeAvailable ? static_cast<float>(value.second) : 0.0f;
-        for (uint32_t i = 0; i < 60; ++i) {
-            const float angle = static_cast<float>(i) * kTau / 60.0f;
-            float dx{}, cosine{};
-            sinCosClock(angle, dx, cosine);
-            const float dy = -cosine;
-            const float ax = dx < 0.0f ? -dx : dx;
-            const float ay = dy < 0.0f ? -dy : dy;
-            float distance = (ax > 1.0e-6f ? halfBoxWidth / ax : 1.0e9f);
-            const float edgeY = ay > 1.0e-6f ? halfBoxHeight / ay : 1.0e9f;
-            if (edgeY < distance) distance = edgeY;
-            float px = ax * distance;
-            float py = ay * distance;
-            const float cornerX = halfBoxWidth - cornerRadius;
-            const float cornerY = halfBoxHeight - cornerRadius;
-            if (px > cornerX && py > cornerY) {
-                const float b = ax * cornerX + ay * cornerY;
-                const float c = cornerX * cornerX + cornerY * cornerY -
-                    cornerRadius * cornerRadius;
-                float root = b * b - c;
-                if (root < 0.0f) root = 0.0f;
-                distance = b + sqrtClock(root);
-                px = ax * distance;
-                py = ay * distance;
-            }
-            const float outerX = halfWidth + (dx < 0.0f ? -px : px);
-            const float outerY = halfHeight + (dy < 0.0f ? -py : py);
-            const float innerX = outerX - dx * tickLength;
-            const float innerY = outerY - dy * tickLength;
-            const float segmentX = innerX - outerX;
-            const float segmentY = innerY - outerY;
-            const float segmentLength2 = segmentX * segmentX + segmentY * segmentY;
-            const float past = 0.40f + 0.58f *
-                (static_cast<float>(i) / (seconds > 1.0f ? seconds : 1.0f));
-            const float aheadRatio = static_cast<float>(i) - seconds;
-            const float ahead = 0.12f + 0.28f *
-                (aheadRatio / (seconds < 60.0f ? 60.0f - seconds : 1.0f));
-            const float fraction = seconds - static_cast<float>(i);
-            const float fade = fraction <= 0.0f ? ahead :
-                fraction >= 1.0f ? past : ahead + (past - ahead) * fraction;
-            const float alpha = (timeAvailable ? 0.90f : 0.55f) * fade;
-
-            const float screenOuterX = outerX + 10.0f;
-            const float screenOuterY = outerY + 10.0f;
-            const float screenInnerX = innerX + 10.0f;
-            const float screenInnerY = innerY + 10.0f;
-            int left = static_cast<int>(screenOuterX < screenInnerX ? screenOuterX : screenInnerX) - 2;
-            int right = static_cast<int>(screenOuterX > screenInnerX ? screenOuterX : screenInnerX) + 2;
-            int top = static_cast<int>(screenOuterY < screenInnerY ? screenOuterY : screenInnerY) - 2;
-            int bottom = static_cast<int>(screenOuterY > screenInnerY ? screenOuterY : screenInnerY) + 2;
-            if (left < 0) left = 0;
-            if (top < 0) top = 0;
-            if (right >= static_cast<int>(CLOCK_WINDOW)) right = CLOCK_WINDOW - 1;
-            if (bottom >= static_cast<int>(CLOCK_WINDOW)) bottom = CLOCK_WINDOW - 1;
-            for (int y = top; y <= bottom; ++y) {
-                for (int x = left; x <= right; ++x) {
-                    const float qx = static_cast<float>(x) + 0.5f - screenOuterX;
-                    const float qy = static_cast<float>(y) + 0.5f - screenOuterY;
-                    float along = (qx * segmentX + qy * segmentY) /
-                        (segmentLength2 > 1.0e-5f ? segmentLength2 : 1.0f);
-                    if (along < 0.0f) along = 0.0f;
-                    if (along > 1.0f) along = 1.0f;
-                    const float rx = qx - segmentX * along;
-                    const float ry = qy - segmentY * along;
-                    const float distance2 = rx * rx + ry * ry;
-                    if (distance2 > 1.0f) continue;
-                    const float coverage = 1.0f - sqrtClock(distance2) * 0.5f;
-                    const uint32_t a8 = static_cast<uint32_t>(
-                        alpha * coverage * 255.0f + 0.5f);
-                    const uint32_t pixel = (a8 << 24) | (a8 << 16) |
-                        (a8 << 8) | a8;
-                    g.clockPixels[static_cast<size_t>(y) * CLOCK_WINDOW +
-                                  static_cast<size_t>(x)] = pixel;
-                }
-            }
-        }
-
-        SetBkMode(g.clockDc, TRANSPARENT);
-        // The source uses a small bold Open Runde TTF label. Use the bundled
-        // Selawik Bold TTF at a size that remains clean on the 1024x768 scanout.
-        SetTextColor(g.clockDc, RGB(182, 188, 204));
-        HFONT font = CreateFontW(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        if (font) {
-            HGDIOBJ old = SelectObject(g.clockDc, font);
-            const wchar_t city[] = L"ROME";
-            SIZE cityExtent{};
-            if (GetTextExtentPoint32W(g.clockDc, city, 4, &cityExtent))
-                TextOutW(g.clockDc, 10 + (static_cast<int>(CLOCK_CARD) - cityExtent.cx) / 2,
-                    10 + 34 - cityExtent.cy / 2, city, 4);
-            SelectObject(g.clockDc, old);
-            DeleteObject(font);
-        }
-
-        // ClockWidget.qml uses a 64 px semibold face, then Text.Fit within a
-        // 108.5 px content width. Fit the actual installed GDI face and center
-        // the resulting glyph run in the 168 px card; this also keeps the
-        // explicit --:-- state legible while the firmware has no UTC source.
-        wchar_t time[6]{};
-        int32_t timeLength = 0;
-        const uint8_t hour12 = static_cast<uint8_t>(value.hour % 12 ? value.hour % 12 : 12);
-        if (timeAvailable && hour12 >= 10) time[timeLength++] = static_cast<wchar_t>(L'0' + hour12 / 10);
-        time[timeLength++] = static_cast<wchar_t>(L'0' + hour12 % 10);
-        time[timeLength++] = L':';
-        time[timeLength++] = static_cast<wchar_t>(L'0' + value.minute / 10);
-        time[timeLength++] = static_cast<wchar_t>(L'0' + value.minute % 10);
-        if (!timeAvailable) {
-            time[0] = L'-'; time[1] = L'-'; time[2] = L':';
-            time[3] = L'-'; time[4] = L'-';
-            timeLength = 5;
-        }
-        SetTextColor(g.clockDc, RGB(255, 255, 255));
-        const int32_t initialFontHeight = static_cast<int32_t>(64.0f * unit + 0.5f);
-        font = CreateFontW(initialFontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI Semibold");
-        if (font) {
-            HGDIOBJ old = SelectObject(g.clockDc, font);
-            SIZE extent{};
-            if (GetTextExtentPoint32W(g.clockDc, time, timeLength, &extent) && extent.cx > 0) {
-                constexpr int32_t targetWidth = 108;
-                if (extent.cx > targetWidth) {
-                    SelectObject(g.clockDc, old);
-                    DeleteObject(font);
-                    const int32_t fittedHeight = initialFontHeight * targetWidth / extent.cx;
-                    font = CreateFontW(fittedHeight > 0 ? fittedHeight : 1,
-                        0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Semibold");
-                    if (font) old = SelectObject(g.clockDc, font);
-                    extent = {};
-                    if (font) (void)GetTextExtentPoint32W(g.clockDc, time, timeLength, &extent);
-                }
-                if (extent.cx > 0 && extent.cy > 0)
-                    TextOutW(g.clockDc, 10 + (static_cast<int>(CLOCK_CARD) - extent.cx) / 2,
-                        10 + (static_cast<int>(CLOCK_CARD) - extent.cy) / 2 - 1,
-                        time, timeLength);
-            }
-            if (font) {
-                SelectObject(g.clockDc, old);
-                DeleteObject(font);
-            }
-        }
-        present(g.clockWidget);
-    }
     for (auto& app : g.apps) {
         if (!app.open || app.view != View::DateTime) continue;
         drawAppWindow(app);
@@ -2758,23 +2277,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         updateClock();
         updateAutomaticTheme();
         redrawTaskbar();
-        return 0;
-    }
-    if (message == WM_MOUSEMOVE && (hwnd == g.desktop || hwnd == g.taskbar || hwnd == g.dock.hwnd)) {
-        int32_t x = static_cast<int16_t>(static_cast<uint32_t>(lParam) & 0xFFFFu);
-        int32_t y = static_cast<int16_t>((static_cast<uint32_t>(lParam) >> 16) & 0xFFFFu);
-        if (hwnd == g.taskbar) y += static_cast<int32_t>(g.screenH - TASKBAR_H);
-        else if (hwnd == g.dock.hwnd) { x += g.dock.x; y += g.dock.y; }
-        const int32_t dockGlassY = g.dock.y + static_cast<int32_t>(g.dock.glassTop);
-        const bool overDock = g.dock.hwnd && x >= g.dock.x &&
-            x < g.dock.x + static_cast<int32_t>(g.dock.width) &&
-            y >= g.dock.y && y < dockGlassY + static_cast<int32_t>(g.dock.glassHeight);
-        const int32_t nextX = overDock ? x : -1;
-        const int32_t delta = nextX - g.dockPointerX;
-        if (delta >= 2 || delta <= -2 || (nextX == -1 && g.dockPointerX != -1)) {
-            g.dockPointerX = nextX;
-            redrawDock();
-        }
         return 0;
     }
     if (message == WM_COMMAND && reinterpret_cast<HWND>(lParam) == g.themeButtonProbe &&
@@ -3087,14 +2589,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     }
     if (message == WM_PAINT) {
-        if (hwnd == g.clockWidget) PrintLine("[MicaNT Explorer] Clock WM_PAINT entered");
         HDC source = nullptr;
         uint32_t width = 0, height = 0;
         AppWindow* app = appFromHwnd(hwnd);
         if (hwnd == g.desktop) { source = g.desktopDc; width = g.screenW; height = g.screenH - TASKBAR_H; }
-        else if (hwnd == g.clockWidget) { source = g.clockDc; width = CLOCK_WINDOW; height = CLOCK_WINDOW; }
-        else if (hwnd == g.controlCenter.hwnd) { source = g.controlCenter.dc; width = g.controlCenter.width; height = g.controlCenter.height; }
-        else if (hwnd == g.dock.hwnd) { source = g.dock.dc; width = g.dock.width; height = g.dock.height; }
         else if (hwnd == g.taskbar) { source = g.taskbarDc; width = g.screenW; height = TASKBAR_H; }
         else if (hwnd == g.startMenu) { source = g.menuDc; width = MENU_W; height = MENU_H; }
         else if (app) { source = app->dc; width = app->width; height = app->height; }
@@ -3110,7 +2608,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         else if (app && !copied)
             PrintLine("[MicaNT Explorer] Application paint BitBlt failed");
         const bool ended = EndPaint(hwnd, &paint) != FALSE;
-        if (hwnd == g.clockWidget && copied && ended && !g.clockPaintReported) { g.clockPaintReported = true; PrintLine("[MicaNT Explorer] Clock bitmap painted to its window surface"); }
         if (app && copied && ended && !app->firstPaintPresented) {
             app->firstPaintPresented = true;
             PrintLine("[MicaNT Explorer] Application window paint presented");
@@ -3250,39 +2747,6 @@ extern "C" void _start(const char* = nullptr) {
 
     const int32_t clockX = static_cast<int32_t>(g.screenW) - 291;
     const int32_t clockY = 46;
-    g.clockWidget = CreateWindowExW(WS_EX_TOOLWINDOW, kClassName, L"", WS_POPUP | WS_VISIBLE,
-        clockX, clockY, CLOCK_WINDOW, CLOCK_WINDOW, nullptr, nullptr, nullptr, nullptr);
-    if (g.clockWidget) {
-        g.clockDc = CreateCompatibleDC(nullptr);
-        void* clockBits = nullptr;
-        BITMAPINFO clockInfo{};
-        clockInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        clockInfo.bmiHeader.biWidth = CLOCK_WINDOW;
-        clockInfo.bmiHeader.biHeight = -static_cast<LONG>(CLOCK_WINDOW);
-        clockInfo.bmiHeader.biPlanes = 1;
-        clockInfo.bmiHeader.biBitCount = 32;
-        clockInfo.bmiHeader.biCompression = BI_RGB;
-        g.clockBitmap = CreateDIBSection(g.clockDc, &clockInfo, DIB_RGB_COLORS, &clockBits, nullptr, 0);
-        if (g.clockDc && g.clockBitmap && clockBits) {
-            SelectObject(g.clockDc, g.clockBitmap);
-            g.clockPixels = static_cast<uint32_t*>(clockBits);
-            MicaLiquidGlassDescriptor glass{};
-            glass.magic = MICANT_LIQUID_GLASS_MAGIC; glass.version = MICANT_LIQUID_GLASS_VERSION;
-            glass.size = sizeof(glass); glass.flags = MICANT_LIQUID_GLASS_ACTIVE;
-            glass.left = 10; glass.top = 10; glass.width = CLOCK_CARD; glass.height = CLOCK_CARD;
-            glass.radius = 29.8f; glass.bezel = 26.0f; glass.thickness = 30.0f;
-            glass.dispersion = 0.06f; glass.blurPx = 1.0f; glass.tintMix = 0.586f;
-            glass.saturation = 1.25f; glass.dark = 1.0f; glass.sourceBlur = 11.2f;
-            glass.downsample = 0.5f; glass.pad = 10.0f; glass.rim = 0.45f;
-            glass.grain = 0.0045f; glass.magnify = 0.042857f; glass.rimTint = 1.0f;
-            glass.flatInner = 1.0f; glass.generation = 1;
-            if (LuceGlassSetWindow(g.clockWidget, &glass)) {
-                ShowWindow(g.clockWidget, SW_SHOW);
-                PrintLine("[MicaNT Explorer] MacShell MIT clock Liquid Glass descriptor published");
-            } else ShowWindow(g.clockWidget, SW_HIDE);
-        }
-    }
-
     const int32_t taskbarY = static_cast<int32_t>(g.screenH - TASKBAR_H);
     g.taskbar = CreateWindowExW(WS_EX_TOPMOST, kClassName, kTaskbarTitle,
         WS_POPUP | WS_VISIBLE, 0, taskbarY, static_cast<int32_t>(g.screenW), TASKBAR_H,
@@ -3301,26 +2765,6 @@ extern "C" void _start(const char* = nullptr) {
     if (!taskbarBitmap || !taskbarBits) for (;;) __asm__ __volatile__("pause");
     SelectObject(g.taskbarDc, taskbarBitmap);
     g.taskbarPixels = static_cast<uint32_t*>(taskbarBits);
-
-    // MacShell's reference is a 313x510 Control Center and a 69px Dock glass
-    // capsule (52px icons, 8px top inset, 9px lower inset).
-    constexpr uint32_t controlWidth = 313, controlHeight = 510;
-    const int32_t controlX = static_cast<int32_t>(g.screenW) - 291 -
-        static_cast<int32_t>(controlWidth) - 16;
-    const bool controlGlassReady = createGlassSurface(g.controlCenter,
-        controlX, 28, controlWidth, controlHeight, 25.0f, 8.0f);
-    constexpr uint32_t dockWidth = 9 * 52 + 8 * 6 + 20;
-    constexpr uint32_t dockHeight = 8 + 52 + 9;
-    const int32_t dockX = (static_cast<int32_t>(g.screenW) -
-        static_cast<int32_t>(dockWidth)) / 2;
-    constexpr uint32_t dockMagnifyArea = 36;
-    const int32_t dockY = static_cast<int32_t>(g.screenH - dockHeight - 6 - dockMagnifyArea);
-    const bool dockGlassReady = createGlassSurface(g.dock, dockX, dockY,
-        dockWidth, dockHeight + dockMagnifyArea, 18.0f, 13.0f,
-        dockMagnifyArea, dockHeight);
-    PrintLine(controlGlassReady && dockGlassReady
-        ? "[MicaNT Explorer] Control Center and Dock use compositor Liquid Glass"
-        : "[MicaNT Explorer] Control Center or Dock Liquid Glass setup failed");
 
     const int32_t menuY = static_cast<int32_t>(g.screenH) - static_cast<int32_t>(MENU_H) - static_cast<int32_t>(TASKBAR_H);
     g.startMenu = CreateWindowExW(WS_EX_TOPMOST, kClassName, kStartTitle, WS_POPUP,
@@ -3348,6 +2792,7 @@ extern "C" void _start(const char* = nullptr) {
     verifyDirectWriteFonts();
     redrawDesktop();
     updateClock();
+    launchMacShell();
     verifyThemeChangeQueueRollback();
     verifyAutomaticThemeBoundary();
     verifyMissingDesktopIconFallback();

@@ -574,11 +574,25 @@ if (MICANT_ENABLE_BAREMETAL)
     target_compile_definitions(explorer_boot PRIVATE MICANT_UXTHEME_IMPORTS)
     target_link_libraries(explorer_boot PRIVATE
         user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot comctl32_boot
-        luceglass_boot m)
+        m)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
+    add_executable(mac_shell_boot EXCLUDE_FROM_ALL tools/mac_shell_app.cpp
+        include/micant/um/subsystems/imaging/wallpaper.cpp
+        kernel/ex/freestanding_memory.cpp)
+    target_include_directories(mac_shell_boot PRIVATE "${CMAKE_SOURCE_DIR}/tools")
+    target_compile_options(mac_shell_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2)
+    target_link_options(mac_shell_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start)
+    target_link_libraries(mac_shell_boot PRIVATE
+        user32_boot gdi32_boot win32k_boot kernel32_boot ntdll_boot luceglass_boot m)
+    set_target_properties(mac_shell_boot PROPERTIES
+        OUTPUT_NAME "mac_shell"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
     # Task Manager uses native User32/GDI32 exports for its HWND and paint loop;
     # the APIs reach the canonical Win32k server through the existing DLL path.
     add_executable(taskmgr_boot EXCLUDE_FROM_ALL tools/taskmgr_app.cpp)
@@ -1061,7 +1075,7 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot uxtheme_boot luceglass_boot
+        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot uxtheme_boot luceglass_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)
@@ -1108,7 +1122,7 @@ if(WIN32 OR MICANT_ENABLE_BAREMETAL)
     foreach(_user_mode_variant IN ITEMS
         micant_win32k micant_user32 micant_gdi32 micant_imm32
         kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot uxtheme_boot luceglass_boot
-        imm32_boot explorer_boot explorer_runtime_boot
+        imm32_boot explorer_boot mac_shell_boot explorer_runtime_boot
     )
         add_custom_target(micant_boundary_${_user_mode_variant}
             COMMAND "${Python3_EXECUTABLE}"

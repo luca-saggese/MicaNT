@@ -72,6 +72,8 @@ def variants() -> tuple[Variant, ...]:
         "tools/explorer_shell/task_switcher.cpp",
     ):
         result.append(Variant("explorer_boot", source, includes=("tools",)))
+    result.append(Variant("mac_shell_boot", "tools/mac_shell_app.cpp",
+                          includes=("tools",)))
     return tuple(result)
 
 

@@ -2071,6 +2071,9 @@ def serial_has_failure(serial_log: str) -> bool:
                             "[MicaNT OEM] AHCI claim, BAR, DMA or SATA initialization failed",
                             "[MicaNT OEM] i210.sys: controller startup failed")):
             continue
+        if (line.startswith("[MicaNT Io] Boot-start driver failed: ehci.sys") and
+                "[MicaNT OEM] ehci.sys: PCI class 0C/03/20 controller not found" in serial_log):
+            continue
         return True
     return False
 
@@ -2469,6 +2472,10 @@ def run_qemu(
         if not explorer_image.is_file():
             raise RuntimeError("Explorer image was not built for the QEMU system volume")
         shutil.copyfile(explorer_image, system32_dir / explorer_image.name)
+        mac_shell_image = ROOT / "build" / "mac_shell.exe"
+        if not mac_shell_image.is_file():
+            raise RuntimeError("MacShell widget owner was not built for the QEMU system volume")
+        shutil.copyfile(mac_shell_image, system32_dir / mac_shell_image.name)
         procdump_image = ROOT / "build" / "procdump.exe"
         if not procdump_image.is_file():
             raise RuntimeError("Process memory diagnostic tool was not built for the system volume")

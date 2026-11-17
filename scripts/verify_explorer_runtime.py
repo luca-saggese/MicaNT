@@ -249,20 +249,22 @@ def verify_runtime(executable: Path, system32: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--explorer", type=Path, default=ROOT / "build/explorer.exe")
+    parser.add_argument("--mac-shell", type=Path, default=ROOT / "build/mac_shell.exe")
     parser.add_argument("--system32", type=Path, default=ROOT / "build/system32")
     args = parser.parse_args()
     try:
-        errors = verify_runtime(args.explorer, args.system32)
-        if errors:
-            print("Explorer runtime import closure FAILED:", file=sys.stderr)
-            for error in errors:
-                print(f"  {error}", file=sys.stderr)
-            print("No host DLL fallback or synthetic import trampoline is permitted.", file=sys.stderr)
-            return 1
+        for label, executable in (("Explorer", args.explorer), ("MacShell", args.mac_shell)):
+            errors = verify_runtime(executable, args.system32)
+            if errors:
+                print(f"{label} runtime import closure FAILED:", file=sys.stderr)
+                for error in errors:
+                    print(f"  {error}", file=sys.stderr)
+                print("No host DLL fallback or synthetic import trampoline is permitted.", file=sys.stderr)
+                return 1
     except (OSError, RuntimeError) as error:
         print(f"Explorer runtime check failed: {error}", file=sys.stderr)
         return 1
-    print("Explorer PE import closure passed; this alone does not verify process startup.")
+    print("Explorer and MacShell PE import closures passed; this alone does not verify process startup.")
     return 0
 
 
