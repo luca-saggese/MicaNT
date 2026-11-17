@@ -76,7 +76,7 @@ typedef struct MicaWin32kBitmapInfoHeader {
 
 #define MICANT_WIN32K_REQUEST_VERSION 1u
 #define MICANT_WIN32K_TEXT_CAPACITY 128u
-#define MICANT_WIN32K_WINDOW_CAPACITY 64u
+#define MICANT_WIN32K_ENUM_BATCH_CAPACITY 64u
 
 enum {
     MICANT_WIN32K_OP_REGISTER_CLASS = 1,
@@ -147,7 +147,7 @@ typedef struct MicaWin32kRequest {
     uint16_t className[MICANT_WIN32K_TEXT_CAPACITY];
     uint16_t title[MICANT_WIN32K_TEXT_CAPACITY];
     uint16_t text[MICANT_WIN32K_TEXT_CAPACITY];
-    uint64_t windowHandles[MICANT_WIN32K_WINDOW_CAPACITY];
+    uint64_t windowHandles[MICANT_WIN32K_ENUM_BATCH_CAPACITY];
 } MicaWin32kRequest;
 
 // Private client operation used by User32 DrawIconEx after validating the
@@ -219,7 +219,7 @@ typedef struct MicaWin32kCursorImage {
     uint32_t size, version;
     uint64_t cursorHandle;
     uint32_t width, height, pitch, hotX, hotY;
-    uint32_t pixels[MICANT_COMPOSITOR_CURSOR_MAX_PIXELS];
+    uint64_t pixelsAddress, pixelSizeBytes;
     uint64_t previousCursorHandle;
 } MicaWin32kCursorImage;
 
@@ -229,7 +229,7 @@ typedef struct MicaWin32kCursorInfo {
     MicaWin32kPoint position;
 } MicaWin32kCursorInfo;
 
-#define MICANT_WIN32K_CURSOR_IMAGE_VERSION 1u
+#define MICANT_WIN32K_CURSOR_IMAGE_VERSION 2u
 MICANT_WIN32K_API int32_t MicaWin32kApplyCursorImage(MicaWin32kCursorImage*);
 MICANT_WIN32K_API int32_t MicaWin32kGetCursorInfo(MicaWin32kCursorInfo*);
 #ifdef __cplusplus

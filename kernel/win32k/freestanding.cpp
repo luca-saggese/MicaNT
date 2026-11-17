@@ -4,11 +4,11 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <new>
 
 namespace micant::win32k::freestanding {
 namespace {
 
-constexpr size_t kWindowCapacity = MICANT_WIN32K_WINDOW_CAPACITY;
 constexpr size_t kClassCapacity = 32;
 constexpr size_t kMessageCapacity = 256;
 constexpr uint64_t kHandleTag = 0x4D4E570000000000ULL;
@@ -44,14 +44,87 @@ constexpr uint32_t kWsBorder = 0x00800000u;
 constexpr uint32_t kWsDlgFrame = 0x00400000u;
 constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
 constexpr uint32_t kWsThickFrame = 0x00040000u;
-constexpr int32_t kScreenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
-constexpr int32_t kScreenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
+int32_t g_screenWidth{};
+int32_t g_screenHeight{};
 std::atomic_flag g_stateLock = ATOMIC_FLAG_INIT;
 sync::detail::BootstrapEvent g_compositorWakeEvent{true, false};
-MicaCompositorDirtyRect g_pendingDirtyRegions[MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY]{};
+MicaCompositorDirtyRect* g_pendingDirtyRegions{};
 uint32_t g_pendingDirtyRegionCount{};
+size_t g_pendingDirtyRegionCapacity{};
 bool g_pendingFullRedraw{true};
 bool g_damageChangedSinceLastPublish{true};
+CreateCompositorSurface g_createCompositorSurface{};
+ReleaseCompositorSurface g_releaseCompositorSurface{};
+CompositorSurfaceStorage g_surfaceMetadataStorage{};
+CompositorSurfaceStorage g_dirtyMetadataStorage{};
+size_t g_surfaceMetadataCapacity{};
+size_t g_dirtyMetadataCapacity{};
+size_t g_lastPublishedSurfaceCount{};
+MicaCompositorMetadataStore* g_compositorStore{};
+struct RetiredMetadataStorage {
+    CompositorSurfaceStorage storage{};
+    uint64_t releaseAfterSequence{};
+    RetiredMetadataStorage* next{};
+};
+RetiredMetadataStorage* g_retiredMetadataStorage{};
+
+bool retireMetadataStorage(CompositorSurfaceStorage& storage) noexcept {
+    auto* store = g_compositorStore;
+    if (!store || !storage.sectionReference || !g_releaseCompositorSurface)
+        return false;
+    const uint64_t sequence = __atomic_load_n(&store->frameSequence, __ATOMIC_ACQUIRE);
+    if ((sequence & 1u) || sequence > UINT64_MAX - 2u) return false;
+    auto* retired = new (std::nothrow_t{}) RetiredMetadataStorage{};
+    if (!retired) return false;
+    retired->storage = storage;
+    retired->releaseAfterSequence = sequence + 2u;
+    retired->next = g_retiredMetadataStorage;
+    g_retiredMetadataStorage = retired;
+    return true;
+}
+
+void reapRetiredMetadataStorage(uint64_t acknowledgedSequence) noexcept {
+    auto** link = &g_retiredMetadataStorage;
+    while (*link) {
+        auto* retired = *link;
+        if (acknowledgedSequence < retired->releaseAfterSequence ||
+            !g_releaseCompositorSurface ||
+            g_releaseCompositorSurface(retired->storage, true) != NtStatus::Success) {
+            link = &retired->next;
+            continue;
+        }
+        *link = retired->next;
+        delete retired;
+    }
+}
+
+template <typename T>
+bool ensureMetadataArray(CompositorSurfaceStorage& storage, size_t& capacity,
+                         size_t required) noexcept {
+    if (required <= capacity) return true;
+    if (!g_createCompositorSurface || required > SIZE_MAX / sizeof(T)) return false;
+    size_t next = capacity ? capacity : 4;
+    while (next < required) {
+        if (next > SIZE_MAX / 2) { next = required; break; }
+        next *= 2;
+    }
+    const size_t bytes = next * sizeof(T);
+    if (bytes > SIZE_MAX - 3 || (bytes + 3) / 4 > UINT32_MAX) return false;
+    CompositorSurfaceStorage replacement{};
+    if (g_createCompositorSurface(static_cast<uint32_t>((bytes + 3) / 4),
+                                  1, replacement) != NtStatus::Success)
+        return false;
+    if (storage.sectionReference) {
+        if (!retireMetadataStorage(storage)) {
+            if (g_releaseCompositorSurface)
+                (void)g_releaseCompositorSurface(replacement, true);
+            return false;
+        }
+    }
+    storage = replacement;
+    capacity = next;
+    return true;
+}
 
 class StateLockGuard {
 public:
@@ -81,6 +154,17 @@ struct WindowClass {
     bool active{};
 };
 
+struct WindowIconImage {
+    uint32_t width{}, height{}, stride{};
+    uint64_t generation{};
+    CompositorSurfaceStorage storage{};
+};
+struct WindowTitleSurface {
+    uint32_t width{}, height{}, stride{};
+    uint64_t generation{};
+    CompositorSurfaceStorage storage{};
+};
+
 struct Window {
     uint16_t title[MICANT_WIN32K_TEXT_CAPACITY]{};
     uint64_t handle{};
@@ -94,30 +178,59 @@ struct Window {
     uint32_t style{}, extendedStyle{};
     uint32_t animationFlags{};
     uint32_t compositorSlot{UINT32_MAX};
+    CompositorSurfaceStorage surface{};
     uint64_t animationGeneration{};
     MicaWin32kRect taskbarButtonBounds{};
     MicaWin32kRect animationTarget{};
     uint64_t contentGeneration{};
     uint32_t activeWriters{};
-    struct WriterOwner { uint64_t processId{}; uint32_t count{}; };
-    WriterOwner writerOwners[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+    struct WriterOwner { uint64_t processId{}; uint32_t count{}; WriterOwner* next{}; };
+    WriterOwner* writerOwners{};
     int32_t dirtyLeft{}, dirtyTop{}, dirtyRight{}, dirtyBottom{};
     uint16_t classAtom{};
     uint64_t ownerProcessId{};
     uint64_t zOrder{};
     bool active{}, visible{}, iconic{}, maximized{};
     bool hasTaskbarButtonBounds{};
+    WindowIconImage iconImages[3]{};
+    WindowTitleSurface titleSurface{};
 };
 
-struct WindowIconImage {
-    uint32_t width{}, height{}, stride{};
-    uint64_t generation{};
-    uint32_t pixels[MICANT_COMPOSITOR_ICON_MAX_PIXELS]{};
-};
-struct WindowTitleSurface {
-    uint32_t width{}, height{}, stride{};
-    uint64_t generation{};
-    uint32_t pixels[MICANT_COMPOSITOR_TITLE_MAX_PIXELS]{};
+class WindowTable {
+public:
+    Window* begin() noexcept { return entries_; }
+    Window* end() noexcept { return entries_ ? entries_ + capacity_ : nullptr; }
+    const Window* begin() const noexcept { return entries_; }
+    const Window* end() const noexcept { return entries_ ? entries_ + capacity_ : nullptr; }
+    Window& operator[](size_t index) noexcept { return entries_[index]; }
+    const Window& operator[](size_t index) const noexcept { return entries_[index]; }
+    size_t capacity() const noexcept { return capacity_; }
+    Window* data() noexcept { return entries_; }
+
+    bool grow() noexcept {
+        const size_t nextCapacity = capacity_ ? capacity_ * 2 : 16;
+        if (nextCapacity < capacity_ || nextCapacity > SIZE_MAX / sizeof(Window)) return false;
+        auto* replacement = new (std::nothrow_t{}) Window[nextCapacity]{};
+        if (!replacement) return false;
+        for (size_t index = 0; index < capacity_; ++index)
+            replacement[index] = entries_[index];
+        delete[] entries_;
+        entries_ = replacement;
+        capacity_ = nextCapacity;
+        return true;
+    }
+
+    void releaseIfEmpty() noexcept {
+        for (size_t index = 0; index < capacity_; ++index)
+            if (entries_[index].active) return;
+        delete[] entries_;
+        entries_ = nullptr;
+        capacity_ = 0;
+    }
+
+private:
+    Window* entries_{};
+    size_t capacity_{};
 };
 
 struct QueuedMessage {
@@ -139,9 +252,7 @@ struct PointerGesture {
 };
 
 WindowClass g_classes[kClassCapacity]{};
-Window g_windows[kWindowCapacity]{};
-WindowIconImage g_windowIcons[kWindowCapacity][MICANT_COMPOSITOR_ICON_TYPES]{};
-WindowTitleSurface g_windowTitles[kWindowCapacity]{};
+WindowTable g_windows{};
 QueuedMessage g_messages[kMessageCapacity]{};
 uint16_t g_nextAtom{1};
 uint32_t g_nextGeneration{1};
@@ -152,31 +263,40 @@ uint64_t g_focusedWindowOwner{};
 uint64_t g_nextZOrder{};
 int32_t g_mouseX{-1}, g_mouseY{-1};
 bool g_mousePositionValid{};
-MicaWin32kRect g_cursorClip{0, 0, kScreenWidth, kScreenHeight};
+MicaWin32kRect g_cursorClip{};
 uint64_t g_cursorClipOwner{};
 int32_t g_cursorDisplayCount{1};
 uint64_t g_activeCursorHandle{};
 uint64_t g_activeCursorOwner{};
 uint32_t g_activeCursorWidth{16}, g_activeCursorHeight{16}, g_activeCursorPitch{16};
 uint32_t g_activeCursorHotX{}, g_activeCursorHotY{};
-uint32_t g_activeCursorPixels[MICANT_COMPOSITOR_CURSOR_MAX_PIXELS]{};
+CompositorSurfaceStorage g_activeCursorStorage{};
 bool g_defaultCursorInitialized{};
 constexpr uint16_t kDefaultArrowRows[16]{
     0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
     0xFF80,0xFCC0,0xCCC0,0x86C0,0x06C0,0x0360,0x0360,0x0000};
 
-void resetCursorImage() noexcept {
+void resetCursorImage(bool ownerAddressValid = false) noexcept {
+    if (g_activeCursorStorage.sectionReference && g_releaseCompositorSurface)
+        (void)g_releaseCompositorSurface(g_activeCursorStorage, ownerAddressValid);
+    g_activeCursorStorage = {};
     g_activeCursorHandle = 0;
     g_activeCursorOwner = 0;
     g_activeCursorWidth = g_activeCursorHeight = g_activeCursorPitch = 16;
     g_activeCursorHotX = g_activeCursorHotY = 0;
-    for (size_t i = 0; i < 16 * 16; ++i) g_activeCursorPixels[i] = 0;
+    if (!g_createCompositorSurface ||
+        g_createCompositorSurface(16, 16, g_activeCursorStorage) != NtStatus::Success) {
+        g_activeCursorWidth = g_activeCursorHeight = g_activeCursorPitch = 0;
+        return;
+    }
+    auto* pixels = reinterpret_cast<uint32_t*>(g_activeCursorStorage.ownerAddress);
+    std::fill_n(pixels, 16 * 16, 0u);
     for (uint32_t y = 0; y < 16; ++y) for (uint32_t x = 0; x < 16; ++x) {
         if (!(kDefaultArrowRows[y] & (0x8000u >> x))) continue;
         const bool edge = x == 0 || y == 0 ||
             !(kDefaultArrowRows[y] & (0x8000u >> (x - 1))) ||
             (y && !(kDefaultArrowRows[y - 1] & (0x8000u >> x)));
-        g_activeCursorPixels[y * 16 + x] = edge ? 0xFF000000u : 0xFFFFFFFFu;
+        pixels[y * 16 + x] = edge ? 0xFF000000u : 0xFFFFFFFFu;
     }
 }
 uint64_t g_captionCapture{};
@@ -186,7 +306,6 @@ uint64_t g_mouseCaptureOwner{};
 PointerGesture g_pointerGesture{};
 uint64_t g_cursorHitWindow{};
 int32_t g_cursorHitTest{};
-MicaCompositorMetadataStore* g_compositorStore{};
 MicaThemeSnapshot g_themeSnapshot{};
 MicaThemeCaptionImageSet g_themeCaptionImageSet{};
 uint64_t g_themeGeneration{};
@@ -227,7 +346,7 @@ bool windowScreenOrigin(const Window& window, int64_t& screenX,
     screenX = 0;
     screenY = 0;
     const Window* current = &window;
-    for (size_t depth = 0; depth < kWindowCapacity; ++depth) {
+    for (size_t depth = 0; depth < g_windows.capacity(); ++depth) {
         screenX += current->x;
         screenY += current->y;
         if (!current->parent) {
@@ -246,7 +365,7 @@ bool windowScreenOrigin(const Window& window, int64_t& screenX,
 
 bool hasVisibleAncestors(const Window& window) noexcept {
     const Window* current = &window;
-    for (size_t depth = 0; current->parent && depth < kWindowCapacity; ++depth) {
+    for (size_t depth = 0; current->parent && depth < g_windows.capacity(); ++depth) {
         const auto* parent = findWindowAny(current->parent);
         if (!parent || !parent->active || !parent->visible || parent->iconic ||
             parent->ownerProcessId != current->ownerProcessId) return false;
@@ -264,12 +383,32 @@ void clearPendingDamage() noexcept {
     }
 }
 
+bool ensurePendingDamageCapacity(size_t required) noexcept {
+    if (required <= g_pendingDirtyRegionCapacity) return true;
+    if (required > UINT32_MAX || required > SIZE_MAX / sizeof(MicaCompositorDirtyRect))
+        return false;
+    size_t next = g_pendingDirtyRegionCapacity ? g_pendingDirtyRegionCapacity : 16;
+    while (next < required) {
+        if (next > UINT32_MAX / 2u) { next = required; break; }
+        next *= 2;
+    }
+    if (next > SIZE_MAX / sizeof(MicaCompositorDirtyRect)) return false;
+    auto* replacement = new (std::nothrow_t{}) MicaCompositorDirtyRect[next]{};
+    if (!replacement) return false;
+    if (g_pendingDirtyRegionCount)
+        std::copy_n(g_pendingDirtyRegions, g_pendingDirtyRegionCount, replacement);
+    delete[] g_pendingDirtyRegions;
+    g_pendingDirtyRegions = replacement;
+    g_pendingDirtyRegionCapacity = next;
+    return true;
+}
+
 void markDamageRect(int64_t left, int64_t top,
                     int64_t right, int64_t bottom) noexcept {
     left = std::max<int64_t>(left, 0);
     top = std::max<int64_t>(top, 0);
-    right = std::min<int64_t>(right, kScreenWidth);
-    bottom = std::min<int64_t>(bottom, kScreenHeight);
+    right = std::min<int64_t>(right, g_screenWidth);
+    bottom = std::min<int64_t>(bottom, g_screenHeight);
     if (left >= right || top >= bottom) return;
     g_damageChangedSinceLastPublish = true;
     if (g_pendingFullRedraw) return;
@@ -294,7 +433,8 @@ void markDamageRect(int64_t left, int64_t top,
             g_pendingDirtyRegions[--g_pendingDirtyRegionCount];
         index = 0;
     }
-    if (g_pendingDirtyRegionCount == MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY) {
+    if (!ensurePendingDamageCapacity(
+            static_cast<size_t>(g_pendingDirtyRegionCount) + 1)) {
         g_pendingDirtyRegionCount = 0;
         g_pendingFullRedraw = true;
         return;
@@ -315,7 +455,22 @@ void markWindowBounds(const Window& window) noexcept {
     // The compositor's themed shadow extends beyond the HWND bounds. Include
     // that apron when a window moves, hides, minimizes, or is destroyed so its
     // old shadow pixels are repainted from the desktop and lower windows.
-    constexpr int64_t shadow = MICANT_COMPOSITOR_WINDOW_SHADOW_EXTENT;
+    int64_t shadow{};
+    // The compositor metadata view exists only in the compositor process.
+    // Window mutations can arrive from any client process, so damage
+    // calculation must use Win32k's kernel-owned theme snapshot.
+    if (MicaThemeSnapshotIsValid(&g_themeSnapshot, sizeof(g_themeSnapshot))) {
+        const auto& windowStyle =
+            g_themeSnapshot.styles[14u * MICANT_THEME_STATE_COUNT];
+        const auto& headerbarStyle =
+            g_themeSnapshot.styles[13u * MICANT_THEME_STATE_COUNT];
+        if ((windowStyle.flags & MICANT_THEME_HAS_RADIUS) &&
+            windowStyle.borderRadius)
+            shadow = windowStyle.borderRadius;
+        else if ((headerbarStyle.flags & MICANT_THEME_HAS_BACKGROUND) &&
+                 !window.maximized)
+            shadow = headerbarStyle.borderRadius;
+    }
     markDamageRect(left - shadow, top - shadow,
                    left + window.width + shadow,
                    top + window.height + shadow);
@@ -393,32 +548,64 @@ void markWindowClientDamage(Window& window, int64_t left, int64_t top,
 
 bool beginWindowWriter(Window& window, uint64_t processId) noexcept {
     if (!processId || window.activeWriters == UINT32_MAX) return false;
-    Window::WriterOwner* freeOwner = nullptr;
-    for (auto& owner : window.writerOwners) {
-        if (owner.processId == processId) {
-            if (owner.count == UINT32_MAX) return false;
-            ++owner.count;
+    for (auto* owner = window.writerOwners; owner; owner = owner->next) {
+        if (owner->processId == processId) {
+            if (owner->count == UINT32_MAX) return false;
+            ++owner->count;
             ++window.activeWriters;
             return true;
         }
-        if (!owner.processId && !freeOwner) freeOwner = &owner;
     }
-    if (!freeOwner) return false;
-    freeOwner->processId = processId;
-    freeOwner->count = 1;
+    auto* owner = new (std::nothrow_t{}) Window::WriterOwner{};
+    if (!owner) return false;
+    owner->processId = processId;
+    owner->count = 1;
+    owner->next = window.writerOwners;
+    window.writerOwners = owner;
     ++window.activeWriters;
     return true;
 }
 
 bool endWindowWriter(Window& window, uint64_t processId) noexcept {
-    for (auto& owner : window.writerOwners) {
-        if (owner.processId != processId || !owner.count) continue;
+    auto** link = &window.writerOwners;
+    while (*link) {
+        auto* owner = *link;
+        if (owner->processId != processId || !owner->count) {
+            link = &owner->next;
+            continue;
+        }
         if (!window.activeWriters) return false;
-        if (!--owner.count) owner.processId = 0;
+        if (!--owner->count) {
+            *link = owner->next;
+            delete owner;
+        }
         --window.activeWriters;
         return true;
     }
     return false;
+}
+
+void clearWindowWriters(Window& window) noexcept {
+    while (window.writerOwners) {
+        auto* owner = window.writerOwners;
+        window.writerOwners = owner->next;
+        delete owner;
+    }
+    window.activeWriters = 0;
+}
+
+void removeWindowWriterOwner(Window& window, uint64_t processId) noexcept {
+    auto** link = &window.writerOwners;
+    while (*link) {
+        auto* owner = *link;
+        if (owner->processId != processId) {
+            link = &owner->next;
+            continue;
+        }
+        window.activeWriters -= std::min(window.activeWriters, owner->count);
+        *link = owner->next;
+        delete owner;
+    }
 }
 
 uint8_t captionButtonAt(const Window& window, int32_t localX,
@@ -497,7 +684,8 @@ Window* findWindowAny(uint64_t handle) noexcept {
 }
 
 Window* rootWindow(Window* window) noexcept {
-    for (size_t depth = 0; window && window->parent && depth < kWindowCapacity; ++depth) {
+    for (size_t depth = 0; window && window->parent &&
+         depth < g_windows.capacity(); ++depth) {
         auto* parent = findWindowAny(window->parent);
         if (!parent || parent->ownerProcessId != window->ownerProcessId) break;
         window = parent;
@@ -509,14 +697,17 @@ bool ensureCompositorSlot(Window& window) noexcept {
     auto* root = rootWindow(&window);
     if (!root) return false;
     if (root->compositorSlot == UINT32_MAX) {
-        bool occupied[MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY]{};
-        for (const auto& candidate : g_windows)
-            if (candidate.active && candidate.compositorSlot <
-                MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY)
-                occupied[candidate.compositorSlot] = true;
         size_t slot = 0;
-        while (slot < MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY && occupied[slot]) ++slot;
-        if (slot == MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY) return false;
+        for (;;) {
+            bool occupied = false;
+            for (const auto& candidate : g_windows)
+                if (candidate.active && candidate.compositorSlot == slot) {
+                    occupied = true;
+                    break;
+                }
+            if (!occupied) break;
+            if (++slot == UINT32_MAX) return false;
+        }
         root->compositorSlot = static_cast<uint32_t>(slot);
     }
     window.compositorSlot = root->compositorSlot;
@@ -532,7 +723,7 @@ uint64_t visibleOrder(const Window& window) noexcept {
 }
 
 bool belongsToWindow(const Window* window, uint64_t ancestorHandle) noexcept {
-    for (size_t depth = 0; window && depth < kWindowCapacity; ++depth) {
+    for (size_t depth = 0; window && depth < g_windows.capacity(); ++depth) {
         if (window->handle == ancestorHandle) return true;
         window = findWindowAny(window->parent);
     }
@@ -755,9 +946,9 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
         top += dy;
         constexpr int64_t visibleCaption = 48;
         left = std::clamp<int64_t>(left, -width + visibleCaption,
-                                  static_cast<int64_t>(kScreenWidth) - visibleCaption);
+                                  static_cast<int64_t>(g_screenWidth) - visibleCaption);
         top = std::clamp<int64_t>(top, 0,
-                                 static_cast<int64_t>(kScreenHeight) - 28);
+                                 static_cast<int64_t>(g_screenHeight) - 28);
     } else {
         constexpr int32_t HTLEFT = 10, HTRIGHT = 11, HTTOP = 12;
         constexpr int32_t HTTOPLEFT = 13, HTTOPRIGHT = 14, HTBOTTOM = 15;
@@ -887,24 +1078,21 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
     const int64_t height = static_cast<int64_t>(request.args[5]);
     const int64_t x = static_cast<int64_t>(request.args[2]);
     const int64_t y = static_cast<int64_t>(request.args[3]);
-    if (width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
+    if (width <= 0 || height <= 0 || width > INT32_MAX || height > INT32_MAX ||
         x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX ||
         x + width > INT32_MAX || y + height > INT32_MAX) {
         return NtStatus::InvalidParameter;
     }
-    for (size_t index = 0; index < kWindowCapacity; ++index) {
+    size_t index = 0;
+    while (index < g_windows.capacity() && g_windows[index].active) ++index;
+    if (index == g_windows.capacity()) {
+        const size_t oldCapacity = g_windows.capacity();
+        if (!g_windows.grow()) return NtStatus::InsufficientResources;
+        index = oldCapacity;
+    }
+    {
         auto& window = g_windows[index];
-        if (window.active) continue;
         window = {};
-        for (auto& icon : g_windowIcons[index]) {
-            icon.width = icon.height = icon.stride = 0;
-            std::fill_n(icon.pixels, MICANT_COMPOSITOR_ICON_MAX_PIXELS, 0u);
-        }
-        g_windowTitles[index].width = 0;
-        g_windowTitles[index].height = 0;
-        g_windowTitles[index].stride = 0;
-        std::fill_n(g_windowTitles[index].pixels,
-                    MICANT_COMPOSITOR_TITLE_MAX_PIXELS, 0u);
         window.active = true;
         window.handle = makeHandle(index);
         window.parent = request.args[6];
@@ -936,28 +1124,41 @@ NtStatus setWindowIconData(MicaWin32kRequest& request,
                            uint32_t width, uint32_t height) noexcept {
     const uint32_t type = static_cast<uint32_t>(request.args[1]);
     const uint64_t icon = request.args[2];
-    if (type >= MICANT_COMPOSITOR_ICON_TYPES ||
+    if (type >= 3u ||
         (icon && (!pixels || !width || !height ||
-                  width > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
-                  height > MICANT_COMPOSITOR_ICON_MAX_DIMENSION)) ||
+                  height > SIZE_MAX / (static_cast<size_t>(width) * sizeof(uint32_t)))) ||
         (!icon && (pixels || width || height)))
         return NtStatus::InvalidParameter;
     StateLockGuard lock;
     auto* window = findWindow(request.args[0], ownerProcessId);
     if (!window) return NtStatus::InvalidHandle;
-    auto& image = g_windowIcons[static_cast<size_t>(window - g_windows)][type];
+    auto& image = window->iconImages[type];
     request.result = window->icons[type];
     window->icons[type] = icon;
+    CompositorSurfaceStorage replacement{};
+    if (icon) {
+        if (!g_createCompositorSurface) return NtStatus::DeviceNotReady;
+        const auto status = g_createCompositorSurface(width, height, replacement);
+        if (status != NtStatus::Success) return status;
+        std::copy_n(pixels, static_cast<size_t>(width) * height,
+                    reinterpret_cast<uint32_t*>(replacement.ownerAddress));
+    }
+    if (image.storage.sectionReference) {
+        if (!g_releaseCompositorSurface) {
+            if (replacement.sectionReference) (void)g_releaseCompositorSurface(replacement, true);
+            return NtStatus::DeviceNotReady;
+        }
+        const auto status = g_releaseCompositorSurface(image.storage, true);
+        if (status != NtStatus::Success) {
+            if (replacement.sectionReference) (void)g_releaseCompositorSurface(replacement, true);
+            return status;
+        }
+    }
+    image.storage = replacement;
     image.width = width;
     image.height = height;
     image.stride = width;
     if (++image.generation == 0) ++image.generation;
-    std::fill_n(image.pixels, MICANT_COMPOSITOR_ICON_MAX_PIXELS, 0u);
-    if (icon) {
-        for (uint32_t row = 0; row < height; ++row)
-            std::copy_n(pixels + static_cast<size_t>(row) * width, width,
-                        image.pixels + static_cast<size_t>(row) * width);
-    }
     markWindowBounds(*window);
     return NtStatus::Success;
 }
@@ -967,24 +1168,38 @@ NtStatus setWindowTitleSurface(MicaWin32kRequest& request,
                                uint32_t width, uint32_t height,
                                uint32_t stride) noexcept {
     if ((!pixels && (width || height || stride)) ||
-        (pixels && (!width || !height || width > MICANT_COMPOSITOR_TITLE_MAX_WIDTH ||
-                    height > MICANT_COMPOSITOR_TITLE_MAX_HEIGHT ||
-                    stride < width || stride > MICANT_COMPOSITOR_TITLE_MAX_WIDTH)))
+        (pixels && (!width || !height ||
+                    height > SIZE_MAX / (static_cast<size_t>(width) * sizeof(uint32_t)) ||
+                    stride < width ||
+                    height > SIZE_MAX / (static_cast<size_t>(stride) * sizeof(uint32_t)))) )
         return NtStatus::InvalidParameter;
     StateLockGuard lock;
     auto* window = findWindow(request.args[0], ownerProcessId);
     if (!window) return NtStatus::InvalidHandle;
-    auto& surface = g_windowTitles[static_cast<size_t>(window - g_windows)];
+    auto& surface = window->titleSurface;
+    CompositorSurfaceStorage replacement{};
+    if (pixels) {
+        if (!g_createCompositorSurface) return NtStatus::DeviceNotReady;
+        const auto status = g_createCompositorSurface(width, height, replacement);
+        if (status != NtStatus::Success) return status;
+        auto* destination = reinterpret_cast<uint32_t*>(replacement.ownerAddress);
+        for (uint32_t row = 0; row < height; ++row)
+            std::copy_n(pixels + static_cast<size_t>(row) * stride, width,
+                        destination + static_cast<size_t>(row) * width);
+    }
+    if (surface.storage.sectionReference) {
+        if (!g_releaseCompositorSurface) return NtStatus::DeviceNotReady;
+        const auto status = g_releaseCompositorSurface(surface.storage, true);
+        if (status != NtStatus::Success) {
+            if (replacement.sectionReference) (void)g_releaseCompositorSurface(replacement, true);
+            return status;
+        }
+    }
+    surface.storage = replacement;
     surface.width = width;
     surface.height = height;
     surface.stride = width;
     if (++surface.generation == 0) ++surface.generation;
-    std::fill_n(surface.pixels, MICANT_COMPOSITOR_TITLE_MAX_PIXELS, 0u);
-    if (pixels) {
-        for (uint32_t row = 0; row < height; ++row)
-            std::copy_n(pixels + static_cast<size_t>(row) * stride, width,
-                        surface.pixels + static_cast<size_t>(row) * width);
-    }
     markWindowBounds(*window);
     request.result = surface.generation;
     return NtStatus::Success;
@@ -1018,6 +1233,32 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 root->width - rootFrame * 2);
             const int32_t rootClientHeight = std::max(1,
                 root->height - rootFrame * 2 - rootCaption);
+            if (root->surface.sectionReference &&
+                (root->surface.width != static_cast<uint32_t>(rootClientWidth) ||
+                 root->surface.height != static_cast<uint32_t>(rootClientHeight))) {
+                if (!g_releaseCompositorSurface) return NtStatus::DeviceNotReady;
+                const auto releaseStatus = g_releaseCompositorSurface(root->surface, true);
+                if (releaseStatus != NtStatus::Success) return releaseStatus;
+                root->surface = {};
+            }
+            if (!root->surface.sectionReference) {
+                if (!g_createCompositorSurface) return NtStatus::DeviceNotReady;
+                const auto surfaceStatus = g_createCompositorSurface(
+                    static_cast<uint32_t>(rootClientWidth),
+                    static_cast<uint32_t>(rootClientHeight), root->surface);
+                if (surfaceStatus != NtStatus::Success) return surfaceStatus;
+                if (!root->surface.sectionReference || !root->surface.ownerAddress ||
+                    !root->surface.compositorAddress ||
+                    root->surface.width != static_cast<uint32_t>(rootClientWidth) ||
+                    root->surface.height != static_cast<uint32_t>(rootClientHeight) ||
+                    root->surface.pitch < root->surface.width ||
+                    !root->surface.sizeBytes) {
+                    if (g_releaseCompositorSurface)
+                        (void)g_releaseCompositorSurface(root->surface, true);
+                    root->surface = {};
+                    return NtStatus::Unsuccessful;
+                }
+            }
             const int64_t clientX = window == root ? 0
                 : windowX - rootX - rootFrame + frame;
             const int64_t clientY = window == root ? 0
@@ -1026,7 +1267,11 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 clientX + clientWidth > rootClientWidth ||
                 clientY + clientHeight > rootClientHeight)
                 return NtStatus::InvalidParameter;
-            request.result = static_cast<uint64_t>(root->compositorSlot) + 1;
+            request.result = 1;
+            request.args[1] = root->surface.pitch;
+            request.args[2] = root->surface.height;
+            request.args[3] = root->surface.ownerAddress;
+            request.args[4] = root->surface.width;
             request.rect = {static_cast<int32_t>(clientX), static_cast<int32_t>(clientY),
                 static_cast<int32_t>(clientX + clientWidth),
                 static_cast<int32_t>(clientY + clientHeight)};
@@ -1079,6 +1324,25 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_DESTROY_WINDOW: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
+            if (!window->parent && window->surface.sectionReference) {
+                if (!g_releaseCompositorSurface) return NtStatus::DeviceNotReady;
+                const auto releaseStatus = g_releaseCompositorSurface(window->surface, true);
+                if (releaseStatus != NtStatus::Success) return releaseStatus;
+                window->surface = {};
+            }
+            for (auto& icon : window->iconImages) {
+                if (icon.storage.sectionReference && g_releaseCompositorSurface) {
+                    const auto releaseStatus = g_releaseCompositorSurface(icon.storage, true);
+                    if (releaseStatus != NtStatus::Success) return releaseStatus;
+                }
+                icon = {};
+            }
+            auto& titleSurface = window->titleSurface;
+            if (titleSurface.storage.sectionReference && g_releaseCompositorSurface) {
+                const auto releaseStatus = g_releaseCompositorSurface(titleSurface.storage, true);
+                if (releaseStatus != NtStatus::Success) return releaseStatus;
+            }
+            titleSurface = {};
             auto* oldFocus = findWindowAny(g_focusedWindow);
             const bool wasFocus = belongsToWindow(oldFocus, window->handle);
             const bool wasForeground = g_foregroundWindow == window->handle;
@@ -1097,6 +1361,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 g_mouseCaptureWindow = 0;
                 g_mouseCaptureOwner = 0;
             }
+            clearWindowWriters(*window);
             window->active = false;
             if (wasFocus && !wasForeground) {
                 if (auto* parent = rootWindow(findWindowAny(window->parent));
@@ -1109,6 +1374,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                     (void)activateWindow(next);
                 }
             }
+            g_windows.releaseIfEmpty();
             request.result = 1;
             return NtStatus::Success;
         }
@@ -1163,7 +1429,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (!window || window->parent) return NtStatus::InvalidHandle;
             const auto& bounds = request.rect;
             if (bounds.left < 0 || bounds.top < 0 ||
-                bounds.right > kScreenWidth || bounds.bottom > kScreenHeight ||
+                bounds.right > g_screenWidth || bounds.bottom > g_screenHeight ||
                 bounds.left >= bounds.right || bounds.top >= bounds.bottom)
                 return NtStatus::InvalidParameter;
             window->taskbarButtonBounds = bounds;
@@ -1292,8 +1558,17 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_ENUM_WINDOWS: {
+            const size_t first = static_cast<size_t>(request.args[0]);
+            const size_t requested = request.args[1]
+                ? static_cast<size_t>(request.args[1])
+                : MICANT_WIN32K_ENUM_BATCH_CAPACITY;
+            const size_t capacity = std::min<size_t>(requested,
+                MICANT_WIN32K_ENUM_BATCH_CAPACITY);
+            size_t ordinal = 0;
             for (const auto& window : g_windows) {
                 if (!window.active || window.parent) continue;
+                if (ordinal++ < first) continue;
+                if (request.result == capacity) break;
                 request.windowHandles[request.result++] = window.handle;
             }
             return NtStatus::Success;
@@ -1408,8 +1683,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             const int32_t requestedY = static_cast<int32_t>(request.args[1]);
             const int32_t left = std::max(0, g_cursorClip.left);
             const int32_t top = std::max(0, g_cursorClip.top);
-            const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
-            const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
+            const int32_t right = std::min(g_screenWidth, g_cursorClip.right);
+            const int32_t bottom = std::min(g_screenHeight, g_cursorClip.bottom);
             if (right <= left || bottom <= top) return NtStatus::InvalidParameter;
             const int32_t newX = std::clamp(requestedX, left, right - 1);
             const int32_t newY = std::clamp(requestedY, top, bottom - 1);
@@ -1425,15 +1700,15 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_SET_CURSOR_CLIP: {
             if (request.args[0] == 0) {
                 if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
-                g_cursorClip = {0, 0, kScreenWidth, kScreenHeight};
+                g_cursorClip = {0, 0, g_screenWidth, g_screenHeight};
                 g_cursorClipOwner = 0;
                 if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
                 request.result = 1;
                 return NtStatus::Success;
             }
             const auto rect = request.rect;
-            if (rect.left < 0 || rect.top < 0 || rect.right > kScreenWidth ||
-                rect.bottom > kScreenHeight || rect.right <= rect.left || rect.bottom <= rect.top)
+            if (rect.left < 0 || rect.top < 0 || rect.right > g_screenWidth ||
+                rect.bottom > g_screenHeight || rect.right <= rect.left || rect.bottom <= rect.top)
                 return NtStatus::InvalidParameter;
             if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
             g_cursorClip = rect;
@@ -1511,20 +1786,23 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         for (auto& window : g_windows) {
             if (!window.active || window.ownerProcessId != ownerProcessId) continue;
             markWindowBounds(window);
-            window.activeWriters = 0;
-            for (auto& writerOwner : window.writerOwners) writerOwner = {};
-            if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
-            const size_t windowIndex = static_cast<size_t>(&window - g_windows);
-            for (auto& icon : g_windowIcons[windowIndex])
-            {
-                icon.width = icon.height = icon.stride = 0;
-                std::fill_n(icon.pixels, MICANT_COMPOSITOR_ICON_MAX_PIXELS, 0u);
+            if (!window.parent && window.surface.sectionReference &&
+                g_releaseCompositorSurface) {
+                // Ps has already removed the terminating process's views.
+                if (g_releaseCompositorSurface(window.surface, false) == NtStatus::Success)
+                    window.surface = {};
             }
-            g_windowTitles[windowIndex].width = 0;
-            g_windowTitles[windowIndex].height = 0;
-            g_windowTitles[windowIndex].stride = 0;
-            std::fill_n(g_windowTitles[windowIndex].pixels,
-                        MICANT_COMPOSITOR_TITLE_MAX_PIXELS, 0u);
+            clearWindowWriters(window);
+            if (g_foregroundWindow == window.handle) g_foregroundWindow = 0;
+            for (auto& icon : window.iconImages) {
+                if (icon.storage.sectionReference && g_releaseCompositorSurface)
+                    (void)g_releaseCompositorSurface(icon.storage, false);
+                icon = {};
+            }
+            auto& title = window.titleSurface;
+            if (title.storage.sectionReference && g_releaseCompositorSurface)
+                (void)g_releaseCompositorSurface(title.storage, false);
+            title = {};
             window = {};
         }
         if (g_focusedWindowOwner == ownerProcessId) {
@@ -1537,12 +1815,7 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         }
         for (auto& window : g_windows) {
             if (!window.active) continue;
-            for (auto& writerOwner : window.writerOwners) {
-                if (writerOwner.processId != ownerProcessId) continue;
-                window.activeWriters -= std::min(window.activeWriters,
-                                                  writerOwner.count);
-                writerOwner = {};
-            }
+            removeWindowWriterOwner(window, ownerProcessId);
         }
         if (g_pointerGesture.window) {
             const auto* gestureWindow = findWindowAny(g_pointerGesture.window);
@@ -1563,7 +1836,7 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         for (auto& windowClass : g_classes)
             if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
         if (g_cursorClipOwner == ownerProcessId) {
-            g_cursorClip = {0, 0, kScreenWidth, kScreenHeight};
+            g_cursorClip = {0, 0, g_screenWidth, g_screenHeight};
             g_cursorClipOwner = 0;
         }
         if (g_activeCursorOwner == ownerProcessId) {
@@ -1579,8 +1852,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     StateLockGuard lock;
     const int32_t left = std::max(0, g_cursorClip.left);
     const int32_t top = std::max(0, g_cursorClip.top);
-    const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
-    const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
+    const int32_t right = std::min(g_screenWidth, g_cursorClip.right);
+    const int32_t bottom = std::min(g_screenHeight, g_cursorClip.bottom);
     const int32_t x = std::clamp(event.x, left, std::max(left, right - 1));
     const int32_t y = std::clamp(event.y, top, std::max(top, bottom - 1));
     const int32_t oldMouseX = g_mouseX;
@@ -1694,8 +1967,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
                 captured->restoreHeight = captured->height;
                 captured->x = 0;
                 captured->y = 0;
-                captured->width = MICANT_COMPOSITOR_SCREEN_WIDTH;
-                captured->height = MICANT_COMPOSITOR_SCREEN_HEIGHT - 40;
+                captured->width = g_screenWidth;
+                captured->height = std::max(1, g_screenHeight - 40);
                 captured->maximized = true;
             } else {
                 captured->x = captured->restoreX;
@@ -1781,8 +2054,8 @@ void initializeCursorPosition(int32_t x, int32_t y) noexcept {
     StateLockGuard lock;
     const int32_t left = std::max(0, g_cursorClip.left);
     const int32_t top = std::max(0, g_cursorClip.top);
-    const int32_t right = std::min(kScreenWidth, g_cursorClip.right);
-    const int32_t bottom = std::min(kScreenHeight, g_cursorClip.bottom);
+    const int32_t right = std::min(g_screenWidth, g_cursorClip.right);
+    const int32_t bottom = std::min(g_screenHeight, g_cursorClip.bottom);
     x = std::clamp(x, left, std::max(left, right - 1));
     y = std::clamp(y, top, std::max(top, bottom - 1));
     if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
@@ -1812,14 +2085,27 @@ bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
 }
 
 void bindCompositorStore(MicaCompositorMetadataStore* store,
-                         void (*publishCallback)() noexcept) noexcept {
+                         void (*publishCallback)() noexcept,
+                         uint32_t* compositorDecorPixels,
+                         CreateCompositorSurface createSurface,
+                         ReleaseCompositorSurface releaseSurface) noexcept {
     StateLockGuard lock;
+    g_createCompositorSurface = createSurface;
+    g_releaseCompositorSurface = releaseSurface;
     if (!g_defaultCursorInitialized) {
-        resetCursorImage();
+        resetCursorImage(false);
         g_defaultCursorInitialized = true;
     }
     g_compositorStore = store;
+    (void)compositorDecorPixels;
     g_compositorPublishCallback = publishCallback;
+    if (store && store->screenWidth && store->screenHeight &&
+        store->screenWidth <= static_cast<uint32_t>(INT32_MAX) &&
+        store->screenHeight <= static_cast<uint32_t>(INT32_MAX)) {
+        g_screenWidth = static_cast<int32_t>(store->screenWidth);
+        g_screenHeight = static_cast<int32_t>(store->screenHeight);
+        g_cursorClip = {0, 0, g_screenWidth, g_screenHeight};
+    }
     g_pendingDirtyRegionCount = 0;
     g_pendingFullRedraw = true;
     g_damageChangedSinceLastPublish = true;
@@ -1836,10 +2122,48 @@ void publishCompositorSurfaces() noexcept {
         &store->frameSequence, __ATOMIC_ACQUIRE);
     const uint64_t acknowledged = __atomic_load_n(
         &store->compositorAckSequence, __ATOMIC_ACQUIRE);
+    reapRetiredMetadataStorage(acknowledged);
     if (!g_damageChangedSinceLastPublish && previousSequence &&
         !(previousSequence & 1u) && acknowledged == previousSequence)
         clearPendingDamage();
+    size_t rootEntryCount = 0;
+    size_t childEntryCount = 0;
+    for (const auto& candidate : g_windows) {
+        if (!candidate.active) continue;
+        if (candidate.parent) {
+            ++childEntryCount;
+        } else if (candidate.compositorSlot != UINT32_MAX) {
+            rootEntryCount = std::max(rootEntryCount,
+                static_cast<size_t>(candidate.compositorSlot) + 1);
+        }
+    }
+    const size_t requiredSurfaceEntries = rootEntryCount + childEntryCount;
+    const size_t requiredDirtyEntries = g_pendingFullRedraw
+        ? 0 : g_pendingDirtyRegionCount;
+    if ((requiredSurfaceEntries && !ensureMetadataArray<MicaCompositorSurfaceInfo>(
+            g_surfaceMetadataStorage, g_surfaceMetadataCapacity,
+            requiredSurfaceEntries)) ||
+        (requiredDirtyEntries && !ensureMetadataArray<MicaCompositorDirtyRect>(
+            g_dirtyMetadataStorage, g_dirtyMetadataCapacity, requiredDirtyEntries))) {
+        g_pendingFullRedraw = true;
+        g_damageChangedSinceLastPublish = true;
+        return;
+    }
+    auto* surfaceInfos = g_surfaceMetadataStorage.ownerAddress
+        ? reinterpret_cast<MicaCompositorSurfaceInfo*>(
+            g_surfaceMetadataStorage.ownerAddress) : nullptr;
+    auto* dirtyInfos = g_dirtyMetadataStorage.ownerAddress
+        ? reinterpret_cast<MicaCompositorDirtyRect*>(
+            g_dirtyMetadataStorage.ownerAddress) : nullptr;
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_ACQ_REL);
+    store->surfaces = g_surfaceMetadataStorage.compositorAddress
+        ? reinterpret_cast<MicaCompositorSurfaceInfo*>(
+            g_surfaceMetadataStorage.compositorAddress) : nullptr;
+    store->surfaceArraySizeBytes = g_surfaceMetadataStorage.sizeBytes;
+    store->dirtyRegions = g_dirtyMetadataStorage.compositorAddress
+        ? reinterpret_cast<MicaCompositorDirtyRect*>(
+            g_dirtyMetadataStorage.compositorAddress) : nullptr;
+    store->dirtyRegionArraySizeBytes = g_dirtyMetadataStorage.sizeBytes;
     if (store->themeGeneration != g_themeGeneration) {
         store->theme = g_themeSnapshot;
         store->captionImageSet = g_themeCaptionImageSet;
@@ -1854,15 +2178,16 @@ void publishCompositorSurfaces() noexcept {
     cursor.pitch = g_activeCursorPitch;
     cursor.hotX = g_activeCursorHotX;
     cursor.hotY = g_activeCursorHotY;
+    cursor.pixelsAddress = g_activeCursorStorage.compositorAddress;
+    cursor.pixelSizeBytes = g_activeCursorStorage.sizeBytes;
     cursor.flags = (g_activeCursorWidth && g_activeCursorHeight
         ? MICANT_COMPOSITOR_CURSOR_ACTIVE : 0u) |
         (g_cursorDisplayCount >= 0 && g_mousePositionValid
             ? MICANT_COMPOSITOR_CURSOR_VISIBLE : 0u);
-    if (g_activeCursorWidth && g_activeCursorHeight)
-        for (size_t i = 0; i < size_t(g_activeCursorPitch) * g_activeCursorHeight; ++i)
-            cursor.pixels[i] = g_activeCursorPixels[i];
-    for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
-        auto& info = store->surfaces[index];
+    const size_t clearSurfaceCount = std::max(g_lastPublishedSurfaceCount,
+        requiredSurfaceEntries);
+    for (size_t index = 0; index < clearSurfaceCount; ++index) {
+        auto& info = surfaceInfos[index];
         info = {};
         const Window* windowPointer = nullptr;
         for (const auto& candidate : g_windows)
@@ -1883,7 +2208,9 @@ void publishCompositorSurfaces() noexcept {
         info.y = static_cast<int32_t>(screenY);
         info.width = static_cast<uint32_t>(window.width);
         info.height = static_cast<uint32_t>(window.height);
-        info.pitch = MICANT_COMPOSITOR_SCREEN_WIDTH;
+        info.pitch = window.surface.pitch;
+        info.surfaceAddress = window.surface.compositorAddress;
+        info.surfaceSizeBytes = window.surface.sizeBytes;
         info.zOrder = static_cast<uint32_t>(visibleOrder(window));
         const uint8_t hoveredCaptionButton = g_cursorHitWindow == window.handle
             ? captionButtonAt(window,
@@ -1907,46 +2234,33 @@ void publishCompositorSurfaces() noexcept {
                     (static_cast<uint32_t>(hoveredCaptionButton) <<
                      MICANT_COMPOSITOR_SURFACE_CAPTION_HOVER_SHIFT)
                 : 0u);
-        info.pixelOffset = static_cast<uint32_t>(index * MICANT_COMPOSITOR_SURFACE_PIXELS);
-        const size_t windowIndex = static_cast<size_t>(&window - g_windows);
+        info.surfaceSourceX = 0;
+        info.surfaceSourceY = 0;
         const WindowIconImage* icon = nullptr;
         uint32_t iconType = 0;
-        for (; iconType < MICANT_COMPOSITOR_ICON_TYPES; ++iconType) {
-            const auto& candidate = g_windowIcons[windowIndex][iconType];
+        for (; iconType < 3u; ++iconType) {
+            const auto& candidate = window.iconImages[iconType];
             if (candidate.width && candidate.height) {
                 icon = &candidate;
                 break;
             }
         }
-        if (icon) {
-            const uint64_t iconOffset = MICANT_COMPOSITOR_ICON_PIXEL_OFFSET +
-                (static_cast<uint64_t>(index) * MICANT_COMPOSITOR_ICON_TYPES +
-                 iconType) * MICANT_COMPOSITOR_ICON_MAX_PIXELS;
-            info.iconPixelOffset = static_cast<uint32_t>(iconOffset);
+        if (icon && icon->storage.compositorAddress) {
             info.iconWidth = icon->width;
             info.iconHeight = icon->height;
             info.iconStride = icon->stride;
             info.iconGeneration = icon->generation;
-            auto* sharedPixels = reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_DECOR_PIXELS_BASE) +
-                iconOffset;
-            for (uint32_t row = 0; row < icon->height; ++row)
-                std::copy_n(icon->pixels + static_cast<size_t>(row) * icon->stride,
-                            icon->width, sharedPixels + static_cast<size_t>(row) * icon->stride);
+            info.iconAddress = icon->storage.compositorAddress;
+            info.iconSizeBytes = icon->storage.sizeBytes;
         }
-        const auto& title = g_windowTitles[windowIndex];
-        if (title.width && title.height) {
-            const uint64_t titleOffset = MICANT_COMPOSITOR_TITLE_PIXEL_OFFSET +
-                static_cast<uint64_t>(index) * MICANT_COMPOSITOR_TITLE_MAX_PIXELS;
-            info.titlePixelOffset = static_cast<uint32_t>(titleOffset);
+        const auto& title = window.titleSurface;
+        if (title.width && title.height && title.storage.compositorAddress) {
             info.titleWidth = title.width;
             info.titleHeight = title.height;
             info.titleStride = title.stride;
             info.titleGeneration = title.generation;
-            auto* sharedPixels = reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_DECOR_PIXELS_BASE) +
-                titleOffset;
-            for (uint32_t row = 0; row < title.height; ++row)
-                std::copy_n(title.pixels + static_cast<size_t>(row) * title.stride,
-                            title.width, sharedPixels + static_cast<size_t>(row) * title.stride);
+            info.titleAddress = title.storage.compositorAddress;
+            info.titleSizeBytes = title.storage.sizeBytes;
         }
         info.dirtyLeft = window.dirtyLeft;
         info.dirtyTop = window.dirtyTop;
@@ -1962,9 +2276,6 @@ void publishCompositorSurfaces() noexcept {
             window.animationTarget.left, window.animationTarget.top,
             window.animationTarget.right, window.animationTarget.bottom};
         info.animationGeneration = window.animationGeneration;
-        for (size_t character = 0; character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
-             window.title[character]; ++character)
-            info.title[character] = window.title[character];
     }
     // Child HWNDs share their root window's pixel block. Publish their client
     // rectangles as metadata layers so the compositor's existing child overlay
@@ -1973,12 +2284,14 @@ void publishCompositorSurfaces() noexcept {
         if (!window.active || !window.parent || !window.visible ||
             !hasVisibleAncestors(window)) continue;
         auto* root = rootWindow(const_cast<Window*>(&window));
-        if (!root || root->compositorSlot >= MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY)
+        if (!root || root->compositorSlot >= rootEntryCount ||
+            !root->surface.compositorAddress || !root->surface.pitch ||
+            !root->surface.sizeBytes)
             continue;
         size_t metadataIndex = 0;
-        while (metadataIndex < MICANT_COMPOSITOR_SURFACE_CAPACITY &&
-               store->surfaces[metadataIndex].window) ++metadataIndex;
-        if (metadataIndex == MICANT_COMPOSITOR_SURFACE_CAPACITY) break;
+        while (metadataIndex < requiredSurfaceEntries &&
+               surfaceInfos[metadataIndex].window) ++metadataIndex;
+        if (metadataIndex == requiredSurfaceEntries) break;
 
         int64_t windowX{}, windowY{}, rootX{}, rootY{};
         if (!windowScreenOrigin(window, windowX, windowY) ||
@@ -1999,7 +2312,7 @@ void publishCompositorSurfaces() noexcept {
             clientX + clientWidth > rootClientWidth ||
             clientY + clientHeight > rootClientHeight) continue;
 
-        auto& info = store->surfaces[metadataIndex];
+        auto& info = surfaceInfos[metadataIndex];
         info.window = window.handle;
         info.parentWindow = window.parent;
         info.ownerProcessId = window.ownerProcessId;
@@ -2007,28 +2320,30 @@ void publishCompositorSurfaces() noexcept {
         info.y = static_cast<int32_t>(windowY + frame + caption);
         info.width = static_cast<uint32_t>(clientWidth);
         info.height = static_cast<uint32_t>(clientHeight);
-        info.pitch = MICANT_COMPOSITOR_SCREEN_WIDTH;
+        info.pitch = root->surface.pitch;
+        info.surfaceAddress = root->surface.compositorAddress;
+        info.surfaceSizeBytes = root->surface.sizeBytes;
         info.zOrder = static_cast<uint32_t>(visibleOrder(window));
         info.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
             MICANT_COMPOSITOR_SURFACE_VISIBLE;
-        info.pixelOffset = static_cast<uint32_t>(
-            root->compositorSlot * MICANT_COMPOSITOR_SURFACE_PIXELS +
-            clientY * MICANT_COMPOSITOR_SCREEN_WIDTH + clientX);
+        if (clientX > UINT32_MAX || clientY > UINT32_MAX) continue;
+        info.surfaceSourceX = static_cast<uint32_t>(clientX);
+        info.surfaceSourceY = static_cast<uint32_t>(clientY);
         info.activeWriters = window.activeWriters;
         info.style = window.style;
         info.contentGeneration = window.contentGeneration;
-        for (size_t character = 0;
-             character + 1 < sizeof(info.title) / sizeof(info.title[0]) &&
-             window.title[character]; ++character)
-            info.title[character] = window.title[character];
     }
+    size_t publishedSurfaceCount = 0;
+    for (size_t index = 0; index < clearSurfaceCount; ++index)
+        if (surfaceInfos[index].window) publishedSurfaceCount = index + 1;
+    store->surfaceEntryCount = static_cast<uint32_t>(publishedSurfaceCount);
+    g_lastPublishedSurfaceCount = publishedSurfaceCount;
     store->dirtyRegionCount = g_pendingFullRedraw
         ? 0u : g_pendingDirtyRegionCount;
     store->dirtyFlags = g_pendingFullRedraw
         ? MICANT_COMPOSITOR_DIRTY_FULL : 0u;
-    for (size_t index = 0; index < MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY; ++index)
-        store->dirtyRegions[index] = index < store->dirtyRegionCount
-            ? g_pendingDirtyRegions[index] : MicaCompositorDirtyRect{};
+    for (size_t index = 0; index < store->dirtyRegionCount; ++index)
+        dirtyInfos[index] = g_pendingDirtyRegions[index];
     __atomic_add_fetch(&store->frameSequence, 1, __ATOMIC_RELEASE);
     g_damageChangedSinceLastPublish = false;
     }
@@ -2068,38 +2383,84 @@ micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence,
 }
 
 micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
+                                const uint32_t* pixels,
                                 uint64_t ownerProcessId) noexcept {
     if (!ownerProcessId || image.size != sizeof(image) ||
         image.version != MICANT_WIN32K_CURSOR_IMAGE_VERSION) return NtStatus::InvalidParameter;
     if (!image.cursorHandle) {
-        if (image.width || image.height || image.pitch || image.hotX || image.hotY)
+        if (image.width || image.height || image.pitch || image.hotX || image.hotY ||
+            image.pixelsAddress || image.pixelSizeBytes || pixels)
             return NtStatus::InvalidParameter;
     } else if (!image.width || !image.height ||
-        image.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        image.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        image.pitch != image.width || image.hotX >= image.width || image.hotY >= image.height) {
+        !pixels || image.pitch < image.width ||
+        image.height > SIZE_MAX / (static_cast<size_t>(image.pitch) * sizeof(uint32_t)) ||
+        image.hotX >= image.width || image.hotY >= image.height) {
         return NtStatus::InvalidParameter;
     }
-    for (size_t i = 0; i < size_t(image.pitch) * image.height; ++i) {
-        const uint32_t pixel = image.pixels[i];
-        const uint32_t alpha = pixel >> 24;
-        if (((pixel >> 16) & 0xFFu) > alpha || ((pixel >> 8) & 0xFFu) > alpha ||
-            (pixel & 0xFFu) > alpha) return NtStatus::InvalidParameter;
+    if (!image.cursorHandle) {
+        StateLockGuard lock;
+        if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+        if (g_activeCursorStorage.sectionReference) {
+            const auto releaseStatus = g_releaseCompositorSurface
+                ? g_releaseCompositorSurface(g_activeCursorStorage,
+                    g_activeCursorOwner == ownerProcessId)
+                : NtStatus::DeviceNotReady;
+            if (releaseStatus != NtStatus::Success) return releaseStatus;
+        }
+        g_activeCursorStorage = {};
+        g_activeCursorHandle = 0;
+        g_activeCursorOwner = 0;
+        resetCursorImage(false);
+        if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+        return g_activeCursorStorage.sectionReference
+            ? NtStatus::Success : NtStatus::InsufficientResources;
+    }
+    const size_t requiredBytes = static_cast<size_t>(image.pitch) * image.height *
+        sizeof(uint32_t);
+    if (image.pixelSizeBytes < requiredBytes ||
+        requiredBytes > static_cast<size_t>(INT64_MAX))
+        return NtStatus::InvalidParameter;
+    CompositorSurfaceStorage replacement{};
+    if (!g_createCompositorSurface) return NtStatus::DeviceNotReady;
+    const auto allocationStatus = g_createCompositorSurface(
+        image.width, image.height, replacement);
+    if (allocationStatus != NtStatus::Success) return allocationStatus;
+    auto* destination = reinterpret_cast<uint32_t*>(replacement.ownerAddress);
+    for (uint32_t y = 0; y < image.height; ++y) {
+        for (uint32_t x = 0; x < image.width; ++x) {
+            const uint32_t pixel = pixels[static_cast<size_t>(y) * image.pitch + x];
+            const uint32_t alpha = pixel >> 24;
+            if (((pixel >> 16) & 0xFFu) > alpha || ((pixel >> 8) & 0xFFu) > alpha ||
+                (pixel & 0xFFu) > alpha) {
+                if (g_releaseCompositorSurface)
+                    (void)g_releaseCompositorSurface(replacement, true);
+                return NtStatus::InvalidParameter;
+            }
+            destination[static_cast<size_t>(y) * image.width + x] = pixel;
+        }
     }
     StateLockGuard lock;
+    if (g_activeCursorStorage.sectionReference) {
+        const auto releaseStatus = g_releaseCompositorSurface
+            ? g_releaseCompositorSurface(g_activeCursorStorage,
+                g_activeCursorOwner == ownerProcessId)
+            : NtStatus::DeviceNotReady;
+        if (releaseStatus != NtStatus::Success) {
+            if (g_releaseCompositorSurface)
+                (void)g_releaseCompositorSurface(replacement, true);
+            return releaseStatus;
+        }
+    }
     if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
     g_activeCursorHandle = image.cursorHandle;
     g_activeCursorOwner = image.cursorHandle ? ownerProcessId : 0;
     if (image.cursorHandle) {
         g_activeCursorWidth = image.width;
         g_activeCursorHeight = image.height;
-        g_activeCursorPitch = image.pitch;
+        g_activeCursorPitch = image.width;
         g_activeCursorHotX = image.hotX;
         g_activeCursorHotY = image.hotY;
-        for (size_t i = 0; i < size_t(image.pitch) * image.height; ++i)
-            g_activeCursorPixels[i] = image.pixels[i];
-    } else {
-        resetCursorImage();
+        g_activeCursorStorage = replacement;
     }
     if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
     return NtStatus::Success;

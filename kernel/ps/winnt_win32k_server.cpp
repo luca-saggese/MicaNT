@@ -7,9 +7,11 @@
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/compositor_surface.h"
 #include "micant/shared/pixel_composite.h"
+#include "micant/shared/native_nt_api.hpp"
 
 #include <cstdint>
 #include <algorithm>
+
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
@@ -17,18 +19,10 @@ extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 
 namespace {
 
-constexpr uint32_t kScreenWidth = 1024;
-constexpr uint32_t kScreenHeight = 768;
-constexpr size_t kScreenPixels =
-    static_cast<size_t>(kScreenWidth) * kScreenHeight;
-// Keep the fixed backing store bounded for the 512 MiB desktop profile. The
-// compositor owns scanout and window surfaces; this arena holds active GDI
-// DIBs only, with room for a desktop-sized bitmap and several smaller windows.
-constexpr size_t kPixelCapacity = 1536u * 1024u;
+
 constexpr size_t kDcCapacity = 32;
 constexpr size_t kBitmapCapacity = 32;
 constexpr uint64_t kHandleTag = 0x4D574B0000000000ULL;
-constexpr size_t kSurfacePixels = MICANT_COMPOSITOR_SURFACE_PIXELS;
 
 struct DeviceContext {
     uint64_t handle{};
@@ -36,6 +30,7 @@ struct DeviceContext {
     void* window{};
     uint32_t bitmap{};
     uint32_t defaultPixel{};
+    uint32_t surfacePitch{};
     bool memory{};
     bool active{};
     bool windowUpdateActive{};
@@ -44,13 +39,14 @@ struct DeviceContext {
 
 struct Bitmap {
     uint64_t handle{};
-    uint32_t pixelOffset{};
     uint32_t width{}, height{};
+    uint32_t* pixels{};
     bool active{};
 };
 
-uint32_t g_screenPixels[kScreenPixels]{};
-uint32_t g_pixelArena[kPixelCapacity]{};
+uint32_t* g_screenPixels{};
+size_t g_screenPixelCount{};
+uint32_t g_screenWidth{}, g_screenHeight{}, g_screenPitch{};
 DeviceContext g_contexts[kDcCapacity]{};
 Bitmap g_bitmaps[kBitmapCapacity]{};
 uint32_t g_nextHandle{1};
@@ -96,44 +92,68 @@ DeviceContext* allocateContext(void* window, bool memory) noexcept {
 
 bool request(uint32_t operation, MicaWin32kRequest& value) noexcept;
 
+uint32_t* allocateUserPixels(size_t count) noexcept {
+    if (!count || count > SIZE_MAX / sizeof(uint32_t)) return nullptr;
+    void* base = nullptr;
+    size_t bytes = count * sizeof(uint32_t);
+    if (micant::native_nt::NtAllocateVirtualMemory(micant::InvalidHandleValue,
+            &base, 0, &bytes, 0x3000u, 0x04u) != micant::NtStatus::Success || !base)
+        return nullptr;
+    return static_cast<uint32_t*>(base);
+}
+
+void releaseUserPixels(uint32_t*& pixels) noexcept {
+    if (!pixels) return;
+    void* base = pixels;
+    size_t bytes = 0;
+    (void)micant::native_nt::NtFreeVirtualMemory(micant::InvalidHandleValue,
+        &base, &bytes, 0x8000u);
+    pixels = nullptr;
+}
+
 Bitmap* allocateBitmap(uint32_t width, uint32_t height) noexcept {
-    if (!width || !height || width > kScreenWidth || height > kScreenHeight ||
-        static_cast<size_t>(width) > kPixelCapacity / height) {
+    if (!width || !height || static_cast<size_t>(width) > SIZE_MAX / height ||
+        static_cast<size_t>(width) * height > SIZE_MAX / sizeof(uint32_t)) {
         return nullptr;
     }
     const size_t count = static_cast<size_t>(width) * height;
     for (auto& bitmap : g_bitmaps) {
         if (bitmap.active) continue;
-        uint32_t offset = 0;
-        for (;;) {
-            bool collided = false;
-            size_t next = offset;
-            for (const auto& other : g_bitmaps) {
-                if (!other.active) continue;
-                const size_t otherEnd = static_cast<size_t>(other.pixelOffset) +
-                                        static_cast<size_t>(other.width) * other.height;
-                if (offset < otherEnd && other.pixelOffset < offset + count) {
-                    offset = static_cast<uint32_t>(otherEnd);
-                    next = offset;
-                    collided = true;
-                    break;
-                }
-            }
-            if (!collided) break;
-            if (next > kPixelCapacity || count > kPixelCapacity - next) return nullptr;
-        }
-        if (offset > kPixelCapacity || count > kPixelCapacity - offset) return nullptr;
+        auto* pixels = allocateUserPixels(count);
+        if (!pixels) return nullptr;
+        std::fill_n(pixels, count, 0u);
         bitmap = {};
         bitmap.handle = makeHandle(2, &bitmap - g_bitmaps);
-        bitmap.pixelOffset = offset;
         bitmap.width = width;
         bitmap.height = height;
+        bitmap.pixels = pixels;
         bitmap.active = true;
-        auto* pixels = g_pixelArena + offset;
-        for (size_t index = 0; index < count; ++index) pixels[index] = 0;
         return &bitmap;
     }
     return nullptr;
+}
+
+bool ensureDisplaySurface() noexcept {
+    micant::um::UserVideoInfo64 mode{};
+    if (micant::sys::invokeUserService(0x80, reinterpret_cast<uint64_t>(&mode)) != 0 ||
+        !mode.width || !mode.height || mode.bpp != 32 || mode.pixelFormat != 1 ||
+        mode.pitch < mode.width ||
+        static_cast<size_t>(mode.pitch) > SIZE_MAX / mode.height ||
+        static_cast<size_t>(mode.pitch) * mode.height > SIZE_MAX / sizeof(uint32_t))
+        return false;
+    const size_t requiredPixels = static_cast<size_t>(mode.pitch) * mode.height;
+    if (g_screenPixels && mode.width == g_screenWidth && mode.height == g_screenHeight &&
+        mode.pitch == g_screenPitch && requiredPixels == g_screenPixelCount) return true;
+    auto* replacement = allocateUserPixels(requiredPixels);
+    if (!replacement) return false;
+    std::fill_n(replacement, requiredPixels, 0u);
+    releaseUserPixels(g_screenPixels);
+    g_screenPixels = replacement;
+    g_screenPixelCount = requiredPixels;
+    g_screenWidth = mode.width;
+    g_screenHeight = mode.height;
+    g_screenPitch = mode.pitch;
+    return true;
 }
 
 uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
@@ -142,17 +162,18 @@ uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
         MicaWin32kRequest value{};
         value.args[0] = reinterpret_cast<uint64_t>(context.window);
         if (!request(MICANT_WIN32K_OP_GET_WINDOW_SURFACE, value) ||
-            !value.result || value.result > MICANT_COMPOSITOR_SURFACE_STORAGE_CAPACITY ||
+            !value.result || !value.args[1] || !value.args[2] ||
+            !value.args[3] || !value.args[4] ||
             value.rect.left < 0 || value.rect.top < 0 ||
             value.rect.right <= value.rect.left || value.rect.bottom <= value.rect.top ||
-            value.rect.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
-            value.rect.bottom > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT))
+            static_cast<uint32_t>(value.rect.right) > value.args[4] ||
+            static_cast<uint32_t>(value.rect.bottom) > value.args[2])
             return nullptr;
         width = static_cast<uint32_t>(value.rect.right - value.rect.left);
         height = static_cast<uint32_t>(value.rect.bottom - value.rect.top);
-        return reinterpret_cast<uint32_t*>(MICANT_COMPOSITOR_PIXELS_BASE) +
-            (value.result - 1) * kSurfacePixels +
-            static_cast<size_t>(value.rect.top) * MICANT_COMPOSITOR_SCREEN_WIDTH +
+        context.surfacePitch = static_cast<uint32_t>(value.args[1]);
+        return reinterpret_cast<uint32_t*>(value.args[3]) +
+            static_cast<size_t>(value.rect.top) * context.surfacePitch +
             static_cast<uint32_t>(value.rect.left);
     }
     if (context.bitmap) {
@@ -160,15 +181,19 @@ uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
         if (!bitmap.active) return nullptr;
         width = bitmap.width;
         height = bitmap.height;
-        return g_pixelArena + bitmap.pixelOffset;
+        context.surfacePitch = bitmap.width;
+        return bitmap.pixels;
     }
     if (context.memory) {
         width = 1;
         height = 1;
+        context.surfacePitch = 1;
         return &context.defaultPixel;
     }
-    width = kScreenWidth;
-    height = kScreenHeight;
+    if (!ensureDisplaySurface()) return nullptr;
+    width = g_screenWidth;
+    height = g_screenHeight;
+    context.surfacePitch = g_screenPitch;
     return g_screenPixels;
 }
 
@@ -207,10 +232,12 @@ intptr_t callWindowProcedure(void* hwnd, uint32_t message,
 }
 
 bool presentSurface(const uint32_t* pixels, uint32_t width,
-                    uint32_t height, uint32_t dstX, uint32_t dstY) noexcept {
-    if (!pixels || !width || !height || dstX >= kScreenWidth ||
-        dstY >= kScreenHeight || width > kScreenWidth - dstX ||
-        height > kScreenHeight - dstY) {
+                    uint32_t height, uint32_t dstX, uint32_t dstY,
+                    uint32_t sourcePitch) noexcept {
+    if (!ensureDisplaySurface() || !pixels || !width || !height ||
+        sourcePitch < width ||
+        dstX >= g_screenWidth || dstY >= g_screenHeight ||
+        width > g_screenWidth - dstX || height > g_screenHeight - dstY) {
         return false;
     }
     micant::um::UserPresentSurfaceParams64 params{};
@@ -219,7 +246,7 @@ bool presentSurface(const uint32_t* pixels, uint32_t width,
     params.dstY = dstY;
     params.width = width;
     params.height = height;
-    params.pitch = width;
+    params.pitch = sourcePitch;
     return micant::sys::invokeUserService(
         0x81, reinterpret_cast<uint64_t>(&params)) == 0;
 }
@@ -424,13 +451,22 @@ int32_t MicaWin32kGetWindowRect(void* hwnd, MicaWin32kRect* output) {
 
 int32_t MicaWin32kEnumWindows(void* callback, intptr_t parameter) {
     if (!callback) return 0;
-    MicaWin32kRequest value{};
-    if (!request(MICANT_WIN32K_OP_ENUM_WINDOWS, value)) return 0;
     using Callback = int32_t (*)(void*, intptr_t);
     auto enumerate = reinterpret_cast<Callback>(callback);
-    for (uint64_t index = 0; index < value.result; ++index) {
-        if (!enumerate(reinterpret_cast<void*>(value.windowHandles[index]),
-                       parameter)) return 0;
+    uint64_t first = 0;
+    for (;;) {
+        MicaWin32kRequest value{};
+        value.args[0] = first;
+        value.args[1] = MICANT_WIN32K_ENUM_BATCH_CAPACITY;
+        if (!request(MICANT_WIN32K_OP_ENUM_WINDOWS, value)) return 0;
+        for (uint64_t index = 0; index < value.result; ++index) {
+            if (!enumerate(reinterpret_cast<void*>(value.windowHandles[index]),
+                           parameter)) return 0;
+        }
+        if (!value.result || value.result < MICANT_WIN32K_ENUM_BATCH_CAPACITY)
+            break;
+        if (first > UINT64_MAX - value.result) return 0;
+        first += value.result;
     }
     return 1;
 }
@@ -517,10 +553,9 @@ int32_t MicaWin32kSetWindowIconData(void* hwnd, uint32_t type, uint64_t icon,
     const uint8_t* pixels, uint32_t width, uint32_t height,
     uint32_t strideBytes, uint64_t* previous) {
     if (previous) *previous = 0;
-    if (!previous || type >= MICANT_COMPOSITOR_ICON_TYPES ||
+    if (!previous || type >= 3u ||
         (icon && (!pixels || !width || !height ||
-            width > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
-            height > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+            height > SIZE_MAX / (static_cast<size_t>(width) * sizeof(uint32_t)) ||
             strideBytes != width * sizeof(uint32_t))) ||
         (!icon && (pixels || width || height || strideBytes))) return 0;
     MicaWin32kRequest value{};
@@ -541,9 +576,8 @@ int32_t MicaWin32kSetWindowTitleSurface(void* hwnd, const uint32_t* pixels,
     uint32_t width, uint32_t height, uint32_t stride) {
     if ((!pixels && (width || height || stride)) ||
         (pixels && (!width || !height ||
-            width > MICANT_COMPOSITOR_TITLE_MAX_WIDTH ||
-            height > MICANT_COMPOSITOR_TITLE_MAX_HEIGHT || stride < width ||
-            stride > MICANT_COMPOSITOR_TITLE_MAX_WIDTH))) return 0;
+            stride < width ||
+            height > SIZE_MAX / (static_cast<size_t>(stride) * sizeof(uint32_t))))) return 0;
     MicaWin32kRequest value{};
     value.operation = MICANT_WIN32K_OP_SET_WINDOW_TITLE_SURFACE;
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
@@ -599,7 +633,7 @@ int32_t MicaWin32kGetDCSurface(void* dc, uint32_t** pixels,
     *pixels = surface;
     *clientWidth = static_cast<uint32_t>(value.rect.right - value.rect.left);
     *clientHeight = static_cast<uint32_t>(value.rect.bottom - value.rect.top);
-    *stride = MICANT_COMPOSITOR_SCREEN_WIDTH;
+    *stride = context->surfacePitch;
     return 1;
 }
 
@@ -674,10 +708,8 @@ int32_t MicaWin32kBitBlt(void* destination, int32_t x, int32_t y,
     auto* dstPixels = pixelsFor(*dst, dstWidth, dstHeight);
     auto* srcPixels = pixelsFor(*src, srcWidth, srcHeight);
     if (!dstPixels || !srcPixels) return 0;
-    const uint32_t dstPitch = dst->window
-        ? MICANT_COMPOSITOR_SCREEN_WIDTH : dstWidth;
-    const uint32_t srcPitch = src->window
-        ? MICANT_COMPOSITOR_SCREEN_WIDTH : srcWidth;
+    const uint32_t dstPitch = dst->surfacePitch ? dst->surfacePitch : dstWidth;
+    const uint32_t srcPitch = src->surfacePitch ? src->surfacePitch : srcWidth;
     const int64_t left = x;
     const int64_t top = y;
     const int64_t right = left + width;
@@ -713,8 +745,7 @@ int32_t MicaWin32kFillRect(void* dc, const MicaWin32kRect* rectangle,
     uint32_t width{}, height{};
     uint32_t* pixels = pixelsFor(*context, width, height);
     if (!pixels || !width || !height) return 0;
-    const uint32_t pitch = context->window
-        ? MICANT_COMPOSITOR_SCREEN_WIDTH : width;
+    const uint32_t pitch = context->window ? context->surfacePitch : width;
     const int64_t left = std::max<int64_t>(0, rectangle->left);
     const int64_t top = std::max<int64_t>(0, rectangle->top);
     const int64_t right = std::min<int64_t>(width, rectangle->right);
@@ -739,8 +770,7 @@ int32_t MicaWin32kBlendRect(void* dc, const MicaWin32kRect* rectangle,
     uint32_t width{}, height{};
     uint32_t* pixels = pixelsFor(*context, width, height);
     if (!pixels || !width || !height) return 0;
-    const uint32_t pitch = context->window
-        ? MICANT_COMPOSITOR_SCREEN_WIDTH : width;
+    const uint32_t pitch = context->window ? context->surfacePitch : width;
     const int64_t left = std::max<int64_t>(0, rectangle->left);
     const int64_t top = std::max<int64_t>(0, rectangle->top);
     const int64_t right = std::min<int64_t>(width, rectangle->right);
@@ -791,7 +821,8 @@ int32_t MicaWin32kPresentDCRect(void* dc, const MicaWin32kRect* dirtyRect) {
         return presented ? 1 : 0;
     }
     if (!context->memory) return 0;
-    return presentSurface(pixels, width, height, 0, 0);
+    return presentSurface(pixels, width, height, 0, 0,
+                          context->surfacePitch ? context->surfacePitch : width);
 }
 
 int32_t MicaWin32kPresentDC(void* dc) {
@@ -806,6 +837,7 @@ int32_t MicaWin32kDeleteObject(void* object) {
         if (context.active && context.bitmap == index) return 0;
     }
     bitmap->active = false;
+    releaseUserPixels(bitmap->pixels);
     return 1;
 }
 
@@ -818,7 +850,7 @@ void* MicaWin32kCreateDibSection(void*, int32_t width, int32_t height,
     auto* bitmap = allocateBitmap(static_cast<uint32_t>(width),
                                  static_cast<uint32_t>(height));
     if (!bitmap) return nullptr;
-    if (bits) *bits = g_pixelArena + bitmap->pixelOffset;
+    if (bits) *bits = bitmap->pixels;
     return reinterpret_cast<void*>(bitmap->handle);
 }
 
@@ -865,21 +897,19 @@ void* MicaWin32kSetCursor(void* cursor, const uint32_t* pixels, uint32_t width,
                           uint32_t height, uint32_t pitch,
                           uint32_t hotX, uint32_t hotY) {
     if (cursor && (!pixels || !width || !height ||
-        width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION || pitch < width ||
+        pitch < width ||
+        height > SIZE_MAX / (static_cast<size_t>(pitch) * sizeof(uint32_t)) ||
         hotX >= width || hotY >= height)) return nullptr;
     MicaWin32kCursorImage image{};
     image.size = sizeof(image);
     image.version = MICANT_WIN32K_CURSOR_IMAGE_VERSION;
     image.cursorHandle = reinterpret_cast<uint64_t>(cursor);
-    image.width = width; image.height = height;
-    image.pitch = cursor ? width : 0;
+    image.width = cursor ? width : 0; image.height = cursor ? height : 0;
+    image.pitch = cursor ? pitch : 0;
     image.hotX = cursor ? hotX : 0; image.hotY = cursor ? hotY : 0;
-    if (cursor) {
-        for (uint32_t y = 0; y < height; ++y)
-            for (uint32_t x = 0; x < width; ++x)
-                image.pixels[static_cast<size_t>(y) * width + x] = pixels[static_cast<size_t>(y) * pitch + x];
-    }
+    image.pixelsAddress = cursor ? reinterpret_cast<uint64_t>(pixels) : 0;
+    image.pixelSizeBytes = cursor
+        ? static_cast<uint64_t>(pitch) * height * sizeof(uint32_t) : 0;
     if (MicaWin32kApplyCursorImage(&image) != 0)
         return nullptr;
     return reinterpret_cast<void*>(image.previousCursorHandle);

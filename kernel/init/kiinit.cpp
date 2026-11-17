@@ -159,10 +159,7 @@ namespace {
 constexpr uint32_t kWidth = 1024;
 constexpr uint32_t kHeight = 768;
 constexpr uint32_t kTaskbarHeight = 40;
-constexpr uint32_t kCursorSize = 16;
-alignas(16) uint32_t g_explorerSurface[kWidth * kHeight]{};
 size_t g_bootPfnCount{};
-uint32_t g_cursorFrame[kCursorSize * kCursorSize]{};
 micant::boot_driver::KernelServices g_displayServices{};
 micant::boot_driver::DisplayDevice g_display{};
 micant::boot_driver::DriverObject g_displayDriver{};
@@ -213,8 +210,8 @@ BootOwnedHandle g_bootDriverHandles[kMaxBootStartDrivers][kMaxBootDriverHandles]
 BootFileProvider g_bootFileProviders[kMaxBootStartDrivers]{};
 size_t g_bootFileProviderCount{};
 bool g_bootFileOpenRouterInstalled{};
-uint32_t g_mouseX = (kWidth - kCursorSize) / 2;
-uint32_t g_mouseY = (kHeight - kCursorSize) / 2;
+uint32_t g_mouseX = kWidth / 2;
+uint32_t g_mouseY = kHeight / 2;
 uint32_t g_mouseButtons{};
 uint32_t g_mouseSequence{};
 bool pollMouseInput(MicaWin32kInputEvent& event) noexcept;
@@ -1873,8 +1870,8 @@ void initializeKernelServices(micant::boot_driver::KernelServices& services,
     if (ownerIndex >= kMaxBootStartDrivers) ownerIndex = 0;
     g_bootDriverContexts[ownerIndex].Index = ownerIndex;
     services.Context = &g_bootDriverContexts[ownerIndex];
-    services.BootWidth = kWidth;
-    services.BootHeight = kHeight;
+    services.BootWidth = g_display.Width ? g_display.Width : kWidth;
+    services.BootHeight = g_display.Height ? g_display.Height : kHeight;
     services.TranslateVirtualAddress = [](void*, const void* address) {
         return micant::hal::amd64::translateBootstrapAddress(address);
     };
@@ -2156,6 +2153,8 @@ bool initializeGopFramebuffer(const micant::boot::KernelFramebufferV1& framebuff
     g_display.PresentComposition = nullptr;
     g_displayDriver = {};
     g_displayUsingGopFallback = true;
+    g_mouseX = framebuffer.width / 2;
+    g_mouseY = framebuffer.height / 2;
     if (logFallback)
         serialWrite("[MicaNT Display] OEM driver unavailable; GOP framebuffer pass-through active\r\n");
     return true;
@@ -2179,8 +2178,8 @@ bool initializeDisplay(const micant::boot::KernelBootImageV1& image) noexcept {
     g_displayDriver.Display = &g_display;
     const auto entry = reinterpret_cast<DriverEntryRoutine>(image.entryPoint);
     if (entry(&g_displayDriver, nullptr) != STATUS_SUCCESS ||
-        !g_display.PresentFrame || g_display.Width != kWidth ||
-        g_display.Height != kHeight) {
+        !g_display.PresentFrame || !g_display.Width || !g_display.Height ||
+        g_display.Pitch < g_display.Width) {
         if (g_displayDriver.DriverUnload) g_displayDriver.DriverUnload(&g_displayDriver);
         rollbackBootDriverResources(0);
         return false;
@@ -2190,14 +2189,6 @@ bool initializeDisplay(const micant::boot::KernelBootImageV1& image) noexcept {
         ? "[MicaNT Display] VirGL composition available\r\n"
         : "[MicaNT Display] VirtIO 2D active; GPU composition unavailable\r\n");
     return true;
-}
-
-void presentCursorRect(uint32_t x, uint32_t y) noexcept {
-    if (!g_display.PresentFrame(g_display.Context, g_cursorFrame,
-            kCursorSize, kCursorSize, kCursorSize,
-            static_cast<int32_t>(x), static_cast<int32_t>(y))) {
-        stopWithError("[MicaNT Display] Cursor presentation failed\r\n");
-    }
 }
 
 bool validHandoff(const micant::boot::UefiKernelHandoffV3* handoff) noexcept {
@@ -2593,12 +2584,15 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
             serialWriteChar(module.baseName[n]);
         serialWrite("\r\n");
         if (module.flags & micant::boot::BOOT_MODULE_FLAG_DISPLAY_DRIVER) {
-            if (!display.PresentFrame || display.Width != kWidth || display.Height != kHeight) {
+            if (!display.PresentFrame || !display.Width || !display.Height ||
+                display.Pitch < display.Width) {
                 if (driver.DriverUnload) driver.DriverUnload(&driver);
                 rollbackBootDriverResources(i);
                 continue;
             }
             g_display = display;
+            g_mouseX = display.Width / 2;
+            g_mouseY = display.Height / 2;
             g_displayDriver = driver;
             g_displayUsingGopFallback = false;
             displayReady = true;
@@ -2622,40 +2616,205 @@ micant::Handle g_compositorProcessId{};
 micant::ps::EProcess* g_compositorProcessObject{};
 micant::ob::ObjectHeader* g_compositorProcessReference{};
 micant::Handle g_compositorMetadataSection{};
-micant::Handle g_compositorPixelsSection{};
-micant::Handle g_compositorDecorPixelsSection{};
 MicaCompositorMetadataStore* g_compositorMetadata{};
+uintptr_t g_compositorMetadataAddress{};
+
+struct RetiredCompositorSurface {
+    RetiredCompositorSurface* next{};
+    void* sectionReference{};
+    uintptr_t compositorAddress{};
+    uint64_t retireAfterSequence{};
+};
+std::atomic_flag g_retiredSurfaceLock = ATOMIC_FLAG_INIT;
+RetiredCompositorSurface* g_retiredSurfaces{};
+
+void lockRetiredSurfaces() noexcept {
+    while (g_retiredSurfaceLock.test_and_set(std::memory_order_acquire))
+        __asm__ __volatile__("pause");
+}
+
+void unlockRetiredSurfaces() noexcept {
+    g_retiredSurfaceLock.clear(std::memory_order_release);
+}
+
+void reapAcknowledgedCompositorSurfaces() noexcept {
+    using namespace micant;
+    auto* compositor = g_compositorProcessObject;
+    auto* metadata = g_compositorMetadata;
+    if (!compositor || !metadata || ke::KeGetCurrentProcess() != compositor) return;
+
+    const uint64_t acknowledged = __atomic_load_n(
+        &metadata->compositorAckSequence, __ATOMIC_ACQUIRE);
+    RetiredCompositorSurface* ready{};
+    lockRetiredSurfaces();
+    auto** link = &g_retiredSurfaces;
+    while (*link) {
+        auto* item = *link;
+        if (item->retireAfterSequence > acknowledged) {
+            link = &item->next;
+            continue;
+        }
+        *link = item->next;
+        item->next = ready;
+        ready = item;
+    }
+    unlockRetiredSurfaces();
+
+    while (ready) {
+        auto* item = ready;
+        ready = ready->next;
+        if (item->compositorAddress &&
+            sys::NtUnmapViewOfSection(InvalidHandleValue,
+                                      item->compositorAddress) != NtStatus::Success) {
+            lockRetiredSurfaces();
+            item->next = g_retiredSurfaces;
+            g_retiredSurfaces = item;
+            unlockRetiredSurfaces();
+            continue;
+        }
+        if (item->sectionReference)
+            ob::ObDereferenceObject(static_cast<ob::ObjectHeader*>(item->sectionReference));
+        delete item;
+    }
+}
+
+micant::NtStatus createCompositorSurfaceSection(uint32_t width, uint32_t height,
+    micant::win32k::freestanding::CompositorSurfaceStorage& storage) noexcept {
+    using namespace micant;
+    storage = {};
+    if (!width || !height || !g_compositorProcessObject ||
+        width > UINT32_MAX / sizeof(uint32_t)) return NtStatus::InvalidParameter;
+    const size_t pitch = width;
+    if (height > SIZE_MAX / (pitch * sizeof(uint32_t))) return NtStatus::InvalidParameter;
+    const size_t bytes = pitch * height * sizeof(uint32_t);
+    if (bytes > static_cast<size_t>(INT64_MAX)) return NtStatus::InvalidParameter;
+    LargeInteger maximum{};
+    maximum.quadPart = static_cast<int64_t>(bytes);
+    Handle sectionHandle{};
+    auto status = sys::NtCreateSectionFromKernel(&sectionHandle,
+        section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr, &maximum,
+        mm::PAGE_READWRITE, section::SEC_RESERVE, 0);
+    if (status != NtStatus::Success) return status;
+
+    uintptr_t ownerBase{};
+    size_t ownerView = bytes;
+    status = sys::NtMapViewOfSectionFromKernel(sectionHandle, InvalidHandleValue,
+        &ownerBase, 0, 0, nullptr, &ownerView, 2, 0, mm::PAGE_READWRITE);
+    void* sectionReference{};
+    if (status == NtStatus::Success)
+        status = sys::NtReferenceSectionFromKernel(sectionHandle,
+            section::SECTION_MAP_READ, &sectionReference);
+
+    uintptr_t compositorBase{};
+    Handle compositorSectionHandle{};
+    ke::KAPC_STATE attachState{};
+    bool attached{};
+    if (status == NtStatus::Success) {
+        auto* header = static_cast<ob::ObjectHeader*>(sectionReference);
+        ke::KeStackAttachProcess(g_compositorProcessObject, &attachState);
+        attached = true;
+        if (ke::KeGetCurrentProcess() != g_compositorProcessObject)
+            status = NtStatus::Unsuccessful;
+        else
+            status = ob::detail::currentHandleTable().createHandle(header,
+                compositorSectionHandle, section::SECTION_MAP_READ);
+        if (status == NtStatus::Success) {
+            size_t compositorView = bytes;
+            status = sys::NtMapViewOfSectionFromKernel(compositorSectionHandle,
+                InvalidHandleValue, &compositorBase, 0, 0, nullptr,
+                &compositorView, 2, 0, mm::PAGE_READONLY);
+        }
+        if (compositorSectionHandle) {
+            const auto closeStatus = ob::detail::currentHandleTable().closeHandle(
+                compositorSectionHandle);
+            if (status == NtStatus::Success && closeStatus != NtStatus::Success)
+                status = closeStatus;
+        }
+        ke::KeUnstackDetachProcess(&attachState);
+        attached = false;
+    }
+    (void)attached;
+    const auto sourceClose = sys::NtClose(sectionHandle);
+    if (status == NtStatus::Success && sourceClose != NtStatus::Success)
+        status = sourceClose;
+    if (status != NtStatus::Success) {
+        if (compositorBase) {
+            ke::KeStackAttachProcess(g_compositorProcessObject, &attachState);
+            (void)sys::NtUnmapViewOfSection(InvalidHandleValue, compositorBase);
+            ke::KeUnstackDetachProcess(&attachState);
+        }
+        if (ownerBase) (void)sys::NtUnmapViewOfSection(InvalidHandleValue, ownerBase);
+        if (sectionReference) ob::ObDereferenceObject(
+            static_cast<ob::ObjectHeader*>(sectionReference));
+        return status;
+    }
+    storage.sectionReference = sectionReference;
+    storage.ownerAddress = ownerBase;
+    storage.compositorAddress = compositorBase;
+    storage.sizeBytes = bytes;
+    storage.width = width;
+    storage.height = height;
+    storage.pitch = static_cast<uint32_t>(pitch);
+    return NtStatus::Success;
+}
+
+micant::NtStatus releaseCompositorSurfaceSection(
+    micant::win32k::freestanding::CompositorSurfaceStorage& storage,
+    bool ownerAddressValid) noexcept {
+    using namespace micant;
+    NtStatus status = NtStatus::Success;
+    RetiredCompositorSurface* retired{};
+    if (storage.compositorAddress && g_compositorProcessObject) {
+        retired = new (std::nothrow_t{}) RetiredCompositorSurface{};
+        if (!retired) return NtStatus::InsufficientResources;
+
+        ke::KAPC_STATE attachState{};
+        ke::KeStackAttachProcess(g_compositorProcessObject, &attachState);
+        if (ke::KeGetCurrentProcess() != g_compositorProcessObject ||
+            !g_compositorMetadata) {
+            ke::KeUnstackDetachProcess(&attachState);
+            delete retired;
+            return NtStatus::Unsuccessful;
+        }
+        const uint64_t frameSequence = __atomic_load_n(
+            &g_compositorMetadata->frameSequence, __ATOMIC_ACQUIRE);
+        ke::KeUnstackDetachProcess(&attachState);
+        if (frameSequence > UINT64_MAX - 2) {
+            delete retired;
+            return NtStatus::IntegerOverflow;
+        }
+        retired->sectionReference = storage.sectionReference;
+        retired->compositorAddress = storage.compositorAddress;
+        retired->retireAfterSequence = (frameSequence & 1u)
+            ? frameSequence + 1 : frameSequence + 2;
+    }
+    if (ownerAddressValid && storage.ownerAddress) {
+        status = sys::NtUnmapViewOfSection(InvalidHandleValue, storage.ownerAddress);
+        if (status != NtStatus::Success) {
+            delete retired;
+            return status;
+        }
+    }
+    if (retired) {
+        lockRetiredSurfaces();
+        retired->next = g_retiredSurfaces;
+        g_retiredSurfaces = retired;
+        unlockRetiredSurfaces();
+    } else if (storage.sectionReference) {
+        ob::ObDereferenceObject(static_cast<ob::ObjectHeader*>(storage.sectionReference));
+    }
+    storage = {};
+    return NtStatus::Success;
+}
 
 bool initializeCompositorSections() noexcept {
     using namespace micant;
     LargeInteger metadataSize{};
-    metadataSize.quadPart = MICANT_COMPOSITOR_METADATA_STORE_SIZE;
+    metadataSize.quadPart = sizeof(MicaCompositorMetadataStore);
     auto result = sys::NtCreateSectionFromKernel(&g_compositorMetadataSection,
         section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr,
         &metadataSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
     if (result != NtStatus::Success) return false;
-    LargeInteger pixelsSize{};
-    pixelsSize.quadPart = MICANT_COMPOSITOR_PIXEL_STORE_SIZE;
-    result = sys::NtCreateSectionFromKernel(&g_compositorPixelsSection,
-        section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr,
-        &pixelsSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
-    if (result != NtStatus::Success) {
-        (void)sys::NtClose(g_compositorMetadataSection);
-        g_compositorMetadataSection = 0;
-        return false;
-    }
-    LargeInteger decorSize{};
-    decorSize.quadPart = MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE;
-    result = sys::NtCreateSectionFromKernel(&g_compositorDecorPixelsSection,
-        section::SECTION_MAP_READ | section::SECTION_MAP_WRITE, nullptr,
-        &decorSize, mm::PAGE_READWRITE, section::SEC_COMMIT, 0);
-    if (result != NtStatus::Success) {
-        (void)sys::NtClose(g_compositorPixelsSection);
-        (void)sys::NtClose(g_compositorMetadataSection);
-        g_compositorPixelsSection = 0;
-        g_compositorMetadataSection = 0;
-        return false;
-    }
     return true;
 }
 
@@ -2663,17 +2822,15 @@ void publishCompositorSurfacesInCompositorSpace() noexcept {
     using namespace micant;
     auto* compositor = g_compositorProcessObject;
     if (!compositor || !g_compositorProcessReference) return;
-    auto* currentProcess = ke::KeGetCurrentProcess();
-    if (currentProcess == compositor) {
+    // Always establish the target CR3, even when the thread's process pointer
+    // already names the compositor (nested syscall attachments can otherwise
+    // leave that pointer ahead of the active address-space root).
+    ke::KAPC_STATE attachState{};
+    ke::KeStackAttachProcess(compositor, &attachState);
+    if (ke::KeGetCurrentProcess() == compositor) {
         win32k::freestanding::publishCompositorSurfaces();
-    } else {
-        ke::KAPC_STATE attachState{};
-        ke::KeStackAttachProcess(compositor, &attachState);
-        if (ke::KeGetCurrentProcess() == compositor)
-            win32k::freestanding::publishCompositorSurfaces();
-        else serialWrite("[MicaNT Compositor] Metadata target attach failed\r\n");
-        ke::KeUnstackDetachProcess(&attachState);
     }
+    ke::KeUnstackDetachProcess(&attachState);
 }
 
 bool waitForCompositorPresentation(uint64_t timeoutTicks) noexcept {
@@ -2722,7 +2879,11 @@ bool hasVisibleExplorerSurface() noexcept {
         const uint64_t sequence = __atomic_load_n(
             &g_compositorMetadata->frameSequence, __ATOMIC_ACQUIRE);
         if (sequence & 1u) continue;
-        for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
+        const size_t surfaceCount = g_compositorMetadata->surfaceEntryCount;
+        if (surfaceCount && (!g_compositorMetadata->surfaces ||
+            surfaceCount > g_compositorMetadata->surfaceArraySizeBytes /
+                sizeof(MicaCompositorSurfaceInfo))) break;
+        for (size_t index = 0; index < surfaceCount; ++index) {
             const volatile auto& surface = g_compositorMetadata->surfaces[index];
             const uint32_t flags = surface.flags;
             if (surface.ownerProcessId == static_cast<uint64_t>(g_explorerProcessId) &&
@@ -2757,10 +2918,23 @@ bool waitForExplorerDesktopPresentation(uint64_t timeoutTicks) noexcept {
     }
     return false;
 }
-uint32_t g_explorerApplicationWindowCount{};
-uint64_t g_explorerApplicationWindowHandles[MICANT_WIN32K_WINDOW_CAPACITY]{};
+struct ExplorerApplicationWindow {
+    uint64_t handle{};
+    ExplorerApplicationWindow* next{};
+};
+size_t g_explorerApplicationWindowCount{};
+ExplorerApplicationWindow* g_explorerApplicationWindows{};
+std::atomic_flag g_explorerApplicationWindowLock = ATOMIC_FLAG_INIT;
+struct ExplorerApplicationWindowLock {
+    ExplorerApplicationWindowLock() noexcept {
+        while (g_explorerApplicationWindowLock.test_and_set(std::memory_order_acquire))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    ~ExplorerApplicationWindowLock() {
+        g_explorerApplicationWindowLock.clear(std::memory_order_release);
+    }
+};
 std::atomic_flag g_userSurfaceImageCopyLock = ATOMIC_FLAG_INIT;
-uint32_t g_userSurfaceImageCopyBuffer[MICANT_COMPOSITOR_TITLE_MAX_PIXELS]{};
 std::atomic_flag g_userThemeSnapshotCopyLock = ATOMIC_FLAG_INIT;
 MicaThemeSnapshot g_userThemeSnapshotCopy{};
 MicaThemeCaptionImageSet g_userThemeCaptionImageSetCopy{};
@@ -2942,8 +3116,8 @@ bool launchUserImageProcess(const char16_t* imageName,
 #endif
     if (processHandle == g_compositorProcessHandle || processHandle == g_explorerProcessHandle ||
         taskManagerImage || themeTestImage || cmdTestImage) {
-        uintptr_t metadataBase = MICANT_COMPOSITOR_METADATA_BASE;
-        size_t metadataView = MICANT_COMPOSITOR_METADATA_STORE_SIZE;
+        uintptr_t metadataBase{};
+        size_t metadataView = sizeof(MicaCompositorMetadataStore);
         const uint32_t metadataProtection = processHandle == g_compositorProcessHandle
             ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
         serialWrite("[MicaNT Compositor] Mapping metadata view\r\n");
@@ -2951,38 +3125,15 @@ bool launchUserImageProcess(const char16_t* imageName,
             processHandle, &metadataBase, 0, 0, nullptr, &metadataView,
             2, 0, metadataProtection);
         serialWrite("[MicaNT Compositor] Metadata view mapping returned\r\n");
-        uintptr_t pixelsBase = MICANT_COMPOSITOR_PIXELS_BASE;
-        size_t pixelsView = MICANT_COMPOSITOR_PIXEL_STORE_SIZE;
-        const uint32_t pixelProtection = processHandle == g_explorerProcessHandle ||
-            taskManagerImage || themeTestImage || cmdTestImage
-            ? mm::PAGE_READWRITE : mm::PAGE_READONLY;
-        if (result == NtStatus::Success) {
-            serialWrite("[MicaNT Compositor] Mapping pixel view\r\n");
-            result = sys::NtMapViewOfSectionFromKernel(g_compositorPixelsSection,
-                processHandle, &pixelsBase, 0, 0, nullptr, &pixelsView,
-                2, 0, pixelProtection);
-            serialWrite("[MicaNT Compositor] Pixel view mapping returned\r\n");
-        }
         if (result == NtStatus::Success && processHandle == g_compositorProcessHandle) {
-            uintptr_t decorBase = MICANT_COMPOSITOR_DECOR_PIXELS_BASE;
-            size_t decorView = MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE;
-            serialWrite("[MicaNT Compositor] Mapping decoration view\r\n");
-            result = sys::NtMapViewOfSectionFromKernel(g_compositorDecorPixelsSection,
-                processHandle, &decorBase, 0, 0, nullptr, &decorView,
-                2, 0, mm::PAGE_READWRITE);
-            serialWrite("[MicaNT Compositor] Decoration view mapping returned\r\n");
-            if (result == NtStatus::Success &&
-                decorBase != MICANT_COMPOSITOR_DECOR_PIXELS_BASE)
-                result = NtStatus::Conflict;
         }
-        if (result != NtStatus::Success || metadataBase != MICANT_COMPOSITOR_METADATA_BASE ||
-            pixelsBase != MICANT_COMPOSITOR_PIXELS_BASE) {
+        if (result == NtStatus::Success && processHandle == g_compositorProcessHandle)
+            g_compositorMetadataAddress = metadataBase;
+        if (result != NtStatus::Success || !metadataBase) {
             serialWrite("[MicaNT Compositor] Section view mapping failed status=");
             serialWriteNumber(static_cast<uint32_t>(result));
             serialWrite(" metadata=");
             serialWriteNumber(metadataBase);
-            serialWrite(" pixels=");
-            serialWriteNumber(pixelsBase);
             serialWrite("\r\n");
             (void)sys::NtTerminateProcess(processHandle, result);
             (void)sys::NtClose(processHandle);
@@ -3004,11 +3155,15 @@ bool launchUserImageProcess(const char16_t* imageName,
                     *g_compositorMetadata = {};
                     g_compositorMetadata->magic = MICANT_COMPOSITOR_STORE_MAGIC;
                     g_compositorMetadata->version = MICANT_COMPOSITOR_STORE_VERSION;
-                    g_compositorMetadata->screenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
-                    g_compositorMetadata->screenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
-                    g_compositorMetadata->surfaceCapacity = MICANT_COMPOSITOR_SURFACE_CAPACITY;
+                    g_compositorMetadata->screenWidth = g_display.Width
+                        ? g_display.Width : g_bootFramebufferInfo.width;
+                    g_compositorMetadata->screenHeight = g_display.Height
+                        ? g_display.Height : g_bootFramebufferInfo.height;
+                    g_compositorMetadata->surfaceEntryCount = 0;
                     win32k::freestanding::bindCompositorStore(
-                        g_compositorMetadata, publishCompositorSurfacesInCompositorSpace);
+                        g_compositorMetadata, publishCompositorSurfacesInCompositorSpace,
+                        nullptr,
+                        createCompositorSurfaceSection, releaseCompositorSurfaceSection);
                 }
                 ke::KeUnstackDetachProcess(&attachState);
             } else if (result == NtStatus::Success) result = NtStatus::InvalidHandle;
@@ -3092,39 +3247,6 @@ void recoverPendingCrashDumpAfterMount() noexcept {
 bool launchCompositorProcess() noexcept {
     return launchUserImageProcess(u"compositor.exe", g_compositorProcessHandle,
                                   g_compositorProcessId);
-}
-
-void restoreCursorBackground(uint32_t x, uint32_t y) noexcept {
-    for (uint32_t row = 0; row < kCursorSize; ++row) {
-        for (uint32_t column = 0; column < kCursorSize; ++column) {
-            g_cursorFrame[row * kCursorSize + column] =
-                g_explorerSurface[static_cast<size_t>(y + row) * kWidth + x + column];
-        }
-    }
-    presentCursorRect(x, y);
-}
-
-void drawMouseCursor(uint32_t x, uint32_t y) noexcept {
-    constexpr uint16_t shape[kCursorSize]{
-        0x8000, 0xC000, 0xE000, 0xF000,
-        0xF800, 0xFC00, 0xFE00, 0xFF00,
-        0xFF80, 0xFFC0, 0xFE00, 0xCE00,
-        0x8700, 0x0700, 0x0300, 0x0000
-    };
-    for (uint32_t row = 0; row < kCursorSize; ++row) {
-        uint32_t* target = g_cursorFrame + row * kCursorSize;
-        for (uint32_t column = 0; column < kCursorSize; ++column) {
-            target[column] = g_explorerSurface[(y + row) * kWidth + x + column];
-            if (shape[row] & (0x8000u >> column)) {
-                target[column] = 0xFF101820u;
-            }
-            if (row > 0 &&
-                ((shape[row - 1] >> 1) & (0x8000u >> column))) {
-                target[column] = 0xFFF4F7FFu;
-            }
-        }
-    }
-    presentCursorRect(x, y);
 }
 
 uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments& args) noexcept {
@@ -4414,6 +4536,26 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
                                            &info, sizeof(info)));
     }
+    if (number == 0x84) {
+        const auto* thread = ke::KeGetCurrentThread();
+        if (!thread || !thread->owningProcess || !g_compositorProcessId ||
+            thread->owningProcess->processId() != g_compositorProcessId)
+            return status(NtStatus::AccessDenied);
+        um::UserCompositorViews64 views{};
+        views.metadataAddress = g_compositorMetadataAddress;
+        if (!views.metadataAddress)
+            return status(NtStatus::DeviceNotReady);
+        return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(first),
+                                           &views, sizeof(views)));
+    }
+    if (number == 0x85) {
+        const auto* thread = ke::KeGetCurrentThread();
+        if (!thread || !thread->owningProcess || !g_compositorProcessId ||
+            thread->owningProcess->processId() != g_compositorProcessId)
+            return status(NtStatus::AccessDenied);
+        reapAcknowledgedCompositorSurfaces();
+        return status(NtStatus::Success);
+    }
     if (number == 0x83) {
         const auto* thread = ke::KeGetCurrentThread();
         if (!thread || !thread->owningProcess || !thread->kernelStackTop)
@@ -4437,10 +4579,13 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             &params, reinterpret_cast<const void*>(first), sizeof(params));
         if (copyStatus != NtStatus::Success) return status(copyStatus);
         const uint32_t pitch = params.pitch ? params.pitch : params.width;
-        if (!params.width || !params.height || params.dstX >= kWidth ||
-            params.dstY >= kHeight || params.width > kWidth - params.dstX ||
-            params.height > kHeight - params.dstY || pitch < params.width ||
-            pitch > 16384 || params.reserved) {
+        if (!g_display.Width || !g_display.Height || !params.width || !params.height ||
+            params.dstX >= g_display.Width || params.dstY >= g_display.Height ||
+            params.width > g_display.Width - params.dstX ||
+            params.height > g_display.Height - params.dstY ||
+            pitch < params.width || pitch > g_display.Width || params.reserved ||
+            (params.height > 1 && pitch >
+                (SIZE_MAX / sizeof(uint32_t) - params.width) / (params.height - 1))) {
             return status(NtStatus::InvalidParameter);
         }
         const size_t bytes = (static_cast<size_t>(params.height - 1) * pitch +
@@ -4450,16 +4595,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (probeStatus != NtStatus::Success) return status(probeStatus);
         if (!g_display.PresentFrame) return status(NtStatus::DeviceNotReady);
         const auto* pixels = reinterpret_cast<const uint32_t*>(params.surfaceBufferVa);
-        for (uint32_t row = 0; row < params.height; ++row) {
-            const NtStatus rowStatus = ex::ExSafeCopyFromUser(
-                g_explorerSurface + (params.dstY + row) * kWidth + params.dstX,
-                pixels + static_cast<size_t>(row) * pitch,
-                params.width * sizeof(uint32_t));
-            if (rowStatus != NtStatus::Success) return status(rowStatus);
-        }
-        if (!g_display.PresentFrame(g_display.Context,
-                g_explorerSurface + params.dstY * kWidth + params.dstX,
-                params.width, params.height, kWidth,
+        if (!g_display.PresentFrame(g_display.Context, pixels,
+                params.width, params.height, pitch,
                 static_cast<int32_t>(params.dstX), static_cast<int32_t>(params.dstY))) {
             return status(NtStatus::DeviceError);
         }
@@ -4522,12 +4659,13 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 request.operation == MICANT_WIN32K_OP_SET_WINDOW_ICON_DATA;
             if (iconRequest) {
                 const uint64_t icon = request.args[2];
-                if (request.args[1] >= MICANT_COMPOSITOR_ICON_TYPES)
+                if (request.args[1] >= 3u)
                     return status(NtStatus::InvalidParameter);
                 if (icon) {
                     if (!request.args[3] || !request.args[4] || !request.args[5] ||
-                        request.args[4] > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
-                        request.args[5] > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
+                        request.args[4] > SIZE_MAX / sizeof(uint32_t) ||
+                        request.args[5] > SIZE_MAX /
+                            (request.args[4] * sizeof(uint32_t)) ||
                         request.args[6] != request.args[4] * sizeof(uint32_t))
                         return status(NtStatus::InvalidParameter);
                     sourceAddress = request.args[3];
@@ -4544,10 +4682,11 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                         return status(NtStatus::InvalidParameter);
                 } else {
                     if (!request.args[2] || !request.args[3] ||
-                        request.args[2] > MICANT_COMPOSITOR_TITLE_MAX_WIDTH ||
-                        request.args[3] > MICANT_COMPOSITOR_TITLE_MAX_HEIGHT ||
                         request.args[4] < request.args[2] ||
-                        request.args[4] > MICANT_COMPOSITOR_TITLE_MAX_WIDTH)
+                        request.args[4] > SIZE_MAX / sizeof(uint32_t) ||
+                        request.args[2] > SIZE_MAX / sizeof(uint32_t) ||
+                        request.args[3] > SIZE_MAX /
+                            (request.args[4] * sizeof(uint32_t)))
                         return status(NtStatus::InvalidParameter);
                     sourceAddress = request.args[1];
                     width = static_cast<uint32_t>(request.args[2]);
@@ -4555,19 +4694,24 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                     sourceBytes = static_cast<size_t>(request.args[4]) * height * sizeof(uint32_t);
                 }
             }
+            if (sourceBytes > static_cast<size_t>(INT64_MAX))
+                return status(NtStatus::InvalidParameter);
             UserSurfaceImageCopyGuard copyGuard{};
+            std::unique_ptr<uint32_t[]> imageCopy;
             if (sourceBytes) {
+                imageCopy.reset(new (std::nothrow_t{}) uint32_t[sourceBytes / sizeof(uint32_t)]);
+                if (!imageCopy) return status(NtStatus::InsufficientResources);
                 const NtStatus copyStatus = ex::ExSafeCopyFromUser(
-                    g_userSurfaceImageCopyBuffer,
+                    imageCopy.get(),
                     reinterpret_cast<const void*>(sourceAddress), sourceBytes);
                 if (copyStatus != NtStatus::Success) return status(copyStatus);
             }
             const uint64_t ownerId = process ? process->processId() : 0;
             const NtStatus updateStatus = iconRequest
                 ? win32k::freestanding::setWindowIconData(request, ownerId,
-                    sourceBytes ? g_userSurfaceImageCopyBuffer : nullptr, width, height)
+                    imageCopy.get(), width, height)
                 : win32k::freestanding::setWindowTitleSurface(request, ownerId,
-                    sourceBytes ? g_userSurfaceImageCopyBuffer : nullptr, width, height,
+                    imageCopy.get(), width, height,
                     iconRequest ? width : static_cast<uint32_t>(request.args[4]));
             if (updateStatus != NtStatus::Success) return status(updateStatus);
             publishCompositorSurfacesInCompositorSpace();
@@ -4638,10 +4782,12 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 if (!km::hid::MouClassPopInputData(packet)) break;
                 const int32_t nextX = static_cast<int32_t>(g_mouseX) + packet.LastX;
                 const int32_t nextY = static_cast<int32_t>(g_mouseY) + packet.LastY;
-                g_mouseX = nextX < 0 ? 0 : (nextX >= static_cast<int32_t>(kWidth)
-                    ? kWidth - 1 : static_cast<uint32_t>(nextX));
-                g_mouseY = nextY < 0 ? 0 : (nextY >= static_cast<int32_t>(kHeight)
-                    ? kHeight - 1 : static_cast<uint32_t>(nextY));
+                const uint32_t screenWidth = g_display.Width ? g_display.Width : kWidth;
+                const uint32_t screenHeight = g_display.Height ? g_display.Height : kHeight;
+                g_mouseX = nextX < 0 ? 0 : (nextX >= static_cast<int32_t>(screenWidth)
+                    ? screenWidth - 1 : static_cast<uint32_t>(nextX));
+                g_mouseY = nextY < 0 ? 0 : (nextY >= static_cast<int32_t>(screenHeight)
+                    ? screenHeight - 1 : static_cast<uint32_t>(nextY));
                 g_mouseButtons = packet.RawButtons & 7u;
                 event = {static_cast<int32_t>(g_mouseX), static_cast<int32_t>(g_mouseY),
                     g_mouseButtons, ++g_mouseSequence};
@@ -4753,11 +4899,13 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                     (kWsCaptionStyle | kWsVisibleStyle)) {
                 ++explorerCaptionWindowCreateCount;
                 if (explorerCaptionWindowCreateCount >= 1) {
-                    for (auto& tracked : g_explorerApplicationWindowHandles) {
-                        if (tracked) continue;
-                        tracked = request.result;
+                    auto* tracked = new (std::nothrow_t{}) ExplorerApplicationWindow{
+                        request.result, nullptr};
+                    if (tracked) {
+                        ExplorerApplicationWindowLock lock;
+                        tracked->next = g_explorerApplicationWindows;
+                        g_explorerApplicationWindows = tracked;
                         ++g_explorerApplicationWindowCount;
-                        break;
                     }
                     if (explorerCaptionWindowCreateCount == 1)
                         serialWrite("[MicaNT Explorer] First application window created\r\n");
@@ -4777,13 +4925,25 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         }
         if (fromExplorer && resultStatus == NtStatus::Success &&
             request.operation == MICANT_WIN32K_OP_DESTROY_WINDOW) {
-            for (auto& tracked : g_explorerApplicationWindowHandles) {
-                if (tracked != request.args[0]) continue;
-                tracked = 0;
-                if (g_explorerApplicationWindowCount) --g_explorerApplicationWindowCount;
-                serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
-                break;
+            bool removed = false;
+            {
+                ExplorerApplicationWindowLock lock;
+                auto** link = &g_explorerApplicationWindows;
+                while (*link) {
+                    auto* tracked = *link;
+                    if (tracked->handle != request.args[0]) {
+                        link = &tracked->next;
+                        continue;
+                    }
+                    *link = tracked->next;
+                    delete tracked;
+                    if (g_explorerApplicationWindowCount) --g_explorerApplicationWindowCount;
+                    removed = true;
+                    break;
+                }
             }
+            if (removed)
+                serialWrite("[MicaNT Explorer] Application window destroyed by its owner\r\n");
         }
         return status(resultStatus);
     }
@@ -4795,6 +4955,30 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (image.size != sizeof(image) ||
             image.version != MICANT_WIN32K_CURSOR_IMAGE_VERSION)
             return status(NtStatus::InvalidParameter);
+        std::unique_ptr<uint32_t[]> cursorPixels;
+        size_t cursorPixelCount{};
+        size_t cursorPixelBytes{};
+        if (image.cursorHandle) {
+            if (!image.width || !image.height || !image.pitch ||
+                image.pitch < image.width || image.hotX >= image.width ||
+                image.hotY >= image.height ||
+                image.height > SIZE_MAX / (static_cast<size_t>(image.pitch) *
+                    sizeof(uint32_t)))
+                return status(NtStatus::InvalidParameter);
+            cursorPixelCount = static_cast<size_t>(image.pitch) * image.height;
+            cursorPixelBytes = cursorPixelCount * sizeof(uint32_t);
+            if (!image.pixelsAddress || image.pixelSizeBytes < cursorPixelBytes ||
+                cursorPixelBytes > static_cast<size_t>(INT64_MAX))
+                return status(NtStatus::InvalidParameter);
+            cursorPixels.reset(new (std::nothrow_t{}) uint32_t[cursorPixelCount]);
+            if (!cursorPixels) return status(NtStatus::InsufficientResources);
+            const NtStatus pixelsStatus = ex::ExSafeCopyFromUser(cursorPixels.get(),
+                reinterpret_cast<const void*>(image.pixelsAddress), cursorPixelBytes);
+            if (pixelsStatus != NtStatus::Success) return status(pixelsStatus);
+        } else if (image.width || image.height || image.pitch || image.hotX ||
+                   image.hotY || image.pixelsAddress || image.pixelSizeBytes) {
+            return status(NtStatus::InvalidParameter);
+        }
         auto* process = ke::KeGetCurrentProcess();
         const uint64_t owner = process ? process->processId() : 0;
         MicaWin32kRequest previous{};
@@ -4808,7 +4992,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             const_cast<uint8_t*>(previousField), &image.previousCursorHandle,
             sizeof(image.previousCursorHandle));
         if (outputStatus != NtStatus::Success) return status(outputStatus);
-        resultStatus = win32k::freestanding::setCursorImage(image, owner);
+        resultStatus = win32k::freestanding::setCursorImage(image,
+            cursorPixels.get(), owner);
         if (resultStatus != NtStatus::Success) return status(resultStatus);
         publishCompositorSurfacesInCompositorSpace();
         return status(NtStatus::Success);
@@ -4968,8 +5153,8 @@ bool pollMouseInput(MicaWin32kInputEvent& event) noexcept {
                               ((packet[0] & 0x20) ? 256 : 0);
         const int32_t nextX = static_cast<int32_t>(g_mouseX) + deltaX;
         const int32_t nextY = static_cast<int32_t>(g_mouseY) - deltaY;
-        const uint32_t maxX = kWidth - kCursorSize;
-        const uint32_t maxY = kHeight - kCursorSize;
+        const uint32_t maxX = g_display.Width ? g_display.Width - 1 : kWidth - 1;
+        const uint32_t maxY = g_display.Height ? g_display.Height - 1 : kHeight - 1;
         const uint32_t clampedX = nextX < 0 ? 0 :
             (static_cast<uint32_t>(nextX) > maxX ? maxX :
                                                    static_cast<uint32_t>(nextX));
@@ -5045,8 +5230,8 @@ void pollKeyboardInput() noexcept {
         stopWithError("[MicaNT Compositor] Ring 3 launch failed\r\n");
     serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
     micant::win32k::freestanding::initializeCursorPosition(
-        static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH / 2u),
-        static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT / 2u));
+        static_cast<int32_t>(g_display.Width / 2u),
+        static_cast<int32_t>(g_display.Height / 2u));
     publishCompositorSurfacesInCompositorSpace();
     if (!waitForCompositorPresentation(clockActive ? 1000u : 0u))
         stopWithError("[MicaNT Compositor] Initial cursor frame timed out\r\n");

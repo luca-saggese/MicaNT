@@ -32,6 +32,8 @@ extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 
 namespace micant::um::winnt_user32_gdi32_imm32_abi {
 
+int32_t Gdi32_GetDeviceCaps(void*, int32_t) noexcept;
+
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 extern "C" void MicaUser32MenuWindowDestroyed(void*) noexcept;
 extern "C" void* CreateFontW(int32_t, int32_t, int32_t, int32_t,
@@ -511,11 +513,6 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
     if (winuser::ParseAniFile(encoded, view, limits.maxEncodedBytes) != winuser::AniStatus::Success)
         return nullptr;
     auto frameLimits = limits;
-    frameLimits.maxPixels = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS;
-    frameLimits.maxDecodedBytes = MICANT_COMPOSITOR_CURSOR_MAX_PIXELS * 4u;
-    frameLimits.maxIntermediateBytes = 1024u * 1024u;
-    if (requestedWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        requestedHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
     AnimatedCursor candidate{};
     candidate.frameCount = view.frameCount;
     for (uint16_t i = 0; i < view.frameCount; ++i) {
@@ -523,8 +520,6 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
         if (winuser::DecodeCursorImage(view.frames[i], requestedWidth, requestedHeight,
                 cursor, allocator, frameLimits) !=
             imaging::ImageStatus::Success) return nullptr;
-        if (cursor.image.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-            cursor.image.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
         const uint32_t targetWidth = requestedWidth ? requestedWidth : cursor.image.width;
         const uint32_t targetHeight = requestedHeight ? requestedHeight : cursor.image.height;
         if (!targetWidth || !targetHeight) return nullptr;
@@ -612,9 +607,7 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
                    uint32_t desiredWidth, uint32_t desiredHeight,
                    bool shared) noexcept {
     using namespace micant::um;
-    if (!resourceName ||
-        desiredWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        desiredHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) {
+    if (!resourceName) {
         setThreadLastError(87); // ERROR_INVALID_PARAMETER
         return nullptr;
     }
@@ -707,17 +700,11 @@ void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
     imaging::ImageFrame frame{};
     if (imaging::DecodeIconResourcePayload(selected.imageBytes, frame, allocator, limits) !=
         imaging::ImageStatus::Success || frame.width != selected.entry.width ||
-        frame.height != selected.entry.height || frame.width > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        frame.height > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) {
+        frame.height != selected.entry.height) {
         setThreadLastError(13); // ERROR_INVALID_DATA
         return nullptr;
     }
     uint16_t hotX = selected.entry.hotX, hotY = selected.entry.hotY;
-    if (targetWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-        targetHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) {
-        setThreadLastError(87);
-        return nullptr;
-    }
     if (frame.width != targetWidth || frame.height != targetHeight) {
         const uint32_t oldWidth = frame.width, oldHeight = frame.height;
         imaging::ImageFrame scaled{};
@@ -815,7 +802,7 @@ bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
 
     size_t length = 0;
     if (title) {
-        while (length < 63 && title[length]) ++length;
+        while (length + 1 < MICANT_WIN32K_TEXT_CAPACITY && title[length]) ++length;
         if (title[length]) {
             (void)clearTitle();
             return false;
@@ -823,44 +810,113 @@ bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
     }
     if (!length) return clearTitle();
 
-    constexpr uint32_t kMaxWidth = 512;
-    constexpr uint32_t kMaxHeight = 32;
-    CaptionDibInfo info{};
-    info.width = static_cast<int32_t>(kMaxWidth);
-    info.height = -static_cast<int32_t>(kMaxHeight);
     void* dc = CreateCompatibleDC(nullptr);
-    void* bits = nullptr;
-    void* bitmap = dc ? CreateDIBSection(dc, &info, 0, &bits, nullptr, 0) : nullptr;
-    if (!dc || !bitmap || !bits) {
-        if (bitmap) (void)DeleteObject(bitmap);
-        if (dc) (void)DeleteDC(dc);
+    if (!dc) {
         (void)clearTitle();
         return false;
     }
-
-    auto* pixels = static_cast<uint32_t*>(bits);
-    for (size_t index = 0; index < static_cast<size_t>(kMaxWidth) * kMaxHeight; ++index)
-        pixels[index] = 0;
-    void* oldBitmap = SelectObject(dc, bitmap);
     // WhiteSur's headerbar title uses the installed Segoe UI Semibold TTF
     // (resolved by GDI's font catalog to Selawik-Semibold.ttf). Keep the
-    // stock GUI font as a failure fallback.
-    void* font = CreateFontW(-13, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
+    // stock GUI font as a failure fallback. Scale the point size from the
+    // device's current vertical DPI.
+    const int32_t dpi = std::max<int32_t>(1, Gdi32_GetDeviceCaps(dc, 90));
+    const int32_t fontHeight = -std::max<int32_t>(1, (13 * dpi + 48) / 96);
+    void* font = CreateFontW(fontHeight, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
                              L"Segoe UI Semibold");
     const bool ownsFont = font != nullptr;
     if (!font) font = GetStockObject(kStockDefaultGuiFont);
     void* oldFont = font ? SelectObject(dc, font) : nullptr;
+    using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
+    using GetIconFn = uint64_t (*)(void*, uint32_t);
+    const auto getWindowRect = Win32kProc<GetRectFn>("MicaWin32kGetWindowRect");
+    const auto getClientRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
+    const auto getWindowIcon = Win32kProc<GetIconFn>("MicaWin32kGetWindowIcon");
+    MicaWin32kRect windowRect{}, clientRect{};
+    const bool haveGeometry = oldFont && getWindowRect && getClientRect &&
+        getWindowRect(hwnd, &windowRect) && getClientRect(hwnd, &clientRect) &&
+        windowRect.right > windowRect.left &&
+        clientRect.right > clientRect.left;
+    if (!haveGeometry) {
+        if (oldFont) (void)SelectObject(dc, oldFont);
+        if (ownsFont) (void)DeleteObject(font);
+        (void)DeleteDC(dc);
+        (void)clearTitle();
+        return false;
+    }
+    const int64_t outerWidth = static_cast<int64_t>(windowRect.right) - windowRect.left;
+    const int64_t clientWidth = static_cast<int64_t>(clientRect.right) - clientRect.left;
+    const int64_t frame = std::max<int64_t>(0, (outerWidth - clientWidth) / 2);
+    const int64_t titleStart = frame + 9;
+    const int64_t closeLeft = outerWidth - frame - 30;
+    const int64_t titleLimit = closeLeft - 66;
+    const int64_t iconReserve = getWindowIcon && getWindowIcon(hwnd, 0) ? 32 : 0;
+    const int64_t availableWidth = std::max<int64_t>(
+        0, titleLimit - titleStart - iconReserve);
+    if (!availableWidth) {
+        if (oldFont) (void)SelectObject(dc, oldFont);
+        if (ownsFont) (void)DeleteObject(font);
+        (void)DeleteDC(dc);
+        return clearTitle();
+    }
+
+    wchar_t displayTitle[MICANT_WIN32K_TEXT_CAPACITY]{};
+    size_t displayLength = length;
+    for (size_t index = 0; index < length; ++index) displayTitle[index] = title[index];
     CaptionTextExtent extent{};
-    const bool measured = oldBitmap && oldFont &&
-        GetTextExtentPoint32W(dc, title, static_cast<int32_t>(length), &extent) &&
-        extent.cx > 0 && extent.cy > 0;
-    const uint32_t width = measured
-        ? std::min<uint32_t>(static_cast<uint32_t>(extent.cx), kMaxWidth) : 0;
-    const uint32_t height = measured
-        ? std::min<uint32_t>(static_cast<uint32_t>(extent.cy), kMaxHeight) : 0;
-    const bool rendered = measured && width && height && SetBkMode(dc, 1) > 0 &&
-        SetTextColor(dc, 0x00FFFFFFu) != 0xFFFFFFFFu &&
-        TextOutW(dc, 0, 0, title, static_cast<int32_t>(length));
+    bool measured = GetTextExtentPoint32W(dc, displayTitle,
+        static_cast<int32_t>(displayLength), &extent) && extent.cx > 0 && extent.cy > 0;
+    if (measured && extent.cx > availableWidth) {
+        constexpr wchar_t kEllipsis[]{L'.', L'.', L'.', 0};
+        CaptionTextExtent ellipsisExtent{};
+        if (!GetTextExtentPoint32W(dc, kEllipsis, 3, &ellipsisExtent) ||
+            ellipsisExtent.cx <= 0 || ellipsisExtent.cx > availableWidth) {
+            if (oldFont) (void)SelectObject(dc, oldFont);
+            if (ownsFont) (void)DeleteObject(font);
+            (void)DeleteDC(dc);
+            return clearTitle();
+        }
+        size_t prefix = length;
+        measured = false;
+        while (true) {
+            for (size_t index = 0; index < prefix; ++index)
+                displayTitle[index] = title[index];
+            displayTitle[prefix] = L'.';
+            displayTitle[prefix + 1] = L'.';
+            displayTitle[prefix + 2] = L'.';
+            displayTitle[prefix + 3] = L'\0';
+            displayLength = prefix + 3;
+            measured = GetTextExtentPoint32W(dc, displayTitle,
+                static_cast<int32_t>(displayLength), &extent) &&
+                extent.cx > 0 && extent.cy > 0;
+            if (measured && extent.cx <= availableWidth) break;
+            if (!prefix) { measured = false; break; }
+            --prefix;
+        }
+    }
+    const uint32_t width = measured ? static_cast<uint32_t>(extent.cx) : 0;
+    const uint32_t height = measured ? static_cast<uint32_t>(extent.cy) : 0;
+    if (!width || !height || width > INT32_MAX || height > INT32_MAX ||
+        static_cast<size_t>(width) > SIZE_MAX / height ||
+        static_cast<size_t>(width) * height > UINT32_MAX / sizeof(uint32_t)) {
+        if (oldFont) (void)SelectObject(dc, oldFont);
+        if (ownsFont) (void)DeleteObject(font);
+        (void)DeleteDC(dc);
+        (void)clearTitle();
+        return false;
+    }
+    CaptionDibInfo info{};
+    info.width = static_cast<int32_t>(width);
+    info.height = -static_cast<int32_t>(height);
+    info.imageSize = width * height * sizeof(uint32_t);
+    void* bits = nullptr;
+    void* bitmap = CreateDIBSection(dc, &info, 0, &bits, nullptr, 0);
+    void* oldBitmap = bitmap ? SelectObject(dc, bitmap) : nullptr;
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    auto* pixels = static_cast<uint32_t*>(bits);
+    if (pixels) std::fill_n(pixels, pixelCount, 0u);
+    const bool rendered = pixels && oldBitmap && measured &&
+        SetBkMode(dc, 1) > 0 && SetTextColor(dc, 0x00FFFFFFu) != 0xFFFFFFFFu &&
+        TextOutW(dc, 0, 0, displayTitle, static_cast<int32_t>(displayLength));
     bool published = false;
     if (rendered) {
         // GDI's FontManager blends a white glyph into the transparent DIB.
@@ -869,8 +925,7 @@ bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
         for (uint32_t y = 0; y < height; ++y) {
             for (uint32_t x = 0; x < width; ++x) {
                 uint32_t& pixel = pixels[static_cast<size_t>(y) * width + x];
-                const uint32_t source =
-                    pixels[static_cast<size_t>(y) * kMaxWidth + x];
+                const uint32_t source = pixel;
                 const uint32_t coverage = std::max({source & 0xFFu,
                     (source >> 8) & 0xFFu, (source >> 16) & 0xFFu});
                 pixel = coverage << 24;
@@ -880,6 +935,7 @@ bool publishCaptionTitleSurface(void* hwnd, const wchar_t* title) noexcept {
     }
     if (oldFont) (void)SelectObject(dc, oldFont);
     if (oldBitmap) (void)SelectObject(dc, oldBitmap);
+    if (bitmap) (void)DeleteObject(bitmap);
     if (ownsFont) (void)DeleteObject(font);
     (void)DeleteObject(bitmap);
     (void)DeleteDC(dc);
@@ -1141,7 +1197,7 @@ RegisteredClassIcons* findRegisteredClassIcons(const wchar_t* name) noexcept {
 int32_t setWindowIconPixels(void* hwnd, uint32_t type, void* icon,
                             uint64_t* previous) noexcept {
     if (previous) *previous = 0;
-    if (!previous || type >= MICANT_COMPOSITOR_ICON_TYPES) return 0;
+    if (!previous || type >= 3u) return 0;
     winuser::IconHandleTable::Lease lease{};
     uint32_t width{}, height{}, stride{};
     const uint8_t* pixels = nullptr;
@@ -1149,8 +1205,6 @@ int32_t setWindowIconPixels(void* hwnd, uint32_t type, void* icon,
         if (!winuser::ProcessIconHandles().acquire(icon, lease)) return 0;
         const auto& view = lease.bitmap();
         if (view.cursor || !view.width || !view.height ||
-            view.width > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
-            view.height > MICANT_COMPOSITOR_ICON_MAX_DIMENSION ||
             view.width > UINT32_MAX / sizeof(uint32_t) ||
             view.stride != view.width * sizeof(uint32_t) ||
             static_cast<uint64_t>(view.stride) * view.height > view.pixels.size())
@@ -1476,9 +1530,7 @@ void* User32_LoadImageW(void* instance, const wchar_t* name, uint32_t type,
             return nullptr;
         uint32_t targetWidth = width ? width : cursor.image.width;
         uint32_t targetHeight = height ? height : cursor.image.height;
-        if ((flags & DefaultSize) && !width && !height) targetWidth = targetHeight = 32;
-        if (!targetWidth || !targetHeight || targetWidth > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION ||
-            targetHeight > MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION) return nullptr;
+        if (!targetWidth || !targetHeight) return nullptr;
         uint16_t hotX = cursor.hotX, hotY = cursor.hotY;
         if (cursor.image.width != targetWidth || cursor.image.height != targetHeight) {
             const uint32_t oldWidth = cursor.image.width, oldHeight = cursor.image.height;
@@ -2682,14 +2734,17 @@ bool drawButtonFocus(void* dc, int32_t width, int32_t height) noexcept {
 
 bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
                   int32_t width, int32_t height) noexcept {
+
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return false;
     void* memoryDc = CreateCompatibleDC(nullptr);
+
     if (!memoryDc) return false;
     ButtonDibInfo info{};
     info.width = width;
     info.height = -height;
     void* pixels{};
     void* bitmap = CreateDIBSection(nullptr, &info, 0, &pixels, nullptr, 0);
+
     if (!bitmap || !pixels) {
         if (bitmap) (void)DeleteObject(bitmap);
         (void)DeleteDC(memoryDc);
@@ -2725,9 +2780,12 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
     const int32_t glyphY = std::max<int32_t>(0, (height - glyphSize) / 2);
     const WinNtRect glyph{4, glyphY, 4 + glyphSize, glyphY + glyphSize};
     const WinNtRect bounds = checkable ? glyph : WinNtRect{0, 0, width, height};
+
     void* theme = OpenThemeData(hwnd, L"BUTTON");
+
     bool backgroundDrawn = theme &&
         DrawThemeBackground(theme, memoryDc, part, themeState, &bounds, nullptr) == 0;
+
     if (!backgroundDrawn && !checkable) drawButtonFallback(memoryDc, width, height, button);
     if (checkable && !backgroundDrawn) {
         const uint32_t face = (button.state & kButtonDisabled)
@@ -2742,9 +2800,11 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
     uint32_t textColor = (button.state & kButtonDisabled)
         ? 0xFF777777u : kColorWindowText;
     if (theme) {
+
         uint32_t themedColor{};
         if (GetThemeColor(theme, part, themeState, 3803, &themedColor) == 0)
             textColor = themedColor;
+
     }
     if (checkable && button.checkState != 0) {
         const uint32_t mark = (button.state & kButtonDisabled) ? 0xFF777777u : textColor;
@@ -2765,11 +2825,14 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
     }
     const WinNtRect textBounds = checkable
         ? WinNtRect{glyph.right + 5, 0, width, height} : bounds;
+
     bool textDrawn = theme &&
         DrawThemeText(theme, memoryDc, part, themeState, button.text, -1,
             (checkable ? 0u : kDtCenter) | kDtVCenter | kDtSingleLine | kDtNoPrefix,
             0, &textBounds) == 0;
+
     if (!textDrawn && button.text[0]) {
+
         ButtonTextExtent extent{};
         size_t textLength{};
         while (textLength < std::size(button.text) && button.text[textLength]) ++textLength;
@@ -2785,19 +2848,24 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
             (void)TextOutW(memoryDc, x, y, button.text,
                            static_cast<int32_t>(textLength));
         }
+
     }
+
     const int32_t copied = BitBlt(targetDc, 0, 0, width, height,
                                    memoryDc, 0, 0, 0x00CC0020u);
+
     // Draw on the window DC after copying the themed DIB. In this path the
     // window DC is the presented surface; fillButtonRect also falls back to
     // Win32k's direct software fill when GDI FillRect rejects that DC.
     const bool focusDrawn = !(button.state & kButtonFocused) ||
         drawButtonFocus(targetDc, width, height);
+
     if (theme) (void)CloseThemeData(theme);
     (void)SelectObject(memoryDc, oldFont);
     (void)SelectObject(memoryDc, oldBitmap);
     const int32_t bitmapDeleted = DeleteObject(bitmap);
     const int32_t dcDeleted = DeleteDC(memoryDc);
+
     return copied && focusDrawn && bitmapDeleted && dcDeleted;
 }
 } // namespace
@@ -3127,6 +3195,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             invalidateButton(hwnd);
     }
     if (message == kWmPaint) {
+
         ButtonState button{};
         {
             ButtonLockGuard guard(g_buttonLock);
@@ -3138,20 +3207,26 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         else button.state &= ~kButtonFocused;
         WinNtPaintStruct paint{};
         void* targetDc = User32_BeginPaint(hwnd, &paint);
+
         if (!targetDc) return 0;
         MicaWin32kRect client{};
         using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
         const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
         const bool hasRect = getRect && getRect(hwnd, &client);
+
         bool drawn = false;
-        if (hasRect && client.right > 0 && client.bottom > 0)
+        if (hasRect && client.right > 0 && client.bottom > 0) {
+
             drawn = renderButton(hwnd, button, targetDc, client.right, client.bottom);
+
+        }
         if (!drawn && hasRect && client.right > 0 && client.bottom > 0) {
             drawButtonFallback(targetDc, client.right, client.bottom, button);
             if (button.state & kButtonFocused)
                 (void)drawButtonFocus(targetDc, client.right, client.bottom);
         }
         (void)User32_EndPaint(hwnd, &paint);
+
         return hasRect && client.right > 0 && client.bottom > 0;
     }
     if (click) notifyButtonClicked(hwnd);

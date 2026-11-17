@@ -249,9 +249,13 @@ def main() -> int:
         "--graphics-backend", choices=("auto", "virtio2d", "virgl"), default="auto",
         help="select VirtIO-GPU 2D, or attempt VirGL only when QEMU and the display support it",
     )
+    parser.add_argument(
+        "--resolution", choices=("800x600", "1024x768", "1280x1024", "1920x1080"),
+        help="request a guest scanout mode through VirtIO-VGA EDID",
+    )
     parser.add_argument("--timeout", type=int, default=90, help="boot milestone timeout")
     parser.add_argument("--memory-mib", type=int, default=1024,
-                        choices=(256, 512, 1024, 2048, 4096),
+                        choices=(256, 500, 512, 1024, 2048, 4096),
                         help="QEMU RAM profile used by the bare-metal boot")
     parser.add_argument("--diagnostics-dir", type=Path,
                         help="new directory retaining serial/QEMU logs and the exact kernel/manifest")
@@ -283,6 +287,10 @@ def main() -> int:
     parser.add_argument(
         "--theme-test", action="store_true",
         help="launch theme_test.exe in QEMU for dedicated Win32 theme verification",
+    )
+    parser.add_argument(
+        "--compositor-local-stats", action="store_true",
+        help="enable aggregated compositor timing, repaint and present counters",
     )
     parser.add_argument(
         "--process-memory-selftest", action="store_true",
@@ -383,6 +391,7 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_NETWORK_SELFTEST:BOOL={'ON' if args.network_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_TASKMGR_SELFTEST:BOOL={'ON' if args.taskmgr_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_THEME_TEST:BOOL={'ON' if args.theme_test else 'OFF'}",
+                f"-DMICANT_COMPOSITOR_LOCAL_STATS:BOOL={'ON' if args.compositor_local_stats else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST:BOOL={'ON' if args.process_memory_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CMD_TEST:BOOL={'ON' if args.cmd_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST:BOOL={'ON' if args.crash_dump_selftest else 'OFF'}",
@@ -472,6 +481,8 @@ def main() -> int:
             "--graphics-backend",
             args.graphics_backend,
         ]
+        if args.resolution:
+            boot_command.extend(["--resolution", args.resolution])
         if args.diagnostics_dir:
             boot_command.extend(["--diagnostics-dir", str(args.diagnostics_dir.resolve())])
         elif args.cmd_test:
@@ -498,7 +509,7 @@ def main() -> int:
             boot_command.append("--interactive")
         elif args.usb_test:
             boot_command.append("--verify-usb-input")
-        elif not args.process_memory_selftest:
+        elif not args.process_memory_selftest and not args.resolution:
             boot_command.append("--verify-input")
         if args.process_memory_selftest:
             boot_command.append("--process-memory-selftest")

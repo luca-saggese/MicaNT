@@ -38,6 +38,7 @@ extern "C" int memcmp(const void* left, const void* right, size_t count) {
 
 namespace {
 constexpr wchar_t kClassName[] = L"MicaNTThemeTestWindow";
+constexpr wchar_t kStressClassName[] = L"MicaNTWindowGrowthProbe";
 constexpr UINT kLightId = 1010;
 constexpr UINT kDarkId = 1011;
 constexpr UINT kBaseId = 1015;
@@ -68,6 +69,73 @@ HWND g_focusEdit{};
 MicaThemeHandle g_initialThemeHandle{};
 uint32_t g_initialThemeColor{};
 bool g_themeLifetimeVerified{};
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+
+bool exerciseWindowTableGrowth(HINSTANCE instance) {
+    WNDCLASSEXW klass{};
+    klass.cbSize = sizeof(klass);
+    klass.lpfnWndProc = WindowProc;
+    klass.hInstance = instance;
+    klass.lpszClassName = kStressClassName;
+    if (!RegisterClassExW(&klass)) return false;
+
+    HWND windows[24]{};
+    size_t created = 0;
+    for (; created < 24; ++created) {
+        windows[created] = CreateWindowExW(0, kStressClassName, L"Window growth probe",
+            WS_OVERLAPPEDWINDOW,
+            12 + static_cast<int>(created % 6) * 120,
+            12 + static_cast<int>(created / 6) * 100, 96, 72,
+            nullptr, nullptr, instance, nullptr);
+        if (!windows[created]) break;
+        (void)ShowWindow(windows[created], SW_SHOW);
+    }
+    bool resized = created == 24;
+    for (size_t pass = 0; pass < 3; ++pass) {
+        for (size_t index = 0; index < created; ++index) {
+            const int x = 24 + static_cast<int>(index % 6) * 120;
+            const int y = 24 + static_cast<int>(index / 6) * 100;
+            const int width = pass == 1 ? 112 : (index % 2 ? 80 : 112);
+            const int height = pass == 1 ? 84 : (index % 2 ? 64 : 84);
+            if (!SetWindowPos(windows[index], nullptr, x, y, width, height, 0))
+                resized = false;
+        }
+    }
+    for (size_t index = created; index > 0; --index)
+        if (!DestroyWindow(windows[index - 1])) resized = false;
+    constexpr int probeX[3]{16, 48, 760};
+    constexpr int probeY[3]{16, 40, 560};
+    constexpr int probeWidth[3]{1, 700, 96};
+    constexpr int probeHeight[3]{1, 500, 72};
+    HWND geometryProbes[3]{};
+    size_t geometryCreated = 0;
+    for (; geometryCreated < 3; ++geometryCreated) {
+        geometryProbes[geometryCreated] = CreateWindowExW(0, kStressClassName,
+            L"Window geometry probe", WS_OVERLAPPEDWINDOW,
+            probeX[geometryCreated], probeY[geometryCreated],
+            probeWidth[geometryCreated], probeHeight[geometryCreated],
+            nullptr, nullptr, instance, nullptr);
+        if (!geometryProbes[geometryCreated]) break;
+        (void)ShowWindow(geometryProbes[geometryCreated], SW_SHOW);
+        if (!SetWindowPos(geometryProbes[geometryCreated], nullptr,
+                probeX[geometryCreated], probeY[geometryCreated],
+                geometryCreated == 0 ? 40 : 112,
+                geometryCreated == 0 ? 32 : 84, 0) ||
+            !SetWindowPos(geometryProbes[geometryCreated], nullptr,
+                probeX[geometryCreated], probeY[geometryCreated],
+                probeWidth[geometryCreated], probeHeight[geometryCreated], 0))
+            resized = false;
+    }
+    if (geometryCreated != 3) resized = false;
+    for (size_t index = geometryCreated; index > 0; --index)
+        if (!DestroyWindow(geometryProbes[index - 1])) resized = false;
+    if (resized) {
+        micant_gui::PrintLine("[MicaNT ThemeTest] Dynamic window table: 24 windows created, resized, and destroyed");
+        return true;
+    }
+    micant_gui::PrintLine("[MicaNT ThemeTest] Dynamic window table stress failed");
+    return false;
+}
 MicaThemeSnapshot g_activeSnapshot{};
 MicaThemeSnapshot g_candidateSnapshot{};
 MicaThemeSnapshot g_rollbackSnapshot{};
@@ -493,7 +561,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 extern "C" void _start() noexcept {
-    micant_gui::PrintLine("[MicaNT ThemeTest TEMP] user entry reached");
     InitCommonControlsExArgs commonControls{sizeof(commonControls), 0x0000002Au};
     if (!InitCommonControlsEx(&commonControls))
         micant_gui::PrintLine("[MicaNT ThemeTest] Common control class initialization failed");
@@ -505,17 +572,14 @@ extern "C" void _start() noexcept {
     klass.hInstance = GetModuleHandleW(nullptr);
     klass.lpszClassName = kClassName;
     if (!RegisterClassExW(&klass)) {
-    micant_gui::PrintLine("[MicaNT ThemeTest TEMP] RegisterClassExW failed");
         return;
     }
     g_window = CreateWindowExW(0, kClassName, L"MicaNT Theme Test",
         WS_OVERLAPPEDWINDOW, 72, 56, 860, 570, nullptr, nullptr,
         klass.hInstance, nullptr);
     if (!g_window) {
-        micant_gui::PrintLine("[MicaNT ThemeTest TEMP] CreateWindowExW failed");
         return;
     }
-    micant_gui::PrintLine("[MicaNT ThemeTest TEMP] CreateWindowExW succeeded");
     HMENU menu = CreateMenu();
     if (menu) {
         AppendMenuW(menu, 0, 1, L"Theme test");
@@ -526,14 +590,9 @@ extern "C" void _start() noexcept {
     // Establish the public Base snapshot first so a missing, unreadable, or
     // invalid active profile has a real fallback to preserve.
     if (!selectBaseTheme()) {
-        micant_gui::PrintLine("[MicaNT ThemeTest TEMP] Base snapshot publication failed");
         return;
     }
-    micant_gui::PrintLine("[MicaNT ThemeTest TEMP] Base snapshot published");
-    if (loadActiveTheme())
-        micant_gui::PrintLine("[MicaNT ThemeTest TEMP] active.profile theme applied");
-    else
-        micant_gui::PrintLine("[MicaNT ThemeTest TEMP] active.profile unavailable; Base retained");
+    (void)loadActiveTheme();
     g_initialThemeHandle = OpenThemeData(g_window, L"BUTTON");
     if (!g_initialThemeHandle ||
         GetThemeColor(g_initialThemeHandle, 1, 1, 3802, &g_initialThemeColor) != 0) {
@@ -541,15 +600,14 @@ extern "C" void _start() noexcept {
         return;
     }
     micant_gui::PrintLine("[MicaNT ThemeTest] Initial HTHEME snapshot pinned");
-    micant_gui::PrintLine("[MicaNT ThemeTest TEMP] notification queue probe starting");
-    const auto wasVisible = ShowWindow(g_window, SW_SHOW);
+    (void)ShowWindow(g_window, SW_SHOW);
     createThemeControls(g_window);
     if (g_focusEdit) (void)SetFocus(g_focusEdit);
     UpdateWindow(g_window);
-    micant_gui::PrintLine(wasVisible
-        ? "[MicaNT ThemeTest TEMP] ShowWindow returned visible"
-        : "[MicaNT ThemeTest TEMP] ShowWindow completed from hidden state");
     micant_gui::PrintLine("[MicaNT ThemeTest] Production control window started");
+    micant_gui::PrintLine("[MicaNT ThemeTest] Dynamic window table stress starting");
+    (void)exerciseWindowTableGrowth(klass.hInstance);
+    micant_gui::PrintLine("[MicaNT ThemeTest] Dynamic window table stress returned");
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);

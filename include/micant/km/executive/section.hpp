@@ -87,6 +87,7 @@ struct SectionBackingReference {
     void* context{nullptr};
     bool (*acquire)(void*) noexcept{nullptr};
     void (*release)(void*) noexcept{nullptr};
+    NtStatus (*materialize)(void*, size_t, uint64_t*) noexcept{nullptr};
     size_t pageCount{0};
     const uint64_t* pfns{nullptr};
 };
@@ -113,6 +114,7 @@ class SectionObject {
         std::atomic<size_t> references{1};
         size_t pageCount{0};
         uint64_t* pfns{nullptr};
+        std::atomic_flag pageLock = ATOMIC_FLAG_INIT;
         uintptr_t imageBase{0};
         size_t imageSize{0};
         std::unique_ptr<uint32_t[]> pageProtections{};
@@ -144,6 +146,33 @@ class SectionObject {
             if (backing->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
                 delete backing;
         }
+
+        static NtStatus materialize(void* context, size_t pageIndex,
+                                    uint64_t* outPfn) noexcept {
+            if (!context || !outPfn) return NtStatus::InvalidParameter;
+            auto* backing = static_cast<Backing*>(context);
+            if (pageIndex >= backing->pageCount || !backing->pfns)
+                return NtStatus::InvalidViewSize;
+            while (backing->pageLock.test_and_set(std::memory_order_acquire)) {}
+            uint64_t pfn = backing->pfns[pageIndex];
+            if (!pfn) {
+                auto& db = mm::PfnDatabase::get();
+                pfn = db.allocatePage(true);
+                if (!pfn) {
+                    backing->pageLock.clear(std::memory_order_release);
+                    return NtStatus::NoMemory;
+                }
+                if (!db.zeroAllocatedPage(pfn)) {
+                    db.freePage(pfn);
+                    backing->pageLock.clear(std::memory_order_release);
+                    return NtStatus::Unsuccessful;
+                }
+                backing->pfns[pageIndex] = pfn;
+            }
+            backing->pageLock.clear(std::memory_order_release);
+            *outPfn = pfn;
+            return NtStatus::Success;
+        }
     };
 
 public:
@@ -156,7 +185,7 @@ public:
             status_ = NtStatus::InvalidParameter;
             return;
         }
-        if (allocationAttributes != SEC_COMMIT || fileObject ||
+        if ((allocationAttributes != SEC_COMMIT && allocationAttributes != SEC_RESERVE) || fileObject ||
             (backingPath && *backingPath) ||
             (pageProtection != mm::PAGE_READONLY && pageProtection != mm::PAGE_READWRITE)) {
             status_ = NtStatus::NotImplemented;
@@ -179,19 +208,23 @@ public:
             status_ = NtStatus::NoMemory;
             return;
         }
+        std::memset(backing->pfns, 0, count * sizeof(uint64_t));
         auto& db = mm::PfnDatabase::get();
-        for (size_t i = 0; i < count; ++i) {
-            const uint64_t pfn = db.allocatePage(true);
-            if (!pfn) {
-                status_ = NtStatus::NoMemory;
-                delete backing;
-                return;
-            }
-            backing->pfns[backing->pageCount++] = pfn;
-            if (!db.zeroAllocatedPage(pfn)) {
-                status_ = NtStatus::Unsuccessful;
-                delete backing;
-                return;
+        backing->pageCount = count;
+        if (allocationAttributes == SEC_COMMIT) {
+            for (size_t i = 0; i < count; ++i) {
+                const uint64_t pfn = db.allocatePage(true);
+                if (!pfn) {
+                    status_ = NtStatus::NoMemory;
+                    delete backing;
+                    return;
+                }
+                backing->pfns[i] = pfn;
+                if (!db.zeroAllocatedPage(pfn)) {
+                    status_ = NtStatus::Unsuccessful;
+                    delete backing;
+                    return;
+                }
             }
         }
         backing_ = backing;
@@ -639,7 +672,7 @@ public:
     [[nodiscard]] SectionBackingReference getBackingReference() const noexcept {
         if (!backing_) return {};
         return {backing_, Backing::acquire, Backing::release,
-                backing_->pageCount, backing_->pfns};
+                Backing::materialize, backing_->pageCount, backing_->pfns};
     }
     [[nodiscard]] uint8_t* getData() noexcept { return nullptr; }
     [[nodiscard]] const uint8_t* getData() const noexcept { return nullptr; }

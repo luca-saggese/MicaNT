@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <cstring>
 #include "micant/shared/ntdef.hpp"
+#include "micant/shared/user_graphics.hpp"
+#include "micant/shared/user_syscall.hpp"
 #include "micant/um/subsystems/winbase/kernel32.hpp"
 #include "micant/um/native/ldr.hpp"
 #include "micant/um/servers/winlogon.hpp"
@@ -1646,9 +1648,14 @@ inline win32::HWND GetDesktopWindow() noexcept {
 }
 
 inline int32_t GetSystemMetrics(int32_t nIndex) noexcept {
+    micant::um::UserVideoInfo64 display{};
+    if (micant::sys::invokeUserService(0x80,
+            reinterpret_cast<uint64_t>(&display)) != 0 ||
+        !display.width || !display.height || display.width > INT32_MAX ||
+        display.height > INT32_MAX) return 0;
     switch (nIndex) {
-        case 0: return 1920; // SM_CXSCREEN
-        case 1: return 1080; // SM_CYSCREEN
+        case 0: return static_cast<int32_t>(display.width); // SM_CXSCREEN
+        case 1: return static_cast<int32_t>(display.height); // SM_CYSCREEN
         case 2: return 0;    // SM_CXVSCROLL
         case 3: return 0;    // SM_CYHSCROLL
         case 4: return 32;   // SM_CYCAPTION

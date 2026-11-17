@@ -1744,6 +1744,36 @@ pair. QMP input verification, scanout captures and five-second serial stability
 all passed. This closes E6 stabilization for the current bounded single-boot
 profile; E5 VirGL support remains open.
 
+### LuceOS runtime display geometry and demand-backed compositor pixels
+
+The compositor now queries the canonical display service for runtime width,
+height and pitch, allocates its software frame and blur buffers from those
+dimensions, and accepts GOP modes selected through the ESP `boot.ini`
+`resolution=WxH` setting. The bootstrap display probe validates runtime
+geometry and pitch instead of requiring 1024x768. The QEMU runner checks the
+captured scanout dimensions against the requested mode.
+
+The compositor pixel section now uses `SEC_RESERVE`. Section views retain the
+section object and materialize/zero a shared PFN on first access; Mm records
+resident pages in the owning VAD and releases mappings during unmap while the
+section remains the PFN owner. This removes eager commitment of all twenty
+full-screen pixel slots. The section is still one monolithic slot store with
+fixed slot offsets and fixed virtual bases; individual HWND-owned sections,
+dynamic metadata/assets/dirty regions and resize/destruction rundown are not
+implemented yet.
+
+| Evidence | Result |
+|---|---|
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal win32k_boot compositor_boot -j4` | Passed; canonical kernel linked and native user-mode boundary checks passed |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 75 --diagnostics-dir /private/tmp/micant-lazy-section-500` | Passed; 500 MiB QEMU boot reached compositor first shared frame, cursor presentation, Explorer visible desktop, and five seconds of stable serial |
+| QEMU `--resolution` runs at 800x600, 1280x1024 and 1920x1080 | CPL3 scanout capture dimensions matched each requested mode; later process/Explorer startup did not complete in these runs, so broad multi-resolution desktop operation is not verified |
+
+The 500 MiB result verifies the current 1024x768 interactive boot profile only.
+It does not establish that larger modes or arbitrary surface counts fit the
+budget. Cursor repaint equivalence, per-window section lifecycle, address
+randomization, dynamic metadata/assets/dirty regions, and full multi-resolution
+Explorer interaction remain open acceptance work.
+
 | Command | Result |
 |---|---|
 | `python3 qemu.py --headless --timeout 180 --memory-mib 1024 --diagnostics-dir build/explorer-ring3-main-e6-run5` | Passed E6 stabilization; repeated Explorer window create/destroy cycles, focus return, mouse/keyboard dispatch, scanout updates and five-second serial stability verified |
@@ -1993,3 +2023,201 @@ item in the original process-memory specification. Atomic capture, timeout
 and cancellation policy, restricted-token denial, shared-section accounting,
 independent parsing of the emitted dump file, exact global PFN attribution,
 and the 512 MiB desktop boot remain unverified or incomplete.
+
+## LuceOS dynamic compositor migration (2026-11-16, in progress)
+
+The canonical compositor now allocates each root window's client surface as a
+lazy `SEC_RESERVE` section. Mm maps it writable in the owning process and
+read-only in the compositor; child windows address their clipped client area
+within the root section. Owner mappings are released on resize and destroy.
+Compositor mappings and section references are queued until the compositor
+acknowledges a frame sequence that no longer contains the surface; process
+rundown removes owner mappings after Ps tears down the owner's address space.
+The compositor no longer uses a global
+per-display pixel slot store. Metadata and decoration views are mapped at
+runtime-selected addresses, and only the compositor receives those addresses
+from the display query. Win32k and popup placement now derive screen bounds
+from the initialized display mode instead of 1024x768 constants.
+
+A cross-process page fault at `metadataAddress + 0x28` was traced to
+`markWindowBounds()` reading the compositor-only metadata mapping while
+handling an Explorer window operation. Damage expansion now reads Win32k's
+kernel-owned theme snapshot. The canonical 1024x768 run at 500 MiB passes after
+this fix. A compositor-only syscall now triggers retirement after metadata
+changes are presented. The acknowledgement retirement path compiles and the
+desktop boots, but destroy/resize stress has not yet proved reclamation.
+
+The earlier Ring 3 `#UD` at RIP `0x4000000110EC` was the intentional failure
+branch in the native syscall probe. Its display-query test incorrectly required
+1024x768, so it rejected valid runtime display dimensions before the compositor
+started. The probe now checks nonzero width and height, pitch >= width, and no
+physical display pointer exposure. The fault was not in Explorer's image loader.
+
+| Command | Result |
+|---|---|
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal win32k_boot compositor_boot explorer_runtime_boot -j4` | Passed; canonical kernel and user-mode targets linked and boundary checks passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 75 --diagnostics-dir /private/tmp/micant-runtime-display-query-500` | Passed; QEMU used VirtIO 2D, the compositor received dynamic section addresses, Explorer requested and mapped a shared window surface, the desktop became visible, and serial remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-final-clean-500` | Passed after fixing the kernel dereference of compositor-only theme metadata and removing temporary tracing; VirtIO 2D boot remained stable for five seconds at the 500 MiB limit. |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal compositor_boot win32k_boot explorer_runtime_boot -j4` | Passed with frame-acknowledged retirement and the compositor-PID-gated `0x85` notification service linked. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-retire-500` | Passed; VirtIO 2D desktop remained stable for five seconds. This boot does not exercise a controlled destroy/resize reclamation stress case. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --timeout 75 --diagnostics-dir /private/tmp/micant-per-window-surfaces-1280` | Failed after selecting and capturing the requested GOP mode; Explorer hit an unhandled Ring 3 `#UD` before the compositor started. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 75 --diagnostics-dir /private/tmp/micant-per-window-surfaces-1920` | Failed with the same pre-compositor Ring 3 `#UD`; the early scanout capture was 1920x1080. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 75 --diagnostics-dir /private/tmp/micant-runtime-display-800` | Failed with the same pre-compositor Ring 3 `#UD`; the requested mode was selected before the failure. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-theme-1280` | Reproduced the pre-compositor Explorer `#UD` at RIP `0x4000000110EC`; QMP capture confirms the selected scanout was 1280x1024. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-theme-1920` | Reproduced the pre-compositor Explorer `#UD`; QMP capture confirms the selected scanout was 1920x1080. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-theme-800` | Reproduced the pre-compositor Explorer `#UD` at RIP `0x4000000110EC`; QMP capture confirms the selected scanout was 800x600. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-ud-opcodes-800` | Reproduced the fault with a fresh Explorer build. The translated fault page contains `0F 0B`, unlike the corresponding bytes in the built image; scanout capture is 800x600. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-retire-800-fresh` | Reproduced Explorer `#UD` at the same RIP using the regenerated kernel and user images. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-retire-1280-fresh` | Reproduced the same RIP and the same translated physical page/opcode bytes as 800x600 using the regenerated images. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-retire-1920-fresh` | Reproduced the `#UD` with regenerated images; opcode trace resolves the same physical page and `0F 0B` bytes as the smaller modes, while QMP capture confirms 1920x1080 scanout. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 100 --diagnostics-dir /private/tmp/micant-compositor-theme-test-500` | Failed the 100-second theme-test gate. The app loaded WhiteSur Light and pinned its theme snapshot, then made no further progress after the notification-queue probe start marker; the expected production-control-window marker and desktop screenshot were not produced. |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal -j4` | Passed after removing the native display probe's fixed 1024x768 assertion. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 75 --diagnostics-dir /private/tmp/micant-native-query-fixed-800` | Passed; VirtIO 2D desktop boot remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --timeout 75 --diagnostics-dir /private/tmp/micant-native-query-fixed-1280` | Passed; VirtIO 2D desktop boot remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 75 --diagnostics-dir /private/tmp/micant-native-query-fixed-1920` | Passed; VirtIO 2D desktop boot remained stable for five seconds at 500 MiB. |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal compositor_boot win32k_boot explorer_runtime_boot -j4` | Passed; canonical kernel and user-mode targets linked, including the cursor repaint equivalence probe. Native user-mode boundary checks passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 75 --diagnostics-dir /private/tmp/micant-cursor-repaint-probe-800` | Passed; compositor's controlled scene compared cursor old/new partial repaint pixel-for-pixel with full composition after cursor movement and return, then presented a shared frame. QEMU remained stable for five seconds at 500 MiB. |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal compositor_boot win32k_boot explorer_runtime_boot -j4` | Passed with live surface-prefix metadata publication and stable snapshot copying. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 75 --diagnostics-dir /private/tmp/micant-live-surface-count-1024` | Passed; live surface count and variable-prefix snapshot path booted through shared frame presentation and remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 75 --diagnostics-dir /private/tmp/micant-live-surface-prefix-1920` | Passed; variable-prefix metadata, animation cleanup, and the full/partial cursor pixel comparison passed; QMP scanout capture was 1920x1080 and serial remained stable for five seconds at 500 MiB. |
+
+The migration remains incomplete. Surface slots, metadata arrays, dirty arrays,
+cursor pixels, icons, titles, and the Win32k window table now use runtime-sized
+storage. The compositor store ABI is version 14; its surface descriptors carry
+runtime addresses, byte sizes, pitch, and explicit source X/Y coordinates.
+Icon and title pixels are individual section-backed resources, cursor pixels
+are section-backed, the old decoration and pixel-offset stores are gone, and
+Win32k's pending dirty-region set now grows dynamically with allocation-failure
+fallback to full redraw.
+The compositor performs stable sequence-validated snapshots and a controlled
+software scene shows pixel-identical full/partial cursor repaint after moving
+and returning the pointer. The particular reported line displacement has not
+yet been reproduced during a live drag/hover interaction. Process termination,
+compositor restart, mode-change resource transitions, allocation-failure
+stress, PFN recovery under prolonged create/destroy churn, and measured 500 MiB
+headroom remain open. The immediate GDI path now queries display width, height,
+pitch and format at runtime, keeps its scanout scratch buffer mode-sized, and
+allocates DIB pixels per bitmap rather than from a fixed monolithic arena.
+
+Theme-test tracing exposed a missing Mm integration: `SEC_RESERVE` window
+surfaces were mapped writable in the client, but user-mode page faults were
+only routed through the copy-on-write and stack-guard paths. The first
+`BitBlt` into a newly created client surface therefore faulted before storing
+its first pixel. User page faults now reach the owning process address space's
+`handlePageFault`, which materializes demand-section pages and retains the
+existing COW behavior. In QEMU the previously stalled button `BitBlt` now
+successfully reads and writes its first pixel and completes a full-window
+copy. The same boot then failed to open `theme_test.exe` with
+`STATUS_INSUFFICIENT_RESOURCES` before the test app reached its entry point;
+follow-up tracing located the shortage in the FAT backend's fixed 32-entry
+per-mount file-stream table. The table is now a mount-owned list of live
+streams, with each stream removed and freed when its final file reference
+closes. This made the existing theme and font file opens succeed without
+raising a static cap. Temporary paint and BitBlt traces were removed after
+the fault path was identified.
+
+| Command | Result |
+|---|---|
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 75 --diagnostics-dir /private/tmp/micant-compositor-abi-v9-1024` | Passed with ABI v9; controlled cursor repaint comparison and first shared-frame presentation markers appeared, scanout capture was 1024x768, and serial remained stable for five seconds at 500 MiB. |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal theme_test_boot -j4` | Passed after wiring user page faults into the process address space; the kernel linked and native user-mode boundary checks passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-theme-demand-section-fix-01` | Failed after the desktop came up: the button paint path successfully committed and wrote into its dynamic section-backed client surface, but the later `theme_test.exe` image open returned `STATUS_INSUFFICIENT_RESOURCES` (`0xC0000017`) before Ring 3 entry. This is not a passing theme-test run. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 100 --diagnostics-dir /private/tmp/micant-demand-section-desktop-500-01` | Passed; the canonical desktop boot remained stable for five seconds at 500 MiB with demand-section mapping active and no theme-test app launch. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-theme-dynamic-fat-streams-01` | Passed; the dedicated `theme_test.exe` entered Ring 3, synchronously painted the Light, Dark, and Base buttons, created the production common-control matrix, produced `theme-test-start.ppm`, and QEMU remained stable for five seconds at 500 MiB. The screenshot shows the test window and controls on the desktop. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-theme-clean-evidence-02` | Passed after removing temporary diagnostics and updating the startup evidence gate to require production markers; `theme-test-start.ppm` was captured and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 120 --diagnostics-dir /private/tmp/micant-demand-section-1920-500-01` | Passed with demand-section page materialization active; QEMU remained stable for five seconds at 500 MiB and the captured scanout PPM header is `1920 1080`. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --timeout 120 --diagnostics-dir /private/tmp/micant-demand-section-1280-500-01` | Passed with demand-section page materialization active; QEMU remained stable for five seconds at 500 MiB and the captured scanout PPM header is `1280 1024`. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 75 --diagnostics-dir /private/tmp/micant-theme-updatewindow-exact-v9` | Failed the theme-test gate. The app created its Light, Dark, Base, and matrix controls, then stalled synchronously in `UpdateWindow(light)` while dispatching `WM_PAINT`; `ShowWindow` and its metadata publish/copy path returned successfully. The theme test did not reach its production-control-window marker or screenshot. Temporary tracing currently narrows the stall to the button paint procedure or a nested GDI/Win32k operation; the exact blocking call is unresolved. |
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal win32k_boot user32_boot theme_test_boot compositor_boot -j4` | Passed after replacing the decoration pixel store with section-backed icon/title resources and changing compositor descriptors to runtime address/size pairs. Native user-mode boundary checks passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-dynamic-assets-qemu-02` | Passed; compositor and Explorer started, the dedicated theme app reached the startup evidence markers, `theme-test-start.ppm` was captured, and QEMU remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-dynamic-assets-qemu-01` | Failed before this fix with a supervisor write page fault while the kernel copied into a newly reserved asset view. The #PF path now resolves valid non-present supervisor writes in the current process's user section view through Mm; unrelated kernel faults still use the fatal path. The subsequent run above passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-dynamic-assets-v10-qemu-01` | Passed with the v10 metadata descriptor and no decoration view; the dedicated theme app reached its production control window, the startup screenshot was captured, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-dynamic-metadata-qemu-02` | Passed with v11 dynamically section-backed surface/dirty descriptors; the compositor presented its first frame, Explorer and the dedicated theme app started, `theme-test-start.ppm` was captured, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 120 --diagnostics-dir /private/tmp/micant-dynamic-cursor-qemu-01` | Passed with dynamic cursor section mappings and metadata v11; Explorer loaded and selected class, theme, PE and ANI cursors, the dedicated theme app startup screenshot was captured, and QEMU remained stable for five seconds. |
+
+### Dynamic window/GDI continuation
+
+| Command or evidence | Result |
+|---|---|
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal win32k_boot compositor_boot user32_boot theme_test_boot -j4` | Passed with runtime-sized Win32k window storage, per-resource GDI bitmap allocation, display-query-driven screen dimensions, explicit compositor source X/Y fields, and ABI v13. Native user-mode boundary checks passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-runtime-gdi-window-stress-800x600` | Passed; actual scanout PPM is 800x600; theme app created, resized, and destroyed 24 real top-level windows and reported the completion marker; QEMU remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-runtime-gdi-window-stress-1280x1024-03` | Passed before ABI v13 source-coordinate migration; actual theme screenshot is 1280x1024 and the 24-window lifecycle marker appeared. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-runtime-gdi-window-stress-1920x1080` | Passed before ABI v13 source-coordinate migration; actual theme screenshot is 1920x1080 and the 24-window lifecycle marker appeared. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-abi-v13-window-stress-1024x768` | Passed with ABI v13; controlled cursor full/partial pixel comparison passed, 24-window create/resize/destroy passed, and the actual theme screenshot is 1024x768. QEMU remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-dynamic-regions-geometry-v13-1024` | Passed with ABI v13 and dynamic dirty-region storage; the production client completed 24 spaced top-level windows with repeated resize/destroy, plus 1x1, 700x500, and partly off-screen geometry probes; cursor repaint equivalence passed and the QMP screenshot header is 1024x768. QEMU remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-dynamic-title-raster-v14-1024` | Passed with ABI v14 after removing the fixed inline title field and its compositor fallback; dynamic section-backed title rasters rendered during the 24-window lifecycle/geometry stress, cursor repaint equivalence passed, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-abi-v14-theme-1280x1024` | Passed at ABI v14; theme test and 24-window lifecycle stress completed on actual 1280x1024 scanout, cursor repaint equivalence passed, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-abi-v14-theme-1920x1080` | Passed at ABI v14; theme test and 24-window lifecycle stress completed on actual 1920x1080 scanout, cursor repaint equivalence passed, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-abi-v14-visual-settle-1024` | Passed with the QMP screenshot gate waiting for a stable, neutral parent-client pixel before capture; reviewed screenshot shows the complete WhiteSur window and controls at 1024x768. The 24-window lifecycle stress, cursor repaint equivalence, and five-second stable interval passed at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-abi-v14-visual-settle-1280x1024` | Passed with the same stable parent-client scanout gate; reviewed screenshot shows the complete WhiteSur window and controls at 1280x1024. The 24-window lifecycle stress, cursor repaint equivalence, and five-second stable interval passed at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-abi-v14-visual-settle-1920x1080` | Passed with the stable parent-client scanout gate; screenshot header and reviewed image are 1920x1080 with the complete WhiteSur window and controls. The 24-window lifecycle stress, cursor repaint equivalence, and five-second stable interval passed at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-clipped-window-800x600` | Passed after removing the compositor's `surface.width/height > screen` rejection; an 860x570 theme-test window now composes clipped to 800x600, its complete visible client region and controls appear in the reviewed screenshot, and the 24-window lifecycle stress plus five-second stable interval passed at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-v14-final-normal-1024` | Failed the strengthened visual-settle gate: the theme app and 24-window stress completed, but its parent window was absent from scanout. The screenshot showed desktop taskbar entries without the parent surface. This exposed repaint loss when the published surface-entry count changed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-surface-set-full-1024` | Passed with the count-based full-repaint trigger; screenshot shows the complete theme window and controls, 24-window lifecycle stress and cursor repaint equivalence completed, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-surface-set-full-1280x1024` | Failed the stable parent-client scanout gate. The screenshot showed the desktop and theme taskbar entry but no parent surface after the 24-window lifecycle stress. This demonstrated that the published prefix count can remain unchanged while live surface identities change. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-live-set-repaint-1280x1024` | Passed after triggering full-screen damage when the live surface identity fingerprint changes; complete theme window reached scanout, the 24-window lifecycle stress and cursor repaint equivalence completed, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-live-set-repaint-1920x1080` | Failed the stable parent-client scanout gate after the theme app completed its 24-window lifecycle stress. Screenshot shows the desktop and theme taskbar entry without its parent surface; live identity fingerprint alone does not resolve the intermittent missing-window repaint. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-large-surface-diag-1920x1080-r2` | Passed with temporary compositor metadata diagnostics; screenshot shows the full theme window, and logs show its visible 860x570 descriptor first without backing then with a valid section address, 850-pixel pitch, and 1,761,200-byte view. The 24-window lifecycle test completed and QEMU remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-resource-signature-clean-1920x1080` | Passed without diagnostic logging after the repaint signature began including section address/size, dimensions, pitch, z-order, and child source offsets; full theme window reached scanout, 24-window lifecycle stress completed, and QEMU remained stable for five seconds. Previous failures remain evidence of intermittent behavior. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-resource-signature-800x600` | Passed with the expanded resource signature; actual 800x600 scanout showed the clipped theme window, its 24-window lifecycle stress completed, and QEMU remained stable for five seconds at 500 MiB. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --compositor-local-stats --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-stats-v14-1024` | Failed after the first shared frame and an aggregate sample (`compose_ms=11 present_ms=1 full=1 partial=0 pixels=786432 bytes=3145728 surfaces=0 frames=1 wakes=0 failed_present=0`); serial stopped during desktop process creation and the theme app did not start. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --compositor-local-stats --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-stats-v14-delay-report-1024` | Failed after Explorer's first user-mode window; one deferred aggregate reported `compose_ms=3 present_ms=28 full=5 partial=7 pixels=3939264 bytes=15757056 surfaces=0 frames=12 wakes=12 failed_present=0`, but the desktop surface did not reach scanout and the theme app did not launch. Stats-enabled runtime remains unverified. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --compositor-local-stats --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-stats-v14-visible-only-1024` | Failed during theme-app startup after the compositor reported `compose_ms=2 present_ms=32 full=6 partial=8 pixels=4727632 bytes=18910528 surfaces=2 frames=14 wakes=15 failed_present=0`; serial showed `CreateFileW error 31` on the compiled style snapshot and no production-control-window marker. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 120 --diagnostics-dir /private/tmp/micant-compositor-dynamic-windows-1920x1080` | Passed before the latest dynamic GDI and ABI v13 changes; QMP scanout capture header was 1920x1080. |
+
+The window exercise is a startup stress in `theme_test.exe`; it does not yet
+cover repeated process-owned window churn, multiple concurrent owners, abnormal
+process exit, or restart/mode-change cleanup. The compositor's theme-test
+capture now waits for stable pixels at multiple points in the parent client
+area; otherwise it could save a startup frame before the full window had been
+repainted. The compositor no longer drops a surface merely because its outer
+dimensions exceed scanout; it clips drawing to the actual display bounds. ABI
+v14 theme runs visually exercised complete windows at 800x600, 1024x768,
+1280x1024, and 1920x1080 before the latest repaint changes. A count-based
+full-screen repaint trigger fixed one reproduced missing parent-window frame
+at 1024x768, but failed to detect slot reuse at 1280x1024. The compositor now
+fingerprints live handles, visibility state, section backing, dimensions,
+pitch, z-order, and child source offsets. It passed at 1280x1024 and in a clean
+1920x1080 rerun, but earlier 1280x1024 and 1920x1080 runs still reproduced the
+missing parent window. Treat repaint as intermittent until repeated clean
+runs and the planned live drag/hover checks pass. Live QMP drag/hover pixel checks,
+process exit/restart cleanup, mode-change transitions, allocation-failure
+stress, prolonged PFN recovery, and measured 500 MiB headroom remain open.
+Optional local compose/present, redraw, pixel, byte, surface, frame, wakeup,
+and failed-present counters have been added behind
+`MICANT_COMPOSITOR_LOCAL_STATS` (off by default). The stats-enabled QEMU image
+linked and emitted aggregates, but three stats-enabled theme boots failed
+before the theme test completed; one reached desktop surfaces and then failed
+reading the compiled style snapshot. Fix and rerun that path before relying on
+the metrics.
+
+### Metadata retirement and latest 500 MiB mode runs
+
+Metadata array growth now retires the previous section mapping only after an
+even compositor acknowledgement sequence has advanced past the publication
+that replaces it. A failed release remains queued for retry. This addresses a
+snapshot lifetime race found while the compositor could still read the old
+array. The current code has no compositor restart path to validate, and the
+retired-list behavior under owner exit or permanent compositor loss remains
+unverified.
+
+| Command or evidence | Result |
+|---|---|
+| `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal win32k_boot compositor_boot theme_test_boot -j4` | Passed; canonical kernel and compositor/theme targets linked, native user-mode boundary checks passed. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --timeout 90 --diagnostics-dir /private/tmp/micant-compositor-retired-1024` | Passed after metadata retirement; canonical modular desktop remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1280x1024 --timeout 90 --diagnostics-dir /private/tmp/micant-compositor-retired-1280` | Passed after metadata retirement; requested display mode booted and serial remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1920x1080 --timeout 90 --diagnostics-dir /private/tmp/micant-compositor-retired-1920` | Passed after metadata retirement; requested display mode booted and serial remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 800x600 --timeout 90 --diagnostics-dir /private/tmp/micant-compositor-retired-800` | Passed after metadata retirement; requested display mode booted and serial remained stable for five seconds. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-retired-metadata-qmp-drag-1024x768` | Failed the added live caption-drag scanout check. Theme test reached the stable parent screenshot gate and its 24-window create/resize/destroy stress completed, but QMP-injected mouse movement did not change scanout pixels. This does not verify live drag or cursor repaint under real guest input. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-metadata-retired-theme-1024` | Passed the normal theme-test gate after separating the drag result from startup success: WhiteSur parent screenshot and 24-window lifecycle completed, serial remained stable for five seconds, and the drag probe explicitly reported 0 changed scanout pixels. Live drag remains unverified. |
+| `python3 qemu.py --headless --memory-mib 500 --resolution 1024x768 --theme-test --timeout 150 --diagnostics-dir /private/tmp/micant-compositor-paced-mouse-1024` | Repeated the theme-test pass after pacing relative pointer calibration; the drag probe still reported 0 changed pixels. |
+| Visible Cocoa QEMU theme run at 1024x768 | Theme app and 24-window stress completed; QMP scanout again reported 0 pixels changed during the scripted drag. The visible QEMU frontend was not exposed in the computer-use app inventory, so a physical GUI drag could not be performed through this session. The interactive QEMU process was stopped with Ctrl+C after this observation. |
+| `python3 scripts/boot_micant.py --ovmf-code /opt/homebrew/Cellar/qemu/11.1.3/share/qemu/edk2-x86_64-code.fd --timeout 150 --stable-seconds 5 --memory-mib 500 --display none --graphics-backend auto --resolution 1024x768 --diagnostics-dir /private/tmp/micant-compositor-verify-input-1024 --verify-input` | Failed at the existing Explorer input gate: QMP keyboard and mouse click markers appeared, but Enter did not dispatch an application window action before timeout. This run did not reach the caption-drag check. |
+| Direct 1024x768 theme QEMU run with temporary bounded PS/2/Win32k input tracing | The trace confirmed the scripted pointer path reached Win32k dispatch with changing coordinates through `(272,74) → (332,74) → (332,104)` while button 1 was down, then returned to `(272,74)` and released. The QMP scanout comparison remained at 0 changed pixels. Thus input polling and dispatch are working; the drag/dirty-publication/presentation path remains the unresolved boundary. Temporary serial tracing was removed after collecting this evidence. |
+
+The 1024x768, 1280x1024, and 1920x1080 runs above verify stable desktop boots
+at 500 MiB after the metadata lifetime fix; the 1024 theme screenshot and
+24-window stress are additional evidence, but its drag gate failed. They do
+not prove resize/destroy PFN reclamation, arbitrary surface counts, mode
+transitions, multi-process ownership, abnormal owner exit, or compositor
+restart cleanup. Dynamic asset sizing, live pointer repaint, measured memory
+headroom, and stress of allocation failure remain open.

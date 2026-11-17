@@ -4,9 +4,15 @@
 #include "micant/shared/pixel_composite.h"
 #include "micant/shared/user_graphics.hpp"
 #include "micant/shared/user_syscall.hpp"
+#include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/win32k_client.h"
 
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef MICANT_COMPOSITOR_LOCAL_STATS
+#define MICANT_COMPOSITOR_LOCAL_STATS 0
+#endif
 
 extern "C" void* memset(void* destination, int value, size_t count) {
     auto* bytes = static_cast<volatile uint8_t*>(destination);
@@ -24,16 +30,52 @@ extern "C" void* memcpy(void* destination, const void* source, size_t count) {
 
 namespace {
 
-uint32_t g_frame[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
+uint32_t* g_frame{};
 constexpr int64_t kWindowEffectRadiusLimit = 32;
-constexpr int64_t kWindowShadowExtent = MICANT_COMPOSITOR_WINDOW_SHADOW_EXTENT;
 constexpr int64_t kWindowBlurRadius = 2;
+constexpr size_t kDamageRegionComplexityBudget = 16;
 uint32_t g_windowCornerBackdrop[4][kWindowEffectRadiusLimit *
                                    kWindowEffectRadiusLimit]{};
-uint32_t g_windowBlurBackdrop[MICANT_COMPOSITOR_SURFACE_PIXELS]{};
-uint16_t g_windowBlurRowSums[kWindowBlurRadius * 2 + 1]
-    [MICANT_COMPOSITOR_SCREEN_WIDTH][3]{};
+uint32_t* g_windowBlurBackdrop{};
+uint16_t* g_windowBlurRowSums{};
+uint32_t g_displayWidth{};
+uint32_t g_displayHeight{};
+
+struct LocalPerformanceStats {
+    uint64_t composeMilliseconds{};
+    uint64_t presentMilliseconds{};
+    uint64_t fullRedraws{};
+    uint64_t partialRedraws{};
+    uint64_t pixelsComposited{};
+    uint64_t bytesTransferred{};
+    uint64_t surfaceCount{};
+    uint64_t frames{};
+    uint64_t wakeups{};
+    uint64_t failedPresents{};
+    uint64_t lastReportMilliseconds{};
+};
+LocalPerformanceStats g_localPerformanceStats{};
+
+bool allocateZeroed(size_t bytes, void*& allocation) noexcept {
+    allocation = nullptr;
+    if (!bytes) return false;
+    size_t regionSize = bytes;
+    return micant::native_nt::NtAllocateVirtualMemory(
+        static_cast<micant::Handle>(-1), &allocation, 0, &regionSize,
+        0x3000u, 0x04u) == micant::NtStatus::Success && allocation;
+}
+void releaseAllocation(void* allocation) noexcept {
+    if (!allocation) return;
+    size_t regionSize{};
+    void* base = allocation;
+    (void)micant::native_nt::NtFreeVirtualMemory(
+        static_cast<micant::Handle>(-1), &base, &regionSize, 0x8000u);
+}
 MicaCompositorMetadataStore g_metadataSnapshot{};
+MicaCompositorSurfaceInfo* g_snapshotSurfaces{};
+size_t g_snapshotSurfaceCapacity{};
+MicaCompositorDirtyRect* g_snapshotDirtyRegions{};
+size_t g_snapshotDirtyCapacity{};
 bool g_presentFailureReported{};
 bool g_hasPresentedFrame{};
 uint64_t g_lastThemeGeneration{};
@@ -61,12 +103,54 @@ struct AnimationRuntime {
     bool active{}, hasLastBounds{};
 };
 
-AnimationRuntime g_animationRuntime[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
-AnimationFrame g_animationFrames[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+struct OrderedSurface {
+    const MicaCompositorSurfaceInfo* info{};
+    size_t index{};
+};
+AnimationRuntime* g_animationRuntime{};
+AnimationFrame* g_animationFrames{};
+size_t g_animationCapacity{};
+OrderedSurface* g_orderedSurfaces{};
+size_t g_orderedSurfaceCapacity{};
 MicaCompositorMetadataStore g_effectProbeMetadata{};
 MicaCompositorSurfaceInfo g_effectProbeSurfaces[2]{};
-AnimationFrame g_effectProbeAnimations[MICANT_COMPOSITOR_SURFACE_CAPACITY]{};
+AnimationFrame g_effectProbeAnimations[2]{};
 uint32_t g_effectProbePixels[128u * 128u + 64u * 64u]{};
+
+bool ensureAnimationCapacity(size_t required) noexcept {
+    if (required <= g_animationCapacity) return true;
+    if (required > SIZE_MAX / sizeof(AnimationRuntime) ||
+        required > SIZE_MAX / sizeof(AnimationFrame)) return false;
+    void* runtimes{};
+    void* frames{};
+    if (!allocateZeroed(required * sizeof(AnimationRuntime), runtimes) ||
+        !allocateZeroed(required * sizeof(AnimationFrame), frames)) {
+        releaseAllocation(runtimes);
+        releaseAllocation(frames);
+        return false;
+    }
+    auto* newRuntimes = static_cast<AnimationRuntime*>(runtimes);
+    auto* newFrames = static_cast<AnimationFrame*>(frames);
+    for (size_t index = 0; index < g_animationCapacity; ++index)
+        newRuntimes[index] = g_animationRuntime[index];
+    releaseAllocation(g_animationRuntime);
+    releaseAllocation(g_animationFrames);
+    g_animationRuntime = newRuntimes;
+    g_animationFrames = newFrames;
+    g_animationCapacity = required;
+    return true;
+}
+
+bool ensureOrderedSurfaceCapacity(size_t required) noexcept {
+    if (required <= g_orderedSurfaceCapacity) return true;
+    if (required > SIZE_MAX / sizeof(OrderedSurface)) return false;
+    void* replacement{};
+    if (!allocateZeroed(required * sizeof(OrderedSurface), replacement)) return false;
+    releaseAllocation(g_orderedSurfaces);
+    g_orderedSurfaces = static_cast<OrderedSurface*>(replacement);
+    g_orderedSurfaceCapacity = required;
+    return true;
+}
 
 uint64_t animationClockMilliseconds() noexcept {
     const auto* shared = reinterpret_cast<volatile const micant::KUserSharedData*>(
@@ -96,8 +180,11 @@ void addAnimationDamage(AnimationFrame& frame, ScreenRect bounds) noexcept {
 
 void buildAnimationFrames(const MicaCompositorMetadataStore& metadata,
                           uint64_t nowMilliseconds,
-                          AnimationFrame* frames) noexcept {
-    for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
+                          AnimationFrame* frames,
+                          uint32_t screenWidth,
+                          uint32_t screenHeight) noexcept {
+    const size_t surfaceCount = metadata.surfaceEntryCount;
+    for (size_t index = 0; index < surfaceCount; ++index) {
         auto& frame = frames[index];
         frame = {};
         auto& runtime = g_animationRuntime[index];
@@ -119,8 +206,8 @@ void buildAnimationFrames(const MicaCompositorMetadataStore& metadata,
 
         const auto& target = surface.animationTarget;
         if (target.left < 0 || target.top < 0 ||
-            target.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
-            target.bottom > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT) ||
+            target.right > static_cast<int32_t>(screenWidth) ||
+            target.bottom > static_cast<int32_t>(screenHeight) ||
             target.left >= target.right || target.top >= target.bottom ||
             !surface.width || !surface.height) {
             if (runtime.active && runtime.hasLastBounds)
@@ -189,11 +276,77 @@ void buildAnimationFrames(const MicaCompositorMetadataStore& metadata,
         runtime.lastBounds = current;
         runtime.hasLastBounds = true;
     }
+    for (size_t index = surfaceCount;
+         index < g_animationCapacity; ++index) {
+        auto& frame = frames[index];
+        auto& runtime = g_animationRuntime[index];
+        frame = {};
+        if (runtime.active && runtime.hasLastBounds)
+            addAnimationDamage(frame, runtime.lastBounds);
+        runtime = {};
+    }
 }
 
 void print(const char* text, size_t length) noexcept {
     (void)micant::sys::invokeUserService(0x25,
         reinterpret_cast<uint64_t>(text), length);
+}
+
+uint64_t performanceMilliseconds() noexcept {
+    micant::LargeInteger counter{}, frequency{};
+    if (micant::native_nt::NtQueryPerformanceCounter(&counter, &frequency) !=
+            micant::NtStatus::Success || counter.quadPart < 0 ||
+        frequency.quadPart <= 0) return 0;
+    const uint64_t ticks = static_cast<uint64_t>(counter.quadPart);
+    const uint64_t rate = static_cast<uint64_t>(frequency.quadPart);
+    return (ticks / rate) * 1000u + ((ticks % rate) * 1000u) / rate;
+}
+
+void appendPerformanceValue(char*& cursor, uint64_t value) noexcept {
+    char digits[20]{};
+    size_t count = 0;
+    do {
+        digits[count++] = static_cast<char>('0' + value % 10u);
+        value /= 10u;
+    } while (value && count < sizeof(digits));
+    while (count) *cursor++ = digits[--count];
+}
+
+void reportLocalPerformanceStats() noexcept {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+    auto& stats = g_localPerformanceStats;
+    const uint64_t now = performanceMilliseconds();
+    if (!now || !stats.surfaceCount || (stats.lastReportMilliseconds &&
+                 now - stats.lastReportMilliseconds < 5000u)) return;
+    stats.lastReportMilliseconds = now;
+    char line[320]{};
+    char* cursor = line;
+    const auto append = [&cursor](const char* text) noexcept {
+        while (*text) *cursor++ = *text++;
+    };
+    append("[MicaNT Compositor Stats] compose_ms=");
+    appendPerformanceValue(cursor, stats.composeMilliseconds);
+    append(" present_ms="); appendPerformanceValue(cursor, stats.presentMilliseconds);
+    append(" full="); appendPerformanceValue(cursor, stats.fullRedraws);
+    append(" partial="); appendPerformanceValue(cursor, stats.partialRedraws);
+    append(" pixels="); appendPerformanceValue(cursor, stats.pixelsComposited);
+    append(" bytes="); appendPerformanceValue(cursor, stats.bytesTransferred);
+    append(" surfaces="); appendPerformanceValue(cursor, stats.surfaceCount);
+    append(" frames="); appendPerformanceValue(cursor, stats.frames);
+    append(" wakes="); appendPerformanceValue(cursor, stats.wakeups);
+    append(" failed_present="); appendPerformanceValue(cursor, stats.failedPresents);
+    append("\r\n");
+    print(line, static_cast<size_t>(cursor - line));
+    stats.composeMilliseconds = 0;
+    stats.presentMilliseconds = 0;
+    stats.fullRedraws = 0;
+    stats.partialRedraws = 0;
+    stats.pixelsComposited = 0;
+    stats.bytesTransferred = 0;
+    stats.frames = 0;
+    stats.wakeups = 0;
+    stats.failedPresents = 0;
+#endif
 }
 
 uint32_t blend(uint32_t source, uint32_t destination) noexcept {
@@ -281,7 +434,8 @@ void applyWindowBackdropBlur(int64_t left, int64_t top,
                 green += (pixel >> 8) & 0xFFu;
                 blue += pixel & 0xFFu;
             }
-            auto& row = g_windowBlurRowSums[rowSlot][x];
+            auto* row = g_windowBlurRowSums +
+                (rowSlot * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3;
             row[0] = static_cast<uint16_t>(red);
             row[1] = static_cast<uint16_t>(green);
             row[2] = static_cast<uint16_t>(blue);
@@ -297,7 +451,9 @@ void applyWindowBackdropBlur(int64_t left, int64_t top,
         for (int64_t x = left; x < right; ++x) {
             uint32_t red = 0, green = 0, blue = 0;
             for (size_t row = 0; row < kernel; ++row) {
-                const auto& sums = g_windowBlurRowSums[(head + row) % kernel][x];
+                const auto* sums = g_windowBlurRowSums +
+                    (((head + row) % kernel) * static_cast<size_t>(width) +
+                     static_cast<size_t>(x)) * 3;
                 red += sums[0];
                 green += sums[1];
                 blue += sums[2];
@@ -323,6 +479,7 @@ void applyWindowBackdropBlur(int64_t left, int64_t top,
 
 void blendWindowShadow(int64_t left, int64_t top, int64_t right, int64_t bottom,
                        int64_t radius, uint32_t width, uint32_t height) noexcept {
+    const int64_t shadowExtent = radius;
     const auto integerSqrt = [](uint64_t value) noexcept {
         uint64_t result = 0;
         uint64_t bit = uint64_t{1} << 62;
@@ -339,12 +496,12 @@ void blendWindowShadow(int64_t left, int64_t top, int64_t right, int64_t bottom,
     // Signed distance to the rounded rectangle, in half-pixel units. The
     // rounded silhouette now controls the shadow at the corners as well as
     // along the straight edges.
-    for (int64_t y = top - kWindowShadowExtent;
-         y < bottom + kWindowShadowExtent; ++y) {
+    for (int64_t y = top - shadowExtent;
+         y < bottom + shadowExtent; ++y) {
         if (y < g_composeClip.top || y >= g_composeClip.bottom ||
             y < 0 || y >= height) continue;
-        for (int64_t x = left - kWindowShadowExtent;
-             x < right + kWindowShadowExtent; ++x) {
+        for (int64_t x = left - shadowExtent;
+             x < right + shadowExtent; ++x) {
             if (x < g_composeClip.left || x >= g_composeClip.right ||
                 x < 0 || x >= width) continue;
             const int64_t qx = (2 * x + 1 < left + right
@@ -360,7 +517,7 @@ void blendWindowShadow(int64_t left, int64_t top, int64_t right, int64_t bottom,
                                                    outsideY * outsideY)) +
                 std::min<int64_t>(std::max(qx, qy), 0) - 2 * radius;
             if (signedDistance2 <= 0 || signedDistance2 >
-                2 * static_cast<int64_t>(kWindowShadowExtent)) continue;
+                2 * shadowExtent) continue;
             const uint32_t alpha = signedDistance2 <= 2 ? 42u :
                 signedDistance2 <= 5 ? 34u : signedDistance2 <= 8 ? 26u :
                 signedDistance2 <= 11 ? 18u : 10u;
@@ -454,30 +611,6 @@ void applyWindowCornerMask(int64_t left, int64_t top,
     }
 }
 
-void drawGlyph(int64_t x, int64_t y, uint32_t character, uint32_t color,
-               uint32_t width, uint32_t height) noexcept {
-    if (character < 32 || character > 126) character = '?';
-    const auto* rows = micant::shared::FONT_8X8[character - 32];
-    for (int row = 0; row < 8; ++row) {
-        for (int column = 0; column < 8; ++column) {
-            if (!(rows[row] & (1u << (7 - column)))) continue;
-            const int64_t px = x + column, py = y + row;
-            if (px >= g_composeClip.left && px < g_composeClip.right &&
-                py >= g_composeClip.top && py < g_composeClip.bottom &&
-                px < width && py < height)
-            {
-                auto& destination = g_frame[static_cast<size_t>(py) * width +
-                    static_cast<size_t>(px)];
-                const uint32_t alpha =
-                    ((color >> 24) * g_windowDrawOpacity + 127u) / 255u;
-                if (alpha == 255) destination = color;
-                else if (alpha) destination = blend(
-                    (alpha << 24) | (color & 0x00FFFFFFu), destination);
-            }
-        }
-    }
-}
-
 void drawIconPixel(int64_t x, int64_t y, uint32_t color,
                    uint32_t width, uint32_t height) noexcept {
     fillRect(x, y, x + 2, y + 2, color, width, height);
@@ -508,15 +641,27 @@ void drawControlIcon(uint8_t kind, bool maximized, int64_t left,
     }
 }
 
+bool requiredPixelBytes(uint32_t width, uint32_t height, uint32_t stride,
+                        uint64_t& bytes) noexcept {
+    bytes = 0;
+    if (!width || !height || stride < width) return false;
+    constexpr uint64_t maxPixels = UINT64_MAX / sizeof(uint32_t);
+    const uint64_t rows = static_cast<uint64_t>(height - 1);
+    if (rows && stride > (maxPixels - width) / rows) return false;
+    bytes = (rows * stride + width) * sizeof(uint32_t);
+    return true;
+}
+
 bool composeRegion(const MicaCompositorMetadataStore& metadata,
-                   const uint32_t* surfaces, ScreenRect clip,
+                   ScreenRect clip,
                    const AnimationFrame* animationFrames,
                    const uint32_t* decorPixels) noexcept {
+    (void)decorPixels;
     const uint32_t width = metadata.screenWidth;
     const uint32_t height = metadata.screenHeight;
-    if (width != MICANT_COMPOSITOR_SCREEN_WIDTH ||
-        height != MICANT_COMPOSITOR_SCREEN_HEIGHT ||
-        metadata.surfaceCapacity > MICANT_COMPOSITOR_SURFACE_CAPACITY ||
+    if (!width || !height || width > SIZE_MAX / height ||
+        (metadata.surfaceEntryCount && (!metadata.surfaces || !animationFrames)) ||
+        !ensureOrderedSurfaceCapacity(metadata.surfaceEntryCount) ||
         clip.left < 0 || clip.top < 0 || clip.right > width || clip.bottom > height ||
         clip.left >= clip.right || clip.top >= clip.bottom) return false;
     g_composeClip = clip;
@@ -540,14 +685,10 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
     fillRect(clip.left, clip.top, clip.right, clip.bottom, 0xFF1C3A5Cu,
              width, height);
 
-    struct OrderedSurface {
-        const MicaCompositorSurfaceInfo* info;
-        size_t index;
-    };
-    OrderedSurface ordered[MICANT_COMPOSITOR_SURFACE_CAPACITY];
+    auto* ordered = g_orderedSurfaces;
     constexpr uint32_t kWsChild = 0x40000000u;
     size_t count = 0;
-    for (size_t index = 0; index < metadata.surfaceCapacity; ++index) {
+    for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
         const auto& surface = metadata.surfaces[index];
         if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
                               MICANT_COMPOSITOR_SURFACE_VISIBLE)) !=
@@ -556,11 +697,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             ((surface.flags & MICANT_COMPOSITOR_SURFACE_ICONIC) &&
              !animationFrames[index].active) ||
             !surface.window || !surface.width || !surface.height ||
-            surface.width > width || surface.height > height ||
-            surface.pitch < surface.width ||
-            surface.pixelOffset > MICANT_COMPOSITOR_SURFACE_PIXEL_CAPACITY ||
-            static_cast<uint64_t>(surface.pitch) * surface.height >
-                MICANT_COMPOSITOR_SURFACE_PIXEL_CAPACITY - surface.pixelOffset)
+            !surface.surfaceAddress || !surface.surfaceSizeBytes || !surface.pitch)
             continue;
         size_t insertion = count;
         while (insertion && ordered[insertion - 1].info->zOrder > surface.zOrder) {
@@ -615,7 +752,22 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         const int64_t clientHeight = windowHeight - frame * 2 - caption;
         const int64_t sourceClientWidth = surface.width - sourceFrame * 2;
         const int64_t sourceClientHeight = surface.height - sourceFrame * 2 - sourceCaption;
-        if (clientWidth <= 0 || clientHeight <= 0) continue;
+        const uint64_t surfacePixels = surface.surfaceSizeBytes / sizeof(uint32_t);
+        if (clientWidth <= 0 || clientHeight <= 0 || sourceClientWidth <= 0 ||
+            sourceClientHeight <= 0 || surface.surfaceSourceX > surface.pitch ||
+            static_cast<uint64_t>(sourceClientWidth) >
+                surface.pitch - surface.surfaceSourceX ||
+            static_cast<uint64_t>(surface.surfaceSourceY) >
+                (surfacePixels / surface.pitch)) continue;
+        const uint64_t sourceStart = static_cast<uint64_t>(surface.surfaceSourceY) *
+            surface.pitch + surface.surfaceSourceX;
+        const uint64_t sourceRows = static_cast<uint64_t>(sourceClientHeight - 1) *
+            surface.pitch;
+        if (sourceRows > surfacePixels || sourceStart > surfacePixels - sourceRows ||
+            static_cast<uint64_t>(sourceClientWidth) >
+                surfacePixels - sourceStart - sourceRows) continue;
+        const auto* surfacePixelsBase = reinterpret_cast<const uint32_t*>(
+            static_cast<uintptr_t>(surface.surfaceAddress));
 
         const uint8_t opacity = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_OPACITY)
@@ -627,14 +779,13 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         int64_t radius = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_RADIUS)
             ? windowStyle->borderRadius : 0;
-        // WhiteSur's decoration selector specifies 12px corners, but Snapshot
-        // v2 has no decoration control. Keep Base square and use the CSS value
-        // only when the active theme provides a real headerbar style.
+        // Base remains square; themed corner radius comes from the active
+        // headerbar style when the window style does not specify one.
         const bool hasThemedHeaderbar = themeValid && normalHeaderbar &&
             (normalHeaderbar->flags & MICANT_THEME_HAS_BACKGROUND);
         if (!radius && hasThemedHeaderbar &&
             !(surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED))
-            radius = 12;
+            radius = normalHeaderbar->borderRadius;
         if (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) radius = 0;
         if (!topLevel || !frame) radius = 0;
         if (radius > kWindowEffectRadiusLimit) radius = kWindowEffectRadiusLimit;
@@ -851,23 +1002,13 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                                    closeGlyph, width, height);
 
                     const int64_t titleLimit = closeLeft - 66;
-                    const size_t surfaceSlot = ordered[index].index;
-                    const uint64_t iconSlotBegin = MICANT_COMPOSITOR_ICON_PIXEL_OFFSET +
-                        static_cast<uint64_t>(surfaceSlot) * MICANT_COMPOSITOR_ICON_TYPES *
-                            MICANT_COMPOSITOR_ICON_MAX_PIXELS;
-                    const uint64_t iconSlotEnd = iconSlotBegin +
-                        static_cast<uint64_t>(MICANT_COMPOSITOR_ICON_TYPES) *
-                            MICANT_COMPOSITOR_ICON_MAX_PIXELS;
-                    const uint64_t iconEnd = static_cast<uint64_t>(surface.iconPixelOffset) +
-                        (surface.iconHeight ? static_cast<uint64_t>(surface.iconHeight - 1) *
-                            surface.iconStride + surface.iconWidth : 0);
-                    const bool validIcon = surface.iconGeneration &&
-                        surface.iconWidth && surface.iconHeight &&
-                        surface.iconWidth <= MICANT_COMPOSITOR_ICON_MAX_DIMENSION &&
-                        surface.iconHeight <= MICANT_COMPOSITOR_ICON_MAX_DIMENSION &&
-                        surface.iconStride >= surface.iconWidth &&
-                        surface.iconPixelOffset >= iconSlotBegin && iconEnd <= iconSlotEnd &&
-                        iconEnd <= MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE / sizeof(uint32_t);
+                    uint64_t iconEnd{};
+                    const bool validIcon = surface.iconGeneration && surface.iconWidth &&
+                        requiredPixelBytes(surface.iconWidth, surface.iconHeight,
+                            surface.iconStride, iconEnd) && surface.iconAddress &&
+                        iconEnd <= surface.iconSizeBytes;
+                    const auto* iconPixels = validIcon
+                        ? reinterpret_cast<const uint32_t*>(surface.iconAddress) : nullptr;
                     int64_t titleX = windowLeft + frame + 9;
                     if (validIcon) {
                         const int64_t iconLeft = titleX;
@@ -881,8 +1022,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                 const int64_t x = iconLeft + column;
                                 if (x >= titleLimit || x < g_composeClip.left ||
                                     x >= g_composeClip.right || x < 0 || x >= width) continue;
-                                const uint32_t source = decorPixels[surface.iconPixelOffset +
-                                    static_cast<size_t>(row) * surface.iconStride + column];
+                                const uint32_t source = iconPixels[static_cast<size_t>(row) * surface.iconStride + column];
                                 const uint32_t sourceAlpha = source >> 24;
                                 const uint32_t effectiveAlpha =
                                     (sourceAlpha * opacity + 127u) / 255u;
@@ -898,21 +1038,13 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                         titleX += surface.iconWidth + 8;
                     }
 
-                    const uint64_t titleSlotBegin = MICANT_COMPOSITOR_TITLE_PIXEL_OFFSET +
-                        static_cast<uint64_t>(surfaceSlot) * MICANT_COMPOSITOR_TITLE_MAX_PIXELS;
-                    const uint64_t titleSlotEnd = titleSlotBegin +
-                        MICANT_COMPOSITOR_TITLE_MAX_PIXELS;
-                    const uint64_t titleEnd = static_cast<uint64_t>(surface.titlePixelOffset) +
-                        (surface.titleHeight ? static_cast<uint64_t>(surface.titleHeight - 1) *
-                            surface.titleStride + surface.titleWidth : 0);
+                    uint64_t titleEnd{};
                     const bool validTitle = surface.titleGeneration && surface.titleWidth &&
-                        surface.titleHeight &&
-                        surface.titleWidth <= MICANT_COMPOSITOR_TITLE_MAX_WIDTH &&
-                        surface.titleHeight <= MICANT_COMPOSITOR_TITLE_MAX_HEIGHT &&
-                        surface.titleStride >= surface.titleWidth &&
-                        surface.titlePixelOffset == titleSlotBegin &&
-                        titleEnd <= titleSlotEnd &&
-                        titleEnd <= MICANT_COMPOSITOR_DECOR_PIXEL_STORE_SIZE / sizeof(uint32_t);
+                        requiredPixelBytes(surface.titleWidth, surface.titleHeight,
+                            surface.titleStride, titleEnd) && surface.titleAddress &&
+                        titleEnd <= surface.titleSizeBytes;
+                    const auto* titlePixels = validTitle
+                        ? reinterpret_cast<const uint32_t*>(surface.titleAddress) : nullptr;
                     if (validTitle) {
                         const int64_t titleTop = windowTop + frame +
                             (caption - static_cast<int64_t>(surface.titleHeight)) / 2;
@@ -925,8 +1057,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                 if (x >= titleLimit) break;
                                 if (x < g_composeClip.left || x >= g_composeClip.right ||
                                     x < 0 || x >= width) continue;
-                                const uint32_t coverage = decorPixels[surface.titlePixelOffset +
-                                    static_cast<size_t>(row) * surface.titleStride + column] >> 24;
+                                const uint32_t coverage = titlePixels[static_cast<size_t>(row) * surface.titleStride + column] >> 24;
                                 if (!coverage) continue;
                                 const uint32_t effectiveCoverage =
                                     (coverage * opacity + 127u) / 255u;
@@ -937,12 +1068,6 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                                 g_frame[destination] = blend(glyph, g_frame[destination]);
                             }
                         }
-                    } else {
-                        const int64_t titleY = windowTop + frame + (caption - 8) / 2;
-                        for (size_t character = 0; character < 63 && surface.title[character] &&
-                             titleX + 8 <= titleLimit; ++character, titleX += 8)
-                            drawGlyph(titleX, titleY, surface.title[character],
-                                      titleColor, width, height);
                     }
                 }
             }
@@ -971,13 +1096,14 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                 ? static_cast<size_t>(y - top) * static_cast<size_t>(sourceClientHeight) /
                     static_cast<size_t>(clientHeight)
                 : static_cast<size_t>(y - top);
-            const size_t sourceRow = surface.pixelOffset + sourceY * surface.pitch;
+            const size_t sourceRow = static_cast<size_t>(surface.surfaceSourceY) *
+                surface.pitch + surface.surfaceSourceX + sourceY * surface.pitch;
             const size_t pixelCount = static_cast<size_t>(right - clipLeft);
             uint32_t* destination = g_frame + static_cast<size_t>(y) * width +
                 static_cast<size_t>(clipLeft);
             if (!animation.active) {
                 const size_t sourceX = static_cast<size_t>(clipLeft - left);
-                const uint32_t* source = surfaces + sourceRow + sourceX;
+                const uint32_t* source = surfacePixelsBase + sourceRow + sourceX;
                 size_t x = 0;
                 while (x < pixelCount) {
                     if ((source[x] >> 24) == 255u && opacity == 255u) {
@@ -1000,7 +1126,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                         static_cast<size_t>(sourceClientWidth) /
                         static_cast<size_t>(clientWidth);
                     const uint32_t source = applyPremultipliedOpacity(
-                        surfaces[sourceRow + sourceX], opacity);
+                        surfacePixelsBase[sourceRow + sourceX], opacity);
                     if (source >> 24)
                         destination[x] = micant::shared::graphics::PremultipliedSourceOver(
                             source, destination[x]);
@@ -1016,7 +1142,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                 !(child.flags & MICANT_COMPOSITOR_SURFACE_VISIBLE)) continue;
             const MicaCompositorSurfaceInfo* ancestor = &child;
             for (size_t depth = 0; ancestor && ancestor->parentWindow &&
-                 depth < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++depth) {
+                 depth < metadata.surfaceEntryCount; ++depth) {
                 const uint64_t parentHandle = ancestor->parentWindow;
                 ancestor = nullptr;
                 for (size_t lookup = 0; lookup < count; ++lookup) {
@@ -1027,6 +1153,20 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                 }
             }
             if (!ancestor || ancestor->window != surface.window) continue;
+            const auto* childPixelsBase = reinterpret_cast<const uint32_t*>(
+                static_cast<uintptr_t>(child.surfaceAddress));
+            const uint64_t childCapacity = child.surfaceSizeBytes / sizeof(uint32_t);
+            if (!childPixelsBase || !child.pitch || !child.width || !child.height ||
+                child.surfaceSourceX > child.pitch ||
+                static_cast<uint64_t>(child.width) > child.pitch - child.surfaceSourceX ||
+                static_cast<uint64_t>(child.surfaceSourceY) > childCapacity / child.pitch)
+                continue;
+            const uint64_t childStart = static_cast<uint64_t>(child.surfaceSourceY) *
+                child.pitch + child.surfaceSourceX;
+            const uint64_t childRows = static_cast<uint64_t>(child.height - 1) * child.pitch;
+            if (childRows > childCapacity || childStart > childCapacity - childRows ||
+                static_cast<uint64_t>(child.width) >
+                    childCapacity - childStart - childRows) continue;
             const int64_t childLeft = child.x;
             const int64_t childTop = child.y;
             const int64_t childRight = childLeft + child.width;
@@ -1037,12 +1177,13 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             const int64_t drawBottom = std::min({childBottom, parentClientBottom, clip.bottom});
             if (drawRight <= drawLeft || drawBottom <= drawTop) continue;
             for (int64_t y = drawTop; y < drawBottom; ++y) {
-                const size_t sourceRow = child.pixelOffset +
+                const size_t sourceRow = static_cast<size_t>(child.surfaceSourceY) *
+                    child.pitch + child.surfaceSourceX +
                     static_cast<size_t>(y - childTop) * child.pitch;
                 uint32_t* destination = g_frame + static_cast<size_t>(y) * width +
                     static_cast<size_t>(drawLeft);
                 for (int64_t x = drawLeft; x < drawRight; ++x) {
-                    const uint32_t source = surfaces[sourceRow +
+                    const uint32_t source = childPixelsBase[sourceRow +
                         static_cast<size_t>(x - childLeft)];
                     if (source >> 24)
                         destination[x - drawLeft] =
@@ -1058,12 +1199,16 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
     }
 
     const auto& cursor = metadata.cursor;
+    uint64_t cursorBytes{};
+    const bool cursorPixelsValid = requiredPixelBytes(cursor.width, cursor.height,
+        cursor.pitch, cursorBytes) && cursor.pixelsAddress &&
+        cursorBytes <= cursor.pixelSizeBytes;
     if ((cursor.flags & (MICANT_COMPOSITOR_CURSOR_ACTIVE | MICANT_COMPOSITOR_CURSOR_VISIBLE)) ==
             (MICANT_COMPOSITOR_CURSOR_ACTIVE | MICANT_COMPOSITOR_CURSOR_VISIBLE) &&
-        cursor.width && cursor.height && cursor.width <= MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION &&
-        cursor.height <= MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION && cursor.pitch >= cursor.width &&
-        cursor.pitch <= MICANT_COMPOSITOR_CURSOR_MAX_DIMENSION &&
+        cursorPixelsValid &&
         cursor.hotX < cursor.width && cursor.hotY < cursor.height) {
+        const auto* cursorPixels = reinterpret_cast<const uint32_t*>(
+            cursor.pixelsAddress);
         const int64_t originX = static_cast<int64_t>(cursor.x) - cursor.hotX;
         const int64_t originY = static_cast<int64_t>(cursor.y) - cursor.hotY;
         for (uint32_t sy = 0; sy < cursor.height; ++sy) {
@@ -1072,7 +1217,8 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             for (uint32_t sx = 0; sx < cursor.width; ++sx) {
                 const int64_t dx = originX + sx;
                 if (dx < clip.left || dx >= clip.right) continue;
-                const uint32_t source = cursor.pixels[static_cast<size_t>(sy) * cursor.pitch + sx];
+                const uint32_t source = cursorPixels[
+                    static_cast<size_t>(sy) * cursor.pitch + sx];
                 const size_t destination = static_cast<size_t>(dy) * width + static_cast<size_t>(dx);
                 g_frame[destination] = micant::shared::graphics::PremultipliedSourceOver(
                     source, g_frame[destination]);
@@ -1106,17 +1252,31 @@ bool presentRegion(uint32_t screenWidth, ScreenRect clip) noexcept {
 }
 
 struct DamageSet {
-    ScreenRect regions[MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY]{};
+    ScreenRect regions[kDamageRegionComplexityBudget]{};
     size_t count{};
 };
 
-void addDamageRegion(DamageSet& damage, ScreenRect incoming) noexcept {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+uint64_t damagePixelCount(const DamageSet& damage) noexcept {
+    uint64_t pixels = 0;
+    for (size_t index = 0; index < damage.count; ++index) {
+        const auto& region = damage.regions[index];
+        if (region.right <= region.left || region.bottom <= region.top) continue;
+        const uint64_t width = static_cast<uint64_t>(region.right - region.left);
+        const uint64_t height = static_cast<uint64_t>(region.bottom - region.top);
+        if (height && width > (UINT64_MAX - pixels) / height) return UINT64_MAX;
+        pixels += width * height;
+    }
+    return pixels;
+}
+#endif
+
+void addDamageRegion(DamageSet& damage, ScreenRect incoming,
+                     uint32_t screenWidth, uint32_t screenHeight) noexcept {
     incoming.left = incoming.left < 0 ? 0 : incoming.left;
     incoming.top = incoming.top < 0 ? 0 : incoming.top;
-    incoming.right = incoming.right > MICANT_COMPOSITOR_SCREEN_WIDTH
-        ? MICANT_COMPOSITOR_SCREEN_WIDTH : incoming.right;
-    incoming.bottom = incoming.bottom > MICANT_COMPOSITOR_SCREEN_HEIGHT
-        ? MICANT_COMPOSITOR_SCREEN_HEIGHT : incoming.bottom;
+    incoming.right = incoming.right > screenWidth ? screenWidth : incoming.right;
+    incoming.bottom = incoming.bottom > screenHeight ? screenHeight : incoming.bottom;
     if (incoming.left >= incoming.right || incoming.top >= incoming.bottom) return;
     for (size_t index = 0; index < damage.count;) {
         auto& existing = damage.regions[index];
@@ -1134,9 +1294,8 @@ void addDamageRegion(DamageSet& damage, ScreenRect incoming) noexcept {
         damage.regions[index] = damage.regions[--damage.count];
         index = 0;
     }
-    if (damage.count == MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY) {
-        damage.regions[0] = {0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH,
-                             MICANT_COMPOSITOR_SCREEN_HEIGHT};
+    if (damage.count == kDamageRegionComplexityBudget) {
+        damage.regions[0] = {0, 0, screenWidth, screenHeight};
         damage.count = 1;
         return;
     }
@@ -1145,8 +1304,9 @@ void addDamageRegion(DamageSet& damage, ScreenRect incoming) noexcept {
 
 bool collectDamage(const MicaCompositorMetadataStore& metadata,
                    DamageSet& damage) noexcept {
-    constexpr ScreenRect fullScreen{
-        0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH, MICANT_COMPOSITOR_SCREEN_HEIGHT};
+    const uint32_t screenWidth = metadata.screenWidth;
+    const uint32_t screenHeight = metadata.screenHeight;
+    const ScreenRect fullScreen{0, 0, screenWidth, screenHeight};
     const bool blurEnabled =
         MicaThemeSnapshotIsValid(&metadata.theme, sizeof(metadata.theme)) &&
         (metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT].flags &
@@ -1159,13 +1319,15 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
         (metadata.dirtyFlags & MICANT_COMPOSITOR_DIRTY_FULL) != 0 ||
         (metadata.dirtyFlags & ~MICANT_COMPOSITOR_DIRTY_FULL) != 0 ||
         metadata.themeGeneration != g_lastThemeGeneration ||
-        metadata.dirtyRegionCount > MICANT_COMPOSITOR_DIRTY_REGION_CAPACITY;
+        (metadata.dirtyRegionCount && (!metadata.dirtyRegions ||
+            metadata.dirtyRegionCount > metadata.dirtyRegionArraySizeBytes /
+                sizeof(MicaCompositorDirtyRect)));
     if (!fullRedraw) {
         for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
             const auto& dirty = metadata.dirtyRegions[index];
             if (dirty.left < 0 || dirty.top < 0 ||
-                dirty.right > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_WIDTH) ||
-                dirty.bottom > static_cast<int32_t>(MICANT_COMPOSITOR_SCREEN_HEIGHT) ||
+                dirty.right > static_cast<int32_t>(screenWidth) ||
+                dirty.bottom > static_cast<int32_t>(screenHeight) ||
                 dirty.left >= dirty.right || dirty.top >= dirty.bottom) {
                 fullRedraw = true;
                 break;
@@ -1190,28 +1352,30 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
         (((windowStyle.flags & MICANT_THEME_HAS_RADIUS) &&
           windowStyle.borderRadius != 0) ||
          (headerbarStyle.flags & MICANT_THEME_HAS_BACKGROUND));
+    const int64_t shadowExtent = shadowEnabled
+        ? std::max<int64_t>(windowStyle.borderRadius,
+            headerbarStyle.borderRadius) : 0;
     for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
         const auto& dirty = metadata.dirtyRegions[index];
-        const int64_t margin = shadowEnabled ? kWindowShadowExtent : 0;
+        const int64_t margin = shadowExtent;
         const ScreenRect region{
             dirty.left > margin ? dirty.left - margin : 0,
             dirty.top > margin ? dirty.top - margin : 0,
-            dirty.right + margin < MICANT_COMPOSITOR_SCREEN_WIDTH
-                ? dirty.right + margin : MICANT_COMPOSITOR_SCREEN_WIDTH,
-            dirty.bottom + margin < MICANT_COMPOSITOR_SCREEN_HEIGHT
-                ? dirty.bottom + margin : MICANT_COMPOSITOR_SCREEN_HEIGHT};
+            dirty.right + margin < screenWidth
+                ? dirty.right + margin : screenWidth,
+            dirty.bottom + margin < screenHeight
+                ? dirty.bottom + margin : screenHeight};
         damage.regions[index] = region;
     }
     return true;
 }
 
 bool composeDamageRegions(const MicaCompositorMetadataStore& metadata,
-                          const uint32_t* surfaces,
                           const AnimationFrame* frames,
                           const uint32_t* decorPixels,
                           const DamageSet& damage) noexcept {
     for (size_t index = 0; index < damage.count; ++index)
-        if (!composeRegion(metadata, surfaces, damage.regions[index], frames,
+    if (!composeRegion(metadata, damage.regions[index], frames,
                            decorPixels))
             return false;
     return true;
@@ -1228,9 +1392,11 @@ bool verifyWindowEffectsRasterizer() noexcept {
     // These bounded probe buffers are static-storage objects and start zeroed.
     metadata.magic = MICANT_COMPOSITOR_STORE_MAGIC;
     metadata.version = MICANT_COMPOSITOR_STORE_VERSION;
-    metadata.screenWidth = MICANT_COMPOSITOR_SCREEN_WIDTH;
-    metadata.screenHeight = MICANT_COMPOSITOR_SCREEN_HEIGHT;
-    metadata.surfaceCapacity = 2;
+    metadata.screenWidth = g_displayWidth;
+    metadata.screenHeight = g_displayHeight;
+    metadata.surfaceEntryCount = 2;
+    metadata.surfaces = g_effectProbeSurfaces;
+    metadata.surfaceArraySizeBytes = sizeof(g_effectProbeSurfaces);
     metadata.theme.magic = MICANT_THEME_SNAPSHOT_MAGIC;
     metadata.theme.version = MICANT_THEME_SNAPSHOT_VERSION;
     metadata.theme.headerSize = static_cast<uint16_t>(offsetof(MicaThemeSnapshot, styles));
@@ -1250,6 +1416,8 @@ bool verifyWindowEffectsRasterizer() noexcept {
     underlay.y = 90;
     underlay.width = underlay.height = 100;
     underlay.pitch = 100;
+    underlay.surfaceAddress = reinterpret_cast<uintptr_t>(g_effectProbePixels);
+    underlay.surfaceSizeBytes = sizeof(g_effectProbePixels);
     underlay.zOrder = 1;
     underlay.style = 0x40000000u; // child: no frame, no window effects.
     underlay.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
@@ -1262,7 +1430,10 @@ bool verifyWindowEffectsRasterizer() noexcept {
     surface.x = 100;
     surface.y = 100;
     surface.width = surface.height = surface.pitch = 64;
-    surface.pixelOffset = 128u * 128u;
+    surface.surfaceSourceX = 0;
+    surface.surfaceSourceY = 128u * 128u / surface.pitch;
+    surface.surfaceAddress = reinterpret_cast<uintptr_t>(g_effectProbePixels);
+    surface.surfaceSizeBytes = sizeof(g_effectProbePixels);
     surface.zOrder = 2;
     surface.style = 0x00040000u | 0x00800000u | 0x00400000u;
     surface.flags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
@@ -1277,9 +1448,8 @@ bool verifyWindowEffectsRasterizer() noexcept {
     for (uint32_t pixel = 0; pixel < 64u * 64u; ++pixel)
         g_effectProbePixels[128u * 128u + pixel] = 0x80808080u;
     constexpr uint32_t background = 0xFF000000u;
-    constexpr ScreenRect clip{0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH,
-                              MICANT_COMPOSITOR_SCREEN_HEIGHT};
-    if (!composeRegion(metadata, g_effectProbePixels, clip,
+    const ScreenRect clip{0, 0, g_displayWidth, g_displayHeight};
+    if (!composeRegion(metadata, clip,
                        g_effectProbeAnimations, nullptr)) return false;
     const uint32_t blurredBackdrop = blend(0x807A7A7Au, background);
     const uint32_t expectedClient =
@@ -1289,9 +1459,9 @@ bool verifyWindowEffectsRasterizer() noexcept {
         micant::shared::graphics::PremultipliedSourceOver(
             0x40404040u, background);
     const uint32_t expectedShadow = blend(0x2A000000u, 0xFFFFFFFFu);
-    const size_t corner = 100u * MICANT_COMPOSITOR_SCREEN_WIDTH + 100u;
-    const size_t client = 140u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
-    const size_t shadow = 99u * MICANT_COMPOSITOR_SCREEN_WIDTH + 120u;
+    const size_t corner = 100u * g_displayWidth + 100u;
+    const size_t client = 140u * g_displayWidth + 120u;
+    const size_t shadow = 99u * g_displayWidth + 120u;
     if (g_frame[corner] != 0xFF000000u) {
         constexpr char message[] = "[MicaNT Compositor] Rounded corner pixel mismatch\r\n";
         print(message, sizeof(message) - 1);
@@ -1312,13 +1482,98 @@ bool verifyWindowEffectsRasterizer() noexcept {
     style.flags = 0;
     style.borderRadius = 0;
     style.opacity = 255;
-    if (!composeRegion(metadata, g_effectProbePixels, clip,
+    if (!composeRegion(metadata, clip,
                        g_effectProbeAnimations, nullptr)) return false;
     if (g_frame[corner] != 0xFF334B66u) {
         constexpr char message[] = "[MicaNT Compositor] Base window pixel mismatch\r\n";
         print(message, sizeof(message) - 1);
         return false;
     }
+
+    // Verify that cursor movement can be repainted from only its old and new
+    // bounds without leaving cursor pixels in the backing frame. Compare each
+    // partial result with a fresh full composition of the same scene.
+    metadata.cursor = {};
+    auto& cursor = metadata.cursor;
+    cursor.x = 130;
+    cursor.y = 140;
+    cursor.width = cursor.pitch = 7;
+    cursor.height = 5;
+    cursor.hotX = 2;
+    cursor.hotY = 1;
+    cursor.flags = MICANT_COMPOSITOR_CURSOR_ACTIVE |
+        MICANT_COMPOSITOR_CURSOR_VISIBLE;
+    cursor.pixelsAddress = reinterpret_cast<uintptr_t>(g_effectProbePixels);
+    cursor.pixelSizeBytes = sizeof(g_effectProbePixels);
+    for (uint32_t y = 0; y < cursor.height; ++y)
+        for (uint32_t x = 0; x < cursor.width; ++x)
+            g_effectProbePixels[static_cast<size_t>(y) * cursor.pitch + x] =
+                (x == 0 || y == 0) ? 0xFF101010u : 0x80800000u;
+    const auto frameMatches = [width = g_displayWidth, height = g_displayHeight]() noexcept {
+        const size_t count = static_cast<size_t>(width) * height;
+        for (size_t index = 0; index < count; ++index)
+            if (g_frame[index] != g_windowBlurBackdrop[index]) return false;
+        return true;
+    };
+    const ScreenRect fullScreen{0, 0, g_displayWidth, g_displayHeight};
+    if (!composeRegion(metadata, fullScreen, g_effectProbeAnimations, nullptr))
+        return false;
+    constexpr int32_t firstX = 130;
+    constexpr int32_t firstY = 140;
+    constexpr int32_t secondX = 142;
+    constexpr int32_t secondY = 151;
+    cursor.x = secondX;
+    cursor.y = secondY;
+    DamageSet cursorDamage{};
+    addDamageRegion(cursorDamage,
+        {firstX - static_cast<int64_t>(cursor.hotX),
+         firstY - static_cast<int64_t>(cursor.hotY),
+         firstX - cursor.hotX + cursor.width,
+         firstY - cursor.hotY + cursor.height}, g_displayWidth, g_displayHeight);
+    addDamageRegion(cursorDamage,
+        {secondX - static_cast<int64_t>(cursor.hotX),
+         secondY - static_cast<int64_t>(cursor.hotY),
+         secondX - cursor.hotX + cursor.width,
+         secondY - cursor.hotY + cursor.height}, g_displayWidth, g_displayHeight);
+    if (!composeDamageRegions(metadata, g_effectProbeAnimations, nullptr,
+                              cursorDamage)) return false;
+    for (size_t index = 0; index < static_cast<size_t>(g_displayWidth) * g_displayHeight;
+         ++index) g_windowBlurBackdrop[index] = g_frame[index];
+    if (!composeRegion(metadata, fullScreen, g_effectProbeAnimations, nullptr) ||
+        !frameMatches()) {
+        constexpr char message[] =
+            "[MicaNT Compositor] Cursor partial repaint mismatch after move\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+
+    cursor.x = firstX;
+    cursor.y = firstY;
+    cursorDamage = {};
+    addDamageRegion(cursorDamage,
+        {secondX - static_cast<int64_t>(cursor.hotX),
+         secondY - static_cast<int64_t>(cursor.hotY),
+         secondX - cursor.hotX + cursor.width,
+         secondY - cursor.hotY + cursor.height}, g_displayWidth, g_displayHeight);
+    addDamageRegion(cursorDamage,
+        {firstX - static_cast<int64_t>(cursor.hotX),
+         firstY - static_cast<int64_t>(cursor.hotY),
+         firstX - cursor.hotX + cursor.width,
+         firstY - cursor.hotY + cursor.height}, g_displayWidth, g_displayHeight);
+    if (!composeDamageRegions(metadata, g_effectProbeAnimations, nullptr,
+                              cursorDamage)) return false;
+    for (size_t index = 0; index < static_cast<size_t>(g_displayWidth) * g_displayHeight;
+         ++index) g_windowBlurBackdrop[index] = g_frame[index];
+    if (!composeRegion(metadata, fullScreen, g_effectProbeAnimations, nullptr) ||
+        !frameMatches()) {
+        constexpr char message[] =
+            "[MicaNT Compositor] Cursor partial repaint mismatch after return\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+    constexpr char cursorPassed[] =
+        "[MicaNT Compositor] Cursor old/new partial repaint matches full composition\r\n";
+    print(cursorPassed, sizeof(cursorPassed) - 1);
     return true;
 }
 
@@ -1329,34 +1584,118 @@ bool copyStableMetadata(const MicaCompositorMetadataStore* source,
     if (sequence & 1u) return false;
     const auto* src = reinterpret_cast<const volatile uint8_t*>(source);
     auto* dst = reinterpret_cast<uint8_t*>(&destination);
-    for (size_t index = 0; index < sizeof(destination); ++index)
-        dst[index] = src[index];
-    return __atomic_load_n(&source->frameSequence, __ATOMIC_ACQUIRE) == sequence;
+    const auto copyRange = [src, dst](size_t offset, size_t bytes) noexcept {
+        for (size_t index = 0; index < bytes; ++index)
+            dst[offset + index] = src[offset + index];
+    };
+    copyRange(0, sizeof(destination));
+    const size_t surfaceBytes = static_cast<size_t>(destination.surfaceEntryCount) *
+        sizeof(MicaCompositorSurfaceInfo);
+    const size_t dirtyBytes = static_cast<size_t>(destination.dirtyRegionCount) *
+        sizeof(MicaCompositorDirtyRect);
+    if ((surfaceBytes && (!destination.surfaces ||
+                          surfaceBytes > destination.surfaceArraySizeBytes)) ||
+        (dirtyBytes && (!destination.dirtyRegions ||
+                        dirtyBytes > destination.dirtyRegionArraySizeBytes)))
+        return false;
+    if (destination.surfaceEntryCount > g_snapshotSurfaceCapacity) {
+        void* replacement{};
+        if (!allocateZeroed(surfaceBytes, replacement)) return false;
+        releaseAllocation(g_snapshotSurfaces);
+        g_snapshotSurfaces = static_cast<MicaCompositorSurfaceInfo*>(replacement);
+        g_snapshotSurfaceCapacity = destination.surfaceEntryCount;
+    }
+    if (destination.dirtyRegionCount > g_snapshotDirtyCapacity) {
+        void* replacement{};
+        if (!allocateZeroed(dirtyBytes, replacement)) return false;
+        releaseAllocation(g_snapshotDirtyRegions);
+        g_snapshotDirtyRegions = static_cast<MicaCompositorDirtyRect*>(replacement);
+        g_snapshotDirtyCapacity = destination.dirtyRegionCount;
+    }
+    auto copyRemote = [](void* target, const volatile void* remote,
+                         size_t bytes) noexcept {
+        auto* output = static_cast<uint8_t*>(target);
+        const auto* input = static_cast<const volatile uint8_t*>(remote);
+        for (size_t index = 0; index < bytes; ++index) output[index] = input[index];
+    };
+    if (surfaceBytes)
+        copyRemote(g_snapshotSurfaces, destination.surfaces, surfaceBytes);
+    if (dirtyBytes)
+        copyRemote(g_snapshotDirtyRegions, destination.dirtyRegions, dirtyBytes);
+    if (__atomic_load_n(&source->frameSequence, __ATOMIC_ACQUIRE) != sequence)
+        return false;
+    destination.surfaces = g_snapshotSurfaces;
+    destination.surfaceArraySizeBytes = g_snapshotSurfaceCapacity *
+        sizeof(MicaCompositorSurfaceInfo);
+    destination.dirtyRegions = g_snapshotDirtyRegions;
+    destination.dirtyRegionArraySizeBytes = g_snapshotDirtyCapacity *
+        sizeof(MicaCompositorDirtyRect);
+    return true;
 }
 
 } // namespace
 
 extern "C" void _start() noexcept {
-    const auto* metadata = reinterpret_cast<const MicaCompositorMetadataStore*>(
-        MICANT_COMPOSITOR_METADATA_BASE);
-    const auto* pixels = reinterpret_cast<const uint32_t*>(
-        MICANT_COMPOSITOR_PIXELS_BASE);
-    const auto* decorPixels = reinterpret_cast<const uint32_t*>(
-        MICANT_COMPOSITOR_DECOR_PIXELS_BASE);
     constexpr char startupMessage[] = "[MicaNT Compositor] Ring 3 compositor entered\r\n";
     print(startupMessage, sizeof(startupMessage) - 1);
     constexpr char effectPassed[] =
         "[MicaNT Compositor] Window opacity, radius, shadow and Base pixels verified\r\n";
     constexpr char effectFailed[] =
         "[MicaNT Compositor] Window software effect pixel probe failed\r\n";
+    micant::um::UserVideoInfo64 displayInfo{};
+    micant::um::UserCompositorViews64 compositorViews{};
+    if (micant::sys::invokeUserService(0x80,
+            reinterpret_cast<uint64_t>(&displayInfo)) != 0 ||
+        !displayInfo.width || !displayInfo.height || displayInfo.pitch < displayInfo.width ||
+        displayInfo.height > SIZE_MAX / displayInfo.width ||
+        static_cast<size_t>(displayInfo.width) * displayInfo.height >
+            SIZE_MAX / sizeof(uint32_t)) {
+        constexpr char unavailable[] =
+            "[MicaNT Compositor] Runtime display mode is invalid\r\n";
+        print(unavailable, sizeof(unavailable) - 1);
+        return;
+    }
+    if (micant::sys::invokeUserService(0x84,
+            reinterpret_cast<uint64_t>(&compositorViews)) != 0 ||
+        compositorViews.magic != 0x56434D4Du || compositorViews.version != 1 ||
+        compositorViews.size != sizeof(compositorViews) ||
+        !compositorViews.metadataAddress) {
+        constexpr char unavailable[] =
+            "[MicaNT Compositor] Runtime section mappings are unavailable\r\n";
+        print(unavailable, sizeof(unavailable) - 1);
+        return;
+    }
+    const auto* metadata = reinterpret_cast<const MicaCompositorMetadataStore*>(
+        compositorViews.metadataAddress);
+    const auto* decorPixels = static_cast<const uint32_t*>(nullptr);
+    g_displayWidth = displayInfo.width;
+    g_displayHeight = displayInfo.height;
+    const size_t frameBytes = static_cast<size_t>(g_displayWidth) *
+        g_displayHeight * sizeof(uint32_t);
+    const size_t rowSumBytes = static_cast<size_t>(g_displayWidth) *
+        static_cast<size_t>(kWindowBlurRadius * 2 + 1) * 3 * sizeof(uint16_t);
+    void* frame{};
+    void* backdrop{};
+    void* rowSums{};
+    if (!allocateZeroed(frameBytes, frame) ||
+        !allocateZeroed(frameBytes, backdrop) ||
+        !allocateZeroed(rowSumBytes, rowSums)) {
+        constexpr char allocationFailed[] =
+            "[MicaNT Compositor] Runtime frame allocation failed\r\n";
+        print(allocationFailed, sizeof(allocationFailed) - 1);
+        (void)micant::sys::invokeUserService(0x2C,
+            static_cast<uint64_t>(-1), 0xC0000017u);
+        return;
+    }
+    g_frame = static_cast<uint32_t*>(frame);
+    g_windowBlurBackdrop = static_cast<uint32_t*>(backdrop);
+    g_windowBlurRowSums = static_cast<uint16_t*>(rowSums);
     const bool effectsPassed = verifyWindowEffectsRasterizer();
     const char* effectMessage = effectsPassed ? effectPassed : effectFailed;
     const size_t effectMessageLength = effectsPassed
         ? sizeof(effectPassed) - 1 : sizeof(effectFailed) - 1;
     print(effectMessage, effectMessageLength);
-    micant::um::UserVideoInfo64 displayInfo{};
-    if (micant::sys::invokeUserService(0x80,
-            reinterpret_cast<uint64_t>(&displayInfo)) == 0) {
+    if (displayInfo.width && displayInfo.height) {
         const auto transport = static_cast<micant::um::DisplayTransportBackend>(
             displayInfo.transportBackend);
         const auto composition = static_cast<micant::um::DisplayCompositionBackend>(
@@ -1384,13 +1723,21 @@ extern "C" void _start() noexcept {
         print(unavailable, sizeof(unavailable) - 1);
     }
     uint64_t previous = UINT64_MAX;
+    uint64_t previousSurfaceSetFingerprint = UINT64_MAX;
     bool metadataObserved = false;
     bool invalidHeaderReported = false;
     bool firstPresentationReported = false;
     const auto waitForUpdate = [&](uint64_t observed,
                                    uint64_t timeout100ns = 0) noexcept {
         (void)micant::sys::invokeUserService(0x83, observed, timeout100ns);
+#if MICANT_COMPOSITOR_LOCAL_STATS
+        ++g_localPerformanceStats.wakeups;
+        reportLocalPerformanceStats();
+#endif
     };
+#if MICANT_COMPOSITOR_LOCAL_STATS
+    g_localPerformanceStats.lastReportMilliseconds = performanceMilliseconds();
+#endif
     for (;;) {
         uint64_t sequence{};
         if (!copyStableMetadata(metadata, g_metadataSnapshot, sequence)) {
@@ -1412,11 +1759,21 @@ extern "C" void _start() noexcept {
             waitForUpdate(sequence);
             continue;
         }
+        if (snapshot.screenWidth != g_displayWidth ||
+            snapshot.screenHeight != g_displayHeight) {
+            waitForUpdate(sequence);
+            continue;
+        }
+        if (!ensureAnimationCapacity(snapshot.surfaceEntryCount)) {
+            waitForUpdate(sequence);
+            continue;
+        }
         auto* animationFrames = g_animationFrames;
-        buildAnimationFrames(snapshot, animationClockMilliseconds(), animationFrames);
+        buildAnimationFrames(snapshot, animationClockMilliseconds(), animationFrames,
+                             g_displayWidth, g_displayHeight);
         bool animationActive = false;
         bool animationDamagePending = false;
-        for (size_t index = 0; index < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++index) {
+        for (size_t index = 0; index < snapshot.surfaceEntryCount; ++index) {
             const auto& frame = animationFrames[index];
             animationActive |= frame.active;
             animationDamagePending |= frame.damageCount != 0;
@@ -1427,8 +1784,8 @@ extern "C" void _start() noexcept {
             continue;
         }
         bool surfaceWriteInProgress = false;
-        if (snapshot.surfaceCapacity <= MICANT_COMPOSITOR_SURFACE_CAPACITY) {
-            for (size_t index = 0; index < snapshot.surfaceCapacity; ++index) {
+        {
+            for (size_t index = 0; index < snapshot.surfaceEntryCount; ++index) {
                 const auto& surface = snapshot.surfaces[index];
                 if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
                                       MICANT_COMPOSITOR_SURFACE_VISIBLE)) ==
@@ -1453,36 +1810,150 @@ extern "C" void _start() noexcept {
         }
         DamageSet damage{};
         bool composed = !newMetadata || collectDamage(snapshot, damage);
+        uint64_t surfaceSetFingerprint = 1469598103934665603ull;
+        const auto mixSurfaceIdentity = [&surfaceSetFingerprint](uint64_t value) noexcept {
+            surfaceSetFingerprint ^= value;
+            surfaceSetFingerprint *= 1099511628211ull;
+        };
+        for (size_t index = 0; index < snapshot.surfaceEntryCount; ++index) {
+            const auto& surface = snapshot.surfaces[index];
+            mixSurfaceIdentity(index);
+            mixSurfaceIdentity(surface.window);
+            mixSurfaceIdentity(surface.flags &
+                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                 MICANT_COMPOSITOR_SURFACE_VISIBLE |
+                 MICANT_COMPOSITOR_SURFACE_ICONIC));
+            mixSurfaceIdentity(surface.surfaceAddress);
+            mixSurfaceIdentity(surface.surfaceSizeBytes);
+            mixSurfaceIdentity((static_cast<uint64_t>(surface.width) << 32) |
+                               surface.height);
+            mixSurfaceIdentity((static_cast<uint64_t>(surface.pitch) << 32) |
+                               surface.zOrder);
+            mixSurfaceIdentity((static_cast<uint64_t>(surface.surfaceSourceX) << 32) |
+                               surface.surfaceSourceY);
+        }
+        const bool surfaceSetChanged =
+            surfaceSetFingerprint != previousSurfaceSetFingerprint;
+        bool usedFullRedraw = false;
         for (size_t animationIndex = 0;
-             animationIndex < MICANT_COMPOSITOR_SURFACE_CAPACITY; ++animationIndex) {
+             animationIndex < snapshot.surfaceEntryCount; ++animationIndex) {
             const auto& frame = animationFrames[animationIndex];
             for (size_t index = 0; index < frame.damageCount; ++index)
-                addDamageRegion(damage, frame.damage[index]);
+                addDamageRegion(damage, frame.damage[index],
+                                g_displayWidth, g_displayHeight);
+        }
+        if (surfaceSetChanged) {
+            damage.count = 1;
+            damage.regions[0] = {0, 0, g_displayWidth, g_displayHeight};
+            composed = true;
         }
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) != sequence)
             continue;
-        if (composed)
-            composed = composeDamageRegions(snapshot, pixels, animationFrames,
-                                             decorPixels, damage) &&
-                presentDamage(snapshot.screenWidth, damage);
+        if (composed) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            const uint64_t composeStart = performanceMilliseconds();
+#endif
+            composed = composeDamageRegions(snapshot, animationFrames,
+                                             decorPixels, damage);
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            const uint64_t composeEnd = performanceMilliseconds();
+            if (composeEnd >= composeStart)
+                g_localPerformanceStats.composeMilliseconds +=
+                    composeEnd - composeStart;
+#endif
+            if (composed) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                const uint64_t presentStart = performanceMilliseconds();
+#endif
+                composed = presentDamage(snapshot.screenWidth, damage);
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                const uint64_t presentEnd = performanceMilliseconds();
+                if (presentEnd >= presentStart)
+                    g_localPerformanceStats.presentMilliseconds +=
+                        presentEnd - presentStart;
+                if (!composed) ++g_localPerformanceStats.failedPresents;
+#endif
+            }
+        }
         if (!composed) {
-            constexpr ScreenRect fullScreen{
-                0, 0, MICANT_COMPOSITOR_SCREEN_WIDTH, MICANT_COMPOSITOR_SCREEN_HEIGHT};
-            composed = composeRegion(snapshot, pixels, fullScreen, animationFrames,
-                                     decorPixels) &&
-                presentRegion(snapshot.screenWidth, fullScreen);
+            usedFullRedraw = true;
+            const ScreenRect fullScreen{0, 0, g_displayWidth, g_displayHeight};
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            const uint64_t composeStart = performanceMilliseconds();
+#endif
+            composed = composeRegion(snapshot, fullScreen, animationFrames,
+                                     decorPixels);
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            const uint64_t composeEnd = performanceMilliseconds();
+            if (composeEnd >= composeStart)
+                g_localPerformanceStats.composeMilliseconds +=
+                    composeEnd - composeStart;
+#endif
+            if (composed) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                const uint64_t presentStart = performanceMilliseconds();
+#endif
+                composed = presentRegion(snapshot.screenWidth, fullScreen);
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                const uint64_t presentEnd = performanceMilliseconds();
+                if (presentEnd >= presentStart)
+                    g_localPerformanceStats.presentMilliseconds +=
+                        presentEnd - presentStart;
+                if (!composed) ++g_localPerformanceStats.failedPresents;
+#endif
+            }
         }
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {
             previous = sequence;
+            if (composed)
+                previousSurfaceSetFingerprint = surfaceSetFingerprint;
             if (composed && !firstPresentationReported) {
                 constexpr char presented[] = "[MicaNT Compositor] First shared frame presented\r\n";
                 print(presented, sizeof(presented) - 1);
                 firstPresentationReported = true;
             }
             if (composed) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                const uint64_t screenPixels =
+                    static_cast<uint64_t>(g_displayWidth) * g_displayHeight;
+                const uint64_t damagedPixels = usedFullRedraw
+                    ? screenPixels : damagePixelCount(damage);
+                const bool fullDamage = usedFullRedraw ||
+                    (damage.count == 1 && damage.regions[0].left == 0 &&
+                     damage.regions[0].top == 0 &&
+                     damage.regions[0].right == g_displayWidth &&
+                     damage.regions[0].bottom == g_displayHeight);
+                if (fullDamage) ++g_localPerformanceStats.fullRedraws;
+                else ++g_localPerformanceStats.partialRedraws;
+                if (damagedPixels > UINT64_MAX -
+                        g_localPerformanceStats.pixelsComposited)
+                    g_localPerformanceStats.pixelsComposited = UINT64_MAX;
+                else
+                    g_localPerformanceStats.pixelsComposited += damagedPixels;
+                const uint64_t transferredBytes = damagedPixels > UINT64_MAX / 4u
+                    ? UINT64_MAX : damagedPixels * 4u;
+                if (transferredBytes > UINT64_MAX -
+                        g_localPerformanceStats.bytesTransferred)
+                    g_localPerformanceStats.bytesTransferred = UINT64_MAX;
+                else
+                    g_localPerformanceStats.bytesTransferred += transferredBytes;
+                uint64_t visibleSurfaceCount = 0;
+                for (size_t index = 0; index < snapshot.surfaceEntryCount; ++index) {
+                    const auto flags = snapshot.surfaces[index].flags;
+                    if ((flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                                  MICANT_COMPOSITOR_SURFACE_VISIBLE)) ==
+                            (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                             MICANT_COMPOSITOR_SURFACE_VISIBLE))
+                        ++visibleSurfaceCount;
+                }
+                g_localPerformanceStats.surfaceCount = visibleSurfaceCount;
+                ++g_localPerformanceStats.frames;
+#endif
                 auto* writableMetadata = const_cast<MicaCompositorMetadataStore*>(metadata);
                 __atomic_store_n(&writableMetadata->compositorAckSequence,
                                  sequence, __ATOMIC_RELEASE);
+                if (newMetadata)
+                    (void)micant::sys::invokeUserService(0x85, sequence);
                 g_hasPresentedFrame = true;
                 g_lastThemeGeneration = snapshot.themeGeneration;
             }

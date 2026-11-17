@@ -59,8 +59,9 @@ struct FileContext {
     void* imageControl{};
     bool (*retainControl)(void*) noexcept{};
     void (*releaseControl)(void*) noexcept{};
+    FileContext* next{};
 };
-struct Mount { const void* owner{}; io::BlockDeviceObject* device{}; ob::ObjectHeader* reference{}; uint64_t sectors{}, token{}; FatVolume volumes[3]{}; uint32_t volumeCount{}; FileContext files[32]{}; bool offline{}; };
+struct Mount { const void* owner{}; io::BlockDeviceObject* device{}; ob::ObjectHeader* reference{}; uint64_t sectors{}, token{}; FatVolume volumes[3]{}; uint32_t volumeCount{}; FileContext* files{}; bool offline{}; };
 Mount mounts[4]{};
 Mount* current{};
 uint64_t nextToken{1};
@@ -1053,10 +1054,10 @@ void releaseFile(void* opaque) noexcept {
         // Never retire a directory slot if another handle has acquired it or
         // if the on-disk identity/size has changed since creation.
         bool shared = false;
-        for (const auto& other : file.owner->files) {
-            if (&other != &file && other.inUse && other.volume == file.volume &&
-                other.entry.DirectorySector == file.entry.DirectorySector &&
-                other.entry.DirectoryOffset == file.entry.DirectoryOffset) { shared = true; break; }
+        for (auto* other = file.owner->files; other; other = other->next) {
+            if (other != &file && other->inUse && other->volume == file.volume &&
+                other->entry.DirectorySector == file.entry.DirectorySector &&
+                other->entry.DirectoryOffset == file.entry.DirectoryOffset) { shared = true; break; }
         }
         current = file.owner;
         if (!shared && refreshFileEntry(*file.volume, file.entry) &&
@@ -1069,7 +1070,12 @@ void releaseFile(void* opaque) noexcept {
         }
         current = nullptr;
     }
-    file = {};
+    auto* owner = file.owner;
+    auto** link = owner ? &owner->files : nullptr;
+    while (link && *link && *link != &file) link = &(*link)->next;
+    if (!link || *link != &file) __builtin_trap();
+    *link = file.next;
+    delete &file;
 }
 
 NtStatus queryDirectoryEntry(void* opaque, size_t requestedIndex,
@@ -1186,15 +1192,17 @@ NtStatus openFile(uint64_t targetMount, std::u16string_view name, bool openIf, u
             }
         }
         if (entry.Directory) {
-            FileContext* directory{};
-            for (auto& candidate : mount.files) if (!candidate.inUse) {
-                candidate = {&mount, volume, entry, true, false, 1, 0};
-                candidate.directory = true;
-                candidate.directoryCluster = entry.FirstCluster;
-                directory = &candidate;
-                break;
-            }
+            auto* directory = new (std::nothrow_t{}) FileContext{};
             if (!directory) { current = nullptr; return NtStatus::NoMemory; }
+            directory->owner = &mount;
+            directory->volume = volume;
+            directory->entry = entry;
+            directory->inUse = true;
+            directory->references = 1;
+            directory->directory = true;
+            directory->directoryCluster = entry.FirstCluster;
+            directory->next = mount.files;
+            mount.files = directory;
             backend = {directory, 0, name, readFile, releaseFile};
             backend.queryDirectory = queryDirectoryEntry;
             backend.directory = true;
@@ -1207,27 +1215,34 @@ NtStatus openFile(uint64_t targetMount, std::u16string_view name, bool openIf, u
         }
         // Do not expose an entry until the creating caller has obtained and
         // published its handle. This also makes abort safe under the gate.
-        for (const auto& file : mount.files) {
-            if (file.inUse && file.pendingCreate && file.volume == volume &&
-                file.entry.DirectorySector == entry.DirectorySector &&
-                file.entry.DirectoryOffset == entry.DirectoryOffset) {
+        for (auto* file = mount.files; file; file = file->next) {
+            if (file->inUse && file->pendingCreate && file->volume == volume &&
+                file->entry.DirectorySector == entry.DirectorySector &&
+                file->entry.DirectoryOffset == entry.DirectoryOffset) {
                 current = nullptr;
                 return NtStatus::DeviceBusy;
             }
         }
         FileContext* stream{};
-        for (auto& file : mount.files) {
-            if (file.inUse && file.volume == volume &&
-                file.entry.DirectorySector == entry.DirectorySector &&
-                file.entry.DirectoryOffset == entry.DirectoryOffset) {
-                stream = &file;
+        for (auto* file = mount.files; file; file = file->next) {
+            if (file->inUse && file->volume == volume &&
+                file->entry.DirectorySector == entry.DirectorySector &&
+                file->entry.DirectoryOffset == entry.DirectoryOffset) {
+                stream = file;
                 break;
             }
         }
-        if (!stream) for (auto& file : mount.files) if (!file.inUse) {
-            file = {&mount, volume, entry, true, created, 0};
-            stream = &file;
-            break;
+        if (!stream) {
+            stream = new (std::nothrow_t{}) FileContext{};
+            if (stream) {
+                stream->owner = &mount;
+                stream->volume = volume;
+                stream->entry = entry;
+                stream->inUse = true;
+                stream->pendingCreate = created;
+                stream->next = mount.files;
+                mount.files = stream;
+            }
         }
         if (stream) {
             if (stream->references == static_cast<size_t>(-1)) {
@@ -1391,7 +1406,7 @@ NtStatus unmount(const void* owner, uint64_t token) noexcept {
             if (systemRootMount == token) {
                 publishSystemRoot(0);
             }
-            for (const auto& file : m.files) if (file.inUse) return NtStatus::DeviceBusy;
+            if (m.files) return NtStatus::DeviceBusy;
             reference = m.reference; m = {}; status = NtStatus::Success; break;
         }
     }

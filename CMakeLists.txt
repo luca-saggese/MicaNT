@@ -15,6 +15,7 @@ option(MICANT_BOOTSTRAP_THEME_TEST "Launch theme_test.exe for QEMU theme verific
 option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-memory integration self-test" OFF)
 option(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST "Fault, persist, reboot and recover a LuceOS crash dump in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
+option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
 
 if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
@@ -389,6 +390,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -ffunction-sections -fdata-sections -O2
     )
     target_link_options(win32k_boot PRIVATE -static -Wl,--gc-sections)
+    target_link_libraries(win32k_boot PRIVATE ntdll_boot)
     set_target_properties(win32k_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "win32k"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -704,6 +706,10 @@ if (MICANT_ENABLE_BAREMETAL)
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
     )
+    target_compile_definitions(compositor_boot PRIVATE MICANT_NATIVE_USERMODE)
+    if (MICANT_COMPOSITOR_LOCAL_STATS)
+        target_compile_definitions(compositor_boot PRIVATE MICANT_COMPOSITOR_LOCAL_STATS=1)
+    endif()
     target_link_options(compositor_boot PRIVATE
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
     )
@@ -712,7 +718,7 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
     # Self-contained image for the file-backed SEC_IMAGE verification. It has
-    # no imports and no DllMain, so the Ps loader can map it as a main image.
+    # Native user image with explicit NTDLL imports and no DllMain.
     add_executable(file_image_boot EXCLUDE_FROM_ALL tools/file_image_app.cpp)
     target_compile_options(file_image_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
@@ -757,6 +763,7 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
+    target_link_libraries(compositor_boot PRIVATE ntdll_boot)
 
     # User32 owns per-process icon pixels and file-backed icon loading through
     # the native file/memory system calls. Those operations remain in Ring 3.

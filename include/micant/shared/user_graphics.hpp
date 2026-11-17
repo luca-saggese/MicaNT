@@ -22,12 +22,19 @@ enum class DisplayCompositionBackend : uint32_t {
 struct UserVideoInfo64 {
     uint32_t width{0};
     uint32_t height{0};
-    uint32_t pitch{0};
+    uint32_t pitch{0}; // Scanout pixels per row; the corresponding byte pitch is pitch * 4.
     uint32_t bpp{32};
     uint32_t pixelFormat{1};
     uint32_t transportBackend{static_cast<uint32_t>(DisplayTransportBackend::Unknown)};
     uint32_t compositionBackend{static_cast<uint32_t>(DisplayCompositionBackend::Software)};
     uint64_t physicalBase{0};
+};
+
+struct UserCompositorViews64 {
+    uint32_t magic{0x56434D4Du}; /* MMCV */
+    uint16_t version{1};
+    uint16_t size{16};
+    uint64_t metadataAddress{};
 };
 
 struct UserPresentSurfaceParams64 {
@@ -51,6 +58,7 @@ struct UserPresentCompositionParams64 {
 #pragma pack(pop)
 
 static_assert(sizeof(UserVideoInfo64) == 36);
+static_assert(sizeof(UserCompositorViews64) == 16);
 static_assert(offsetof(UserVideoInfo64, physicalBase) == 28);
 static_assert(sizeof(UserPresentSurfaceParams64) == 32);
 static_assert(sizeof(UserPresentCompositionParams64) == 32);

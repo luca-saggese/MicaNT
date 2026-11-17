@@ -72,6 +72,7 @@ enum class NtStatus : uint32_t {
     InvalidViewSize                  = 0xC000001F,
     InvalidFileForSection            = 0xC0000020,
     InsufficientResources            = 0xC000009A,
+    IntegerOverflow                  = 0xC0000095,
     IllegalInstruction               = 0xC000001D,
     AccessDenied                     = 0xC0000022,
     InvalidAcl                       = 0xC0000077,
@@ -306,6 +307,7 @@ inline constexpr NTSTATUS STATUS_DEVICE_DATA_ERROR      = static_cast<NTSTATUS>(
         case NtStatus::NoSuchFile: return "STATUS_NO_SUCH_FILE";
         case NtStatus::NoMemory: return "STATUS_NO_MEMORY";
         case NtStatus::InsufficientResources: return "STATUS_INSUFFICIENT_RESOURCES";
+        case NtStatus::IntegerOverflow: return "STATUS_INTEGER_OVERFLOW";
         case NtStatus::AccessDenied: return "STATUS_ACCESS_DENIED";
         case NtStatus::BufferTooSmall: return "STATUS_BUFFER_TOO_SMALL";
         case NtStatus::ObjectTypeMismatch: return "STATUS_OBJECT_TYPE_MISMATCH";

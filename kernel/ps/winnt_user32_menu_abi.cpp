@@ -4,6 +4,8 @@
 #include "micant/shared/native_gdi_api.h"
 #include "micant/shared/native_uxtheme_api.h"
 #include "micant/shared/win32k_client.h"
+#include "micant/shared/user_graphics.hpp"
+#include "micant/shared/user_syscall.hpp"
 #include "micant/um/subsystems/winuser/winnt_user32_gdi32_imm32_system32_abi.hpp"
 
 #if defined(BUILD_SYSTEM32_USER32_DLL)
@@ -761,10 +763,22 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
         g_popup.active = true;
         g_popup.selected = nextSelectable(-1, 1);
     }
-    if (g_popup.x + g_popup.width > MICANT_COMPOSITOR_SCREEN_WIDTH)
-        g_popup.x = MICANT_COMPOSITOR_SCREEN_WIDTH - g_popup.width;
-    if (g_popup.y + g_popup.height > MICANT_COMPOSITOR_SCREEN_HEIGHT)
-        g_popup.y = MICANT_COMPOSITOR_SCREEN_HEIGHT - g_popup.height;
+    micant::um::UserVideoInfo64 display{};
+    if (micant::sys::invokeUserService(0x80,
+            reinterpret_cast<uint64_t>(&display)) != 0) {
+        LockGuard guard; g_popup = {};
+        return false;
+    }
+    const int32_t screenWidth = static_cast<int32_t>(display.width);
+    const int32_t screenHeight = static_cast<int32_t>(display.height);
+    if (screenWidth <= 0 || screenHeight <= 0) {
+        LockGuard guard; g_popup = {};
+        return false;
+    }
+    if (g_popup.x + g_popup.width > screenWidth)
+        g_popup.x = std::max(0, screenWidth - g_popup.width);
+    if (g_popup.y + g_popup.height > screenHeight)
+        g_popup.y = std::max(0, screenHeight - g_popup.height);
     g_popup.theme = OpenThemeData(owner, L"MENU");
     auto* window = CreateWindowExW(0, kPopupClassName, L"", kWsPopup,
         g_popup.x, g_popup.y, g_popup.width, g_popup.height, owner, nullptr, nullptr, nullptr);

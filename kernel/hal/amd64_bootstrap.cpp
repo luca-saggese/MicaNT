@@ -930,7 +930,8 @@ extern uint32_t MicantAmd64ExtendedSize;
 // Private Ps hook; it must not enable interrupts, wait or switch threads:
 // the bootstrap page-fault gate currently uses a shared IST stack.
 uint32_t MicantPsResolveUserStackFault(uintptr_t address, uint64_t errorCode, uint64_t savedCs) noexcept;
-uint32_t MicantPsResolveUserCopyOnWrite(uintptr_t address) noexcept;
+uint32_t MicantPsResolveUserPageFault(uintptr_t address,
+                                      uint64_t errorCode) noexcept;
 bool MicantPsPrepareUserException(uint32_t exceptionCode, uint32_t exceptionVector,
                                   uintptr_t address,
                                   uint64_t* hardwareFrame, uint64_t* savedRegisters,
@@ -1502,7 +1503,8 @@ void MicantSyscallClientProgram() {
     }
     auto* video = reinterpret_cast<micant::um::UserVideoInfo64*>(kUserBase + 4096);
     if (micant::sys::invokeUserService(0x80, reinterpret_cast<uint64_t>(video)) ||
-        video->width != 1024 || video->height != 768 || video->physicalBase) {
+        !video->width || !video->height || video->pitch < video->width ||
+        video->physicalBase) {
         __builtin_trap();
     }
     auto* request = reinterpret_cast<MicaWin32kRequest*>(kUserBase + 8192);
@@ -1691,7 +1693,8 @@ __attribute__((naked)) void MicantSyscallProbeProgram() {
         "movq %rdx, %xmm0\nmovq %r8, %xmm6\nmovq %r9, %xmm15\n"
         "std\nmovl $0x80, %eax\nsyscall\ncld\n"
         "testq %rax, %rax\njnz 9f\n"
-        "cmpl $1024, (%r10)\njne 9f\ncmpl $768, 4(%r10)\njne 9f\n"
+        "cmpl $0, (%r10)\nje 9f\ncmpl $0, 4(%r10)\nje 9f\n"
+        "movl 8(%r10), %eax\ncmpl (%r10), %eax\njb 9f\n"
         "cmpq $0, 28(%r10)\njne 9f\n" // No physical display pointer escapes.
         "cmpq $0x1234, %rdx\njne 9f\ncmpq $0x5678, %r8\njne 9f\n"
         "cmpq $0x9abc, %r9\njne 9f\ncmpq $0x1357, %rbx\njne 9f\n"
@@ -1931,22 +1934,36 @@ void MicantProbePageFault(const uint64_t* frame) noexcept {
 bool MicantDispatchBootstrapPageFault(uint64_t* frame, uint64_t* savedRegisters,
                                       const void* floatingState) noexcept {
     if (g_probeMode >= 1 && g_probeMode <= 4) return false;
-    if ((frame[2] & 3) != 3 || micant::ke::KeGetCurrentIrql() != micant::ke::PASSIVE_LEVEL)
+    if (micant::ke::KeGetCurrentIrql() != micant::ke::PASSIVE_LEVEL)
         return false;
     uintptr_t address{};
     __asm__ __volatile__("movq %%cr2, %0" : "=r"(address));
-    // User write to a present, write-protected image page may be a COW
-    // request. Resolve it before stack growth or exception dispatch.
-    if ((frame[0] & 0x1f) == 0x07) {
-        const auto cowStatus = static_cast<micant::NtStatus>(MicantPsResolveUserCopyOnWrite(address));
-        if (cowStatus == micant::NtStatus::Success) return true;
-        if (cowStatus != micant::NtStatus::AccessViolation) {
-            const auto code = static_cast<uint32_t>(cowStatus);
-            if (MicantPsPrepareUserException(code, 14, address, frame, savedRegisters, floatingState))
-                return true;
-            (void)MicantPsTerminateFailedUserException(code);
-            return false;
-        }
+    if ((frame[2] & 3) != 3) {
+        // Kernel routines may access a section through the current process
+        // view while publishing shared metadata. Resolve only non-present
+        // supervisor data accesses in the user VA range; other kernel faults
+        // remain fatal.
+        constexpr uintptr_t userAddressMaximum = 0x00007FFFFFFFFFFFULL;
+        const uint64_t fault = frame[0];
+        if (address && address <= userAddressMaximum &&
+            !(fault & (0x01u | 0x04u | 0x08u | 0x10u)) &&
+            static_cast<micant::NtStatus>(
+                MicantPsResolveUserPageFault(address, fault)) ==
+                    micant::NtStatus::Success)
+            return true;
+        return false;
+    }
+    // Resolve demand-section pages and copy-on-write pages through the owning
+    // process address space before falling back to stack-guard handling.
+    const auto pageStatus = static_cast<micant::NtStatus>(
+        MicantPsResolveUserPageFault(address, frame[0]));
+    if (pageStatus == micant::NtStatus::Success) return true;
+    if (pageStatus != micant::NtStatus::AccessViolation) {
+        const auto code = static_cast<uint32_t>(pageStatus);
+        if (MicantPsPrepareUserException(code, 14, address, frame, savedRegisters, floatingState))
+            return true;
+        (void)MicantPsTerminateFailedUserException(code);
+        return false;
     }
     const auto resolved = static_cast<micant::NtStatus>(
         MicantPsResolveUserStackFault(address, frame[0], frame[2]));

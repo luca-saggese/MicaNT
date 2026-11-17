@@ -1345,12 +1345,15 @@ extern "C" uint32_t MicantPsResolveUserStackFault(uintptr_t address, uint64_t er
         ? thread->owningThread->resolveUserStackGuard(address) : NtStatus::AccessViolation);
 }
 
-extern "C" uint32_t MicantPsResolveUserCopyOnWrite(uintptr_t address) noexcept {
+extern "C" uint32_t MicantPsResolveUserPageFault(uintptr_t address,
+                                                   uint64_t errorCode) noexcept {
     auto* thread = ke::KeGetCurrentThread();
     auto* process = ke::KeGetCurrentProcess();
     if (!thread || !process || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
         return static_cast<uint32_t>(NtStatus::AccessViolation);
-    return static_cast<uint32_t>(process->getAddressSpace().handlePageFault(address, true, true, false));
+    return static_cast<uint32_t>(process->getAddressSpace().handlePageFault(
+        address, (errorCode & 0x02u) != 0, (errorCode & 0x04u) != 0,
+        (errorCode & 0x10u) != 0));
 }
 
 extern "C" bool MicantPsPrepareUserException(uint32_t exceptionCode,

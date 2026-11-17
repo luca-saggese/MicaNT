@@ -383,6 +383,10 @@ NtStatus NtCreateSectionFromKernel(
     Handle fileHandle
 );
 
+NtStatus NtReferenceSectionFromKernel(Handle sectionHandle,
+                                      uint32_t desiredAccess,
+                                      void** sectionReference) noexcept;
+
 // Syscall dispatch has captured inputs in kernel storage, but output remains
 // in user space and is published atomically with the handle-table entry.
 NtStatus NtCreateSectionCaptured(

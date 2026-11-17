@@ -29,6 +29,15 @@ bool acquireSectionView(void* owner) noexcept {
 void releaseSectionView(void* owner) noexcept {
     ob::ObDereferenceObject(static_cast<ob::ObjectHeader*>(owner));
 }
+NtStatus materializeSectionViewPage(void* owner, size_t pageIndex,
+                                    uint64_t* pfn) noexcept {
+    if (!owner || !pfn) return NtStatus::InvalidParameter;
+    auto* header = static_cast<ob::ObjectHeader*>(owner);
+    const auto backing = header->as<section::SectionObject>()->getBackingReference();
+    if (!backing.context || !backing.materialize || pageIndex >= backing.pageCount)
+        return NtStatus::InvalidViewSize;
+    return backing.materialize(backing.context, pageIndex, pfn);
+}
 bool acquireFileSection(void* context) noexcept {
     if (!context) return false;
     static_cast<ob::ObjectHeader*>(context)->addReference();
@@ -568,6 +577,21 @@ NtStatus NtCreateSectionFromKernel(Handle* out, uint32_t access,
                          mm::KernelMode, mm::KernelMode);
 }
 
+NtStatus NtReferenceSectionFromKernel(Handle handle, uint32_t access,
+                                      void** sectionReference) noexcept {
+    if (!sectionReference) return NtStatus::InvalidParameter;
+    *sectionReference = nullptr;
+    ob::HandleTable* table{};
+    Handle raw{};
+    auto status = ob::detail::resolveHandle(handle, table, raw);
+    if (status != NtStatus::Success) return status;
+    ob::ObjectHeader* header{};
+    status = ob::ObReferenceObjectByHandle(raw, *table, access,
+                                            &sectionType, &header);
+    if (status == NtStatus::Success) *sectionReference = header;
+    return status;
+}
+
 NtStatus NtCreateSectionCaptured(Handle* userOut, uint32_t access,
                                  ObjectAttributes* attributes, LargeInteger* maximum,
                                  uint32_t protect, uint32_t allocation, Handle file) {
@@ -652,6 +676,8 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
     if (status != NtStatus::Success) return status;
     auto* object = header->as<section::SectionObject>();
     const bool imageView = object->getAllocationAttributes() & section::SEC_IMAGE;
+    const bool demandSection = !imageView &&
+        (object->getAllocationAttributes() & section::SEC_RESERVE);
     if (imageView) {
         const auto* pageProtections = object->getImageViewProtections();
         if (!pageProtections) {
@@ -765,7 +791,8 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
                     space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,
                         backing.pageCount - firstPage, header, acquireSectionView, releaseSectionView,
                         maximumProtection, imageView, inherit == 1, sectionOffset, pageProtections, false, nullptr,
-                        imageView ? object->getSharedImagePages() + firstPage : nullptr);
+                        imageView ? object->getSharedImagePages() + firstPage : nullptr,
+                        demandSection ? materializeSectionViewPage : nullptr);
                 if (imageView && !capturedBase && result == NtStatus::Conflict) {
                     target = 0;
                     result = space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,
@@ -784,7 +811,8 @@ static NtStatus mapViewOfSection(Handle handle, Handle process, uintptr_t* base,
             space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,
                 backing.pageCount - firstPage, header, acquireSectionView, releaseSectionView,
                 maximumProtection, imageView, inherit == 1, sectionOffset, pageProtections, false, nullptr,
-                imageView ? object->getSharedImagePages() + firstPage : nullptr);
+                imageView ? object->getSharedImagePages() + firstPage : nullptr,
+                demandSection ? materializeSectionViewPage : nullptr);
         if (imageView && !capturedBase && result == NtStatus::Conflict) {
             target = 0;
             result = space.mapSharedPages(target, length, initialProtection, backing.pfns + firstPage,

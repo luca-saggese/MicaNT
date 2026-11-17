@@ -90,6 +90,7 @@ def verify_cpl3_surface(
     qmp_path: Path,
     temp: Path,
     diagnostics_dir: Path | None = None,
+    expected_resolution: tuple[int, int] | None = None,
 ) -> None:
     """Verify the CPL3 surface before later desktop rendering can replace it."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -118,8 +119,12 @@ def verify_cpl3_surface(
             if diagnostics_dir is not None:
                 shutil.copyfile(image_path, diagnostics_dir / image_path.name)
             with image_path.open("rb") as image:
+                expected_header = (
+                    f"{expected_resolution[0]} {expected_resolution[1]}\n".encode()
+                    if expected_resolution else b"1024 768\n"
+                )
                 if (image.readline() != b"P6\n" or
-                        image.readline() != b"1024 768\n" or
+                        image.readline() != expected_header or
                         image.readline() != b"255\n"):
                     raise RuntimeError("Unexpected VirtIO scanout screenshot format")
                 pixel = image.read(3)
@@ -207,6 +212,7 @@ def verify_theme_test(
     temp: Path,
     serial_path: Path,
     diagnostics_dir: Path | None = None,
+    expected_resolution: tuple[int, int] | None = None,
 ) -> None:
     """Drive the dedicated Ring 3 theme client and compare real scanout pixels."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -226,33 +232,27 @@ def verify_theme_test(
                     if "error" in response:
                         raise RuntimeError(f"QMP {command} failed: {response['error']}")
                     if "return" in response:
-                        return
+                        return response["return"]
 
             execute("qmp_capabilities")
 
             pointer = [0, 0]
-            pointer_initialized = False
 
-            def relative(axis: str, distance: int) -> None:
-                while distance:
-                    step = max(-64, min(64, distance))
-                    execute("input-send-event", {"events": [{
-                        "type": "rel", "data": {"axis": axis, "value": step},
-                    }]})
-                    distance -= step
-                    time.sleep(0.02)
+            def move_pointer(x: int, y: int) -> None:
+                for axis, index in (("x", 0), ("y", 1)):
+                    remaining = (x if index == 0 else y) - pointer[index]
+                    while remaining:
+                        step = max(-64, min(64, remaining))
+                        execute("input-send-event", {"events": [{
+                            "type": "rel", "data": {"axis": axis, "value": step},
+                        }]})
+                        pointer[index] += step
+                        remaining -= step
+                        time.sleep(0.01)
+                time.sleep(0.15)
 
             def move_to(x: int, y: int) -> None:
-                nonlocal pointer_initialized
-                if not pointer_initialized:
-                    relative("x", -1200)
-                    relative("y", -1200)
-                    pointer[:] = [0, 0]
-                    pointer_initialized = True
-                relative("x", x - pointer[0])
-                relative("y", y - pointer[1])
-                pointer[:] = [x, y]
-                time.sleep(0.2)
+                move_pointer(x, y)
 
             def screen(name: str) -> bytes:
                 path = temp / name
@@ -260,33 +260,130 @@ def verify_theme_test(
                 if diagnostics_dir is not None:
                     shutil.copyfile(path, diagnostics_dir / name)
                 with path.open("rb") as image:
+                    width, height = expected_resolution or (1024, 768)
                     if (image.readline() != b"P6\n" or
-                            image.readline() != b"1024 768\n" or
+                            image.readline() != f"{width} {height}\n".encode() or
                             image.readline() != b"255\n"):
                         raise RuntimeError("Unexpected VirtIO scanout screenshot format")
                     pixels = image.read()
-                if len(pixels) != 1024 * 768 * 3:
+                if len(pixels) != width * height * 3:
                     raise RuntimeError("Truncated VirtIO scanout screenshot")
                 return pixels
 
+            def pixel_at(image: bytes, x: int, y: int) -> bytes:
+                offset = (y * width + x) * 3
+                return image[offset:offset + 3]
+
             startup = serial_path.read_text(encoding="utf-8", errors="replace")
             for marker in (
-                "[MicaNT ThemeTest TEMP] user entry reached",
-                "[MicaNT ThemeTest TEMP] CreateWindowExW succeeded",
+                "[MicaNT ThemeTest] Progress, tab, and tree classes initialized",
                 "[MicaNT ThemeTest] Base snapshot published",
-                "[MicaNT ThemeTest TEMP] Base snapshot published",
-                "[MicaNT ThemeTest TEMP] active.profile theme applied",
                 "[MicaNT ThemeTest] Initial HTHEME snapshot pinned",
                 "[MicaNT ThemeTest] Production control window started",
-                "[MicaNT ThemeTest TEMP] ShowWindow completed from hidden state",
+                "[MicaNT ThemeTest] Dynamic window table: 24 windows created, resized, and destroyed",
             ):
                 if marker not in startup:
                     raise RuntimeError(f"theme_test.exe startup lacked required evidence: {marker}")
             if ("[MicaNT ThemeTest] Active WhiteSur Light loaded" not in startup and
                     "[MicaNT ThemeTest] Active WhiteSur Dark loaded" not in startup):
                 raise RuntimeError("theme_test.exe startup did not load a WhiteSur profile")
-            screen("theme-test-start.ppm")
+            width, height = expected_resolution or (1024, 768)
+            # The guest initializes its PS/2 cursor at the display center.
+            pointer[:] = [width // 2, height // 2]
+            client_probes = [(x, min(550, height - 1)) for x in (100, 300, 500)
+                             if x < width]
+            visible_since = 0.0
+            startup_screen = b""
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                startup_screen = screen("theme-test-wait.ppm")
+                samples = [pixel_at(startup_screen, x, y)
+                           for x, y in client_probes]
+                neutral_client_pixel = bool(samples) and all(
+                    max(sample) - min(sample) < 32 for sample in samples)
+                if neutral_client_pixel:
+                    for channel in range(3):
+                        values = [sample[channel] for sample in samples]
+                        if max(values) - min(values) >= 24:
+                            neutral_client_pixel = False
+                            break
+                now = time.monotonic()
+                if neutral_client_pixel:
+                    if not visible_since:
+                        visible_since = now
+                    elif now - visible_since >= 0.5:
+                        break
+                else:
+                    visible_since = 0.0
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Theme-test parent client did not reach scanout")
+            if diagnostics_dir is not None:
+                shutil.copyfile(temp / "theme-test-wait.ppm",
+                                diagnostics_dir / "theme-test-start.ppm")
             print("theme_test.exe WhiteSur startup screenshot captured.", flush=True)
+
+            def set_left_button(down: bool) -> None:
+                execute("input-send-event", {"events": [{
+                    "type": "btn", "data": {"button": "left", "down": down},
+                }]})
+                time.sleep(0.12)
+
+            def different_pixels(first: bytes, second: bytes) -> int:
+                return sum(first[offset:offset + 3] != second[offset:offset + 3]
+                           for offset in range(0, min(len(first), len(second)), 3))
+
+            def parent_client_visible(image: bytes, offset_x: int = 0,
+                                      offset_y: int = 0) -> bool:
+                points = [(x + offset_x, 550 + offset_y)
+                          for x in (100, 300, 500)
+                          if x + offset_x < width and 550 + offset_y < height]
+                samples = [pixel_at(image, x, y) for x, y in points]
+                return bool(samples) and all(
+                    max(sample) - min(sample) < 32 for sample in samples
+                ) and all(
+                    max(sample[channel] for sample in samples) -
+                    min(sample[channel] for sample in samples) < 24
+                    for channel in range(3)
+                )
+
+            # Leave the pointer away from the window so the cursor itself does
+            # not dominate the before/after comparison.
+            move_to(max(0, width - 16), max(0, height - 16))
+            time.sleep(0.25)
+            before_drag = screen("theme-window-before-drag.ppm")
+            caption_x = min(width - 40, 272)
+            caption_y = 74
+            if caption_x <= 72 or caption_y >= height:
+                raise RuntimeError("Theme-test window caption is outside the scanout")
+            move_to(caption_x, caption_y)
+            set_left_button(True)
+            move_pointer(caption_x + 60, caption_y + 30)
+            time.sleep(0.25)
+            set_left_button(False)
+            dragged = screen("theme-window-dragged.ppm")
+            drag_changed_pixels = different_pixels(before_drag, dragged)
+            drag_surface_visible = parent_client_visible(dragged, 60, 30)
+
+            move_to(caption_x + 60, caption_y + 30)
+            set_left_button(True)
+            move_pointer(caption_x, caption_y)
+            time.sleep(0.25)
+            set_left_button(False)
+            move_to(max(0, width - 16), max(0, height - 16))
+            time.sleep(0.25)
+            returned = screen("theme-window-after-drag-return.ppm")
+            return_surface_visible = parent_client_visible(returned)
+            if drag_changed_pixels >= 10000 and drag_surface_visible and return_surface_visible:
+                print("theme_test.exe caption drag and return reached scanout.", flush=True)
+            else:
+                print(
+                    "theme_test.exe caption drag was not verified: "
+                    f"changed={drag_changed_pixels}, "
+                    f"shifted_client_visible={int(drag_surface_visible)}, "
+                    f"returned_client_visible={int(return_surface_visible)}.",
+                    flush=True,
+                )
 
 
 def verify_cmd_terminal(
@@ -345,22 +442,9 @@ def verify_cmd_terminal(
                             changed += 1
                 return changed
 
-            pointer = [0, 0]
-            pointer_initialized = False
+            pointer = [512, 384]
 
             def move_to(x: int, y: int) -> None:
-                nonlocal pointer_initialized
-                if not pointer_initialized:
-                    for axis in ("x", "y"):
-                        remaining = -1200
-                        while remaining:
-                            step = max(-64, min(64, remaining))
-                            execute("input-send-event", {"events": [{
-                                "type": "rel", "data": {"axis": axis, "value": step},
-                            }]})
-                            remaining -= step
-                    pointer[:] = [0, 0]
-                    pointer_initialized = True
                 for axis, index in (("x", 0), ("y", 1)):
                     remaining = (x if index == 0 else y) - pointer[index]
                     while remaining:
@@ -841,10 +925,14 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not complete the pre-window theme probes")
-            execute("input-send-event", {"events": [
-                {"type": "rel", "data": {"axis": "x", "value": 40}},
-                {"type": "rel", "data": {"axis": "y", "value": 20}},
-            ]})
+            for axis, distance in (("x", -472), ("y", -364)):
+                while distance:
+                    step = max(-64, min(64, distance))
+                    execute("input-send-event", {"events": [{
+                        "type": "rel", "data": {"axis": axis, "value": step},
+                    }]})
+                    distance -= step
+                    time.sleep(0.01)
             time.sleep(0.5)
             after = screen("after.ppm")
             paint_marker = "[MicaNT Explorer] Application window paint presented"
@@ -2139,8 +2227,9 @@ def run_qemu(
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
     crash_dump_selftest: bool = False,
+    resolution: tuple[int, int] | None = None,
 ) -> None:
-    if memory_mib not in (256, 512, 1024, 2048, 4096):
+    if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
@@ -2263,6 +2352,11 @@ def run_qemu(
         kernel_dir.mkdir(parents=True)
         shutil.copyfile(bootloader, boot_dir / "BOOTX64.EFI")
         shutil.copyfile(kernel, kernel_dir / "ntoskrnl.exe")
+        if resolution:
+            (kernel_dir / "boot.ini").write_text(
+                f"timeout=0\nresolution={resolution[0]}x{resolution[1]}\n",
+                encoding="ascii",
+            )
         driver_dir = kernel_dir / "System32" / "drivers"
         driver_dir.mkdir(parents=True)
         shutil.copyfile(ROOT / "build" / "virtio_gpu.sys", driver_dir / "virtio_gpu.sys")
@@ -2438,6 +2532,10 @@ def run_qemu(
         qemu_output_path = log_directory / "qemu.log"
         network_capture_path = log_directory / "network.pcap"
 
+        graphics_device = ("virtio-vga-gl" if use_virgl else "virtio-vga") + \
+            ",id=micant_display"
+        if resolution:
+            graphics_device += f",xres={resolution[0]},yres={resolution[1]}"
         command = [
             qemu,
             "-machine", "q35" if usb_test else "q35,usb=off",
@@ -2449,7 +2547,7 @@ def run_qemu(
             "-smp", "1",
             "-m", str(memory_mib),
             "-vga", "none",
-            "-device", "virtio-vga-gl" if use_virgl else "virtio-vga",
+            "-device", graphics_device,
             "-drive",
             f"if=pflash,format=raw,unit=0,readonly=on,file={ovmf_code.resolve()}",
             "-drive", f"file=fat:ro:{esp},format=raw,if=ide,index=0",
@@ -2650,7 +2748,7 @@ def run_qemu(
                     if (not surface_verified and
                             "[MicaNT Test] CPL3 surface presentation completed" in serial_log):
                         verify_cpl3_surface(
-                            temp / "qmp.sock", temp, diagnostics_dir,
+                            temp / "qmp.sock", temp, diagnostics_dir, resolution,
                         )
                         surface_verified = True
                         print("CPL3 surface reached VirtIO scanout before desktop redraw.", flush=True)
@@ -2660,7 +2758,9 @@ def run_qemu(
                             complete_since = None
                             time.sleep(0.1)
                             continue
-                        if theme_test and "[MicaNT ThemeTest] Production control window started" not in serial_log:
+                        if theme_test and (
+                                "[MicaNT ThemeTest] Production control window started" not in serial_log or
+                                "[MicaNT ThemeTest] Dynamic window table: 24 windows created, resized, and destroyed" not in serial_log):
                             complete_since = None
                             time.sleep(0.1)
                             continue
@@ -2671,6 +2771,7 @@ def run_qemu(
                         if theme_test and not theme_test_verified:
                             verify_theme_test(
                                 temp / "qmp.sock", temp, serial_path, diagnostics_dir,
+                                resolution,
                             )
                             theme_test_verified = True
                         if cmd_test and not cmd_test_verified:
@@ -2878,12 +2979,16 @@ def main() -> int:
         help="path to the x86_64 OVMF code image (or MICANT_OVMF_CODE)",
     )
     parser.add_argument("--timeout", type=int, default=60)
-    parser.add_argument("--memory-mib", type=int, choices=(256, 512, 1024, 2048, 4096), default=1024)
+    parser.add_argument("--memory-mib", type=int,
+                        choices=(256, 500, 512, 1024, 2048, 4096), default=1024)
     parser.add_argument("--diagnostics-dir", type=Path)
     parser.add_argument("--stable-seconds", type=int, default=5)
     parser.add_argument("--display", default="none")
     parser.add_argument(
         "--graphics-backend", choices=("auto", "virtio2d", "virgl"), default="auto"
+    )
+    parser.add_argument(
+        "--resolution", choices=("800x600", "1024x768", "1280x1024", "1920x1080")
     )
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--verify-input", action="store_true")
@@ -2927,6 +3032,8 @@ def main() -> int:
             args.process_memory_selftest,
             args.cmd_test,
             args.crash_dump_selftest,
+            tuple(int(part) for part in args.resolution.split("x"))
+                if args.resolution else None,
         )
     except KeyboardInterrupt:
         return 130

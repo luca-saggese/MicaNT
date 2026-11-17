@@ -780,6 +780,7 @@ struct VirtualAddressDescriptor {
     void*     sectionContext{nullptr};
     bool (*sectionAcquire)(void*) noexcept{nullptr};
     void (*sectionRelease)(void*) noexcept{nullptr};
+    NtStatus (*sectionMaterializePage)(void*, size_t, uint64_t*) noexcept{nullptr};
 #if !defined(MICANT_FREESTANDING)
     std::shared_ptr<void> sectionOwner;
 #endif
@@ -1605,7 +1606,8 @@ public:
                             const uint32_t* pageProtections = nullptr,
                             bool privateImageView = false,
                             const uint32_t* pageMaximumProtections = nullptr,
-                            const uint8_t* sharedImagePages = nullptr) noexcept {
+                            const uint8_t* sharedImagePages = nullptr,
+                            NtStatus (*materializePage)(void*, size_t, uint64_t*) noexcept = nullptr) noexcept {
         // One prior failed mapping may be recovered before this operation;
         // this operation may then remove its own VAD on rollback. Keep both
         // references alive until the Guard has restored its lock/IRQL state.
@@ -1679,12 +1681,14 @@ public:
         node->inheritView = inheritView;
         node->sectionOffset = sectionOffset;
         node->sectionMaxProtection = maxProtection;
+        node->sectionMaterializePage = materializePage;
         auto* vad = node.get();
         if (!vadTree_.insert(std::move(node))) {
             deferSectionOwner(*node, deferredOwner);
             return NtStatus::Conflict;
         }
-        if (backend_.mapBatch && !pageProtections && !pageMaximumProtections && !privateImageView) {
+        if (backend_.mapBatch && !pageProtections && !pageMaximumProtections &&
+            !privateImageView && !materializePage) {
             std::unique_ptr<VirtualAddressDescriptor::CommitRange> pending;
             for (size_t i = 0; i < count; ++i) {
                 std::unique_ptr<VirtualAddressDescriptor::CommitRange> page(
@@ -1719,6 +1723,11 @@ public:
         }
         NtStatus failure = NtStatus::Success;
         for (size_t i = 0; i < count; ++i) {
+            if (!pfns[i]) {
+                if (materializePage) continue;
+                failure = NtStatus::InvalidParameter;
+                break;
+            }
             std::unique_ptr<VirtualAddressDescriptor::CommitRange> page(
                 new (std::nothrow_t{}) VirtualAddressDescriptor::CommitRange{});
             if (!page) { failure = NtStatus::NoMemory; break; }
@@ -1768,7 +1777,7 @@ public:
             ++workingSet_.commitCharge;
             ++workingSet_.residentPages;
         }
-        vad->committed = vad->commitCharge != 0;
+        vad->committed = vad->commitCharge != 0 || materializePage != nullptr;
         if (failure != NtStatus::Success) {
             // Retain the VAD and backing if an unmap fails: live PTEs must not
             // outlive their physical pages. close() can retry cleanup.
@@ -2170,13 +2179,17 @@ public:
                     maximumProtections[index] = committed->maximumProtection != PAGE_NOACCESS
                         ? committed->maximumProtection : vad->sectionMaxProtection;
                 }
-                for (size_t i = 0; i < count; ++i) if (!frames[i]) return NtStatus::Unsuccessful;
+                for (size_t i = 0; i < count; ++i)
+                    if (!frames[i] && !vad->sectionMaterializePage)
+                        return NtStatus::Unsuccessful;
                 if (!switchRoot(targetRoot)) return NtStatus::Unsuccessful;
                 uintptr_t base = vad->startingAddress;
                 auto status = target.mapSharedPages(base, vad->size(), vad->protection, frames.get(), count,
                     vad->sectionContext, vad->sectionAcquire, vad->sectionRelease,
                     vad->sectionMaxProtection, false, true, vad->sectionOffset,
-                    protections.get(), false, maximumProtections.get());
+                    vad->sectionMaterializePage ? nullptr : protections.get(), false,
+                    vad->sectionMaterializePage ? nullptr : maximumProtections.get(), nullptr,
+                    vad->sectionMaterializePage);
                 if (status != NtStatus::Success) return status;
                 for (size_t i = 0; i < count;) {
                     const size_t start = i;
@@ -2351,10 +2364,56 @@ public:
         Guard lock(*this);
         if (workingSet_.pageFaultCount != UINT32_MAX) ++workingSet_.pageFaultCount;
         if (backend_.map) {
-            if (!isUser || !isWrite || isExecute || !backend_.replace) return NtStatus::AccessViolation;
+            // Kernel copy helpers can fault while writing through a checked
+            // user mapping (for example, while initializing a section view).
+            // Resolve the backing page in the current process address space;
+            // access rights below still enforce the view's protection.
+            if (isExecute) return NtStatus::AccessViolation;
             auto* vad = vadTree_.find(faultingAddress);
-            if (!vad || !vad->isImageView) return NtStatus::AccessViolation;
-            return resolveCopyOnWriteLocked(faultingAddress);
+            if (!vad || !vad->isSectionView) return NtStatus::AccessViolation;
+            if (vad->isImageView) {
+                if (!isWrite || !backend_.replace) return NtStatus::AccessViolation;
+                return resolveCopyOnWriteLocked(faultingAddress);
+            }
+            if (!vad->sectionMaterializePage) return NtStatus::AccessViolation;
+            if (isWrite && (vad->protection == PAGE_READONLY ||
+                            vad->protection == PAGE_EXECUTE_READ))
+                return NtStatus::AccessViolation;
+            const uint64_t faultVpn = faultingAddress >> PageShift4KB;
+            for (auto* resident = vad->commitRanges.get(); resident;
+                 resident = resident->next.get()) {
+                if (faultVpn >= resident->firstVpn && faultVpn <= resident->lastVpn)
+                    return NtStatus::AccessViolation;
+            }
+            std::unique_ptr<VirtualAddressDescriptor::CommitRange> page(
+                new (std::nothrow_t{}) VirtualAddressDescriptor::CommitRange{});
+            if (!page) return NtStatus::NoMemory;
+            const uint64_t sectionPage = ((faultVpn - vad->startingVpn) << PageShift4KB) +
+                                         vad->sectionOffset;
+            if (sectionPage < vad->sectionOffset || (sectionPage & PageMask4KB))
+                return NtStatus::InvalidViewSize;
+            const auto pageIndex = static_cast<size_t>(sectionPage >> PageShift4KB);
+            uint64_t pfn{};
+            const auto materialize = vad->sectionMaterializePage(
+                vad->sectionContext, pageIndex, &pfn);
+            if (materialize != NtStatus::Success) return materialize;
+            if (!pfn || !backend_.map(backend_.context, faultVpn << PageShift4KB,
+                                      pfn, vad->protection))
+                return NtStatus::Unsuccessful;
+            page->firstVpn = page->lastVpn = faultVpn;
+            page->pfn = pfn;
+            page->protection = vad->protection;
+            page->maximumProtection = vad->sectionMaxProtection;
+            page->next = std::move(vad->commitRanges);
+            vad->commitRanges = std::move(page);
+            ++vad->commitCharge;
+            if (workingSet_.commitCharge != SIZE_MAX) ++workingSet_.commitCharge;
+            if (workingSet_.residentPages != SIZE_MAX) ++workingSet_.residentPages;
+            workingSet_.peakCommitCharge = std::max(workingSet_.peakCommitCharge,
+                                                     workingSet_.commitCharge);
+            workingSet_.peakResidentPages = std::max(workingSet_.peakResidentPages,
+                                                      workingSet_.residentPages);
+            return NtStatus::Success;
         }
 #if defined(MICANT_FREESTANDING)
         return NtStatus::NotImplemented;
@@ -2680,7 +2739,8 @@ private:
         // Image views can contain privately allocated pages even when the
         // VAD as a whole does not own every image page. Release those pages
         // individually instead of discarding their ownership records.
-        if (vad.isSectionView && !vad.isImageView && !vad.ownsImagePages && backend_.mapBatch && backend_.unmapBatch && firstVpn == 0 &&
+        if (vad.isSectionView && !vad.isImageView && !vad.sectionMaterializePage &&
+            !vad.ownsImagePages && backend_.mapBatch && backend_.unmapBatch && firstVpn == 0 &&
             lastVpn == std::numeric_limits<uint64_t>::max() && vad.commitCharge) {
             if (!backend_.unmapBatch(backend_.context, vad.startingAddress, vad.pageCount()))
                 return false;

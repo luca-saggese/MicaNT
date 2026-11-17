@@ -1580,6 +1580,27 @@ public:
             uint32_t bestMode = currentMode;
             uint32_t bestW = m_gop->mode->info ? m_gop->mode->info->horizontalResolution : 0;
             uint32_t bestH = m_gop->mode->info ? m_gop->mode->info->verticalResolution : 0;
+            uint32_t requestedW = 0;
+            uint32_t requestedH = 0;
+            char displayConfig[128]{};
+            const size_t displayConfigSize = loadFileFromEfiSystemPartition(
+                m_imageHandle, m_systemTable->bootServices,
+                L"\\EFI\\MicaNT\\boot.ini",
+                reinterpret_cast<uint8_t*>(displayConfig), sizeof(displayConfig) - 1);
+            if (displayConfigSize) {
+                displayConfig[displayConfigSize] = '\0';
+                const char* setting = strstr(displayConfig, "resolution=");
+                if (setting) {
+                    setting += sizeof("resolution=") - 1;
+                    while (*setting >= '0' && *setting <= '9')
+                        requestedW = requestedW * 10 + static_cast<uint32_t>(*setting++ - '0');
+                    if (*setting == 'x' || *setting == 'X') {
+                        ++setting;
+                        while (*setting >= '0' && *setting <= '9')
+                            requestedH = requestedH * 10 + static_cast<uint32_t>(*setting++ - '0');
+                    }
+                }
+            }
 
             UartSerial::print("[MicaNT GOP] Probing GOP Modes (Total: ");
             UartSerial::printDec(maxMode);
@@ -1605,9 +1626,14 @@ public:
                     UartSerial::printDec(info->pixelsPerScanLine);
                     UartSerial::print(")\r\n");
 
-                    // The framebuffer UI uses fixed-size bitmap text. Prefer a
-                    // readable desktop-sized mode instead of shrinking 1080p.
-                    if (info->horizontalResolution == 1024 && info->verticalResolution == 768) {
+                    if (requestedW && requestedH &&
+                        info->horizontalResolution == requestedW &&
+                        info->verticalResolution == requestedH) {
+                        bestMode = m;
+                        bestW = requestedW;
+                        bestH = requestedH;
+                    } else if (!requestedW && info->horizontalResolution == 1024 &&
+                               info->verticalResolution == 768) {
                         bestMode = m;
                         bestW = 1024;
                         bestH = 768;
