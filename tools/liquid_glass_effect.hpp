@@ -10,8 +10,9 @@ struct Rect {
 };
 
 struct Cache {
-    static constexpr uint32_t MaxCapture = 384;
-    static constexpr uint32_t MaxCard = 240;
+    static constexpr uint32_t BackdropMargin = 72;
+    static constexpr uint32_t MaxCapture = 704;
+    static constexpr uint32_t MaxCard = 640;
     bool valid{};
     uint64_t window{};
     uint64_t sceneGeneration{};

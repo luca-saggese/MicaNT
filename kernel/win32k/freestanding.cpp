@@ -1293,7 +1293,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                     return value >= low && value <= high;
                 };
                 if (!glass.width || !glass.height ||
-                    glass.width > 512 || glass.height > 512 ||
+                    glass.width > 640 || glass.height > 640 ||
                     glass.left < 0 || glass.top < 0 ||
                     static_cast<uint64_t>(glass.left) + glass.width >
                         static_cast<uint32_t>(window->width) ||

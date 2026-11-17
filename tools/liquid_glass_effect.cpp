@@ -8,7 +8,7 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTau = 6.28318530717958647692f;
 constexpr float kGoldenAngle = 2.39996323f;
-constexpr uint32_t kBackdropMargin = 72;
+constexpr uint32_t kBackdropMargin = Cache::BackdropMargin;
 
 float minf(float a, float b) noexcept { return a < b ? a : b; }
 float maxf(float a, float b) noexcept { return a > b ? a : b; }
@@ -306,8 +306,11 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
         for (uint32_t x = 0; x < d.width; ++x) {
             const float px = d.left + static_cast<float>(x) + 0.5f;
             const float py = d.top + static_cast<float>(y) + 0.5f;
-            const float qx = px - d.pad - halfWidth;
-            const float qy = py - d.pad - halfHeight;
+            // The output buffer already begins at the glass bounds. Keep the
+            // rounded card centered in that buffer; pad is backdrop sampling
+            // room, not an inset that shifts and clips the visible glass.
+            const float qx = static_cast<float>(x) + 0.5f - halfWidth;
+            const float qy = static_cast<float>(y) + 0.5f - halfHeight;
             const float sd = roundBox(qx, qy, halfWidth, halfHeight, radius);
             const float coverage = clampf(0.5f - sd, 0.0f, 1.0f);
             const size_t destination = static_cast<size_t>(y) * d.width + x;
@@ -349,8 +352,8 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             const float dispX = (refractScale * nx / divide) * d.thickness * 1.35f;
             const float dispY = (refractScale * ny / divide) * d.thickness * 1.35f;
 
-            const float sy = (py - d.pad - halfHeight) *
-                (1.0f - d.magnify * 1.5f) + d.pad + halfHeight;
+            const float sy = (static_cast<float>(y) + 0.5f - halfHeight) *
+                (1.0f - d.magnify * 1.5f) + halfHeight;
             const float blurRadius = d.blurPx * mixf(0.45f, 1.0f,
                 smoothstep(0.0f, bezelWidth, t));
             const float tapRadius = maxf(blurRadius, 0.5f) * 1.5f;
@@ -368,21 +371,21 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
                 const float oy = (baseSin * rotCos + baseCos * rotSin) * r * tapRadius;
                 const float weight = expNegative(2.2f * r * r);
                 const uint32_t cr = sampleBilinear(cache,
-                    px - d.pad + kBackdropMargin + ox + dispX * (1.0f + dispersion),
-                    sy - d.pad + kBackdropMargin + oy + dispY * (1.0f + dispersion));
+                    static_cast<float>(x) + kBackdropMargin + ox + dispX * (1.0f + dispersion),
+                    sy + kBackdropMargin + oy + dispY * (1.0f + dispersion));
                 const uint32_t cg = sampleBilinear(cache,
-                    px - d.pad + kBackdropMargin + ox + dispX,
-                    sy - d.pad + kBackdropMargin + oy + dispY);
+                    static_cast<float>(x) + kBackdropMargin + ox + dispX,
+                    sy + kBackdropMargin + oy + dispY);
                 const uint32_t cb = sampleBilinear(cache,
-                    px - d.pad + kBackdropMargin + ox + dispX * (1.0f - dispersion),
-                    sy - d.pad + kBackdropMargin + oy + dispY * (1.0f - dispersion));
+                    static_cast<float>(x) + kBackdropMargin + ox + dispX * (1.0f - dispersion),
+                    sy + kBackdropMargin + oy + dispY * (1.0f - dispersion));
                 red += static_cast<float>((cr >> 16) & 255u) * weight;
                 green += static_cast<float>((cg >> 8) & 255u) * weight;
                 blue += static_cast<float>(cb & 255u) * weight;
                 weightSum += weight;
             }
             const uint32_t alphaPixel = sampleBilinear(cache,
-                px - d.pad + kBackdropMargin, sy - d.pad + kBackdropMargin);
+                static_cast<float>(x) + kBackdropMargin, sy + kBackdropMargin);
             const float baseAlpha = static_cast<float>(alphaPixel >> 24) / 255.0f;
             const float inverseAlpha = 1.0f / maxf(baseAlpha, 1.0e-3f);
             float colorR = red / maxf(weightSum, 1.0e-3f) / 255.0f * inverseAlpha;
