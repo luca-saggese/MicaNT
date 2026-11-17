@@ -356,6 +356,39 @@ uint32_t premultiplied(uint8_t r, uint8_t green, uint8_t b, uint8_t alpha) noexc
     return PackBGRA(scale(r), scale(green), scale(b), alpha);
 }
 
+void drawDisc(uint32_t* pixels, uint32_t width, uint32_t height,
+              int32_t centerX, int32_t centerY, float radius,
+              uint8_t red, uint8_t green, uint8_t blue,
+              uint8_t opacity = 255) noexcept {
+    const int32_t extent = static_cast<int32_t>(radius + 1.0f);
+    for (int32_t y = centerY - extent; y <= centerY + extent; ++y) {
+        if (y < 0 || y >= static_cast<int32_t>(height)) continue;
+        for (int32_t x = centerX - extent; x <= centerX + extent; ++x) {
+            if (x < 0 || x >= static_cast<int32_t>(width)) continue;
+            const float dx = static_cast<float>(x - centerX) + 0.5f;
+            const float dy = static_cast<float>(y - centerY) + 0.5f;
+            const float distance = dx * dx + dy * dy;
+            const float edge = radius + 0.5f;
+            if (distance >= edge * edge) continue;
+            const float coverage = distance <= (radius - 0.5f) * (radius - 0.5f)
+                ? 1.0f : edge - (distance > 0.0f ? __builtin_sqrtf(distance) : 0.0f);
+            const uint32_t alpha = static_cast<uint32_t>(coverage * opacity + 0.5f);
+            const uint32_t inverse = 255u - alpha;
+            const uint32_t source = premultiplied(red, green, blue,
+                static_cast<uint8_t>(alpha));
+            uint32_t& destination = pixels[static_cast<size_t>(y) * width + x];
+            const auto channel = [&](unsigned shift) noexcept {
+                return (((source >> shift) & 255u) +
+                    ((destination >> shift) & 255u) * inverse / 255u) & 255u;
+            };
+            const uint32_t outAlpha = alpha +
+                ((destination >> 24) & 255u) * inverse / 255u;
+            destination = (outAlpha << 24) | (channel(16) << 16) |
+                (channel(8) << 8) | channel(0);
+        }
+    }
+}
+
 void fillGlassTile(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
                    int32_t rw, int32_t rh, int32_t radius,
                    uint8_t r, uint8_t green, uint8_t b, uint8_t alpha) noexcept {
@@ -417,18 +450,37 @@ void drawControlCenter(GlassSurface& surface) noexcept {
         text(p, w, h, x + 7, toggleY + 44, toggleLabels[i], white);
     }
 
-    constexpr int32_t sliderW = 289, sliderH = 76;
+    constexpr int32_t sliderW = 289, sliderH = 68;
     const int32_t sliderX = inset;
     const int32_t displayY = 306, soundY = 394;
     const auto slider = [&](int32_t y, const char* label, const char* glyph,
                             int32_t amount) noexcept {
-        fillGlassTile(p, w, h, sliderX, y, sliderW, sliderH, 20, 25, 32, 48, 105);
-        fillGlassTile(p, w, h, sliderX + 12, y + 12, 28, 28, 14, 82, 93, 115, 185);
-        text(p, w, h, sliderX + 22, y + 18, glyph, white);
-        text(p, w, h, sliderX + 50, y + 17, label, white);
-        fillGlassTile(p, w, h, sliderX + 13, y + 51, sliderW - 26, 12, 6, 54, 61, 76, 220);
-        roundedFill(p, w, h, sliderX + 13, y + 51,
-                    (sliderW - 26) * amount / 100, 12, 6, PackBGRA(235, 237, 243, 248));
+        const int32_t insetX = 5, insetY = 5;
+        const int32_t trackX = sliderX + insetX;
+        const int32_t trackY = y + insetY;
+        const int32_t trackW = sliderW - insetX * 2;
+        const int32_t trackH = sliderH - insetY * 2;
+        const int32_t centerY = trackY + trackH / 2;
+        const int32_t thumbRadius = 12;
+        const int32_t thumbCenterX = trackX + thumbRadius +
+            (trackW - thumbRadius * 2) * amount / 100;
+
+        // A single continuous capsule is both the control and its track. The
+        // bright section grows beneath the floating thumb like macOS Control
+        // Center, instead of placing a generic slider inside a separate card.
+        fillGlassTile(p, w, h, trackX, trackY, trackW, trackH,
+                      trackH / 2, 28, 34, 48, 145);
+        roundedFill(p, w, h, trackX, trackY,
+                    thumbCenterX - trackX, trackH, trackH / 2,
+                    premultiplied(239, 242, 249, 226));
+        text(p, w, h, trackX + 13, centerY - 8, glyph,
+             amount >= 20 ? PackBGRA(35, 40, 51, 255) : white);
+        text(p, w, h, trackX + 38, centerY - 7, label,
+             amount >= 20 ? PackBGRA(35, 40, 51, 255) : white);
+
+        drawDisc(p, w, h, thumbCenterX, centerY + 1, 13.5f, 0, 0, 0, 100);
+        drawDisc(p, w, h, thumbCenterX, centerY, 12.0f, 199, 207, 221, 255);
+        drawDisc(p, w, h, thumbCenterX, centerY, 10.5f, 255, 255, 255, 255);
     };
     slider(displayY, "Display", "+", 78);
     slider(soundY, "Sound", "S", 67);
