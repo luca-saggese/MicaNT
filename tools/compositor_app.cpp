@@ -1086,7 +1086,10 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND);
         const bool glassWindow = micant::compositor::glass::IsValid(
             surface.liquidGlass, surface.width, surface.height);
-        if (hasClientBackground || (!blurWindow && !glassWindow)) {
+        // The card is rendered from the already-composed wallpaper/backdrop.
+        // Filling its host window first makes the shader refract a flat white
+        // client area and also leaves an opaque square around the rounded card.
+        if (!glassWindow && (hasClientBackground || !blurWindow)) {
             const uint32_t clientBackground = hasClientBackground
                 ? windowStyle->background : 0xFFFFFFFFu;
             fillRect(left, top, clientRight, clientBottom,
