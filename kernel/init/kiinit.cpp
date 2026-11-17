@@ -5661,9 +5661,17 @@ extern "C" micant::NtStatus KiSystemStartup(
         } else {
             micant::shared::time::SystemTimeFields rtc{};
             const auto rtcStatus = micant::hal::amd64::readBootstrapRtc(rtc);
-            if (rtcStatus == micant::hal::amd64::BootstrapRtcStatus::Success)
-                serialWrite("[MicaNT Hal] Stable CMOS RTC sample read; UTC offset unknown\r\n");
-            else if (rtcStatus == micant::hal::amd64::BootstrapRtcStatus::Timeout)
+            if (rtcStatus == micant::hal::amd64::BootstrapRtcStatus::Success) {
+                uint64_t rtcTicks{};
+                if (micant::shared::time::toSystemTime100ns(rtc, rtcTicks) &&
+                    micant::hal::amd64::initializeBootstrapSystemTime(rtcTicks) ==
+                        micant::hal::amd64::BootstrapClockStatus::Success) {
+                    utcSeeded = true;
+                    serialWrite("[MicaNT Hal] UTC SystemTime seeded from stable CMOS RTC fallback; desktop uses Europe/Rome\r\n");
+                } else {
+                    serialWrite("[MicaNT Hal] Stable CMOS RTC sample could not seed SystemTime\r\n");
+                }
+            } else if (rtcStatus == micant::hal::amd64::BootstrapRtcStatus::Timeout)
                 serialWrite("[MicaNT Hal] CMOS RTC update timeout; no UTC seed\r\n");
             else
                 serialWrite("[MicaNT Hal] CMOS RTC unavailable/invalid; no UTC seed\r\n");

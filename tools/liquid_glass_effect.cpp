@@ -441,7 +441,10 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             colorR += noise * d.grain;
             colorG += noise * d.grain;
             colorB += noise * d.grain;
-            const float glassAlpha = coverage * baseAlpha;
+            // The backdrop sample is fully opaque on the desktop, but the
+            // glass must still blend a little of the live scene through it.
+            // Using baseAlpha directly made every glass pixel an opaque tile.
+            const float glassAlpha = coverage * baseAlpha * 0.84f;
             cache.output[destination] = packPremultiplied(
                 clampf(colorR, 0.0f, 1.0f), clampf(colorG, 0.0f, 1.0f),
                 clampf(colorB, 0.0f, 1.0f), glassAlpha);

@@ -2151,6 +2151,43 @@ void updateClock() noexcept {
         }
     }
     }
+    // The shell clock is a local clock face. NT system time remains UTC;
+    // apply the explicit Europe/Rome fallback while no zone data is published.
+    if (timeAvailable) {
+        micant::shared::time::SystemTimeFields utc{
+            value.year, value.month, value.day, value.hour, value.minute,
+            value.second, 0, 0};
+        uint64_t utcTicks{};
+        if (micant::shared::time::toSystemTime100ns(utc, utcTicks)) {
+            const auto lastSunday = [](uint16_t year, uint16_t month) noexcept {
+                const uint32_t lastDay = micant::shared::time::daysInMonth(year, month);
+                const uint32_t weekday = static_cast<uint32_t>(
+                    (micant::shared::time::daysSince1601(year, month, lastDay) + 1) % 7);
+                return lastDay - weekday;
+            };
+            micant::shared::time::SystemTimeFields start{value.year, 3,
+                static_cast<uint16_t>(lastSunday(value.year, 3)), 1, 0, 0};
+            micant::shared::time::SystemTimeFields end{value.year, 10,
+                static_cast<uint16_t>(lastSunday(value.year, 10)), 1, 0, 0};
+            uint64_t startTicks{}, endTicks{};
+            const bool summerTime = micant::shared::time::toSystemTime100ns(start, startTicks) &&
+                micant::shared::time::toSystemTime100ns(end, endTicks) &&
+                utcTicks >= startTicks && utcTicks < endTicks;
+            const uint64_t offset = (summerTime ? 2 : 1) * 60 *
+                micant::shared::time::TicksPerMinute;
+            if (utcTicks <= UINT64_MAX - offset) {
+                micant::shared::time::SystemTimeFields local{};
+                if (micant::shared::time::fromSystemTime100ns(utcTicks + offset, local)) {
+                    value.year = local.year;
+                    value.month = static_cast<uint8_t>(local.month);
+                    value.day = static_cast<uint8_t>(local.day);
+                    value.hour = static_cast<uint8_t>(local.hour);
+                    value.minute = static_cast<uint8_t>(local.minute);
+                    value.second = static_cast<uint8_t>(local.second);
+                }
+            }
+        }
+    }
     if (timeAvailable) {
         if (value.second == g.clockSecond) return;
         g.clockSecond = value.second;
@@ -2291,11 +2328,11 @@ void updateClock() noexcept {
             DEFAULT_PITCH | FF_SWISS, L"Arial");
         if (font) {
             HGDIOBJ old = SelectObject(g.clockDc, font);
-            const wchar_t city[] = L"RIY";
+            const wchar_t city[] = L"ROME";
             SIZE cityExtent{};
-            if (GetTextExtentPoint32W(g.clockDc, city, 3, &cityExtent))
+            if (GetTextExtentPoint32W(g.clockDc, city, 4, &cityExtent))
                 TextOutW(g.clockDc, 10 + (static_cast<int>(CLOCK_CARD) - cityExtent.cx) / 2,
-                    10 + 34 - cityExtent.cy / 2, city, 3);
+                    10 + 34 - cityExtent.cy / 2, city, 4);
             SelectObject(g.clockDc, old);
             DeleteObject(font);
         }
@@ -2859,7 +2896,7 @@ extern "C" void _start(const char* = nullptr) {
             glass.size = sizeof(glass); glass.flags = MICANT_LIQUID_GLASS_ACTIVE;
             glass.left = 10; glass.top = 10; glass.width = CLOCK_CARD; glass.height = CLOCK_CARD;
             glass.radius = 29.8f; glass.bezel = 26.0f; glass.thickness = 30.0f;
-            glass.dispersion = 0.06f; glass.blurPx = 1.0f; glass.tintMix = 0.586f;
+            glass.dispersion = 0.06f; glass.blurPx = 1.0f; glass.tintMix = 0.32f;
             glass.saturation = 1.25f; glass.dark = 1.0f; glass.sourceBlur = 11.2f;
             glass.downsample = 0.5f; glass.pad = 10.0f; glass.rim = 0.45f;
             glass.grain = 0.0045f; glass.magnify = 0.042857f; glass.rimTint = 1.0f;
