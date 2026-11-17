@@ -139,6 +139,14 @@ static_assert(sizeof(MemoryBasicInformation64) == 48);
 
 uint8_t processSnapshot[MaxProcessSnapshot]{};
 SystemProcessInformation* topProcesses[MaxTopProcesses]{};
+struct ProcessCpuBaseline { uintptr_t pid{}; uint64_t kernel{}, user{}; };
+ProcessCpuBaseline previousCpu[MaxTopProcesses]{};
+uint32_t topCpuTenths[MaxTopProcesses]{};
+uint32_t topKernelCpuTenths[MaxTopProcesses]{};
+bool topCpuValid[MaxTopProcesses]{};
+size_t previousCpuCount{};
+uint64_t previousCpuSampleTime{};
+bool previousCpuSampleValid{};
 MemoryWorkingSetExInformation workingSetBatch[RegionBatchCount]{};
 uint8_t dumpChunk[DumpChunkBytes]{};
 StackRange stackRanges[128]{};
@@ -455,28 +463,98 @@ bool CaptureTopSnapshot(void* file, uint64_t sample) noexcept {
         offset += process->NextEntryOffset;
     }
 
-    // Largest working sets first, as in a conventional top view.
+    LargeInteger sampleTime{};
+    const bool sampleTimeValid = NtQuerySystemTime(&sampleTime) == 0 &&
+        sampleTime.quadPart >= 0;
+    const uint64_t sampleTime100ns = sampleTimeValid
+        ? static_cast<uint64_t>(sampleTime.quadPart) : 0;
+    const bool elapsedValid = sampleTimeValid && previousCpuSampleValid &&
+        sampleTime100ns > previousCpuSampleTime;
+    const uint64_t elapsed100ns = elapsedValid
+        ? sampleTime100ns - previousCpuSampleTime : 0;
+    for (size_t i = 0; i < processCount; ++i) {
+        const auto& process = *topProcesses[i];
+        topCpuTenths[i] = 0;
+        topKernelCpuTenths[i] = 0;
+        topCpuValid[i] = false;
+        if (elapsedValid && process.KernelTime >= 0 && process.UserTime >= 0) {
+            for (size_t previous = 0; previous < previousCpuCount; ++previous) {
+                const auto& baseline = previousCpu[previous];
+                if (baseline.pid != process.UniqueProcessId) continue;
+                const uint64_t kernel = static_cast<uint64_t>(process.KernelTime);
+                const uint64_t user = static_cast<uint64_t>(process.UserTime);
+                if (kernel >= baseline.kernel && user >= baseline.user) {
+                    const uint64_t delta = (kernel - baseline.kernel) +
+                                           (user - baseline.user);
+                    const uint64_t tenths = (delta * 1000u + elapsed100ns / 2u) /
+                                            elapsed100ns;
+                    topCpuTenths[i] = static_cast<uint32_t>(
+                        tenths > UINT32_MAX ? UINT32_MAX : tenths);
+                    const uint64_t kernelTenths = ((kernel - baseline.kernel) * 1000u + elapsed100ns / 2u) / elapsed100ns;
+                    topKernelCpuTenths[i] = static_cast<uint32_t>(kernelTenths > UINT32_MAX ? UINT32_MAX : kernelTenths);
+                    topCpuValid[i] = true;
+                }
+                break;
+            }
+        }
+    }
+
+    // Rank by measured per-process CPU once a previous sample exists; retain
+    // working-set ordering for the initial baseline snapshot.
     for (size_t i = 1; i < processCount; ++i) {
         auto* current = topProcesses[i];
+        const uint32_t currentCpu = topCpuTenths[i];
+        const uint32_t currentKernelCpu = topKernelCpuTenths[i];
+        const bool currentCpuValid = topCpuValid[i];
         size_t at = i;
-        while (at && topProcesses[at - 1]->WorkingSetSize < current->WorkingSetSize) {
+        while (at && (elapsedValid
+                ? topCpuTenths[at - 1] < currentCpu
+                : topProcesses[at - 1]->WorkingSetSize < current->WorkingSetSize)) {
             topProcesses[at] = topProcesses[at - 1];
+            topCpuTenths[at] = topCpuTenths[at - 1];
+            topKernelCpuTenths[at] = topKernelCpuTenths[at - 1];
+            topCpuValid[at] = topCpuValid[at - 1];
             --at;
         }
         topProcesses[at] = current;
+        topCpuTenths[at] = currentCpu;
+        topKernelCpuTenths[at] = currentKernelCpu;
+        topCpuValid[at] = currentCpuValid;
+    }
+
+    previousCpuCount = processCount;
+    for (size_t i = 0; i < processCount; ++i) {
+        const auto& process = *topProcesses[i];
+        previousCpu[i] = {process.UniqueProcessId,
+            process.KernelTime >= 0 ? static_cast<uint64_t>(process.KernelTime) : 0,
+            process.UserTime >= 0 ? static_cast<uint64_t>(process.UserTime) : 0};
+    }
+    if (sampleTimeValid) {
+        previousCpuSampleTime = sampleTime100ns;
+        previousCpuSampleValid = true;
+    } else {
+        previousCpuSampleValid = false;
     }
 
     Text heading{};
     heading.append("\r\nProcess memory snapshot "); heading.number(sample);
-    heading.append("  (resident working set and private commit)\r\n");
+    heading.append(elapsedValid
+        ? "  (CPU since previous sample; WS and commit are memory)\r\n"
+        : "  (CPU baseline; WS and commit are memory)\r\n");
     if (!WriteTopLine(file, heading)) return false;
     Text columns{};
-    columns.append("PID       WS (resident)       Private commit      Threads Handles  Image\r\n");
+    columns.append("CPU%  Kernel%  PID       WS (resident)       Private commit      Threads Handles  Image\r\n");
     if (!WriteTopLine(file, columns)) return false;
 
     for (size_t i = 0; i < processCount; ++i) {
         const auto& process = *topProcesses[i];
         Text row{};
+        if (topCpuValid[i]) {
+            row.number(topCpuTenths[i] / 10u); row.append(".");
+            row.number(topCpuTenths[i] % 10u); row.append("%  ");
+            row.number(topKernelCpuTenths[i] / 10u); row.append(".");
+            row.number(topKernelCpuTenths[i] % 10u); row.append("%  ");
+        } else row.append("N/A   N/A   ");
         row.number(process.UniqueProcessId); row.append("  ");
         AppendMemory(row, process.WorkingSetSize); row.append("  ");
         AppendMemory(row, process.PrivatePageCount); row.append("  ");
@@ -1263,8 +1341,10 @@ bool ProcessMemorySelfTest() noexcept {
         return false;
     }
     processMemoryFailureStage = 16;
-    if (!RunTop(1, 1, u"C:\\PROCTOP.TXT")) return false;
-    (void)WriteLiteral("[MicaNT ProcessMemoryTest] process top snapshot file passed\r\n");
+    // Exercise the interval CPU accounting as well as the initial memory-only
+    // baseline. Multiple completed samples are required for per-process deltas.
+    if (!RunTop(1, 5, u"C:\\MicaNT\\System32\\TOP2.TXT")) return false;
+    (void)WriteLiteral("[MicaNT ProcessMemoryTest] process top CPU samples passed\r\n");
     (void)WriteLiteral("[MicaNT ProcessMemoryTest] streamed dump, CRC, and release passed\r\n");
     return true;
 }

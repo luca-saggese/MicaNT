@@ -569,7 +569,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_compile_definitions(explorer_boot PRIVATE MICANT_UXTHEME_IMPORTS)
     target_link_libraries(explorer_boot PRIVATE
         user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot comctl32_boot
-        luceglass_boot)
+        luceglass_boot m)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"

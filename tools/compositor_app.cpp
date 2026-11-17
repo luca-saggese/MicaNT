@@ -60,6 +60,8 @@ struct LocalPerformanceStats {
     uint64_t frames{};
     uint64_t wakeups{};
     uint64_t failedPresents{};
+    uint64_t loops{}, unstable{}, changed{}, waiting{}, writers{};
+    uint64_t waitElapsedMilliseconds{}, waitTimeouts{}, waitFailures{}, metadataMilliseconds{};
     uint64_t lastReportMilliseconds{};
 };
 LocalPerformanceStats g_localPerformanceStats{};
@@ -310,30 +312,93 @@ uint64_t performanceMilliseconds() noexcept {
     return (ticks / rate) * 1000u + ((ticks % rate) * 1000u) / rate;
 }
 
+uint64_t performanceMicroseconds() noexcept {
+    micant::LargeInteger counter{}, frequency{};
+    if (micant::native_nt::NtQueryPerformanceCounter(&counter, &frequency) !=
+            micant::NtStatus::Success || counter.quadPart < 0 ||
+        frequency.quadPart <= 0) return 0;
+    const uint64_t ticks = static_cast<uint64_t>(counter.quadPart);
+    const uint64_t rate = static_cast<uint64_t>(frequency.quadPart);
+    return (ticks / rate) * 1'000'000u + ((ticks % rate) * 1'000'000u) / rate;
+}
+
 #if MICANT_COMPOSITOR_DEBUG_HUD
 void appendPerformanceValue(char*& cursor, uint64_t value) noexcept;
 constexpr uint32_t kSystemProcessorPerformanceInformation = 8;
 constexpr uint64_t kNtQuerySystemInformationService = 0x36;
-constexpr uint32_t kHudWidth = 400;
+constexpr uint32_t kSystemProcessInformation = 5;
+constexpr size_t kHudProcessSnapshotBytes = 256u * 1024u;
+constexpr uint32_t kHudWidth = 480;
 constexpr uint32_t kHudHeight = 48;
 constexpr uint64_t kHudRefreshMilliseconds = 250;
 uint64_t g_hudLastRefresh{};
-uint64_t g_hudLastFpsSample{};
-uint64_t g_hudFrames{};
 uint64_t g_hudFps{};
+uint64_t g_hudRenderTimeUs{};
+uint64_t g_hudPresentedFrames{}, g_hudPresentedSampleMs{}, g_hudOutputFps{};
+void* g_hudProcessSnapshot{};
+uint64_t g_hudCpuLastSampleMs{};
 uint64_t g_hudCpuKernel{}, g_hudCpuUser{}, g_hudCpuIdle{};
-uint32_t g_hudCpuPercent{};
-bool g_hudCpuValid{};
+uint64_t g_hudCompositorKernel{}, g_hudCompositorUser{};
+uint32_t g_hudSystemCpuPercent{}, g_hudCompositorCpuPercent{};
+bool g_hudSystemCpuValid{}, g_hudCompositorCpuValid{};
+bool g_hudSystemBaselineValid{}, g_hudCompositorBaselineValid{};
 uint64_t g_hudMemoryBytes{};
 bool g_hudMemoryValid{}, g_hudCursorValid{};
 int32_t g_hudMouseX{}, g_hudMouseY{};
 
-void refreshHudMetrics(uint64_t now) noexcept {
-    if (g_hudLastFpsSample && now > g_hudLastFpsSample) {
-        g_hudFps = (g_hudFrames * 1000u) / (now - g_hudLastFpsSample);
-        g_hudFrames = 0;
+bool queryCompositorProcessTimes(uint64_t& kernel, uint64_t& user) noexcept {
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb || teb > UINTPTR_MAX - 0x48u) return false;
+    const uintptr_t processId = *reinterpret_cast<const uintptr_t*>(teb + 0x40u);
+    if (!processId) return false;
+    if (!g_hudProcessSnapshot &&
+        !allocateZeroed(kHudProcessSnapshotBytes, g_hudProcessSnapshot)) return false;
+
+    uint32_t returned{};
+    const auto status = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        kNtQuerySystemInformationService, kSystemProcessInformation,
+        reinterpret_cast<uint64_t>(g_hudProcessSnapshot),
+        kHudProcessSnapshotBytes, reinterpret_cast<uint64_t>(&returned)));
+    if (status != 0 || returned > kHudProcessSnapshotBytes) return false;
+    size_t offset = 0;
+    while (offset <= returned && returned - offset >= sizeof(micant::SystemProcessInformation)) {
+        const auto* process = reinterpret_cast<const micant::SystemProcessInformation*>(
+            static_cast<const uint8_t*>(g_hudProcessSnapshot) + offset);
+        if (process->UniqueProcessId == processId) {
+            if (process->KernelTime < 0 || process->UserTime < 0) return false;
+            kernel = static_cast<uint64_t>(process->KernelTime);
+            user = static_cast<uint64_t>(process->UserTime);
+            return true;
+        }
+        if (!process->NextEntryOffset) break;
+        if (process->NextEntryOffset < sizeof(*process) ||
+            process->NextEntryOffset > returned - offset) return false;
+        offset += process->NextEntryOffset;
     }
-    g_hudLastFpsSample = now;
+    return false;
+}
+
+uint32_t cpuPercent(uint64_t busy100ns, uint64_t elapsedMilliseconds) noexcept {
+    if (!elapsedMilliseconds) return 0;
+    const uint64_t total100ns = elapsedMilliseconds * 10'000u;
+    const uint64_t percent = (busy100ns * 100u + total100ns / 2u) / total100ns;
+    return static_cast<uint32_t>(percent > 100u ? 100u : percent);
+}
+
+void refreshHudMetrics(uint64_t now) noexcept {
+    if (!g_hudPresentedSampleMs) {
+        g_hudPresentedSampleMs = now;
+    } else if (now > g_hudPresentedSampleMs &&
+               now - g_hudPresentedSampleMs >= 1000u) {
+        g_hudOutputFps = (g_hudPresentedFrames * 1000u) /
+            (now - g_hudPresentedSampleMs);
+        g_hudPresentedFrames = 0;
+        g_hudPresentedSampleMs = now;
+    }
+    if (g_hudCpuLastSampleMs &&
+        (now <= g_hudCpuLastSampleMs || now - g_hudCpuLastSampleMs < 1000u))
+        return;
 
     micant::SystemProcessorPerformanceInformation cpu{};
     const auto cpuStatus = static_cast<uint32_t>(micant::sys::invokeUserService4(
@@ -343,25 +408,55 @@ void refreshHudMetrics(uint64_t now) noexcept {
         const uint64_t kernel = static_cast<uint64_t>(cpu.KernelTime);
         const uint64_t user = static_cast<uint64_t>(cpu.UserTime);
         const uint64_t idle = static_cast<uint64_t>(cpu.IdleTime);
-        if ((g_hudCpuKernel || g_hudCpuUser) && kernel >= g_hudCpuKernel &&
+        if (g_hudSystemBaselineValid && kernel >= g_hudCpuKernel &&
             user >= g_hudCpuUser && idle >= g_hudCpuIdle) {
             const uint64_t kernelDelta = kernel - g_hudCpuKernel;
             const uint64_t userDelta = user - g_hudCpuUser;
             const uint64_t idleDelta = idle - g_hudCpuIdle;
             const uint64_t total = kernelDelta + userDelta;
             const uint64_t busy = total >= idleDelta ? total - idleDelta : 0;
-            g_hudCpuPercent = total ? static_cast<uint32_t>(
+            g_hudSystemCpuPercent = total ? static_cast<uint32_t>(
                 (busy * 100u + total / 2u) / total) : 0;
+            if (g_hudSystemCpuPercent > 100u) g_hudSystemCpuPercent = 100u;
+            g_hudSystemCpuValid = total != 0;
         }
         g_hudCpuKernel = kernel; g_hudCpuUser = user; g_hudCpuIdle = idle;
-        g_hudCpuValid = true;
+        g_hudSystemBaselineValid = true;
     } else {
-        g_hudCpuValid = false;
+        g_hudSystemCpuValid = false;
+        g_hudSystemBaselineValid = false;
     }
+    uint64_t compositorKernel{}, compositorUser{};
+    if (queryCompositorProcessTimes(compositorKernel, compositorUser)) {
+        if (g_hudCompositorBaselineValid && compositorKernel >= g_hudCompositorKernel &&
+            compositorUser >= g_hudCompositorUser) {
+            g_hudCompositorCpuPercent = cpuPercent(
+                (compositorKernel - g_hudCompositorKernel) +
+                    (compositorUser - g_hudCompositorUser),
+                now - g_hudCpuLastSampleMs);
+            g_hudCompositorCpuValid = true;
+        }
+        g_hudCompositorKernel = compositorKernel;
+        g_hudCompositorUser = compositorUser;
+        g_hudCompositorBaselineValid = true;
+    } else {
+        g_hudCompositorCpuValid = false;
+        g_hudCompositorBaselineValid = false;
+    }
+    g_hudCpuLastSampleMs = now;
 }
 
 void hudAppend(char*& cursor, uint64_t value) noexcept {
     appendPerformanceValue(cursor, value);
+}
+
+void recordHudRender(uint64_t startMicroseconds) noexcept {
+    const uint64_t endMicroseconds = performanceMicroseconds();
+    if (!startMicroseconds || endMicroseconds <= startMicroseconds) return;
+    g_hudRenderTimeUs = endMicroseconds - startMicroseconds;
+    const uint64_t renderMilliseconds =
+        (g_hudRenderTimeUs + 500u) / 1000u;
+    g_hudFps = 1000u / (renderMilliseconds ? renderMilliseconds : 1u);
 }
 
 void drawHud(uint64_t totalMemoryBytes, bool memoryValid,
@@ -382,9 +477,17 @@ void drawHud(uint64_t totalMemoryBytes, bool memoryValid,
         while (*text) *cursor++ = *text++;
     };
     append("FPS "); hudAppend(cursor, g_hudFps);
-    append("   CPU ");
-    if (g_hudCpuValid) { hudAppend(cursor, g_hudCpuPercent); append("%"); }
-    else append("N/A");
+    append("   RENDER ");
+    hudAppend(cursor, (g_hudRenderTimeUs + 500u) / 1000u);
+    append("ms OUT "); hudAppend(cursor, g_hudOutputFps);
+    append(" CPU COM ");
+    if (g_hudCompositorCpuValid) {
+        hudAppend(cursor, g_hudCompositorCpuPercent); append("%");
+    } else append("N/A");
+    append(" SYS ");
+    if (g_hudSystemCpuValid) {
+        hudAppend(cursor, g_hudSystemCpuPercent); append("%");
+    } else append("N/A");
     *cursor = 0;
     auto drawText = [&](const char* text, uint32_t x, uint32_t y) noexcept {
         for (; *text; ++text, x += 8) {
@@ -475,7 +578,16 @@ void reportLocalPerformanceStats() noexcept {
     append(" surfaces="); appendPerformanceValue(cursor, stats.surfaceCount);
     append(" frames="); appendPerformanceValue(cursor, stats.frames);
     append(" wakes="); appendPerformanceValue(cursor, stats.wakeups);
-    append(" failed_present="); appendPerformanceValue(cursor, stats.failedPresents);
+    append(" present_failures="); appendPerformanceValue(cursor, stats.failedPresents);
+    append(" loops="); appendPerformanceValue(cursor, stats.loops);
+    append(" unstable="); appendPerformanceValue(cursor, stats.unstable);
+    append(" changed="); appendPerformanceValue(cursor, stats.changed);
+    append(" waiting="); appendPerformanceValue(cursor, stats.waiting);
+    append(" writers="); appendPerformanceValue(cursor, stats.writers);
+    append(" wait_ms="); appendPerformanceValue(cursor, stats.waitElapsedMilliseconds);
+    append(" wait_timeout="); appendPerformanceValue(cursor, stats.waitTimeouts);
+    append(" wait_fail="); appendPerformanceValue(cursor, stats.waitFailures);
+    append(" metadata_ms="); appendPerformanceValue(cursor, stats.metadataMilliseconds);
     append("\r\n");
     print(line, static_cast<size_t>(cursor - line));
     stats.composeMilliseconds = 0;
@@ -487,6 +599,8 @@ void reportLocalPerformanceStats() noexcept {
     stats.frames = 0;
     stats.wakeups = 0;
     stats.failedPresents = 0;
+    stats.loops = stats.unstable = stats.changed = stats.waiting = stats.writers = 0;
+    stats.waitElapsedMilliseconds = stats.waitTimeouts = stats.waitFailures = stats.metadataMilliseconds = 0;
 #endif
 }
 
@@ -793,6 +907,9 @@ bool requiredPixelBytes(uint32_t width, uint32_t height, uint32_t stride,
     return true;
 }
 
+uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
+                                const MicaCompositorSurfaceInfo& glassSurface) noexcept;
+
 bool composeRegion(const MicaCompositorMetadataStore& metadata,
                    ScreenRect clip,
                    const AnimationFrame* animationFrames,
@@ -920,13 +1037,16 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         int64_t radius = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_RADIUS)
             ? windowStyle->borderRadius : 0;
-        // Base remains square; themed corner radius comes from the active
-        // headerbar style when the window style does not specify one.
+        // WhiteSur's window.background.csd decoration selector carries the
+        // 12px corner radius, but it is not representable in snapshot v2's
+        // Window/HeaderBar rows. Preserve that known decoration value only
+        // when a real themed headerbar is present; Base stays square.
         const bool hasThemedHeaderbar = themeValid && normalHeaderbar &&
             (normalHeaderbar->flags & MICANT_THEME_HAS_BACKGROUND);
         if (!radius && hasThemedHeaderbar &&
             !(surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED))
-            radius = normalHeaderbar->borderRadius;
+            radius = normalHeaderbar->borderRadius
+                ? normalHeaderbar->borderRadius : 12;
         if (surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) radius = 0;
         if (!topLevel || !frame) radius = 0;
         if (radius > kWindowEffectRadiusLimit) radius = kWindowEffectRadiusLimit;
@@ -1238,10 +1358,20 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             applyWindowBackdropBlur(left, top, clientRight, clientBottom,
                                     opacity, width, height);
         if (glassWindow) {
-            micant::compositor::glass::Render(g_liquidGlassCache, g_frame,
-                width, height, surface.window, metadata.frameSequence,
-                static_cast<int32_t>(windowLeft), static_cast<int32_t>(windowTop),
-                surface.liquidGlass);
+            const uint64_t sceneGeneration = glassBackdropGeneration(metadata,
+                                                                      surface);
+            const int32_t glassLeft = static_cast<int32_t>(windowLeft +
+                surface.liquidGlass.left);
+            const int32_t glassTop = static_cast<int32_t>(windowTop +
+                surface.liquidGlass.top);
+            if (micant::compositor::glass::NeedsRefresh(g_liquidGlassCache,
+                    surface.window, sceneGeneration, glassLeft, glassTop,
+                    surface.liquidGlass)) {
+                micant::compositor::glass::Render(g_liquidGlassCache, g_frame,
+                    width, height, surface.window, sceneGeneration,
+                    static_cast<int32_t>(windowLeft), static_cast<int32_t>(windowTop),
+                    surface.liquidGlass);
+            }
             micant::compositor::glass::Composite(g_liquidGlassCache, g_frame,
                 width, height, {static_cast<int32_t>(clipLeft), static_cast<int32_t>(clipTop),
                     static_cast<int32_t>(right), static_cast<int32_t>(bottom)});
@@ -1457,6 +1587,57 @@ void addDamageRegion(DamageSet& damage, ScreenRect incoming,
     damage.regions[damage.count++] = incoming;
 }
 
+uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
+                                const MicaCompositorSurfaceInfo& glassSurface) noexcept {
+    uint64_t generation = 1469598103934665603ull;
+    const auto mix = [&generation](uint64_t value) noexcept {
+        generation ^= value;
+        generation *= 1099511628211ull;
+    };
+    mix(metadata.themeGeneration);
+    mix(metadata.screenWidth);
+    mix(metadata.screenHeight);
+    mix(glassSurface.liquidGlass.generation);
+
+    const int64_t glassLeft = static_cast<int64_t>(glassSurface.x) +
+        glassSurface.liquidGlass.left;
+    const int64_t glassTop = static_cast<int64_t>(glassSurface.y) +
+        glassSurface.liquidGlass.top;
+    const ScreenRect backdrop{
+        glassLeft - micant::compositor::glass::Cache::BackdropMargin,
+        glassTop - micant::compositor::glass::Cache::BackdropMargin,
+        glassLeft + glassSurface.liquidGlass.width +
+            micant::compositor::glass::Cache::BackdropMargin,
+        glassTop + glassSurface.liquidGlass.height +
+            micant::compositor::glass::Cache::BackdropMargin};
+    for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
+        const auto& surface = metadata.surfaces[index];
+        if (surface.window == glassSurface.window ||
+            (surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                              MICANT_COMPOSITOR_SURFACE_VISIBLE)) !=
+                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                 MICANT_COMPOSITOR_SURFACE_VISIBLE) ||
+            surface.zOrder >= glassSurface.zOrder || !surface.width ||
+            !surface.height)
+            continue;
+        const ScreenRect bounds{surface.x, surface.y,
+            static_cast<int64_t>(surface.x) + surface.width,
+            static_cast<int64_t>(surface.y) + surface.height};
+        if (bounds.right <= backdrop.left || bounds.left >= backdrop.right ||
+            bounds.bottom <= backdrop.top || bounds.top >= backdrop.bottom)
+            continue;
+        mix(surface.window);
+        mix(surface.contentGeneration);
+        mix((static_cast<uint64_t>(static_cast<uint32_t>(surface.x)) << 32) |
+            static_cast<uint32_t>(surface.y));
+        mix((static_cast<uint64_t>(surface.width) << 32) | surface.height);
+        mix((static_cast<uint64_t>(surface.pitch) << 32) | surface.zOrder);
+        mix(surface.surfaceAddress);
+        mix(surface.surfaceSizeBytes);
+    }
+    return generation ? generation : 1;
+}
+
 bool collectDamage(const MicaCompositorMetadataStore& metadata,
                    DamageSet& damage) noexcept {
     const uint32_t screenWidth = metadata.screenWidth;
@@ -1477,18 +1658,6 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
         (metadata.dirtyRegionCount && (!metadata.dirtyRegions ||
             metadata.dirtyRegionCount > metadata.dirtyRegionArraySizeBytes /
                 sizeof(MicaCompositorDirtyRect)));
-    for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
-        const auto& surface = metadata.surfaces[index];
-        if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
-                              MICANT_COMPOSITOR_SURFACE_VISIBLE)) ==
-                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
-                 MICANT_COMPOSITOR_SURFACE_VISIBLE) &&
-            micant::compositor::glass::IsValid(surface.liquidGlass,
-                                                surface.width, surface.height)) {
-            fullRedraw = true;
-            break;
-        }
-    }
     if (!fullRedraw) {
         for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
             const auto& dirty = metadata.dirtyRegions[index];
@@ -1520,8 +1689,8 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
           windowStyle.borderRadius != 0) ||
          (headerbarStyle.flags & MICANT_THEME_HAS_BACKGROUND));
     const int64_t shadowExtent = shadowEnabled
-        ? std::max<int64_t>(windowStyle.borderRadius,
-            headerbarStyle.borderRadius) : 0;
+        ? std::max<int64_t>(12, std::max<int64_t>(windowStyle.borderRadius,
+            headerbarStyle.borderRadius)) : 0;
     for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
         const auto& dirty = metadata.dirtyRegions[index];
         const int64_t margin = shadowExtent;
@@ -1533,6 +1702,42 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
             dirty.bottom + margin < screenHeight
                 ? dirty.bottom + margin : screenHeight};
         damage.regions[index] = region;
+    }
+    // Changes in a glass card's backdrop apron also invalidate the card
+    // itself. Cursor movement can intersect this apron, but the cached glass
+    // image remains reusable when the underlying scene generation is stable.
+    for (size_t surfaceIndex = 0; surfaceIndex < metadata.surfaceEntryCount;
+         ++surfaceIndex) {
+        const auto& surface = metadata.surfaces[surfaceIndex];
+        if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                              MICANT_COMPOSITOR_SURFACE_VISIBLE)) !=
+                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                 MICANT_COMPOSITOR_SURFACE_VISIBLE) ||
+            !micant::compositor::glass::IsValid(surface.liquidGlass,
+                                                 surface.width, surface.height))
+            continue;
+        const int64_t left = static_cast<int64_t>(surface.x) +
+            surface.liquidGlass.left;
+        const int64_t top = static_cast<int64_t>(surface.y) +
+            surface.liquidGlass.top;
+        const ScreenRect capture{
+            left - micant::compositor::glass::Cache::BackdropMargin,
+            top - micant::compositor::glass::Cache::BackdropMargin,
+            left + surface.liquidGlass.width +
+                micant::compositor::glass::Cache::BackdropMargin,
+            top + surface.liquidGlass.height +
+                micant::compositor::glass::Cache::BackdropMargin};
+        for (size_t dirtyIndex = 0; dirtyIndex < metadata.dirtyRegionCount;
+             ++dirtyIndex) {
+            const auto& dirty = metadata.dirtyRegions[dirtyIndex];
+            if (dirty.right <= capture.left || dirty.left >= capture.right ||
+                dirty.bottom <= capture.top || dirty.top >= capture.bottom)
+                continue;
+            addDamageRegion(damage,
+                {left, top, left + surface.liquidGlass.width,
+                 top + surface.liquidGlass.height}, screenWidth, screenHeight);
+            break;
+        }
     }
     return true;
 }
@@ -1549,12 +1754,9 @@ bool composeDamageRegions(const MicaCompositorMetadataStore& metadata,
 }
 
 bool presentDamage(uint32_t screenWidth, const DamageSet& damage) noexcept {
-    if (!damage.count) return true;
-    // Diagnostic: submit the persistent complete frame after recomposing only
-    // the damaged regions to isolate the device's partial-present path.
-    return presentRegion(screenWidth,
-        {0, 0, static_cast<int32_t>(screenWidth),
-         static_cast<int32_t>(g_displayHeight)});
+    for (size_t index = 0; index < damage.count; ++index)
+        if (!presentRegion(screenWidth, damage.regions[index])) return false;
+    return true;
 }
 
 bool verifyWindowEffectsRasterizer() noexcept {
@@ -1899,21 +2101,44 @@ extern "C" void _start() noexcept {
     bool firstPresentationReported = false;
     const auto waitForUpdate = [&](uint64_t observed,
                                    uint64_t timeout100ns = 0) noexcept {
-        (void)micant::sys::invokeUserService(0x83, observed, timeout100ns);
+        const uint64_t waitStart = performanceMilliseconds();
+        const auto status = micant::sys::invokeUserService(0x83, observed, timeout100ns);
+        const uint64_t waitEnd = performanceMilliseconds();
 #if MICANT_COMPOSITOR_LOCAL_STATS
+        if (waitEnd >= waitStart) g_localPerformanceStats.waitElapsedMilliseconds += waitEnd - waitStart;
+        if (status == 0x00000102u) ++g_localPerformanceStats.waitTimeouts;
+        else if (status != 0) ++g_localPerformanceStats.waitFailures;
         ++g_localPerformanceStats.wakeups;
         reportLocalPerformanceStats();
+#else
+        (void)status;
+        (void)waitStart;
+        (void)waitEnd;
 #endif
     };
 #if MICANT_COMPOSITOR_LOCAL_STATS
     g_localPerformanceStats.lastReportMilliseconds = performanceMilliseconds();
 #endif
     for (;;) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+        ++g_localPerformanceStats.loops;
+#endif
         uint64_t sequence{};
+        const uint64_t metadataStart = performanceMilliseconds();
         if (!copyStableMetadata(metadata, g_metadataSnapshot, sequence)) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            ++g_localPerformanceStats.unstable;
+#endif
             waitForUpdate(sequence);
             continue;
         }
+        const uint64_t metadataEnd = performanceMilliseconds();
+#if MICANT_COMPOSITOR_LOCAL_STATS
+        if (metadataEnd >= metadataStart) g_localPerformanceStats.metadataMilliseconds += metadataEnd - metadataStart;
+#else
+        (void)metadataStart;
+        (void)metadataEnd;
+#endif
         const auto& snapshot = g_metadataSnapshot;
         if (snapshot.magic != MICANT_COMPOSITOR_STORE_MAGIC ||
             snapshot.version != MICANT_COMPOSITOR_STORE_VERSION) {
@@ -1958,6 +2183,9 @@ extern "C" void _start() noexcept {
         constexpr bool hudDue = false;
 #endif
         if (!newMetadata && !animationDamagePending && !hudDue) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            ++g_localPerformanceStats.waiting;
+#endif
 #if MICANT_COMPOSITOR_DEBUG_HUD
             const uint64_t remaining = kHudRefreshMilliseconds -
                 (hudNow >= g_hudLastRefresh ? hudNow - g_hudLastRefresh : 0);
@@ -1984,6 +2212,9 @@ extern "C" void _start() noexcept {
             }
         }
         if (surfaceWriteInProgress) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            ++g_localPerformanceStats.writers;
+#endif
             waitForUpdate(sequence);
             continue;
         }
@@ -2043,9 +2274,16 @@ extern "C" void _start() noexcept {
             damage.regions[0] = {0, 0, g_displayWidth, g_displayHeight};
             composed = true;
         }
-        if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) != sequence)
+        if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) != sequence) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            ++g_localPerformanceStats.changed;
+#endif
             continue;
+        }
+        uint64_t renderStartMicroseconds{};
+        bool frameWasPresented = false;
         if (composed) {
+            renderStartMicroseconds = performanceMicroseconds();
 #if MICANT_COMPOSITOR_LOCAL_STATS
             const uint64_t composeStart = performanceMilliseconds();
 #endif
@@ -2069,6 +2307,7 @@ extern "C" void _start() noexcept {
                 const uint64_t presentStart = performanceMilliseconds();
 #endif
                 composed = presentDamage(snapshot.screenWidth, damage);
+                frameWasPresented = composed && damage.count != 0;
 #if MICANT_COMPOSITOR_LOCAL_STATS
                 const uint64_t presentEnd = performanceMilliseconds();
                 if (presentEnd >= presentStart)
@@ -2079,6 +2318,7 @@ extern "C" void _start() noexcept {
             }
         }
         if (!composed) {
+            renderStartMicroseconds = performanceMicroseconds();
             usedFullRedraw = true;
             const ScreenRect fullScreen{0, 0, g_displayWidth, g_displayHeight};
 #if MICANT_COMPOSITOR_LOCAL_STATS
@@ -2104,6 +2344,7 @@ extern "C" void _start() noexcept {
                 const uint64_t presentStart = performanceMilliseconds();
 #endif
                 composed = presentRegion(snapshot.screenWidth, fullScreen);
+                frameWasPresented = composed;
 #if MICANT_COMPOSITOR_LOCAL_STATS
                 const uint64_t presentEnd = performanceMilliseconds();
                 if (presentEnd >= presentStart)
@@ -2113,6 +2354,12 @@ extern "C" void _start() noexcept {
 #endif
             }
         }
+#if MICANT_COMPOSITOR_DEBUG_HUD
+        if (frameWasPresented) {
+            recordHudRender(renderStartMicroseconds);
+            ++g_hudPresentedFrames;
+        }
+#endif
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {
             previous = sequence;
             if (composed)
@@ -2123,9 +2370,6 @@ extern "C" void _start() noexcept {
                 firstPresentationReported = true;
             }
             if (composed) {
-#if MICANT_COMPOSITOR_DEBUG_HUD
-                ++g_hudFrames;
-#endif
 #if MICANT_COMPOSITOR_LOCAL_STATS
                 const uint64_t screenPixels =
                     static_cast<uint64_t>(g_displayWidth) * g_displayHeight;
