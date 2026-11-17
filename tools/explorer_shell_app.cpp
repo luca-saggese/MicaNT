@@ -250,6 +250,9 @@ micant::explorer::DesktopIconImage iconImage(micant::explorer::IconId id,
             cached ? cached->stride : 0};
 }
 
+void text(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
+          const char* value, uint32_t color) noexcept;
+
 CachedDesktopIcon* loadPackagedIcon(micant::explorer::IconId id,
                                     uint16_t requestedSize) noexcept;
 
@@ -263,6 +266,134 @@ void fill(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
     for (int32_t yy = y0; yy < y1; ++yy) {
         uint32_t* row = p + static_cast<size_t>(yy) * w + x0;
         for (int32_t xx = x0; xx < x1; ++xx) row[xx - x0] = color;
+    }
+}
+
+void roundedFill(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
+                 int32_t rw, int32_t rh, int32_t radius, uint32_t color) noexcept {
+    if (!p || rw <= 0 || rh <= 0) return;
+    const int32_t r = radius < rw / 2 ? (radius < rh / 2 ? radius : rh / 2) : rw / 2;
+    for (int32_t yy = y; yy < y + rh; ++yy) for (int32_t xx = x; xx < x + rw; ++xx) {
+        const int32_t cx = xx < x + r ? x + r : (xx >= x + rw - r ? x + rw - r - 1 : xx);
+        const int32_t cy = yy < y + r ? y + r : (yy >= y + rh - r ? y + rh - r - 1 : yy);
+        const int32_t dx = xx - cx, dy = yy - cy;
+        if (dx * dx + dy * dy <= r * r && xx >= 0 && yy >= 0 &&
+            xx < static_cast<int32_t>(w) && yy < static_cast<int32_t>(h))
+            p[static_cast<size_t>(yy) * w + xx] = color;
+    }
+}
+
+uint32_t overColor(uint32_t under, uint32_t color, uint8_t alpha) noexcept {
+    const uint32_t inverse = 255u - alpha;
+    const auto channel = [&](unsigned shift) noexcept {
+        return static_cast<uint8_t>((((color >> shift) & 0xFFu) * alpha +
+            ((under >> shift) & 0xFFu) * inverse + 127u) / 255u);
+    };
+    return PackBGRA(channel(16), channel(8), channel(0));
+}
+
+void glassPanel(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
+                int32_t rw, int32_t rh, int32_t radius) noexcept {
+    if (!p || rw <= 0 || rh <= 0) return;
+    const int32_t x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    const int32_t x1 = x + rw > static_cast<int32_t>(w) ? static_cast<int32_t>(w) : x + rw;
+    const int32_t y1 = y + rh > static_cast<int32_t>(h) ? static_cast<int32_t>(h) : y + rh;
+    const int32_t r = radius < rw / 2 ? (radius < rh / 2 ? radius : rh / 2) : rw / 2;
+    for (int32_t yy = y0; yy < y1; ++yy) for (int32_t xx = x0; xx < x1; ++xx) {
+        const int32_t cx = xx < x + r ? x + r : (xx >= x + rw - r ? x + rw - r - 1 : xx);
+        const int32_t cy = yy < y + r ? y + r : (yy >= y + rh - r ? y + rh - r - 1 : yy);
+        const int32_t dx = xx - cx, dy = yy - cy;
+        if (dx * dx + dy * dy > r * r) continue;
+        uint32_t tint = rgb(30, 32, 39);
+        uint8_t alpha = 218;
+        if (yy < y + 2) { tint = rgb(255, 255, 255); alpha = 115; }
+        else if (yy < y + rh / 3) { tint = rgb(82, 86, 98); alpha = 42; }
+        else if (xx == x || xx == x + rw - 1 || yy == y + rh - 1) {
+            tint = rgb(255, 255, 255); alpha = 62;
+        }
+        auto& pixel = p[static_cast<size_t>(yy) * w + xx];
+        pixel = overColor(pixel, tint, alpha);
+    }
+}
+
+void drawSystemIcon(uint32_t* p, uint32_t w, uint32_t h, int32_t x, int32_t y,
+                    int32_t size, micant::explorer::IconId id) noexcept {
+    const auto icon = iconImage(id, 48);
+    if (!icon.pixels || !icon.width || !icon.height) return;
+    for (int32_t iy = 0; iy < size; ++iy) for (int32_t ix = 0; ix < size; ++ix) {
+        const int32_t dx = x + ix, dy = y + iy;
+        if (dx < 0 || dy < 0 || dx >= static_cast<int32_t>(w) || dy >= static_cast<int32_t>(h)) continue;
+        const uint32_t sx = static_cast<uint32_t>(ix) * icon.width / static_cast<uint32_t>(size);
+        const uint32_t sy = static_cast<uint32_t>(iy) * icon.height / static_cast<uint32_t>(size);
+        const auto* row = reinterpret_cast<const uint32_t*>(
+            reinterpret_cast<const uint8_t*>(icon.pixels) + static_cast<size_t>(sy) * icon.stride);
+        const uint32_t color = row[sx];
+        const uint8_t alpha = static_cast<uint8_t>(color >> 24);
+        if (alpha) {
+            auto& pixel = p[static_cast<size_t>(dy) * w + dx];
+            pixel = overColor(pixel, color, alpha);
+        }
+    }
+}
+
+void drawMacShellSurfaces() noexcept {
+    uint32_t* p = g.desktopPixels;
+    const uint32_t w = g.screenW, h = g.screenH - TASKBAR_H;
+    if (!p) return;
+
+    // MacShell-style Control Center popover: compact grouped controls and two sliders.
+    const int32_t panelW = 292, panelH = 334;
+    const int32_t panelX = static_cast<int32_t>(w) - panelW - 22;
+    // The clock occupies the top-right corner, so the popover sits just below it.
+    const int32_t panelY = 246;
+    glassPanel(p, w, h, panelX, panelY, panelW, panelH, 24);
+    text(p, w, h, panelX + 18, panelY + 16, "Control Center", rgb(250, 250, 252));
+    const int32_t gap = 10, tileW = (panelW - 36 - gap) / 2, tileH = 68;
+    const int32_t tileY = panelY + 46;
+    const char* labels[4] = {"Wi-Fi", "Bluetooth", "Focus", "Display"};
+    const char* symbols[4] = {"W", "B", "Z", "+"};
+    for (int i = 0; i < 4; ++i) {
+        const int32_t tx = panelX + 13 + (i & 1) * (tileW + gap);
+        const int32_t ty = tileY + (i / 2) * (tileH + gap);
+        glassPanel(p, w, h, tx, ty, tileW, tileH, 15);
+        fill(p, w, h, tx + 12, ty + 12, 30, 30,
+             i == 0 ? rgb(65, 137, 245) : rgb(93, 98, 111));
+        text(p, w, h, tx + 22, ty + 17, symbols[i], rgb(255, 255, 255));
+        text(p, w, h, tx + 51, ty + 19, labels[i], rgb(246, 246, 250));
+        text(p, w, h, tx + 51, ty + 39, i == 0 ? "Connected" : "On", rgb(190, 193, 202));
+    }
+    const int32_t sliderY = tileY + 2 * (tileH + gap) + 13;
+    text(p, w, h, panelX + 17, sliderY, "Sound", rgb(248, 248, 250));
+    glassPanel(p, w, h, panelX + 16, sliderY + 22, panelW - 32, 28, 14);
+    fill(p, w, h, panelX + 23, sliderY + 29, (panelW - 48) * 3 / 4, 14, rgb(225, 227, 234));
+    text(p, w, h, panelX + 17, sliderY + 62, "Brightness", rgb(248, 248, 250));
+    glassPanel(p, w, h, panelX + 16, sliderY + 84, panelW - 32, 28, 14);
+    fill(p, w, h, panelX + 23, sliderY + 91, (panelW - 48) * 4 / 5, 14, rgb(225, 227, 234));
+
+    // Floating Dock, with included WhiteSur system icons and restrained app glyphs.
+    constexpr int32_t dockH = 76, iconSize = 52, cell = 62, dockW = 9 * cell + 26;
+    const int32_t dockX = (static_cast<int32_t>(w) - dockW) / 2;
+    const int32_t dockY = static_cast<int32_t>(h) - dockH - 7;
+    glassPanel(p, w, h, dockX, dockY, dockW, dockH, 21);
+    const int32_t iconY = dockY + 9;
+    const uint32_t colors[9] = {rgb(46, 132, 244), rgb(231, 75, 68), rgb(246, 158, 53),
+        rgb(84, 186, 117), rgb(130, 87, 222), rgb(40, 173, 204), rgb(215, 82, 134),
+        rgb(110, 116, 131), rgb(239, 239, 242)};
+    const char* glyphs[9] = {"F", "S", "M", "P", "N", "M", "A", "S", ""};
+    const micant::explorer::IconId ids[9] = {micant::explorer::IconId::Computer,
+        micant::explorer::IconId::Network, micant::explorer::IconId::Documents,
+        micant::explorer::IconId::Folder, micant::explorer::IconId::Network,
+        micant::explorer::IconId::GenericText, micant::explorer::IconId::GenericText,
+        micant::explorer::IconId::Computer, micant::explorer::IconId::TrashEmpty};
+    for (int i = 0; i < 9; ++i) {
+        const int32_t ix = dockX + 13 + i * cell + 5;
+        roundedFill(p, w, h, ix, iconY, iconSize, iconSize, 12, colors[i]);
+        if (i == 8) drawSystemIcon(p, w, h, ix + 3, iconY + 3, iconSize - 6, ids[i]);
+        else if (i == 0 || i == 2 || i == 3 || i == 7)
+            drawSystemIcon(p, w, h, ix + 4, iconY + 4, iconSize - 8, ids[i]);
+        else text(p, w, h, ix + 19, iconY + 14, glyphs[i], rgb(255, 255, 255));
+        fill(p, w, h, ix + iconSize / 2 - 2, dockY + dockH - 5, 4, 3,
+             i < 4 ? rgb(238, 239, 243) : rgb(148, 151, 161));
     }
 }
 
@@ -926,6 +1057,12 @@ void redrawTaskbar() noexcept {
     }
     micant::explorer::DrawTaskbar(g.taskbarPixels, g.screenW, TASKBAR_H, TASKBAR_H,
                                   buttons, count, g.clockText, activeShellPalette());
+    // Keep the existing hit targets and tray while bringing its visual surface
+    // into the same dark, glassy family as the MacShell-inspired Dock.
+    for (size_t i = 0; i < static_cast<size_t>(g.screenW) * TASKBAR_H; ++i)
+        g.taskbarPixels[i] = overColor(g.taskbarPixels[i], rgb(18, 20, 27), 205);
+    fill(g.taskbarPixels, g.screenW, TASKBAR_H, 0, 0, g.screenW, 1,
+         rgb(112, 118, 133));
     if (!g.taskbarThemePixelReported && g.taskbarPixels) {
         const auto palette = activeShellPalette();
         if (g.taskbarPixels[5u * g.screenW + 90u] == palette.selected) {
@@ -955,6 +1092,7 @@ void redrawDesktop() noexcept {
     micant::explorer::DrawDesktop(g.desktopPixels, g.screenW, g.screenH - TASKBAR_H,
                                   g.wallpaperPixels, &icons,
                                   activeShellPalette().accentForeground);
+    drawMacShellSurfaces();
     present(g.desktop);
     redrawTaskbar();
 }
