@@ -50,5 +50,11 @@ struct HostServicesV1 {
     int32_t (*AcknowledgeRootConnectionChange)(void*, uint8_t);
     // Optional diagnostic sink for bounded controller/bus lifecycle markers.
     void (*Log)(void*, const char*);
+    // Optional controller-neutral path for EHCI and future host controllers.
+    // AddressDevice performs the USB address-zero descriptor read and SET_ADDRESS;
+    // the returned slot is the bus driver's opaque device identifier.
+    int32_t (*AddressDevice)(void*, uint8_t, uint8_t, uint8_t*);
+    int32_t (*ConfigureBulkEndpoints)(void*, uint8_t, uint8_t, uint16_t,
+                                      uint8_t, uint16_t, uint8_t);
 };
 }

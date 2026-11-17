@@ -425,6 +425,7 @@ def main() -> int:
                 "hidusb_oem_boot",
                 "usbstor_oem_boot",
                 "xhci_oem_boot",
+                "ehci_oem_boot",
                 "i210_oem_boot",
                 "virtio_net_oem_boot",
                 "ws2_32_service_boot",

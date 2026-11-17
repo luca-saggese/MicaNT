@@ -234,6 +234,18 @@ void process(Device& d) noexcept {
         hostLog("USB host: root-port reset completed");
         d.phase = armDeadline(d) ? Phase::NeedEnable : Phase::Quarantined;
     }
+    if (d.phase == Phase::NeedEnable && bus.host.AddressDevice) {
+        uint8_t slot{};
+        if (bus.host.AddressDevice(bus.host.Context, d.port, d.speed, &slot) != success || !slot) {
+            d.phase = Phase::Disconnect;
+            return;
+        }
+        d.slot = slot;
+        d.ep0Packet = d.speed == 3 ? 64 : 8;
+        if (!beginControl(d, 0x80, 6, 0x0100, 0, 18, Phase::DeviceDescriptor))
+            d.phase = Phase::Disconnect;
+        return;
+    }
     if (d.phase == Phase::Disconnect) {
         if (d.hubDevice && d.slot) {
             bool childrenRemain = false;
@@ -248,6 +260,11 @@ void process(Device& d) noexcept {
         }
         if (d.classInstance) { d.phase = Phase::ClassRemoving; return; }
         if (!d.slot) { resetDevice(d); return; }
+        if (bus.host.AddressDevice) {
+            if (bus.host.ForgetDevice(bus.host.Context, d.slot) == success) resetDevice(d);
+            else d.phase = Phase::Quarantined;
+            return;
+        }
         d.phase = Phase::NeedDisable;
         if (!armDeadline(d)) d.phase = Phase::Quarantined;
     }
@@ -369,6 +386,14 @@ void process(Device& d) noexcept {
                     if (!beginControl(d, 0x20, 12, d.depth, 0, 0, Phase::HubSetDepth)) d.phase = Phase::Disconnect;
                 } else if (!beginControl(d, 0xa0, 6, 0x2900, 0, 9, Phase::HubDescriptor)) d.phase = Phase::Disconnect;
             } else if (d.bulkDevice) {
+                if (bus.host.ConfigureBulkEndpoints) {
+                    const auto configured = bus.host.ConfigureBulkEndpoints(bus.host.Context, d.slot,
+                        d.interface.InEndpoint, d.interface.InPacket,
+                        d.interface.OutEndpoint, d.interface.OutPacket, d.speed);
+                    if (configured == success) d.phase = Phase::ClassInitialize;
+                    else d.phase = Phase::Disconnect;
+                    return;
+                }
                 if ((d.speed >= 4 ?
                     (!d.interface.InCompanion || !d.interface.OutCompanion || !bus.host.PrepareSuperSpeedBulk ?
                         int32_t{-1} : bus.host.PrepareSuperSpeedBulk(bus.host.Context, d.interface.InEndpoint,
@@ -624,12 +649,19 @@ NtStatus unregisterClassesForOwner(const void* owner) noexcept {
 
 NtStatus registerHost(const void* owner, const Host& host, uint64_t& token) noexcept {
     token = 0;
-    if (!owner || host.Size < offsetof(Host, PrepareSuperSpeedInterrupt) || host.Version != shared::usb::HostServicesVersion ||
-        !host.Start || !host.Stop || !host.Restart || !host.PortCount || !host.ReadPort || !host.ResetPort || !host.PortSlotType ||
-        !host.PrepareAddressDevice || !host.SelectDevice || !host.ForgetDevice || !host.SubmitCommand ||
-        !host.SubmitControl || !host.ControlBuffer || !host.PollEvent || !host.PrepareInterruptEndpoint ||
-        !host.SubmitInterrupt || !host.InterruptBuffer || !host.PrepareBulkEndpoints || !host.BulkTransfer ||
-        !host.BulkResetRecovery || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidParameter;
+    const bool genericHost = host.Size >= sizeof(Host) &&
+        host.AddressDevice && host.ConfigureBulkEndpoints;
+    const bool xhciHost = host.Size >= offsetof(Host, PrepareSuperSpeedInterrupt) &&
+        host.PortSlotType && host.PrepareAddressDevice && host.SubmitCommand &&
+        host.PrepareInterruptEndpoint && host.SubmitInterrupt && host.InterruptBuffer &&
+        host.PrepareBulkEndpoints;
+    if (!owner || host.Size < offsetof(Host, PrepareSuperSpeedInterrupt) ||
+        host.Version != shared::usb::HostServicesVersion ||
+        !host.Start || !host.Stop || !host.Restart || !host.PortCount || !host.ReadPort ||
+        !host.ResetPort || !host.SelectDevice || !host.ForgetDevice || !host.SubmitControl ||
+        !host.ControlBuffer || !host.PollEvent || !host.BulkTransfer ||
+        !host.BulkResetRecovery || (!genericHost && !xhciHost) ||
+        ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidParameter;
     uint64_t flags{};
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     if (bus.token || !nextToken) {
@@ -663,6 +695,15 @@ NtStatus startEnumeration() noexcept {
         return NtStatus::DeviceBusy;
     return ke::passive_work::startPeriodic(bus.poll, service, nullptr, 200'000) ?
         NtStatus::Success : NtStatus::DeviceNotReady;
+}
+NtStatus stopEnumeration() noexcept {
+    if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidParameter;
+    HostGuard guard;
+    if (!guard.held) return NtStatus::DeviceBusy;
+    if (!bus.token) return NtStatus::Success;
+    if (!bus.poll.deadline.inserted && !bus.poll.dpc.inserted &&
+        !bus.poll.work.queued && !bus.poll.work.running) return NtStatus::Success;
+    return ke::passive_work::stopPeriodic(bus.poll) ? NtStatus::Success : NtStatus::DeviceBusy;
 }
 NtStatus unregisterHost(const void* owner, uint64_t token) noexcept {
     if (!owner || !token || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidParameter;

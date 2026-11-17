@@ -1297,6 +1297,43 @@ NtStatus systemDirectory(char16_t* output, size_t capacity, size_t& length) noex
     length = chars; // suffix includes the terminating NUL.
     return NtStatus::Success;
 }
+NtStatus enumerateMountedVolumes(MountedVolumeSnapshot* output, size_t capacity,
+                                 size_t& count) noexcept {
+    count = 0;
+    if ((!output && capacity) || ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL)
+        return NtStatus::InvalidParameter;
+    if (!initialized) return NtStatus::DeviceNotReady;
+    Gate guard;
+    if (!guard.held) return NtStatus::DeviceNotReady;
+
+    bool truncated{};
+    for (auto& mount : mounts) {
+        if (!mount.token || mount.offline) continue;
+        current = &mount;
+        for (uint32_t index = 0; index < mount.volumeCount; ++index) {
+            auto& volume = mount.volumes[index];
+            if (!volume.Mounted) continue;
+            const size_t snapshotIndex = count++;
+            if (snapshotIndex >= capacity) {
+                truncated = true;
+                continue;
+            }
+
+            auto& snapshot = output[snapshotIndex];
+            snapshot = {};
+            snapshot.Drive = volume.Drive;
+            snapshot.PartitionStartSector = volume.PartitionStart;
+            snapshot.TotalSectors = volume.TotalSectors;
+
+            FatDirEntry entry{};
+            snapshot.NtdllStatus = findFile(volume, "MicaNT\\System32\\ntdll.dll", entry);
+            FatDirEntry image{};
+            snapshot.FileImageStatus = findFile(volume, "MicaNT\\System32\\fileimage.exe", image);
+        }
+    }
+    current = nullptr;
+    return truncated ? NtStatus::BufferTooSmall : NtStatus::Success;
+}
 NtStatus open(std::u16string_view name, bool openIf, uint32_t desiredAccess,
               io::FileBackend& backend) noexcept {
     if (!initialized) return NtStatus::DeviceNotReady;

@@ -739,7 +739,7 @@ def main():
             sftp.put(p, f"/tmp/{name}")
 
     # Real boot-start OEM images, built by the canonical CMake targets.
-    for name in ("storahci.sys", "hidusb.sys", "usbstor.sys", "usbxhci.sys", "i210.sys", "virtio_net.sys"):
+    for name in ("storahci.sys", "hidusb.sys", "usbstor.sys", "usbxhci.sys", "ehci.sys", "i210.sys", "virtio_net.sys"):
         p = os.path.join(REPO_ROOT, "build", name)
         if os.path.exists(p):
             sftp.put(p, f"/tmp/{name}")
@@ -890,7 +890,7 @@ cp -v /tmp/BOOTX64.EFI /mnt/micaesp/EFI/BOOT/BOOTX64.EFI
 cp -v /tmp/BOOTX64.EFI /mnt/micaesp/EFI/MicaNT/BOOTX64.EFI
 cp -v /tmp/ntoskrnl.exe /mnt/micaesp/EFI/MicaNT/
 cp -v /tmp/virtio_gpu.sys /mnt/micaesp/EFI/MicaNT/System32/drivers/
-for f in storahci.sys hidusb.sys usbstor.sys usbxhci.sys i210.sys virtio_net.sys; do
+for f in storahci.sys hidusb.sys usbstor.sys usbxhci.sys ehci.sys i210.sys virtio_net.sys; do
     [ ! -f "/tmp/$f" ] || cp -v "/tmp/$f" /mnt/micaesp/EFI/MicaNT/System32/drivers/
 done
 cp -v /tmp/ntoskrnl.exe /mnt/micaesp/
@@ -901,7 +901,7 @@ mkdir -p /boot/efi/EFI/MicaNT/System32/drivers
 cp -v /tmp/BOOTX64.EFI /boot/efi/EFI/MicaNT/BOOTX64.EFI
 cp -v /tmp/ntoskrnl.exe /boot/efi/EFI/MicaNT/
 cp -v /tmp/virtio_gpu.sys /boot/efi/EFI/MicaNT/System32/drivers/
-for f in storahci.sys hidusb.sys usbstor.sys usbxhci.sys i210.sys virtio_net.sys; do
+for f in storahci.sys hidusb.sys usbstor.sys usbxhci.sys ehci.sys i210.sys virtio_net.sys; do
     [ ! -f "/tmp/$f" ] || cp -v "/tmp/$f" /boot/efi/EFI/MicaNT/System32/drivers/
 done
 cp -v /tmp/ntoskrnl.exe /boot/efi/

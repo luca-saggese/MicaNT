@@ -52,6 +52,14 @@ namespace micant::sys {
 NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& reference) noexcept;
 }
 
+namespace {
+// UEFI may place its handoff object in a firmware virtual-address range that
+// the kernel reclaims when it installs its own page tables. Keep a kernel
+// owned copy before that CR3 switch; the referenced boot buffers remain
+// individually validated by the physical-memory bootstrap path.
+alignas(16) micant::boot::UefiKernelHandoffV8 g_kernelBootHandoff{};
+}
+
 #if defined(MICANT_BOOTSTRAP_CMD_TEST)
 namespace micant::km::hid {
 void DebugValidateInputQueues(const char* stage) noexcept;
@@ -196,7 +204,7 @@ void rememberSerialByte(uint8_t value) noexcept {
 void renderSerialHistory(micant::bootvid::BootVideoDriver& video,
                          uint32_t top, uint32_t maxLines) noexcept {
     constexpr size_t lineCapacity = 81;
-    constexpr size_t historyLines = 7;
+    constexpr size_t historyLines = 14;
     char lines[historyLines][lineCapacity]{};
     size_t lineCount{};
     const uint64_t end = g_serialHistorySequence.load(std::memory_order_acquire);
@@ -230,11 +238,15 @@ void renderSerialHistory(micant::bootvid::BootVideoDriver& video,
         ++lineCount;
     }
 
+    const uint32_t lineHeight = 18;
+    const uint32_t availableLines = top + 24 < video.getHeight()
+        ? (video.getHeight() - top - 24) / lineHeight : 0;
+    if (maxLines > availableLines) maxLines = availableLines;
     if (lineCount > maxLines) lineCount = maxLines;
     const auto pale = micant::bootvid::Color{225, 240, 255};
     for (size_t index = 0; index < lineCount; ++index) {
         const size_t reverseIndex = lineCount - index - 1;
-        video.drawString(48, top + static_cast<uint32_t>(index) * 18,
+        video.drawString(48, top + static_cast<uint32_t>(index) * lineHeight,
                          lines[reverseIndex], pale);
     }
 }
@@ -880,8 +892,18 @@ void initializePhysicalMemory(const micant::boot::UefiKernelHandoffV3& handoff) 
     const uint64_t activeStackPhysical = hal::amd64::translateBootstrapAddress(
         reinterpret_cast<const void*>(static_cast<uintptr_t>(stackPointer)));
     const uint64_t handoffPhysical = hal::amd64::translateBootstrapAddress(&handoff);
-    if (!activeStackPhysical || !handoffPhysical)
-        stopWithError("[MicaNT Mm] Active UEFI bootstrap stack/handoff is not mapped\r\n");
+    if (!activeStackPhysical) {
+        serialWrite("[MicaNT Mm] Active bootstrap stack VA=");
+        serialWriteNumber(stackPointer);
+        serialWrite(" is not mapped by the kernel root\r\n");
+        stopWithError("[MicaNT Mm] Active UEFI bootstrap stack is not mapped\r\n");
+    }
+    if (!handoffPhysical) {
+        serialWrite("[MicaNT Mm] Kernel-owned handoff VA=");
+        serialWriteNumber(reinterpret_cast<uintptr_t>(&handoff));
+        serialWrite(" is not mapped by the kernel root\r\n");
+        stopWithError("[MicaNT Mm] UEFI handoff is not mapped\r\n");
+    }
     const uintptr_t kernelImageBase = reinterpret_cast<uintptr_t>(&__ImageBase);
     const auto* kernelDos = reinterpret_cast<const pe::ImageDosHeader*>(kernelImageBase);
     if (!hal::amd64::bootstrapKernelRange(kernelImageBase, sizeof(*kernelDos), false) ||
@@ -5456,9 +5478,9 @@ extern "C" void MicantRenderFatalScreen(const char* title, const char* detail,
         earlyVideo.drawString(48, 238,
             g_lastBootStatus[0] ? g_lastBootStatus : "not recorded", pale);
         earlyVideo.drawString(48, 270, "Recent serial output:", white);
-        renderSerialHistory(earlyVideo, 294, 7);
-        earlyVideo.drawString(48, 440,
-            "Persistent dump status is included in the serial lines above.", pale);
+        earlyVideo.drawString(48, earlyVideo.getHeight() > 24 ? earlyVideo.getHeight() - 24 : 0,
+            "Crash dump status is included in the recent serial output.", pale);
+        renderSerialHistory(earlyVideo, 294, 14);
         return;
     }
     static std::atomic_flag rendered = ATOMIC_FLAG_INIT;
@@ -5522,7 +5544,7 @@ extern "C" void MicantRenderFatalScreen(const char* title, const char* detail,
     video.drawString(48, 336, "Technical details were sent to the serial log.", pale);
     video.drawString(48, 360, "Power off or restart the computer.", pale);
     video.drawString(48, 400, "Recent serial output:", white);
-    renderSerialHistory(video, 424, 7);
+    renderSerialHistory(video, 424, 14);
 }
 
 extern "C" void MicantRenderBootStatus(const char* message) noexcept {
@@ -5673,6 +5695,12 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!validHandoff(handoff)) {
         stopWithError("[MicaNT] Invalid UEFI kernel handoff\r\n");
     }
+    if (handoff->size > sizeof(g_kernelBootHandoff))
+        stopWithError("[MicaNT] UEFI handoff exceeds kernel copy capacity\r\n");
+    std::memcpy(&g_kernelBootHandoff, handoff, static_cast<size_t>(handoff->size));
+    handoff = reinterpret_cast<const micant::boot::UefiKernelHandoffV3*>(
+        &g_kernelBootHandoff);
+    serialWrite("[MicaNT Boot] UEFI handoff copied into kernel-owned storage\r\n");
     g_bootFramebufferInfo = handoff->framebuffer;
 
     if (!micant::hal::amd64::initializeBootstrapAddressSpace(serialWrite)) {
@@ -5919,6 +5947,14 @@ extern "C" micant::NtStatus KiSystemStartup(
     micant::io::IoScheduleDeferredFileDeletes();
     initializeBootStartDrivers(handoff);
     recoverPendingCrashDumpAfterMount();
+    // Start registered USB hosts early on every boot. A USB system disk is
+    // not mountable until this polling path enumerates it; after the mounted
+    // volume/SEC_IMAGE probe, pause polling around the scheduler checks.
+    const auto usbEnumeration = micant::usb::baremetal::startEnumeration();
+    bool usbEnumerationRunning = usbEnumeration == micant::NtStatus::Success;
+    serialWrite(usbEnumerationRunning
+        ? "[MicaNT Io] USB host enumeration started before system-volume discovery\r\n"
+        : "[MicaNT Io] USB host enumeration did not start before system-volume discovery\r\n");
 #if defined(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
     if (!g_crashDumpStorageOwner.BackendReady)
         stopWithError("[LuceOS Crash] self-test requires persistent backend\r\n");
@@ -6032,6 +6068,11 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!MicantTestPsFileBackedImage())
         stopWithError("[MicaNT Ps] File-backed SEC_IMAGE verification failed\r\n");
     serialWrite("[MicaNT Ps] File-backed SEC_IMAGE process image verified\r\n");
+    if (usbEnumerationRunning) {
+        const auto stopStatus = micant::usb::baremetal::stopEnumeration();
+        if (stopStatus == micant::NtStatus::Success) usbEnumerationRunning = false;
+        else serialWrite("[MicaNT Io] USB enumeration pause failed before scheduler checks\r\n");
+    }
     if (bootNetworkStack.isInitialized()) {
         serialWrite("[MicaNT NDIS/TCPIP] Boot-start network adapter attached to canonical transport\r\n");
         const auto dhcpStatus = micant::netboot::acquireBootDhcpLease();
@@ -6072,15 +6113,19 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (clockActive && !micant::hal::amd64::verifyBootstrapSchedulerClock())
         stopWithError("[MicaNT Ke] Runtime scheduler preemption failed\r\n");
     if (clockActive) serialWrite("[MicaNT Ke] Runtime idle wait and wake verified\r\n");
+    if (!usbEnumerationRunning) {
+        const auto usbEnumeration = micant::usb::baremetal::startEnumeration();
+        usbEnumerationRunning = usbEnumeration == micant::NtStatus::Success;
+        serialWrite(usbEnumerationRunning
+            ? "[MicaNT Io] USB host enumeration started after scheduler checks\r\n"
+            : "[MicaNT Io] USB host enumeration unavailable after scheduler checks\r\n");
+    }
     if (clockActive && !MicantTestPsDeferredReaper())
         stopWithError("[MicaNT Ps] Deferred reaper verification failed\r\n");
     if (clockActive) serialWrite("[MicaNT Ps] Deferred reaper verified\r\n");
     if (clockActive && !MicantTestKeDeferredDelivery())
         stopWithError("[MicaNT Ke] Runtime DPC/APC delivery failed\r\n");
     if (clockActive) serialWrite("[MicaNT Ke] Runtime DPC/APC delivery verified\r\n");
-    const auto usbEnumeration = micant::usb::baremetal::startEnumeration();
-    if (usbEnumeration != micant::NtStatus::Success)
-        serialWrite("[MicaNT Io] USB host enumeration did not start\r\n");
     if (clockActive && startKeyboardInterrupt())
         serialWrite("[MicaNT Input] PS/2 keyboard interrupt routing active\r\n");
     if (clockActive && startMouseInterrupt())

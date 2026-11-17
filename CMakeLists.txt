@@ -1079,6 +1079,8 @@ if (MICANT_ENABLE_BAREMETAL)
                                     kernel/ex/freestanding_memory.cpp)
     add_executable(xhci_oem_boot drivers/oem/xhci/xhci_driver.cpp
                                    kernel/ex/freestanding_memory.cpp)
+    add_executable(ehci_oem_boot drivers/oem/ehci/ehci_driver.cpp
+                                   kernel/ex/freestanding_memory.cpp)
     add_executable(i210_oem_boot drivers/oem/i210/i210_driver.cpp
                                    kernel/ex/freestanding_memory.cpp)
     add_executable(virtio_net_oem_boot drivers/oem/virtio_net/virtio_net_driver.cpp
@@ -1087,9 +1089,10 @@ if (MICANT_ENABLE_BAREMETAL)
     set_target_properties(hidusb_oem_boot PROPERTIES OUTPUT_NAME "hidusb")
     set_target_properties(usbstor_oem_boot PROPERTIES OUTPUT_NAME "usbstor")
     set_target_properties(xhci_oem_boot PROPERTIES OUTPUT_NAME "usbxhci")
+    set_target_properties(ehci_oem_boot PROPERTIES OUTPUT_NAME "ehci")
     set_target_properties(i210_oem_boot PROPERTIES OUTPUT_NAME "i210")
     set_target_properties(virtio_net_oem_boot PROPERTIES OUTPUT_NAME "virtio_net")
-    foreach(_oem_driver_target IN ITEMS ahci_oem_boot hidusb_oem_boot usbstor_oem_boot xhci_oem_boot i210_oem_boot
+    foreach(_oem_driver_target IN ITEMS ahci_oem_boot hidusb_oem_boot usbstor_oem_boot xhci_oem_boot ehci_oem_boot i210_oem_boot
                                        virtio_net_oem_boot)
         set_target_properties(${_oem_driver_target} PROPERTIES
             SUFFIX ".sys"
@@ -1136,7 +1139,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(bootx64 PRIVATE -Wall -Wextra -Wpedantic -Wno-nested-anon-types -Wno-gnu-anonymous-struct -Wno-unused-parameter -Wno-missing-designated-field-initializers -O2)
     if (MICANT_ENABLE_BAREMETAL)
         foreach(_target IN ITEMS ntoskrnl_core_baremetal bootx64_efi virtio_gpu_boot
-                                  ahci_oem_boot hidusb_oem_boot usbstor_oem_boot xhci_oem_boot i210_oem_boot
+                                  ahci_oem_boot hidusb_oem_boot usbstor_oem_boot xhci_oem_boot ehci_oem_boot i210_oem_boot
                                   virtio_net_oem_boot)
             target_compile_options(${_target} PRIVATE
                 -ffreestanding
@@ -1165,7 +1168,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_link_options(virtio_gpu_boot PRIVATE
             -nostdlib -Wl,--subsystem,native -Wl,-e,DriverEntry
         )
-        foreach(_oem_driver_target IN ITEMS ahci_oem_boot hidusb_oem_boot usbstor_oem_boot xhci_oem_boot i210_oem_boot
+        foreach(_oem_driver_target IN ITEMS ahci_oem_boot hidusb_oem_boot usbstor_oem_boot xhci_oem_boot ehci_oem_boot i210_oem_boot
                                             virtio_net_oem_boot)
             target_compile_options(${_oem_driver_target} PRIVATE -fno-builtin)
             target_link_options(${_oem_driver_target} PRIVATE

@@ -9,14 +9,33 @@
 #include "micant/km/core/ke.hpp"
 #include "micant/km/core/syscalls.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
+#include "micant/km/fsrtl/fat_boot.hpp"
 
 namespace micant::sys {
 NtStatus referenceProcessImageSection(Handle handle, ob::ObjectHeader*& reference) noexcept;
 }
+extern "C" void MicantRenderBootStatus(const char*) noexcept;
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
 
 namespace {
 
 void reportFailure(const char* stage, micant::NtStatus status) noexcept {
+    char visibleStatus[128]{};
+    static constexpr char hexDigits[] = "0123456789ABCDEF";
+    constexpr char prefix[] = "NTSTATUS=0x";
+    size_t visibleLength{};
+    for (size_t index = 0; index + 1 < sizeof(prefix); ++index)
+        visibleStatus[visibleLength++] = prefix[index];
+    for (int shift = 28; shift >= 0; shift -= 4)
+        visibleStatus[visibleLength++] = hexDigits[(static_cast<uint32_t>(status) >> shift) & 0xf];
+    visibleStatus[visibleLength++] = ' ';
+    for (size_t index = 0; stage && stage[index] && visibleLength + 1 < sizeof(visibleStatus); ++index)
+        visibleStatus[visibleLength++] = stage[index];
+    visibleStatus[visibleLength] = '\0';
+    MicantRenderBootStatus(visibleStatus);
+    MicantNetbootSerialWrite(visibleStatus);
+    MicantNetbootSerialWrite("\r\n");
+
     auto write = [](char value) noexcept {
         uint8_t ready{};
         do { __asm__ __volatile__("inb %1, %0" : "=a"(ready) : "Nd"(uint16_t{0x3fd})); }
@@ -47,6 +66,129 @@ struct ScopedReference {
         if (value) micant::ob::ObDereferenceObject(value);
     }
 };
+
+bool waitForMountedSystemVolume() noexcept {
+    using namespace micant;
+    constexpr size_t kMaximumVolumes = 12;
+    constexpr uint64_t kMountTimeout100ns = 100'000'000; // 10 seconds; USB failure is reported at its driver stage
+    auto hasSystemVolume = []() noexcept {
+        fsrtl::fat::MountedVolumeSnapshot volumes[kMaximumVolumes]{};
+        size_t count{};
+        const auto status = fsrtl::fat::enumerateMountedVolumes(
+            volumes, kMaximumVolumes, count);
+        const size_t available = count < kMaximumVolumes ? count : kMaximumVolumes;
+        for (size_t index = 0; index < available; ++index)
+            if (volumes[index].NtdllStatus == NtStatus::Success) return true;
+        return false;
+    };
+    if (hasSystemVolume()) return true;
+
+    auto* thread = ke::KeGetCurrentThread();
+    if (!thread || !hal::amd64::bootstrapSchedulerClockActive()) {
+        MicantNetbootSerialWrite("[MicaNT Ps] USB mount wait unavailable: bootstrap scheduler clock inactive\r\n");
+        return false;
+    }
+
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const auto originalPriority = thread->priority;
+    thread->priority = ke::PRIORITY_IDLE;
+    __asm__ __volatile__("sti" : : : "memory");
+
+    uint64_t start{};
+    bool found{};
+    if (ke::KeQueryUptime100ns(start)) {
+        for (;;) {
+            found = hasSystemVolume();
+            size_t count{};
+            fsrtl::fat::MountedVolumeSnapshot volumes[kMaximumVolumes]{};
+            const auto status = fsrtl::fat::enumerateMountedVolumes(
+                volumes, kMaximumVolumes, count);
+            if (found || (status != NtStatus::Success &&
+                          status != NtStatus::BufferTooSmall &&
+                          status != NtStatus::DeviceNotReady)) break;
+
+            uint64_t now{};
+            if (!ke::KeQueryUptime100ns(now) || now < start ||
+                now - start >= kMountTimeout100ns) break;
+            // Yield the single CPU until its next timer interrupt so the
+            // passive USB enumeration worker can run while this boot probe
+            // waits for USBSTOR to publish the system volume.
+            __asm__ __volatile__("sti; hlt" : : : "memory");
+        }
+    }
+
+    __asm__ __volatile__("cli" : : : "memory");
+    thread->priority = originalPriority;
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    if (!found)
+        MicantNetbootSerialWrite("[MicaNT Ps] USB mount wait expired; inspect EHCI/USBSTOR diagnostics above\r\n");
+    return found;
+}
+
+void reportMountedVolumes() noexcept {
+    using namespace micant;
+    fsrtl::fat::MountedVolumeSnapshot volumes[12]{};
+    size_t count{};
+    const auto status = fsrtl::fat::enumerateMountedVolumes(
+        volumes, sizeof(volumes) / sizeof(volumes[0]), count);
+    auto emit = [](const char* message) noexcept {
+        MicantRenderBootStatus(message);
+        MicantNetbootSerialWrite(message);
+        MicantNetbootSerialWrite("\r\n");
+    };
+    auto appendHex = [](char* output, size_t capacity, size_t& length,
+                        uint64_t value, unsigned digits) noexcept {
+        static constexpr char hex[] = "0123456789ABCDEF";
+        for (int shift = static_cast<int>((digits - 1) * 4);
+             shift >= 0 && length + 1 < capacity; shift -= 4)
+            output[length++] = hex[(value >> shift) & 0xf];
+    };
+
+    char summary[112]{};
+    size_t length{};
+    constexpr char prefix[] = "[MicaNT Ps] Mounted FAT enum status=0x";
+    for (size_t i = 0; i + 1 < sizeof(prefix) && length + 1 < sizeof(summary); ++i)
+        summary[length++] = prefix[i];
+    appendHex(summary, sizeof(summary), length, static_cast<uint32_t>(status), 8);
+    constexpr char countLabel[] = " count=0x";
+    for (size_t i = 0; i + 1 < sizeof(countLabel) && length + 1 < sizeof(summary); ++i)
+        summary[length++] = countLabel[i];
+    appendHex(summary, sizeof(summary), length, count, 2);
+    summary[length] = '\0';
+    emit(summary);
+
+    const size_t available = count < sizeof(volumes) / sizeof(volumes[0])
+        ? count : sizeof(volumes) / sizeof(volumes[0]);
+    for (size_t index = 0; index < available; ++index) {
+        char line[160]{};
+        length = 0;
+        constexpr char volumePrefix[] = "[MicaNT Ps] FAT volume ";
+        for (size_t i = 0; i + 1 < sizeof(volumePrefix) && length + 1 < sizeof(line); ++i)
+            line[length++] = volumePrefix[i];
+        line[length++] = volumes[index].Drive ? volumes[index].Drive : '?';
+        constexpr char startLabel[] = ": start=0x";
+        for (size_t i = 0; i + 1 < sizeof(startLabel) && length + 1 < sizeof(line); ++i)
+            line[length++] = startLabel[i];
+        appendHex(line, sizeof(line), length, volumes[index].PartitionStartSector, 16);
+        constexpr char sectorsLabel[] = " sectors=0x";
+        for (size_t i = 0; i + 1 < sizeof(sectorsLabel) && length + 1 < sizeof(line); ++i)
+            line[length++] = sectorsLabel[i];
+        appendHex(line, sizeof(line), length, volumes[index].TotalSectors, 16);
+        constexpr char ntdllLabel[] = " ntdll=0x";
+        for (size_t i = 0; i + 1 < sizeof(ntdllLabel) && length + 1 < sizeof(line); ++i)
+            line[length++] = ntdllLabel[i];
+        appendHex(line, sizeof(line), length,
+                  static_cast<uint32_t>(volumes[index].NtdllStatus), 8);
+        constexpr char imageLabel[] = " fileimage=0x";
+        for (size_t i = 0; i + 1 < sizeof(imageLabel) && length + 1 < sizeof(line); ++i)
+            line[length++] = imageLabel[i];
+        appendHex(line, sizeof(line), length,
+                  static_cast<uint32_t>(volumes[index].FileImageStatus), 8);
+        line[length] = '\0';
+        emit(line);
+    }
+}
 
 // Build the system DLL path the same way the Ps loader does, so the test
 // exercises the real mounted-volume lookup instead of a hardcoded path.
@@ -133,6 +275,17 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         return false;
     }
     const size_t activeBefore = mm::PfnDatabase::get().getActiveCount();
+    // Preserve an inventory of the mounted FAT volumes before querying the
+    // selected system directory, so a missing root can be distinguished from
+    // a system tree mounted under another drive letter or absent from disk.
+    const bool systemVolumeReady = waitForMountedSystemVolume();
+    MicantRenderBootStatus(systemVolumeReady
+        ? "[MicaNT Ps] FAT system volume appeared before SEC_IMAGE path query"
+        : "[MicaNT Ps] FAT system volume mount wait timed out before SEC_IMAGE path query");
+    MicantNetbootSerialWrite(systemVolumeReady
+        ? "[MicaNT Ps] FAT system volume appeared before SEC_IMAGE path query\r\n"
+        : "[MicaNT Ps] FAT system volume mount wait timed out before SEC_IMAGE path query\r\n");
+    reportMountedVolumes();
     char16_t imagePath[256]{};
     size_t imagePathLength{};
     const auto pathStatus = buildSystemPath("fileimage.exe", imagePath,

@@ -46,7 +46,7 @@ def stage(root: Path) -> None:
     drivers = kernel_dir / "System32/drivers"
     drivers.mkdir(parents=True)
     shutil.copy2(gpu, drivers / "virtio_gpu.sys")
-    for name in ("storahci.sys", "hidusb.sys", "usbstor.sys", "usbxhci.sys",
+    for name in ("storahci.sys", "hidusb.sys", "usbstor.sys", "usbxhci.sys", "ehci.sys",
                  "i210.sys", "virtio_net.sys"):
         candidate = ROOT / "build" / name
         if candidate.is_file():

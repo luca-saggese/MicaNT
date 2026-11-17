@@ -2228,6 +2228,7 @@ def run_qemu(
     cmd_test: bool = False,
     crash_dump_selftest: bool = False,
     resolution: tuple[int, int] | None = None,
+    usb_ehci_test: bool = False,
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -2235,14 +2236,16 @@ def run_qemu(
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
         raise RuntimeError("timer self-test halts before process tests and desktop/input; incompatible runner options")
-    if taskmgr_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
+    if usb_test and usb_ehci_test:
+        raise RuntimeError("choose either the xHCI USB test or the EHCI USB test")
+    if taskmgr_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or usb_ehci_test):
         raise RuntimeError("Task Manager self-test requires the unattended desktop boot path")
-    if theme_test and (verify_input or runtime_selftest or timer_selftest or network_test or usb_test or taskmgr_selftest):
+    if theme_test and (verify_input or runtime_selftest or timer_selftest or network_test or usb_test or usb_ehci_test or taskmgr_selftest):
         raise RuntimeError("Theme test cannot be combined with unrelated automated desktop runners")
-    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
+    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or usb_ehci_test):
         raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
     if cmd_test and (interactive or verify_input or runtime_selftest or timer_selftest or
-                     network_test or usb_test or taskmgr_selftest or theme_test or
+                     network_test or usb_test or usb_ehci_test or taskmgr_selftest or theme_test or
                      process_memory_selftest or verify_usb_input):
         raise RuntimeError("CMD test requires its dedicated unattended QMP input path")
     if cmd_test and memory_mib != 512:
@@ -2251,12 +2254,12 @@ def run_qemu(
         raise RuntimeError("CMD test requires --diagnostics-dir to retain screenshots and evidence")
     if crash_dump_selftest and (interactive or verify_input or verify_usb_input or
                                 runtime_selftest or timer_selftest or network_test or
-                                usb_test or taskmgr_selftest or theme_test or
+                                usb_test or usb_ehci_test or taskmgr_selftest or theme_test or
                                 process_memory_selftest or cmd_test):
         raise RuntimeError("Crash dump self-test requires its isolated two-boot profile")
     if crash_dump_selftest and diagnostics_dir is None:
         raise RuntimeError("Crash dump self-test requires --diagnostics-dir to retain the disk image and logs")
-    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test):
+    if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or usb_ehci_test):
         raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
     if verify_usb_input and not usb_test:
         raise RuntimeError("USB HID verification requires --usb-test")
@@ -2360,7 +2363,7 @@ def run_qemu(
         driver_dir = kernel_dir / "System32" / "drivers"
         driver_dir.mkdir(parents=True)
         shutil.copyfile(ROOT / "build" / "virtio_gpu.sys", driver_dir / "virtio_gpu.sys")
-        for name in ("storahci.sys", "hidusb.sys", "usbstor.sys", "usbxhci.sys", "i210.sys", "virtio_net.sys"):
+        for name in ("storahci.sys", "hidusb.sys", "usbstor.sys", "usbxhci.sys", "ehci.sys", "i210.sys", "virtio_net.sys"):
             source = ROOT / "build" / name
             if source.is_file():
                 shutil.copyfile(source, driver_dir / name)
@@ -2527,6 +2530,16 @@ def run_qemu(
         ahci_image = temp / "ahci-gpt-fat32.img"
         create_fat32_image(esp, fat_volume)
         create_gpt_disk_image(fat_volume, ahci_image, reserve_crash_dump=True)
+        ehci_usb_image = temp / "ehci-usb-fat32.img"
+        if usb_ehci_test:
+            # Use an independent removable FAT volume containing only the
+            # proof file. Duplicating the AHCI system tree would make early
+            # boot system-root discovery see two valid MicaNT installations.
+            usb_source = temp / "ehci-usb-source"
+            usb_proof_file = usb_source / "MicaNT" / "System32" / "micant-usb-proof.txt"
+            usb_proof_file.parent.mkdir(parents=True)
+            usb_proof_file.write_bytes(b"MicaNT USB mass-storage FAT32 post-EBS proof v1\n")
+            create_fat32_image(usb_source, ehci_usb_image)
         log_directory = diagnostics_dir if diagnostics_dir is not None else temp
         serial_path = log_directory / "serial.log"
         qemu_output_path = log_directory / "qemu.log"
@@ -2598,6 +2611,18 @@ def run_qemu(
                 "-device", "usb-mouse,id=usb_mouse,bus=xhci.0,port=1.2",
                 "-device", "usb-storage,id=usb_storage,drive=usb_disk,bus=xhci.0",
             ])
+        elif usb_ehci_test:
+            # Reproduce the dual-EHCI layout of the target MCP79 platform:
+            # the first controller has no attached device and the USB disk is
+            # on the second. The guest must reject the empty controller, claim
+            # the controller with a connected root port, then mount/read FAT32.
+            command.extend([
+                "-drive", f"file={ehci_usb_image},format=raw,if=none,id=usb_disk,readonly=on",
+                "-device", "usb-ehci,id=ehci_empty",
+                "-device", "usb-ehci,id=ehci_storage",
+                "-device", "usb-storage,id=usb_storage,drive=usb_disk,bus=ehci_storage.0",
+                "-trace", f"enable=usb_ehci_*,file={log_directory / 'ehci.trace'}",
+            ])
         if crash_dump_selftest:
             run_crash_dump_two_boots(
                 command, ahci_image, temp, diagnostics_dir, timeout, stable_seconds,
@@ -2610,6 +2635,7 @@ def run_qemu(
         process_memory_verified = False
         cmd_test_verified = False
         usb_input_sent = False
+        usb_ehci_verified = False
         network_outbound_peer_done = False
         network_loss_injected = False
         network_inbound_peer_done = False
@@ -2639,6 +2665,17 @@ def run_qemu(
                         if serial_path.exists()
                         else ""
                     )
+                    if usb_ehci_test:
+                        if "ehci.sys: no usable PCI EHCI controller" in serial_log:
+                            raise RuntimeError("EHCI driver could not claim either QEMU EHCI controller")
+                        if "usbstor.sys: known FAT32 file read did not match" in serial_log:
+                            raise RuntimeError("EHCI mass storage mounted, but the FAT32 proof file read failed")
+                        usb_ehci_verified = (
+                            "ehci.sys: no connected device on this controller; trying next EHCI function" in serial_log and
+                            "ehci.sys: PCI EHCI controller claimed and registered with canonical USB bus" in serial_log and
+                            "usbstor.sys: BOT/SCSI device mounted through canonical FAT block path" in serial_log and
+                            "usbstor.sys: verified known file bytes through USB block device and FAT32" in serial_log
+                        )
                     if network_test and network_peer is not None and not network_outbound_peer_done:
                         try:
                             peer_connection, _ = network_peer.accept()
@@ -2865,6 +2902,10 @@ def run_qemu(
                         if complete_since is None:
                             complete_since = time.monotonic()
                         elif time.monotonic() - complete_since >= stable_seconds:
+                            if usb_ehci_test and not usb_ehci_verified:
+                                complete_since = None
+                                time.sleep(0.1)
+                                continue
                             if verify_usb_input:
                                 if not usb_input_sent:
                                     inject_usb_keyboard(temp / "qmp.sock")
@@ -2921,6 +2962,8 @@ def run_qemu(
                                 shutil.copyfile(qemu_output_path, diagnostics_dir / "qemu.log")
                             print(f"QEMU {result} passed; serial remained stable for "
                                   f"{stable_seconds}s.", flush=True)
+                            if usb_ehci_test:
+                                print("Dual-EHCI selection, USB mass-storage mount, and FAT32 file read passed.", flush=True)
                             if interactive:
                                 print("QEMU is running interactively; close its window or press Ctrl+C to stop.", flush=True)
                                 return_code = process.wait()
@@ -2993,6 +3036,8 @@ def main() -> int:
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--verify-input", action="store_true")
     parser.add_argument("--usb-test", action="store_true")
+    parser.add_argument("--usb-ehci-test", action="store_true",
+                        help="test dual-EHCI selection, USB mass storage, and a FAT32 file read")
     parser.add_argument("--verify-usb-input", action="store_true")
     parser.add_argument("--network-test", action="store_true")
     parser.add_argument("--runtime-selftest", action="store_true")
@@ -3034,6 +3079,7 @@ def main() -> int:
             args.crash_dump_selftest,
             tuple(int(part) for part in args.resolution.split("x"))
                 if args.resolution else None,
+            args.usb_ehci_test,
         )
     except KeyboardInterrupt:
         return 130

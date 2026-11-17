@@ -26,6 +26,20 @@ struct Device {
 Device devices[4]{};
 const KernelServices* services{};
 uint64_t registration{};
+void logStatus(const char* prefix, uint32_t status) noexcept {
+    if (!services || !services->Log || !prefix) return;
+    char message[112]{};
+    size_t length{};
+    while (prefix[length] && length + 9 < sizeof(message)) {
+        message[length] = prefix[length];
+        ++length;
+    }
+    static constexpr char digits[] = "0123456789ABCDEF";
+    for (int shift = 28; shift >= 0; shift -= 4)
+        message[length++] = digits[(status >> shift) & 0xf];
+    message[length] = '\0';
+    services->Log(services->Context, message);
+}
 int32_t match(void*, const uint8_t* bytes, size_t size, InterfaceV1* output) {
     if (!output) return micant::boot_driver::STATUS_INVALID_PARAMETER;
     micant::usb::baremetal::StorageInterface storage{};
@@ -90,6 +104,7 @@ int32_t start(void* context) {
         if (result != NtStatus::Success) {
             if (services->Log) services->Log(services->Context,
                 "usbstor.sys: BOT/SCSI probe or READ CAPACITY failed");
+            logStatus("usbstor.sys: BOT/SCSI status=0x", static_cast<uint32_t>(result));
             return static_cast<int32_t>(static_cast<uint32_t>(result));
         }
         d->initialized = true;
@@ -102,6 +117,7 @@ int32_t start(void* context) {
         if (result != micant::boot_driver::STATUS_SUCCESS) {
             if (services->Log) services->Log(services->Context,
                 "usbstor.sys: canonical read-only block publication failed");
+            logStatus("usbstor.sys: block publication status=0x", static_cast<uint32_t>(result));
             return result;
         }
     }
@@ -110,6 +126,7 @@ int32_t start(void* context) {
         if (result != micant::boot_driver::STATUS_SUCCESS) {
             if (services->Log) services->Log(services->Context,
                 "usbstor.sys: canonical FAT32 mount failed");
+            logStatus("usbstor.sys: FAT mount status=0x", static_cast<uint32_t>(result));
             return result;
         }
     }
