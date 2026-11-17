@@ -19,6 +19,15 @@ ROOT = Path(__file__).resolve().parent
 
 def main() -> int:
     forwarded = sys.argv[1:]
+    disable_debug_hud = "--no-compositor-debug-hud" in forwarded
+    if disable_debug_hud:
+        forwarded = [argument for argument in forwarded
+                     if argument not in ("--no-compositor-debug-hud",
+                                         "--compositor-debug-hud")]
+    elif "--compositor-debug-hud" not in forwarded:
+        # The interactive demo is the diagnostic desktop entry point. Keep
+        # qemu.py's unattended screenshot tests HUD-free unless requested.
+        forwarded.append("--compositor-debug-hud")
     if "--headless" in forwarded:
         print("qemu_demo.py always opens a visible interactive QEMU window.", file=sys.stderr)
         return 2

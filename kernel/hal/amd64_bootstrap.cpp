@@ -167,6 +167,7 @@ uint32_t g_probeMode{};
 uint64_t g_probeReturnRip{};
 micant::hal::amd64::UserServiceRoutine g_dispatch{};
 bool g_schedulerClockActive{};
+bool g_schedulerUserPreemptionVerified{};
 bool g_kernelMonitorFailureNotified{};
 bool g_clockIrqlMaskReady{};
 uint32_t g_schedulerTimerPeriod{};
@@ -4513,6 +4514,12 @@ static bool verifyBootstrapTimerInterruptImpl(bool verifyScheduling) noexcept {
         const bool userPreemption = !verifyScheduling || !kernelPreemption || MicantTestPsUserPreemption();
         const bool ticksAdvanced = MicantTimerTicks > before && !MicantTimerDispatchFailed;
         const bool success = interruptDelivery && kernelPreemption && userPreemption && ticksAdvanced;
+        // The boot path follows this live timer diagnostic with
+        // verifyBootstrapSchedulerClock(). Carry the successful CPL3
+        // preemption result forward so that routine only needs to verify its
+        // distinct idle wait/wake path instead of running the full process
+        // preemption integration test a second time.
+        if (verifyScheduling && success) g_schedulerUserPreemptionVerified = true;
         if (!success && g_log) {
             if (!interruptDelivery) g_log("[MicaNT Hal] Live timer interrupt delivery failed\r\n");
             if (!kernelPreemption) g_log("[MicaNT Hal] Live kernel timer preemption failed\r\n");
@@ -4845,6 +4852,7 @@ bool startBootstrapSchedulerClock() noexcept {
         if (g_log) g_log("[MicaNT Hal] Clock start rejected: interrupts enabled during setup\r\n");
         return false;
     }
+    g_schedulerUserPreemptionVerified = false;
     if (current.base != reinterpret_cast<uint64_t>(g_idt)) {
         if (g_log) g_log("[MicaNT Hal] Clock start rejected: bootstrap IDT is not active\r\n");
         return false;
@@ -4999,9 +5007,12 @@ bool verifyIdleWaitAndWake() noexcept {
 
 bool verifyBootstrapSchedulerClock() noexcept {
     if (!g_schedulerClockActive) return false;
-    const uint64_t before = MicantTimerTicks;
-    return MicantTestPsUserPreemption() && MicantTimerTicks > before && !MicantTimerDispatchFailed &&
-        verifyIdleWaitAndWake();
+    if (!g_schedulerUserPreemptionVerified) {
+        const uint64_t before = MicantTimerTicks;
+        if (!MicantTestPsUserPreemption() || MicantTimerTicks <= before) return false;
+    }
+    if (MicantTimerDispatchFailed) return false;
+    return verifyIdleWaitAndWake();
 }
 
 bool bootstrapSchedulerClockFailed() noexcept { return MicantTimerDispatchFailed; }
