@@ -122,7 +122,8 @@ enum {
     MICANT_WIN32K_OP_GET_CAPTURE,
     MICANT_WIN32K_OP_SET_CAPTURE,
     MICANT_WIN32K_OP_RELEASE_CAPTURE,
-    MICANT_WIN32K_OP_GET_FOCUS
+    MICANT_WIN32K_OP_GET_FOCUS,
+    MICANT_WIN32K_OP_SET_LIQUID_GLASS
 };
 
 enum {
@@ -148,6 +149,7 @@ typedef struct MicaWin32kRequest {
     uint16_t title[MICANT_WIN32K_TEXT_CAPACITY];
     uint16_t text[MICANT_WIN32K_TEXT_CAPACITY];
     uint64_t windowHandles[MICANT_WIN32K_ENUM_BATCH_CAPACITY];
+    MicaLiquidGlassDescriptor liquidGlass;
 } MicaWin32kRequest;
 
 // Private client operation used by User32 DrawIconEx after validating the
@@ -155,7 +157,7 @@ typedef struct MicaWin32kRequest {
 #define MICANT_WIN32K_ROP_ALPHA_SOURCE_OVER 0x4D494341u
 
 #if defined(__cplusplus)
-static_assert(sizeof(MicaWin32kRequest) == 1424);
+static_assert(sizeof(MicaWin32kRequest) == 1536);
 static_assert(offsetof(MicaWin32kRequest, args) == 24);
 static_assert(offsetof(MicaWin32kRequest, windowHandles) == 912);
 #endif
@@ -240,6 +242,7 @@ MICANT_WIN32K_API int32_t MicaWin32kSetThemeSnapshot(
     const MicaThemeSnapshot*, const MicaThemeCaptionImageSet*);
 #endif
 MICANT_WIN32K_API int32_t MicaWin32kGetThemeSnapshot(MicaThemeSnapshot*);
+MICANT_WIN32K_API int32_t MicaWin32kSetLiquidGlass(void*, const MicaLiquidGlassDescriptor*);
 MICANT_WIN32K_API int32_t MicaWin32kSetTaskbarButtonBounds(
     void*, const MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kFillRect(void*, const MicaWin32kRect*, uint32_t);

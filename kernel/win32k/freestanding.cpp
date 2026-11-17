@@ -176,6 +176,7 @@ struct Window {
     int32_t x{}, y{}, width{}, height{};
     int32_t restoreX{}, restoreY{}, restoreWidth{}, restoreHeight{};
     uint32_t style{}, extendedStyle{};
+    MicaLiquidGlassDescriptor liquidGlass{};
     uint32_t animationFlags{};
     uint32_t compositorSlot{UINT32_MAX};
     CompositorSurfaceStorage surface{};
@@ -1277,6 +1278,56 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 static_cast<int32_t>(clientY + clientHeight)};
             return NtStatus::Success;
         }
+        case MICANT_WIN32K_OP_SET_LIQUID_GLASS: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            const auto& glass = request.liquidGlass;
+            if (glass.magic != MICANT_LIQUID_GLASS_MAGIC ||
+                glass.version != MICANT_LIQUID_GLASS_VERSION ||
+                glass.size != sizeof(glass) ||
+                (glass.flags & ~MICANT_LIQUID_GLASS_ACTIVE) != 0)
+                return NtStatus::InvalidParameter;
+            if (glass.flags & MICANT_LIQUID_GLASS_ACTIVE) {
+                const auto finiteRange = [](float value, float low,
+                                            float high) noexcept {
+                    return value >= low && value <= high;
+                };
+                if (!glass.width || !glass.height ||
+                    glass.width > 512 || glass.height > 512 ||
+                    glass.left < 0 || glass.top < 0 ||
+                    static_cast<uint64_t>(glass.left) + glass.width >
+                        static_cast<uint32_t>(window->width) ||
+                    static_cast<uint64_t>(glass.top) + glass.height >
+                        static_cast<uint32_t>(window->height) ||
+                    !glass.generation ||
+                    !finiteRange(glass.radius, 0.0f, 128.0f) ||
+                    !finiteRange(glass.bezel, 0.0f, 128.0f) ||
+                    !finiteRange(glass.thickness, 0.0f, 128.0f) ||
+                    !finiteRange(glass.dispersion, 0.0f, 1.0f) ||
+                    !finiteRange(glass.blurPx, 0.0f, 64.0f) ||
+                    !finiteRange(glass.tintMix, 0.0f, 1.0f) ||
+                    !finiteRange(glass.saturation, 0.0f, 2.0f) ||
+                    !finiteRange(glass.dark, 0.0f, 1.0f) ||
+                    !finiteRange(glass.sourceBlur, 0.0f, 32.0f) ||
+                    !finiteRange(glass.downsample, 0.5f, 1.0f) ||
+                    !finiteRange(glass.pad, 0.0f, 32.0f) ||
+                    !finiteRange(glass.rim, 0.0f, 2.0f) ||
+                    !finiteRange(glass.grain, 0.0f, 0.25f) ||
+                    !finiteRange(glass.magnify, 0.0f, 1.0f) ||
+                    !finiteRange(glass.shadowAmt, 0.0f, 1.0f) ||
+                    !finiteRange(glass.rimTint, 0.0f, 1.0f) ||
+                    !finiteRange(glass.ringW, -64.0f, 64.0f) ||
+                    !finiteRange(glass.flatInner, 0.0f, 1.0f))
+                    return NtStatus::InvalidParameter;
+            }
+            window->liquidGlass = glass;
+            markWindowClientDamage(*window, 0, 0,
+                std::max<int32_t>(1, window->width - frameInset(*window) * 2),
+                std::max<int32_t>(1, window->height - frameInset(*window) * 2 -
+                    captionHeight(*window)));
+            request.result = 1;
+            return NtStatus::Success;
+        }
         case MICANT_WIN32K_OP_PRESENT_WINDOW: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
@@ -2271,6 +2322,7 @@ void publishCompositorSurfaces() noexcept {
             if (candidate.active && candidate.compositorSlot == index)
                 info.activeWriters += candidate.activeWriters;
         info.style = window.style;
+        info.liquidGlass = window.liquidGlass;
         info.animationFlags = window.animationFlags;
         info.animationTarget = {
             window.animationTarget.left, window.animationTarget.top,

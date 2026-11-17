@@ -21,6 +21,7 @@
 #endif
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/system_time.hpp"
 #include "micant/shared/theme_snapshot.h"
 #include "micant/um/subsystems/theme/window_decoration_assets.hpp"
 #include "micant/shared/native_uxtheme_api.h"
@@ -36,6 +37,7 @@
 #include "explorer_shell/task_switcher.hpp"
 
 extern "C" __declspec(dllimport) int32_t InitCommonControlsEx(const void*) noexcept;
+extern "C" __declspec(dllimport) int32_t LuceGlassSetWindow(void*, const MicaLiquidGlassDescriptor*) noexcept;
 
 namespace {
 
@@ -44,6 +46,8 @@ using namespace micant_gui;
 constexpr uint32_t TASKBAR_H = 40;
 constexpr uint32_t MENU_W = 344;
 constexpr uint32_t MENU_H = 430;
+constexpr uint32_t CLOCK_CARD = 168;
+constexpr uint32_t CLOCK_WINDOW = 188;
 constexpr size_t MAX_APP_WINDOWS = 8;
 constexpr UINT WM_THEME_SCHEDULE_TICK = 0x8001u;
 constexpr UINT WM_THEME_QUEUE_PRESSURE_PROBE = 0x8002u;
@@ -86,6 +90,10 @@ struct ShellState {
     HWND desktop{};
     HDC desktopDc{};
     uint32_t* desktopPixels{};
+    HWND clockWidget{};
+    HDC clockDc{};
+    HBITMAP clockBitmap{};
+    uint32_t* clockPixels{};
     HFONT uiFont{};
     bool fontReady{};
     MicaThemeSnapshot visualTheme{};
@@ -167,6 +175,7 @@ struct ShellState {
     micant::explorer::TaskSwitchSnapshot taskSwitch{};
     uint8_t activeApp{0xFF};
     uint8_t clockSecond{0xFF};
+    bool clockPaintReported{};
     MicaWin32kSystemTime systemTime{};
     char clockText[12]{"--:--"};
 };
@@ -2096,23 +2105,157 @@ void toggleStart() noexcept {
 
 void updateClock() noexcept {
     MicaWin32kSystemTime value{};
-    const uint64_t ok = DoSyscall(0x83, reinterpret_cast<uint64_t>(&value));
-    if (ok != 1 || value.second == g.clockSecond) return;
-    g.clockSecond = value.second;
+    bool timeAvailable = false;
+    SYSTEMTIME systemTime{};
+    GetSystemTime(&systemTime);
+    if (systemTime.wYear >= 1601 && systemTime.wYear <= 9999 &&
+        systemTime.wMonth >= 1 && systemTime.wMonth <= 12 &&
+        systemTime.wDay >= 1 && systemTime.wDay <= 31 &&
+        systemTime.wHour < 24 && systemTime.wMinute < 60 && systemTime.wSecond < 60) {
+        value.year = systemTime.wYear;
+        value.month = static_cast<uint8_t>(systemTime.wMonth);
+        value.day = static_cast<uint8_t>(systemTime.wDay);
+        value.hour = static_cast<uint8_t>(systemTime.wHour);
+        value.minute = static_cast<uint8_t>(systemTime.wMinute);
+        value.second = static_cast<uint8_t>(systemTime.wSecond);
+        timeAvailable = true;
+    } else {
+    micant::LargeInteger nativeTime{};
+    uint64_t fileTime{};
+    if (micant::native_nt::NtQuerySystemTime(&nativeTime) == micant::NtStatus::Success &&
+        nativeTime.QuadPart >= 0) {
+        fileTime = static_cast<uint64_t>(nativeTime.QuadPart);
+    } else {
+        const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(
+            micant::UserSharedDataAddress);
+        for (unsigned retry = 0; retry < 8; ++retry) {
+            const int32_t high1 = shared->systemTimeHigh1;
+            const uint32_t low = shared->systemTimeLow;
+            const int32_t high2 = shared->systemTimeHigh2;
+            if (high1 == high2) {
+                fileTime = (static_cast<uint64_t>(static_cast<uint32_t>(high1)) << 32) | low;
+                break;
+            }
+        }
+        if (fileTime) {
+            micant::shared::time::SystemTimeFields fields{};
+            if (micant::shared::time::fromSystemTime100ns(fileTime, fields)) {
+                value.year = fields.year;
+                value.month = static_cast<uint8_t>(fields.month);
+                value.day = static_cast<uint8_t>(fields.day);
+                value.hour = static_cast<uint8_t>(fields.hour);
+                value.minute = static_cast<uint8_t>(fields.minute);
+                value.second = static_cast<uint8_t>(fields.second);
+                timeAvailable = true;
+            }
+        }
+    }
+    }
+    if (timeAvailable) {
+        if (value.second == g.clockSecond) return;
+        g.clockSecond = value.second;
+    } else {
+        if (g.clockSecond == 0xFE) return;
+        g.clockSecond = 0xFE;
+    }
     g.systemTime = value;
     uint8_t hour = value.hour;
     const bool pm = hour >= 12;
     hour = static_cast<uint8_t>(hour % 12);
     if (!hour) hour = 12;
-    g.clockText[0] = static_cast<char>('0' + hour / 10);
-    g.clockText[1] = static_cast<char>('0' + hour % 10);
-    g.clockText[2] = ':';
-    g.clockText[3] = static_cast<char>('0' + value.minute / 10);
-    g.clockText[4] = static_cast<char>('0' + value.minute % 10);
-    g.clockText[5] = ' ';
-    g.clockText[6] = pm ? 'P' : 'A';
-    g.clockText[7] = 'M';
-    g.clockText[8] = '\0';
+    if (timeAvailable) {
+        g.clockText[0] = static_cast<char>('0' + hour / 10);
+        g.clockText[1] = static_cast<char>('0' + hour % 10);
+        g.clockText[2] = ':';
+        g.clockText[3] = static_cast<char>('0' + value.minute / 10);
+        g.clockText[4] = static_cast<char>('0' + value.minute % 10);
+        g.clockText[5] = ' ';
+        g.clockText[6] = pm ? 'P' : 'A';
+        g.clockText[7] = 'M';
+        g.clockText[8] = '\0';
+    } else {
+        std::memcpy(g.clockText, "--:--", 6);
+    }
+    if (g.clockPixels) {
+        constexpr float scale = 168.0f / 158.0f;
+        constexpr float radius = 28.0f * scale;
+        constexpr float center = 84.0f;
+        for (uint32_t y = 0; y < CLOCK_WINDOW; ++y)
+            for (uint32_t x = 0; x < CLOCK_WINDOW; ++x)
+                g.clockPixels[y * CLOCK_WINDOW + x] = 0;
+        const float seconds = static_cast<float>(value.second);
+        for (uint32_t i = 0; i < 60; ++i) {
+            float a = static_cast<float>(i) * 6.28318530718f / 60.0f;
+            if (a > 3.14159265f) a -= 6.28318531f;
+            const float a2 = a * a;
+            const float sine = a * (1.0f - a2 / 6.0f + a2 * a2 / 120.0f);
+            const float cosine = 1.0f - a2 / 2.0f + a2 * a2 / 24.0f;
+            const float inner = radius - 9.0f * scale;
+            const float outer = inner + 5.6f * scale;
+            const auto roundPixel = [](float v) noexcept { return static_cast<int>(v + (v >= 0 ? 0.5f : -0.5f)); };
+            const int x0 = roundPixel(center + sine * inner);
+            const int y0 = roundPixel(center - cosine * inner);
+            const int x1 = roundPixel(center + sine * outer);
+            const int y1 = roundPixel(center - cosine * outer);
+            const float alpha = i <= value.second
+                ? 0.40f + 0.58f * (static_cast<float>(i) / static_cast<float>(value.second ? value.second : 1))
+                : 0.12f + 0.28f * (static_cast<float>(i - value.second) /
+                    static_cast<float>(value.second < 60 ? 60 - value.second : 1));
+            const uint32_t a8 = static_cast<uint32_t>(alpha * 255.0f);
+            const uint32_t c = (a8 << 24) | (a8 << 16) | (a8 << 8) | a8;
+            const int deltaX = x1 - x0, deltaY = y1 - y0;
+            const int dx = deltaX < 0 ? -deltaX : deltaX, sx = x0 < x1 ? 1 : -1;
+            const int dy = -(deltaY < 0 ? -deltaY : deltaY), sy = y0 < y1 ? 1 : -1;
+            int err = dx + dy, x = x0, y = y0;
+            for (;;) {
+                if (x >= 0 && x < static_cast<int>(CLOCK_WINDOW) && y >= 0 && y < static_cast<int>(CLOCK_WINDOW))
+                    g.clockPixels[static_cast<size_t>(y) * CLOCK_WINDOW + static_cast<size_t>(x)] = c;
+                if (x == x1 && y == y1) break;
+                const int e2 = 2 * err;
+                if (e2 >= dy) { err += dy; x += sx; }
+                if (e2 <= dx) { err += dx; y += sy; }
+            }
+        }
+        // Small MIT-reference adaptation: text remains native GDI because the original font is not bundled.
+        SetBkMode(g.clockDc, TRANSPARENT);
+        SetTextColor(g.clockDc, RGB(255, 255, 255));
+        HFONT font = CreateFontW(12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Arial");
+        if (font) {
+            HGDIOBJ old = SelectObject(g.clockDc, font);
+            const wchar_t city[] = L"RIY";
+            TextOutW(g.clockDc, 73, 24, city, 3);
+            wchar_t time[6]{};
+            unsigned hour12 = value.hour % 12;
+            if (!hour12) hour12 = 12;
+            time[0] = static_cast<wchar_t>(L'0' + hour12 / 10);
+            time[1] = static_cast<wchar_t>(L'0' + hour12 % 10);
+            time[2] = L':';
+            time[3] = static_cast<wchar_t>(L'0' + value.minute / 10);
+            time[4] = static_cast<wchar_t>(L'0' + value.minute % 10);
+            if (!timeAvailable) {
+                time[0] = L'-'; time[1] = L'-'; time[2] = L':';
+                time[3] = L'-'; time[4] = L'-';
+            }
+            SelectObject(g.clockDc, old);
+            DeleteObject(font);
+            font = CreateFontW(68, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Arial");
+            if (font) {
+                old = SelectObject(g.clockDc, font);
+                TextOutW(g.clockDc, 19, 70, time, 5);
+                SelectObject(g.clockDc, old);
+                DeleteObject(font);
+            }
+        }
+        // GDI on a 32-bit BI_RGB DIB leaves alpha undefined; make glyph pixels opaque.
+        for (size_t i = 0; i < static_cast<size_t>(CLOCK_WINDOW) * CLOCK_WINDOW; ++i) {
+            if (g.clockPixels[i] & 0x00FFFFFFu) g.clockPixels[i] |= 0xFF000000u;
+        }
+        present(g.clockWidget);
+    }
     for (auto& app : g.apps) {
         if (!app.open || app.view != View::DateTime) continue;
         drawAppWindow(app);
@@ -2439,10 +2582,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     }
     if (message == WM_PAINT) {
+        if (hwnd == g.clockWidget) PrintLine("[MicaNT Explorer] Clock WM_PAINT entered");
         HDC source = nullptr;
         uint32_t width = 0, height = 0;
         AppWindow* app = appFromHwnd(hwnd);
         if (hwnd == g.desktop) { source = g.desktopDc; width = g.screenW; height = g.screenH - TASKBAR_H; }
+        else if (hwnd == g.clockWidget) { source = g.clockDc; width = CLOCK_WINDOW; height = CLOCK_WINDOW; }
         else if (hwnd == g.taskbar) { source = g.taskbarDc; width = g.screenW; height = TASKBAR_H; }
         else if (hwnd == g.startMenu) { source = g.menuDc; width = MENU_W; height = MENU_H; }
         else if (app) { source = app->dc; width = app->width; height = app->height; }
@@ -2458,6 +2603,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         else if (app && !copied)
             PrintLine("[MicaNT Explorer] Application paint BitBlt failed");
         const bool ended = EndPaint(hwnd, &paint) != FALSE;
+        if (hwnd == g.clockWidget && copied && ended && !g.clockPaintReported) { g.clockPaintReported = true; PrintLine("[MicaNT Explorer] Clock bitmap painted to its window surface"); }
         if (app && copied && ended && !app->firstPaintPresented) {
             app->firstPaintPresented = true;
             PrintLine("[MicaNT Explorer] Application window paint presented");
@@ -2594,6 +2740,41 @@ extern "C" void _start(const char* = nullptr) {
     if (!desktopBitmap || !desktopBits) for (;;) __asm__ __volatile__("pause");
     SelectObject(g.desktopDc, desktopBitmap);
     g.desktopPixels = static_cast<uint32_t*>(desktopBits);
+
+    const int32_t clockX = static_cast<int32_t>(g.screenW) - 291;
+    const int32_t clockY = 46;
+    g.clockWidget = CreateWindowExW(WS_EX_TOOLWINDOW, kClassName, L"", WS_POPUP | WS_VISIBLE,
+        clockX, clockY, CLOCK_WINDOW, CLOCK_WINDOW, nullptr, nullptr, nullptr, nullptr);
+    if (g.clockWidget) {
+        g.clockDc = CreateCompatibleDC(nullptr);
+        void* clockBits = nullptr;
+        BITMAPINFO clockInfo{};
+        clockInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        clockInfo.bmiHeader.biWidth = CLOCK_WINDOW;
+        clockInfo.bmiHeader.biHeight = -static_cast<LONG>(CLOCK_WINDOW);
+        clockInfo.bmiHeader.biPlanes = 1;
+        clockInfo.bmiHeader.biBitCount = 32;
+        clockInfo.bmiHeader.biCompression = BI_RGB;
+        g.clockBitmap = CreateDIBSection(g.clockDc, &clockInfo, DIB_RGB_COLORS, &clockBits, nullptr, 0);
+        if (g.clockDc && g.clockBitmap && clockBits) {
+            SelectObject(g.clockDc, g.clockBitmap);
+            g.clockPixels = static_cast<uint32_t*>(clockBits);
+            MicaLiquidGlassDescriptor glass{};
+            glass.magic = MICANT_LIQUID_GLASS_MAGIC; glass.version = MICANT_LIQUID_GLASS_VERSION;
+            glass.size = sizeof(glass); glass.flags = MICANT_LIQUID_GLASS_ACTIVE;
+            glass.left = 10; glass.top = 10; glass.width = CLOCK_CARD; glass.height = CLOCK_CARD;
+            glass.radius = 29.8f; glass.bezel = 26.0f; glass.thickness = 30.0f;
+            glass.dispersion = 0.06f; glass.blurPx = 1.0f; glass.tintMix = 0.586f;
+            glass.saturation = 1.25f; glass.dark = 1.0f; glass.sourceBlur = 11.2f;
+            glass.downsample = 0.5f; glass.pad = 10.0f; glass.rim = 0.45f;
+            glass.grain = 0.0045f; glass.magnify = 0.042857f; glass.rimTint = 1.0f;
+            glass.flatInner = 1.0f; glass.generation = 1;
+            if (LuceGlassSetWindow(g.clockWidget, &glass)) {
+                ShowWindow(g.clockWidget, SW_SHOW);
+                PrintLine("[MicaNT Explorer] MacShell MIT clock Liquid Glass descriptor published");
+            } else ShowWindow(g.clockWidget, SW_HIDE);
+        }
+    }
 
     const int32_t taskbarY = static_cast<int32_t>(g.screenH - TASKBAR_H);
     g.taskbar = CreateWindowExW(WS_EX_TOPMOST, kClassName, kTaskbarTitle,

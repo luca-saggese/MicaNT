@@ -2,9 +2,10 @@
 
 #include <stdint.h>
 #include "micant/shared/theme_snapshot.h"
+#include "micant/shared/liquid_glass.h"
 
 #define MICANT_COMPOSITOR_STORE_MAGIC 0x4D434F4Du /* MCOM */
-#define MICANT_COMPOSITOR_STORE_VERSION 14u
+#define MICANT_COMPOSITOR_STORE_VERSION 15u
 
 enum {
     MICANT_COMPOSITOR_SURFACE_ACTIVE = 0x01u,
@@ -65,6 +66,7 @@ typedef struct MicaCompositorSurfaceInfo {
     uint64_t titleGeneration;
     uint64_t titleAddress;
     uint64_t titleSizeBytes;
+    MicaLiquidGlassDescriptor liquidGlass;
 } MicaCompositorSurfaceInfo;
 
 typedef struct MicaCompositorMetadataStore {
@@ -89,5 +91,5 @@ typedef struct MicaCompositorMetadataStore {
 
 #ifdef __cplusplus
 static_assert(sizeof(MicaCompositorDirtyRect) == 16);
-static_assert(sizeof(MicaCompositorSurfaceInfo) == 224);
+static_assert(sizeof(MicaCompositorSurfaceInfo) == 336);
 #endif

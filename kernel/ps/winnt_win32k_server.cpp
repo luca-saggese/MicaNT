@@ -955,4 +955,13 @@ int32_t MicaWin32kGetThemeSnapshot(MicaThemeSnapshot* snapshot) {
            MicaThemeSnapshotIsValid(snapshot, sizeof(*snapshot));
 }
 
+int32_t MicaWin32kSetLiquidGlass(void* hwnd,
+                                const MicaLiquidGlassDescriptor* descriptor) {
+    if (!hwnd || !descriptor) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.liquidGlass = *descriptor;
+    return request(MICANT_WIN32K_OP_SET_LIQUID_GLASS, value) && value.result == 1;
+}
+
 }

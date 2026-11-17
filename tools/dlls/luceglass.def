@@ -1,0 +1,4 @@
+LIBRARY luceglass
+EXPORTS
+    LuceGlassSetWindow
+    LuceGlassClearWindow

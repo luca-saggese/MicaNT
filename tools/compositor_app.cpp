@@ -6,6 +6,7 @@
 #include "micant/shared/user_syscall.hpp"
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/win32k_client.h"
+#include "liquid_glass_effect.hpp"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -31,6 +32,7 @@ extern "C" void* memcpy(void* destination, const void* source, size_t count) {
 namespace {
 
 uint32_t* g_frame{};
+micant::compositor::glass::Cache g_liquidGlassCache{};
 constexpr int64_t kWindowEffectRadiusLimit = 32;
 constexpr int64_t kWindowBlurRadius = 2;
 constexpr size_t kDamageRegionComplexityBudget = 16;
@@ -1082,7 +1084,9 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         if (right <= clipLeft || bottom <= clipTop) continue;
         const bool hasClientBackground = validWindowStyle &&
             (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND);
-        if (hasClientBackground || !blurWindow) {
+        const bool glassWindow = micant::compositor::glass::IsValid(
+            surface.liquidGlass, surface.width, surface.height);
+        if (hasClientBackground || (!blurWindow && !glassWindow)) {
             const uint32_t clientBackground = hasClientBackground
                 ? windowStyle->background : 0xFFFFFFFFu;
             fillRect(left, top, clientRight, clientBottom,
@@ -1091,6 +1095,15 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         if (blurWindow)
             applyWindowBackdropBlur(left, top, clientRight, clientBottom,
                                     opacity, width, height);
+        if (glassWindow) {
+            micant::compositor::glass::Render(g_liquidGlassCache, g_frame,
+                width, height, surface.window, metadata.frameSequence,
+                static_cast<int32_t>(windowLeft), static_cast<int32_t>(windowTop),
+                surface.liquidGlass);
+            micant::compositor::glass::Composite(g_liquidGlassCache, g_frame,
+                width, height, {static_cast<int32_t>(clipLeft), static_cast<int32_t>(clipTop),
+                    static_cast<int32_t>(right), static_cast<int32_t>(bottom)});
+        }
         for (int64_t y = clipTop; y < bottom; ++y) {
             const size_t sourceY = animation.active
                 ? static_cast<size_t>(y - top) * static_cast<size_t>(sourceClientHeight) /
@@ -1322,6 +1335,18 @@ bool collectDamage(const MicaCompositorMetadataStore& metadata,
         (metadata.dirtyRegionCount && (!metadata.dirtyRegions ||
             metadata.dirtyRegionCount > metadata.dirtyRegionArraySizeBytes /
                 sizeof(MicaCompositorDirtyRect)));
+    for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
+        const auto& surface = metadata.surfaces[index];
+        if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                              MICANT_COMPOSITOR_SURFACE_VISIBLE)) ==
+                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                 MICANT_COMPOSITOR_SURFACE_VISIBLE) &&
+            micant::compositor::glass::IsValid(surface.liquidGlass,
+                                                surface.width, surface.height)) {
+            fullRedraw = true;
+            break;
+        }
+    }
     if (!fullRedraw) {
         for (size_t index = 0; index < metadata.dirtyRegionCount; ++index) {
             const auto& dirty = metadata.dirtyRegions[index];
@@ -1382,9 +1407,12 @@ bool composeDamageRegions(const MicaCompositorMetadataStore& metadata,
 }
 
 bool presentDamage(uint32_t screenWidth, const DamageSet& damage) noexcept {
-    for (size_t index = 0; index < damage.count; ++index)
-        if (!presentRegion(screenWidth, damage.regions[index])) return false;
-    return true;
+    if (!damage.count) return true;
+    // Diagnostic: submit the persistent complete frame after recomposing only
+    // the damaged regions to isolate the device's partial-present path.
+    return presentRegion(screenWidth,
+        {0, 0, static_cast<int32_t>(screenWidth),
+         static_cast<int32_t>(g_displayHeight)});
 }
 
 bool verifyWindowEffectsRasterizer() noexcept {

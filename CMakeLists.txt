@@ -397,6 +397,24 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
 
+    # LuceGlass carries only the private Liquid Glass descriptor contract.
+    # Win32k validates and publishes it; the software effect runs in compositor.
+    add_library(luceglass_boot SHARED EXCLUDE_FROM_ALL
+        tools/dlls/luceglass.cpp tools/dlls/luceglass.def)
+    target_include_directories(luceglass_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(luceglass_boot PRIVATE MICANT_NATIVE_USERMODE)
+    target_compile_options(luceglass_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -O2)
+    target_link_options(luceglass_boot PRIVATE
+        -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native)
+    target_link_libraries(luceglass_boot PRIVATE win32k_boot ntdll_boot)
+    set_target_properties(luceglass_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "luceglass"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+
     foreach(_client IN ITEMS user32 gdi32 imm32)
         string(TOUPPER "${_client}" _client_upper)
         add_library(${_client}_boot SHARED EXCLUDE_FROM_ALL
@@ -550,7 +568,8 @@ if (MICANT_ENABLE_BAREMETAL)
     )
     target_compile_definitions(explorer_boot PRIVATE MICANT_UXTHEME_IMPORTS)
     target_link_libraries(explorer_boot PRIVATE
-        user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot comctl32_boot)
+        user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot comctl32_boot
+        luceglass_boot)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
@@ -701,7 +720,8 @@ if (MICANT_ENABLE_BAREMETAL)
     )
     # The compositor is an independent, import-free Ring 3 image. Its shared
     # section views are installed by the kernel before either process starts.
-    add_executable(compositor_boot EXCLUDE_FROM_ALL tools/compositor_app.cpp)
+    add_executable(compositor_boot EXCLUDE_FROM_ALL
+        tools/compositor_app.cpp tools/liquid_glass_effect.cpp)
     target_compile_options(compositor_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
@@ -1035,7 +1055,7 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot uxtheme_boot
+        DEPENDS explorer_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot uxtheme_boot luceglass_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)
@@ -1078,7 +1098,7 @@ if(WIN32 OR MICANT_ENABLE_BAREMETAL)
     add_custom_target(micant_user_mode_boundary_check)
     foreach(_user_mode_variant IN ITEMS
         micant_win32k micant_user32 micant_gdi32 micant_imm32
-        kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot uxtheme_boot
+        kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot uxtheme_boot luceglass_boot
         imm32_boot explorer_boot explorer_runtime_boot
     )
         add_custom_target(micant_boundary_${_user_mode_variant}
