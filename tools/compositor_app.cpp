@@ -1821,6 +1821,39 @@ void addDamageRegion(DamageSet& damage, ScreenRect incoming,
     damage.regions[damage.count++] = incoming;
 }
 
+bool cursorVisible(const MicaCompositorCursorInfo& cursor) noexcept {
+    uint64_t requiredBytes{};
+    return (cursor.flags & (MICANT_COMPOSITOR_CURSOR_ACTIVE |
+                            MICANT_COMPOSITOR_CURSOR_VISIBLE)) ==
+               (MICANT_COMPOSITOR_CURSOR_ACTIVE |
+                MICANT_COMPOSITOR_CURSOR_VISIBLE) &&
+        cursor.hotX < cursor.width && cursor.hotY < cursor.height &&
+        cursor.pixelsAddress &&
+        requiredPixelBytes(cursor.width, cursor.height, cursor.pitch, requiredBytes) &&
+        requiredBytes <= cursor.pixelSizeBytes;
+}
+
+bool sameCursorState(const MicaCompositorCursorInfo& left,
+                     const MicaCompositorCursorInfo& right) noexcept {
+    return left.x == right.x && left.y == right.y &&
+        left.width == right.width && left.height == right.height &&
+        left.pitch == right.pitch && left.hotX == right.hotX &&
+        left.hotY == right.hotY && left.flags == right.flags &&
+        left.pixelsAddress == right.pixelsAddress &&
+        left.pixelSizeBytes == right.pixelSizeBytes;
+}
+
+void addCursorDamage(DamageSet& damage,
+                     const MicaCompositorCursorInfo& cursor,
+                     uint32_t screenWidth, uint32_t screenHeight) noexcept {
+    if (!cursorVisible(cursor)) return;
+    const int64_t left = static_cast<int64_t>(cursor.x) - cursor.hotX;
+    const int64_t top = static_cast<int64_t>(cursor.y) - cursor.hotY;
+    addDamageRegion(damage,
+        {left, top, left + cursor.width, top + cursor.height},
+        screenWidth, screenHeight);
+}
+
 uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
                                 const MicaCompositorSurfaceInfo& glassSurface,
                                 int64_t windowLeft, int64_t windowTop) noexcept {
@@ -2167,6 +2200,78 @@ bool verifyWindowEffectsRasterizer() noexcept {
     constexpr char cursorPassed[] =
         "[MicaNT Compositor] Cursor old/new partial repaint matches full composition\r\n";
     print(cursorPassed, sizeof(cursorPassed) - 1);
+
+    // Exercise the reported cursor/alpha artifact directly: a one-pixel line
+    // must be restored at its original row after a translucent cursor leaves.
+    auto& probeWindow = metadata.surfaces[1];
+    probeWindow.flags &= ~MICANT_COMPOSITOR_SURFACE_VISIBLE;
+    constexpr uint32_t lineSourceY = 50;
+    constexpr uint32_t lineSourceLeft = 20;
+    constexpr uint32_t lineSourceRight = 80;
+    constexpr uint32_t linePixel = 0xFF38A0E0u;
+    for (uint32_t x = lineSourceLeft; x < lineSourceRight; ++x)
+        g_effectProbePixels[static_cast<size_t>(lineSourceY) * 100u + x] = linePixel;
+    cursor.flags = 0;
+    if (!composeRegion(metadata, fullScreen, g_effectProbeAnimations, nullptr))
+        return false;
+    const uint32_t sampleX = 90u + 40u;
+    const uint32_t sampleY = 90u + lineSourceY;
+    const size_t lineSample = static_cast<size_t>(sampleY) * g_displayWidth + sampleX;
+    if (g_frame[lineSample] != linePixel) return false;
+
+    cursor.x = firstX;
+    cursor.y = firstY;
+    cursor.flags = MICANT_COMPOSITOR_CURSOR_ACTIVE |
+        MICANT_COMPOSITOR_CURSOR_VISIBLE;
+    if (!composeRegion(metadata, fullScreen, g_effectProbeAnimations, nullptr))
+        return false;
+    const uint32_t cursorSource = reinterpret_cast<const uint32_t*>(
+        cursor.pixelsAddress)[static_cast<size_t>(cursor.hotY) * cursor.pitch +
+                              cursor.hotX];
+    const uint32_t expectedCoveredPixel =
+        micant::shared::graphics::PremultipliedSourceOver(cursorSource, linePixel);
+    if (g_frame[lineSample] != expectedCoveredPixel) return false;
+
+    const auto oldCursor = cursor;
+    cursor.x = 145;
+    DamageSet lineDamage{};
+    addCursorDamage(lineDamage, oldCursor, g_displayWidth, g_displayHeight);
+    addCursorDamage(lineDamage, cursor, g_displayWidth, g_displayHeight);
+    if (!composeDamageRegions(metadata, g_effectProbeAnimations, nullptr,
+                              lineDamage)) return false;
+    for (uint32_t x = lineSourceLeft; x < lineSourceRight; ++x) {
+        if (x >= 53 && x < 60) continue; // The new cursor covers these pixels.
+        const size_t pixel = static_cast<size_t>(sampleY) * g_displayWidth + 90u + x;
+        if (g_frame[pixel] != linePixel) {
+            constexpr char message[] =
+                "[MicaNT Compositor] Cursor alpha restore shifted a one-pixel line\r\n";
+            print(message, sizeof(message) - 1);
+            return false;
+        }
+    }
+    const auto* lineUnderlay = reinterpret_cast<const uint32_t*>(
+        underlay.surfaceAddress);
+    const uint32_t nextRowPixel = lineUnderlay[
+        static_cast<size_t>(lineSourceY + 1u) * underlay.pitch + 40u];
+    if (g_frame[lineSample + g_displayWidth] != nextRowPixel) {
+        constexpr char message[] =
+            "[MicaNT Compositor] Cursor alpha restore left a shifted line pixel\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+    for (size_t index = 0; index <
+         static_cast<size_t>(g_displayWidth) * g_displayHeight; ++index)
+        g_windowBlurBackdrop[index] = g_frame[index];
+    if (!composeRegion(metadata, fullScreen, g_effectProbeAnimations, nullptr) ||
+        !frameMatches()) {
+        constexpr char message[] =
+            "[MicaNT Compositor] Cursor alpha line partial/full mismatch\r\n";
+        print(message, sizeof(message) - 1);
+        return false;
+    }
+    constexpr char alphaLinePassed[] =
+        "[MicaNT Compositor] Cursor alpha restores one-pixel line at original row\r\n";
+    print(alphaLinePassed, sizeof(alphaLinePassed) - 1);
     return true;
 }
 
@@ -2317,6 +2422,8 @@ extern "C" void _start() noexcept {
     }
     uint64_t previous = UINT64_MAX;
     uint64_t previousSurfaceSetFingerprint = UINT64_MAX;
+    MicaCompositorCursorInfo previousCursor{};
+    bool previousCursorPresented = false;
     bool metadataObserved = false;
     bool invalidHeaderReported = false;
     bool firstPresentationReported = false;
@@ -2521,6 +2628,15 @@ extern "C" void _start() noexcept {
                 addDamageRegion(damage, frame.damage[index],
                                 g_displayWidth, g_displayHeight);
         }
+        const bool cursorChanged = !previousCursorPresented ||
+            !sameCursorState(previousCursor, snapshot.cursor);
+        if (cursorChanged) {
+            addCursorDamage(damage, previousCursor,
+                            g_displayWidth, g_displayHeight);
+            addCursorDamage(damage, snapshot.cursor,
+                            g_displayWidth, g_displayHeight);
+            composed = true;
+        }
         if (surfaceSetChanged) {
             damage.count = 1;
             damage.regions[0] = {0, 0, g_displayWidth, g_displayHeight};
@@ -2636,8 +2752,13 @@ extern "C" void _start() noexcept {
 #endif
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence) {
             previous = sequence;
-            if (composed)
+            if (composed) {
                 previousSurfaceSetFingerprint = surfaceSetFingerprint;
+                if (frameWasPresented) {
+                    previousCursor = snapshot.cursor;
+                    previousCursorPresented = true;
+                }
+            }
             if (composed && !firstPresentationReported) {
                 constexpr char presented[] = "[MicaNT Compositor] First shared frame presented\r\n";
                 print(presented, sizeof(presented) - 1);

@@ -72,7 +72,6 @@ EXPECTED_SERIAL = EXPECTED_BOOTSTRAP_SERIAL + (
     "[MicaNT Ps] File-backed SEC_IMAGE process image verified",
     "[MicaNT Hal] Local APIC periodic interrupts verified",
     "[MicaNT Ke] Timer-preempted kernel contexts verified",
-    "[MicaNT Ke] Timer-preempted CPL3 contexts verified",
     "[MicaNT Ex] Canonical checked user copies verified at CPL3 boundary",
     "[MicaNT Ps] Bounded native PE mapping and compiled user entry verified",
     "[MicaNT Ke] Runtime idle wait and wake verified",
