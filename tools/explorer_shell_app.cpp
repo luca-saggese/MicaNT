@@ -2226,6 +2226,28 @@ void updateClock() noexcept {
         constexpr float tickLength = 5.6f * unit;
         constexpr float kTau = 6.28318530718f;
         constexpr float kPi = 3.14159265359f;
+        const auto sinCosClock = [kPi, kTau](float angle, float& sine,
+                                      float& cosine) noexcept {
+            while (angle > kPi) angle -= kTau;
+            while (angle < -kPi) angle += kTau;
+            float cosineSign = 1.0f;
+            if (angle > kPi * 0.5f) {
+                angle = kPi - angle;
+                cosineSign = -1.0f;
+            } else if (angle < -kPi * 0.5f) {
+                angle = -kPi - angle;
+                cosineSign = -1.0f;
+            }
+            const float angle2 = angle * angle;
+            const float angle3 = angle * angle2;
+            const float angle4 = angle2 * angle2;
+            const float angle5 = angle3 * angle2;
+            const float angle6 = angle4 * angle2;
+            const float angle7 = angle5 * angle2;
+            sine = angle - angle3 / 6.0f + angle5 / 120.0f - angle7 / 5040.0f;
+            cosine = cosineSign * (1.0f - angle2 / 2.0f + angle4 / 24.0f -
+                                    angle6 / 720.0f);
+        };
         const auto sqrtClock = [](float value) noexcept {
             if (value <= 0.0f) return 0.0f;
             float result = value > 1.0f ? value : 1.0f;
@@ -2242,11 +2264,10 @@ void updateClock() noexcept {
         // clock center, which made the face look broken.
         const float seconds = timeAvailable ? static_cast<float>(value.second) : 0.0f;
         for (uint32_t i = 0; i < 60; ++i) {
-            float angle = static_cast<float>(i) * kTau / 60.0f;
-            if (angle > kPi) angle -= kTau;
-            const float a2 = angle * angle;
-            const float dx = angle * (1.0f - a2 / 6.0f + a2 * a2 / 120.0f);
-            const float dy = -(1.0f - a2 / 2.0f + a2 * a2 / 24.0f);
+            const float angle = static_cast<float>(i) * kTau / 60.0f;
+            float dx{}, cosine{};
+            sinCosClock(angle, dx, cosine);
+            const float dy = -cosine;
             const float ax = dx < 0.0f ? -dx : dx;
             const float ay = dy < 0.0f ? -dy : dy;
             float distance = (ax > 1.0e-6f ? halfBoxWidth / ax : 1.0e9f);
