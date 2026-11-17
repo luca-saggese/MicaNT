@@ -6,6 +6,7 @@
 #include "micant/shared/user_syscall.hpp"
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/win32k_client.h"
+#include "micant/shared/system_information.h"
 #include "liquid_glass_effect.hpp"
 
 #include <stddef.h>
@@ -13,6 +14,11 @@
 
 #ifndef MICANT_COMPOSITOR_LOCAL_STATS
 #define MICANT_COMPOSITOR_LOCAL_STATS 0
+#endif
+
+// Set to 0 (or pass -DMICANT_COMPOSITOR_DEBUG_HUD=0) to disable the HUD.
+#ifndef MICANT_COMPOSITOR_DEBUG_HUD
+#define MICANT_COMPOSITOR_DEBUG_HUD 1
 #endif
 
 extern "C" void* memset(void* destination, int value, size_t count) {
@@ -303,6 +309,139 @@ uint64_t performanceMilliseconds() noexcept {
     const uint64_t rate = static_cast<uint64_t>(frequency.quadPart);
     return (ticks / rate) * 1000u + ((ticks % rate) * 1000u) / rate;
 }
+
+#if MICANT_COMPOSITOR_DEBUG_HUD
+void appendPerformanceValue(char*& cursor, uint64_t value) noexcept;
+constexpr uint32_t kSystemProcessorPerformanceInformation = 8;
+constexpr uint64_t kNtQuerySystemInformationService = 0x36;
+constexpr uint32_t kHudWidth = 400;
+constexpr uint32_t kHudHeight = 48;
+constexpr uint64_t kHudRefreshMilliseconds = 250;
+uint64_t g_hudLastRefresh{};
+uint64_t g_hudLastFpsSample{};
+uint64_t g_hudFrames{};
+uint64_t g_hudFps{};
+uint64_t g_hudCpuKernel{}, g_hudCpuUser{}, g_hudCpuIdle{};
+uint32_t g_hudCpuPercent{};
+bool g_hudCpuValid{};
+uint64_t g_hudMemoryBytes{};
+bool g_hudMemoryValid{}, g_hudCursorValid{};
+int32_t g_hudMouseX{}, g_hudMouseY{};
+
+void refreshHudMetrics(uint64_t now) noexcept {
+    if (g_hudLastFpsSample && now > g_hudLastFpsSample) {
+        g_hudFps = (g_hudFrames * 1000u) / (now - g_hudLastFpsSample);
+        g_hudFrames = 0;
+    }
+    g_hudLastFpsSample = now;
+
+    micant::SystemProcessorPerformanceInformation cpu{};
+    const auto cpuStatus = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        kNtQuerySystemInformationService, kSystemProcessorPerformanceInformation,
+        reinterpret_cast<uint64_t>(&cpu), sizeof(cpu), 0));
+    if (cpuStatus == 0 && cpu.KernelTime >= 0 && cpu.UserTime >= 0 && cpu.IdleTime >= 0) {
+        const uint64_t kernel = static_cast<uint64_t>(cpu.KernelTime);
+        const uint64_t user = static_cast<uint64_t>(cpu.UserTime);
+        const uint64_t idle = static_cast<uint64_t>(cpu.IdleTime);
+        if ((g_hudCpuKernel || g_hudCpuUser) && kernel >= g_hudCpuKernel &&
+            user >= g_hudCpuUser && idle >= g_hudCpuIdle) {
+            const uint64_t kernelDelta = kernel - g_hudCpuKernel;
+            const uint64_t userDelta = user - g_hudCpuUser;
+            const uint64_t idleDelta = idle - g_hudCpuIdle;
+            const uint64_t total = kernelDelta + userDelta;
+            const uint64_t busy = total >= idleDelta ? total - idleDelta : 0;
+            g_hudCpuPercent = total ? static_cast<uint32_t>(
+                (busy * 100u + total / 2u) / total) : 0;
+        }
+        g_hudCpuKernel = kernel; g_hudCpuUser = user; g_hudCpuIdle = idle;
+        g_hudCpuValid = true;
+    } else {
+        g_hudCpuValid = false;
+    }
+}
+
+void hudAppend(char*& cursor, uint64_t value) noexcept {
+    appendPerformanceValue(cursor, value);
+}
+
+void drawHud(uint64_t totalMemoryBytes, bool memoryValid,
+             bool cursorValid, int32_t mouseX, int32_t mouseY) noexcept {
+    const uint32_t width = g_displayWidth < kHudWidth ? g_displayWidth : kHudWidth;
+    const uint32_t height = g_displayHeight < kHudHeight ? g_displayHeight : kHudHeight;
+    if (!width || !height) return;
+    const uint32_t left = g_displayWidth - width;
+    constexpr uint32_t background = 0xE8202733u;
+    constexpr uint32_t foreground = 0xFFF3F6FAu;
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            g_frame[static_cast<size_t>(y) * g_displayWidth + left + x] = background;
+
+    char line[96]{};
+    char* cursor = line;
+    const auto append = [&cursor](const char* text) noexcept {
+        while (*text) *cursor++ = *text++;
+    };
+    append("FPS "); hudAppend(cursor, g_hudFps);
+    append("   CPU ");
+    if (g_hudCpuValid) { hudAppend(cursor, g_hudCpuPercent); append("%"); }
+    else append("N/A");
+    *cursor = 0;
+    auto drawText = [&](const char* text, uint32_t x, uint32_t y) noexcept {
+        for (; *text; ++text, x += 8) {
+            const unsigned char ch = static_cast<unsigned char>(*text);
+            if (ch < 32 || ch > 126) continue;
+            const uint8_t* glyph = micant::shared::FONT_8X8[ch - 32];
+            for (uint32_t row = 0; row < 8 && y + row < height; ++row)
+                for (uint32_t col = 0; col < 8 && x + col < width; ++col)
+                    if (glyph[row] & (0x80u >> col))
+                        g_frame[static_cast<size_t>(y + row) * g_displayWidth + left + x + col] = foreground;
+        }
+    };
+    drawText(line, 8, 7);
+    cursor = line;
+    append("RAM TOTAL ");
+    if (memoryValid) {
+        hudAppend(cursor, totalMemoryBytes / (1024u * 1024u));
+        append(" MB");
+    } else append("N/A");
+    append("   MOUSE ");
+    if (cursorValid) {
+        if (mouseX < 0) *cursor++ = '-';
+        hudAppend(cursor, static_cast<uint64_t>(mouseX < 0 ? -static_cast<int64_t>(mouseX) : mouseX));
+        append(",");
+        if (mouseY < 0) *cursor++ = '-';
+        hudAppend(cursor, static_cast<uint64_t>(mouseY < 0 ? -static_cast<int64_t>(mouseY) : mouseY));
+    } else append("N/A");
+    *cursor = 0;
+    drawText(line, 8, 27);
+}
+
+void updateHud(uint64_t now) noexcept {
+    refreshHudMetrics(now);
+    micant::SystemMemoryAccountingInformation memory{};
+    const auto memoryStatus = static_cast<uint32_t>(micant::sys::invokeUserService4(
+        kNtQuerySystemInformationService, micant::SystemMemoryAccountingInformationClass,
+        reinterpret_cast<uint64_t>(&memory), sizeof(memory), 0));
+    const bool memoryValid = memoryStatus == 0 &&
+        memory.version == micant::SystemMemoryAccountingVersion &&
+        (memory.availability & micant::SystemMemoryManagedAvailable) &&
+        memory.managedPages <= UINT64_MAX / 4096u;
+    MicaWin32kRequest request{};
+    request.size = sizeof(request);
+    request.version = MICANT_WIN32K_REQUEST_VERSION;
+    request.operation = MICANT_WIN32K_OP_GET_CURSOR_POS;
+    const bool cursorValid = micant::sys::invokeUserService(0x86,
+        reinterpret_cast<uint64_t>(&request)) == 0 && request.result != 0;
+    g_hudMemoryBytes = memory.managedPages * 4096u;
+    g_hudMemoryValid = memoryValid;
+    g_hudCursorValid = cursorValid;
+    g_hudMouseX = request.rect.left;
+    g_hudMouseY = request.rect.top;
+    drawHud(g_hudMemoryBytes, g_hudMemoryValid, g_hudCursorValid,
+            g_hudMouseX, g_hudMouseY);
+    g_hudLastRefresh = now;
+}
+#endif
 
 void appendPerformanceValue(char*& cursor, uint64_t value) noexcept {
     char digits[20]{};
@@ -1810,8 +1949,22 @@ extern "C" void _start() noexcept {
             animationDamagePending |= frame.damageCount != 0;
         }
         const bool newMetadata = sequence != previous;
-        if (!newMetadata && !animationDamagePending) {
+        const uint64_t hudNow = performanceMilliseconds();
+#if MICANT_COMPOSITOR_DEBUG_HUD
+        const bool hudDue = !g_hudLastRefresh ||
+            (hudNow >= g_hudLastRefresh &&
+             hudNow - g_hudLastRefresh >= kHudRefreshMilliseconds);
+#else
+        constexpr bool hudDue = false;
+#endif
+        if (!newMetadata && !animationDamagePending && !hudDue) {
+#if MICANT_COMPOSITOR_DEBUG_HUD
+            const uint64_t remaining = kHudRefreshMilliseconds -
+                (hudNow >= g_hudLastRefresh ? hudNow - g_hudLastRefresh : 0);
+            waitForUpdate(sequence, remaining * 10000u);
+#else
             waitForUpdate(sequence);
+#endif
             continue;
         }
         bool surfaceWriteInProgress = false;
@@ -1873,6 +2026,18 @@ extern "C" void _start() noexcept {
                 addDamageRegion(damage, frame.damage[index],
                                 g_displayWidth, g_displayHeight);
         }
+#if MICANT_COMPOSITOR_DEBUG_HUD
+        if (hudDue) {
+            const int32_t hudLeft = static_cast<int32_t>(g_displayWidth > kHudWidth
+                ? g_displayWidth - kHudWidth : 0);
+            addDamageRegion(damage,
+                {hudLeft, 0, static_cast<int32_t>(g_displayWidth),
+                 static_cast<int32_t>(g_displayHeight < kHudHeight
+                    ? g_displayHeight : kHudHeight)},
+                g_displayWidth, g_displayHeight);
+            composed = true;
+        }
+#endif
         if (surfaceSetChanged) {
             damage.count = 1;
             damage.regions[0] = {0, 0, g_displayWidth, g_displayHeight};
@@ -1886,6 +2051,13 @@ extern "C" void _start() noexcept {
 #endif
             composed = composeDamageRegions(snapshot, animationFrames,
                                              decorPixels, damage);
+#if MICANT_COMPOSITOR_DEBUG_HUD
+            if (composed) {
+                if (hudDue) updateHud(hudNow);
+                else drawHud(g_hudMemoryBytes, g_hudMemoryValid,
+                            g_hudCursorValid, g_hudMouseX, g_hudMouseY);
+            }
+#endif
 #if MICANT_COMPOSITOR_LOCAL_STATS
             const uint64_t composeEnd = performanceMilliseconds();
             if (composeEnd >= composeStart)
@@ -1914,6 +2086,13 @@ extern "C" void _start() noexcept {
 #endif
             composed = composeRegion(snapshot, fullScreen, animationFrames,
                                      decorPixels);
+#if MICANT_COMPOSITOR_DEBUG_HUD
+            if (composed) {
+                if (hudDue) updateHud(hudNow);
+                drawHud(g_hudMemoryBytes, g_hudMemoryValid, g_hudCursorValid,
+                        g_hudMouseX, g_hudMouseY);
+            }
+#endif
 #if MICANT_COMPOSITOR_LOCAL_STATS
             const uint64_t composeEnd = performanceMilliseconds();
             if (composeEnd >= composeStart)
@@ -1944,6 +2123,9 @@ extern "C" void _start() noexcept {
                 firstPresentationReported = true;
             }
             if (composed) {
+#if MICANT_COMPOSITOR_DEBUG_HUD
+                ++g_hudFrames;
+#endif
 #if MICANT_COMPOSITOR_LOCAL_STATS
                 const uint64_t screenPixels =
                     static_cast<uint64_t>(g_displayWidth) * g_displayHeight;
