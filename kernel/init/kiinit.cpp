@@ -64,6 +64,8 @@ void DebugValidateInputQueues(const char* stage) noexcept;
 extern "C" const unsigned char __ImageBase;
 extern "C" void MicantRenderFatalScreen(const char*, const char*, uint64_t,
                                         uint64_t, uint64_t, uint64_t) noexcept;
+extern "C" void MicantRenderBootStatus(const char*) noexcept;
+extern "C" void MicantRenderEarlyBootStatus(const char*) noexcept;
 
 namespace micant::tcpip::kernel_api {
 bool hasAdapter() noexcept { return NetworkStack::get().hasAdapter(); }
@@ -171,6 +173,71 @@ micant::boot_driver::DisplayDevice g_display{};
 micant::boot_driver::DriverObject g_displayDriver{};
 micant::boot::KernelFramebufferV1 g_bootFramebufferInfo{};
 bool g_bootstrapAddressSpaceReady{};
+constexpr size_t kSerialHistoryCapacity = 2048;
+std::atomic<uint64_t> g_serialHistorySequence{};
+std::atomic<uint8_t> g_serialHistory[kSerialHistoryCapacity]{};
+char g_lastBootStatus[128]{};
+
+void rememberBootStatus(const char* message) noexcept {
+    if (!message) return;
+    size_t index{};
+    while (message[index] && index + 1 < sizeof(g_lastBootStatus)) {
+        g_lastBootStatus[index] = message[index];
+        ++index;
+    }
+    g_lastBootStatus[index] = '\0';
+}
+
+void rememberSerialByte(uint8_t value) noexcept {
+    const uint64_t sequence = g_serialHistorySequence.fetch_add(1, std::memory_order_relaxed);
+    g_serialHistory[sequence % kSerialHistoryCapacity].store(value, std::memory_order_relaxed);
+}
+
+void renderSerialHistory(micant::bootvid::BootVideoDriver& video,
+                         uint32_t top, uint32_t maxLines) noexcept {
+    constexpr size_t lineCapacity = 81;
+    constexpr size_t historyLines = 7;
+    char lines[historyLines][lineCapacity]{};
+    size_t lineCount{};
+    const uint64_t end = g_serialHistorySequence.load(std::memory_order_acquire);
+    const uint64_t historyBegin = end > kSerialHistoryCapacity
+        ? end - kSerialHistoryCapacity : 0;
+    uint64_t scanEnd = end;
+
+    while (scanEnd > historyBegin && lineCount < historyLines) {
+        while (scanEnd > historyBegin) {
+            const uint8_t ch = g_serialHistory[(scanEnd - 1) % kSerialHistoryCapacity]
+                .load(std::memory_order_relaxed);
+            if (ch != '\r' && ch != '\n') break;
+            --scanEnd;
+        }
+        if (scanEnd <= historyBegin) break;
+        const uint64_t lineEnd = scanEnd;
+        while (scanEnd > historyBegin) {
+            const uint8_t ch = g_serialHistory[(scanEnd - 1) % kSerialHistoryCapacity]
+                .load(std::memory_order_relaxed);
+            if (ch == '\n') break;
+            --scanEnd;
+        }
+        const uint64_t lineStart = scanEnd;
+        const size_t length = static_cast<size_t>(lineEnd - lineStart);
+        const size_t copyLength = length < lineCapacity - 1 ? length : lineCapacity - 1;
+        for (size_t index = 0; index < copyLength; ++index) {
+            lines[lineCount][index] = static_cast<char>(g_serialHistory[
+                (lineStart + index) % kSerialHistoryCapacity].load(std::memory_order_relaxed));
+        }
+        lines[lineCount][copyLength] = '\0';
+        ++lineCount;
+    }
+
+    if (lineCount > maxLines) lineCount = maxLines;
+    const auto pale = micant::bootvid::Color{225, 240, 255};
+    for (size_t index = 0; index < lineCount; ++index) {
+        const size_t reverseIndex = lineCount - index - 1;
+        video.drawString(48, top + static_cast<uint32_t>(index) * 18,
+                         lines[reverseIndex], pale);
+    }
+}
 struct GopDisplayContext {
     volatile uint32_t* Pixels{};
     uint32_t Width{};
@@ -350,6 +417,7 @@ void serialInitialize() noexcept {
 
 void serialWrite(const char* text) noexcept {
     for (size_t i = 0; text[i] != '\0'; ++i) {
+        rememberSerialByte(static_cast<uint8_t>(text[i]));
         for (uint32_t wait = 0; wait < 1000000; ++wait) {
             if (readPort(0x3FD) & 0x20) break;
             __asm__ __volatile__("pause");
@@ -359,6 +427,7 @@ void serialWrite(const char* text) noexcept {
 }
 
 void serialWriteChar(char value) noexcept {
+    rememberSerialByte(static_cast<uint8_t>(value));
     for (uint32_t wait = 0; wait < 1000000; ++wait) {
         if (readPort(0x3FD) & 0x20) break;
         __asm__ __volatile__("pause");
@@ -368,6 +437,24 @@ void serialWriteChar(char value) noexcept {
 
 [[noreturn]] void stopWithError(const char* message) noexcept {
     serialWrite(message);
+    uint64_t activeCr3{};
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(activeCr3));
+    micant::ke::CrashRecord evidence{};
+    micant::ke::captureCrashRecord(evidence, 0x100000F0u,
+        activeCr3, 0, 0, 0, nullptr);
+    const bool persisted = micant::ke::persistCrashRecord(evidence);
+    serialWrite("[LuceOS Crash] Boot failure checkpoint: ");
+    serialWrite(g_lastBootStatus[0] ? g_lastBootStatus : "unavailable");
+    serialWrite("\r\n[LuceOS Crash] RIP=");
+    serialWriteNumber(evidence.rip);
+    serialWrite(" RSP=");
+    serialWriteNumber(evidence.rsp);
+    serialWrite(" CR2=");
+    serialWriteNumber(evidence.cr2);
+    serialWrite(" CR3=");
+    serialWriteNumber(activeCr3);
+    serialWrite("\r\n[LuceOS Crash] persistent dump committed=");
+    serialWrite(persisted ? "1\r\n" : "0 (backend unavailable or write failed)\r\n");
     MicantRenderFatalScreen("KERNEL STOPPED DURING BOOT", message, 0, 0, 0, 0);
     for (;;) {
         __asm__ __volatile__("cli; hlt");
@@ -5231,11 +5318,13 @@ void pollKeyboardInput() noexcept {
         serialWrite("[MicaNT Ke] Runtime scheduler clock ticking\r\n");
     }
     serialWrite("[MicaNT Explorer] Kernel idle loop entered\r\n");
+    MicantRenderBootStatus("Starting compositor process...");
     if (!initializeCompositorSections())
         stopWithError("[MicaNT Compositor] Shared sections failed\r\n");
     serialWrite("[MicaNT Compositor] Shared sections ready\r\n");
     if (!launchCompositorProcess())
         stopWithError("[MicaNT Compositor] Ring 3 launch failed\r\n");
+    MicantRenderBootStatus("Compositor started; waiting for its first frame...");
     serialWrite("[MicaNT Compositor] Ring 3 process started\r\n");
     micant::win32k::freestanding::initializeCursorPosition(
         static_cast<int32_t>(g_display.Width / 2u),
@@ -5243,11 +5332,14 @@ void pollKeyboardInput() noexcept {
     publishCompositorSurfacesInCompositorSpace();
     if (!waitForCompositorPresentation(clockActive ? 1000u : 0u))
         stopWithError("[MicaNT Compositor] Initial cursor frame timed out\r\n");
+    MicantRenderBootStatus("Compositor frame visible; starting Explorer...");
     serialWrite("[MicaNT Win32k] Cursor presented before Explorer startup\r\n");
     if (!launchExplorerProcess())
         stopWithError("[MicaNT Explorer] Ring 3 process launch failed\r\n");
+    MicantRenderBootStatus("Explorer started; waiting for desktop presentation...");
     if (!waitForExplorerDesktopPresentation(clockActive ? 8000u : 0u))
         stopWithError("[MicaNT Explorer] Desktop presentation timed out\r\n");
+    MicantRenderBootStatus("Desktop presented; continuing shell startup...");
     serialWrite("[MicaNT Explorer] Visible desktop presented; shell startup continues\r\n");
 #if defined(MICANT_BOOTSTRAP_THEME_TEST)
     serialWrite("[MicaNT ThemeTest] Launching dedicated control test app\r\n");
@@ -5333,8 +5425,42 @@ extern "C" void MicantBootstrapWakeKernelMonitor() noexcept {
 extern "C" void MicantRenderFatalScreen(const char* title, const char* detail,
                                          uint64_t stopCode, uint64_t vector,
                                          uint64_t rip, uint64_t faultAddress) noexcept {
-    if (!g_bootstrapAddressSpaceReady || !g_bootFramebufferInfo.physicalBase ||
-        !g_bootFramebufferInfo.size) return;
+    if (!g_bootFramebufferInfo.physicalBase || !g_bootFramebufferInfo.size) return;
+    if (!g_bootstrapAddressSpaceReady) {
+        const auto& info = g_bootFramebufferInfo;
+        if (info.width < 320 || info.height < 200 ||
+            info.pixelsPerScanLine < info.width || info.pixelFormat > 1 ||
+            info.physicalBase > UINT64_MAX - info.size) return;
+        const uint64_t rowBytes = static_cast<uint64_t>(info.pixelsPerScanLine) * 4;
+        if (!rowBytes || info.height > info.size / rowBytes) return;
+        micant::bootvid::BootVideoDriver earlyVideo;
+        const micant::boot::FramebufferDescriptor earlyFramebuffer{
+            .physicalBase = info.physicalBase,
+            .size = info.size,
+            .width = info.width,
+            .height = info.height,
+            .pixelsPerScanLine = info.pixelsPerScanLine,
+            .pixelFormat = info.pixelFormat,
+        };
+        if (!earlyVideo.initialize(earlyFramebuffer)) return;
+        earlyVideo.clear(micant::bootvid::Color{0, 120, 215});
+        const auto white = micant::bootvid::Color::white();
+        const auto pale = micant::bootvid::Color{225, 240, 255};
+        earlyVideo.drawString(48, 48, ":(", white,
+                              micant::bootvid::Color::transparent(), 4);
+        earlyVideo.drawString(48, 100, title ? title : "KERNEL FATAL ERROR", white,
+                              micant::bootvid::Color::transparent(), 2);
+        earlyVideo.drawString(48, 148, "The system stopped during early kernel startup.", pale);
+        if (detail) earlyVideo.drawString(48, 180, detail, pale);
+        earlyVideo.drawString(48, 216, "Last boot checkpoint:", pale);
+        earlyVideo.drawString(48, 238,
+            g_lastBootStatus[0] ? g_lastBootStatus : "not recorded", pale);
+        earlyVideo.drawString(48, 270, "Recent serial output:", white);
+        renderSerialHistory(earlyVideo, 294, 7);
+        earlyVideo.drawString(48, 440,
+            "Persistent dump status is included in the serial lines above.", pale);
+        return;
+    }
     static std::atomic_flag rendered = ATOMIC_FLAG_INIT;
     if (rendered.test_and_set(std::memory_order_acq_rel)) return;
     if (!initializeGopFramebuffer(g_bootFramebufferInfo, false)) {
@@ -5395,6 +5521,32 @@ extern "C" void MicantRenderFatalScreen(const char* title, const char* detail,
     }
     video.drawString(48, 336, "Technical details were sent to the serial log.", pale);
     video.drawString(48, 360, "Power off or restart the computer.", pale);
+    video.drawString(48, 400, "Recent serial output:", white);
+    renderSerialHistory(video, 424, 7);
+}
+
+extern "C" void MicantRenderBootStatus(const char* message) noexcept {
+    if (!message) return;
+    rememberBootStatus(message);
+    if (!g_bootstrapAddressSpaceReady || !g_gopDisplayContext.Pixels ||
+        !g_gopDisplayContext.Width || !g_gopDisplayContext.Height) return;
+    micant::bootvid::BootVideoDriver video;
+    const micant::boot::FramebufferDescriptor framebuffer{
+        .physicalBase = reinterpret_cast<uintptr_t>(g_gopDisplayContext.Pixels),
+        .size = g_gopDisplayContext.ByteSize,
+        .width = g_gopDisplayContext.Width,
+        .height = g_gopDisplayContext.Height,
+        .pixelsPerScanLine = g_gopDisplayContext.Pitch,
+        .pixelFormat = g_gopDisplayContext.PixelFormat,
+    };
+    if (!video.initialize(framebuffer)) return;
+    constexpr uint32_t lineHeight = 28;
+    if (video.getHeight() < lineHeight || video.getWidth() < 80) return;
+    const uint32_t y = video.getHeight() - lineHeight;
+    const micant::bootvid::Color background{10, 14, 22};
+    video.fillRectangle(0, y, video.getWidth(), lineHeight, background);
+    video.drawString(12, y + 8, message, micant::bootvid::Color{255, 230, 120},
+                     background, 1);
 }
 
 namespace {
@@ -5437,15 +5589,78 @@ bool popBootstrapPs2KeyboardByte(uint8_t& byte, bool& lost) noexcept {
 }
 
 #if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
+extern "C" __attribute__((used, noinline)) void MicantEarlyKernelEntryMarker(
+    const micant::boot::UefiKernelHandoffV3* handoff) noexcept {
+    if (!handoff) return;
+    const auto& framebuffer = handoff->framebuffer;
+    if (!framebuffer.physicalBase || framebuffer.width < 320 ||
+        framebuffer.height < 200 || framebuffer.pixelsPerScanLine < framebuffer.width ||
+        framebuffer.pixelFormat > 1 || framebuffer.size > UINT64_MAX - framebuffer.physicalBase) return;
+    const uint64_t rowBytes = static_cast<uint64_t>(framebuffer.pixelsPerScanLine) * 4;
+    if (!rowBytes || framebuffer.height > framebuffer.size / rowBytes) return;
+
+    micant::bootvid::BootVideoDriver video;
+    const micant::boot::FramebufferDescriptor descriptor{
+        .physicalBase = framebuffer.physicalBase,
+        .size = framebuffer.size,
+        .width = framebuffer.width,
+        .height = framebuffer.height,
+        .pixelsPerScanLine = framebuffer.pixelsPerScanLine,
+        .pixelFormat = framebuffer.pixelFormat,
+    };
+    if (!video.initialize(descriptor)) return;
+    constexpr micant::bootvid::Color background{10, 14, 22};
+    const uint32_t y = video.getHeight() - 30;
+    video.fillRectangle(0, y, video.getWidth(), 30, background);
+    video.drawString(12, y + 8, "Kernel entry reached; initializing page tables...",
+        micant::bootvid::Color{255, 230, 120}, background, 1);
+}
+
+extern "C" void MicantRenderEarlyBootStatus(const char* message) noexcept {
+    if (!message) return;
+    rememberBootStatus(message);
+    serialWrite("[MicaNT Boot] ");
+    serialWrite(message);
+    serialWrite("\r\n");
+    if (!g_bootFramebufferInfo.physicalBase ||
+        g_bootFramebufferInfo.width < 320 || g_bootFramebufferInfo.height < 200 ||
+        g_bootFramebufferInfo.pixelsPerScanLine < g_bootFramebufferInfo.width ||
+        g_bootFramebufferInfo.pixelFormat > 1 ||
+        g_bootFramebufferInfo.physicalBase > UINT64_MAX - g_bootFramebufferInfo.size) return;
+    const uint64_t rowBytes = static_cast<uint64_t>(
+        g_bootFramebufferInfo.pixelsPerScanLine) * 4;
+    if (!rowBytes || g_bootFramebufferInfo.height >
+        g_bootFramebufferInfo.size / rowBytes) return;
+
+    micant::bootvid::BootVideoDriver video;
+    const micant::boot::FramebufferDescriptor descriptor{
+        .physicalBase = g_bootFramebufferInfo.physicalBase,
+        .size = g_bootFramebufferInfo.size,
+        .width = g_bootFramebufferInfo.width,
+        .height = g_bootFramebufferInfo.height,
+        .pixelsPerScanLine = g_bootFramebufferInfo.pixelsPerScanLine,
+        .pixelFormat = g_bootFramebufferInfo.pixelFormat,
+    };
+    if (!video.initialize(descriptor)) return;
+    constexpr micant::bootvid::Color background{10, 14, 22};
+    const uint32_t y = video.getHeight() - 30;
+    video.fillRectangle(0, y, video.getWidth(), 30, background);
+    video.drawString(12, y + 8, message,
+        micant::bootvid::Color{255, 230, 120}, background, 1);
+}
+
 extern "C" __attribute__((naked)) micant::NtStatus KiSystemStartup(
     const micant::boot::UefiKernelHandoffV3*) noexcept {
     __asm__ __volatile__(
         "cli\nleaq MicantBootstrapMainStack+131072(%rip), %rsp\n"
-        "andq $-16, %rsp\nsubq $32, %rsp\ncallq MicantKiSystemStartupBody\n"
+        "andq $-16, %rsp\nsubq $48, %rsp\nmovq %rcx, 32(%rsp)\n"
+        "callq MicantEarlyKernelEntryMarker\nmovq 32(%rsp), %rcx\n"
+        "callq MicantKiSystemStartupBody\n"
         "1: cli\nhlt\njmp 1b\n");
 }
 extern "C" micant::NtStatus MicantKiSystemStartupBody(
 #else
+extern "C" void MicantRenderEarlyBootStatus(const char*) noexcept {}
 extern "C" micant::NtStatus KiSystemStartup(
 #endif
     const micant::boot::UefiKernelHandoffV3* handoff
@@ -5464,6 +5679,8 @@ extern "C" micant::NtStatus KiSystemStartup(
         stopWithError("[MicaNT] Bootstrap address-space initialization failed\r\n");
     }
     g_bootstrapAddressSpaceReady = true;
+    (void)initializeGopFramebuffer(g_bootFramebufferInfo, false);
+    MicantRenderBootStatus("Kernel entry reached; kernel page tables are active.");
     serialWrite("[MicaNT] Kernel-owned page-table root active\r\n");
     if (handoff->userImageFile.size &&
         !micant::hal::amd64::bootstrapKernelRange(
@@ -5473,7 +5690,9 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!micant::mm::detail::initializeBootstrapProbes(probeBootstrapRange)) {
         stopWithError("[MicaNT Ex] Bootstrap probe binding failed\r\n");
     }
+    MicantRenderBootStatus("Initializing physical-page database...");
     initializePhysicalMemory(*handoff);
+    MicantRenderBootStatus("Physical-page database initialized.");
     static micant::hal::amd64::BootstrapInterruptTopology interruptTopology{};
     if (micant::hal::amd64::discoverBootstrapInterruptTopology(*handoff, interruptTopology))
         serialWrite("[MicaNT Hal] ACPI interrupt topology discovered\r\n");
@@ -5491,6 +5710,7 @@ extern "C" micant::NtStatus KiSystemStartup(
         !micant::ex::verifyBootstrapRuntime()) {
         stopWithError("[MicaNT Ex] Bootstrap runtime verification failed\r\n");
     }
+    MicantRenderBootStatus("Kernel memory and C++ runtime initialized.");
     serialWrite("[MicaNT Ex] Canonical page-backed C and C++ allocation verified\r\n");
     if (!MicantTestPartitionTables())
         stopWithError("[MicaNT Storage] MBR/GPT validation failed\r\n");
@@ -5532,6 +5752,7 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!micant::ex::initializeBootstrapCxxRuntime()) {
         stopWithError("[MicaNT Ex] Kernel C++ initialization failed\r\n");
     }
+    MicantRenderBootStatus("Initializing I/O, filesystem, and process services...");
     serialWrite("[MicaNT Ex] Kernel C++ constructors dispatched\r\n");
 #if defined(MICANT_KERNEL_CXX_LIFECYCLE_SELFTEST)
     if (!micant::ex::test::verifyCxxAfterInitialization() ||
@@ -5573,6 +5794,7 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!verifyKernelObjectHandles()) {
         stopWithError("[MicaNT Ob] Kernel handle verification failed\r\n");
     }
+    MicantRenderBootStatus("Core executive services initialized.");
     serialWrite("[MicaNT Ob] Canonical kernel handle storage and references verified\r\n");
     if (!MicantTestObOpenAccess()) {
         const uint32_t stage = MicantObOpenAccessFailureStage();

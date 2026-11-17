@@ -24,6 +24,7 @@ extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
 extern "C" void MicantBootstrapWakeKernelMonitor() noexcept;
 extern "C" void MicantRenderFatalScreen(const char*, const char*, uint64_t,
                                          uint64_t, uint64_t, uint64_t) noexcept;
+extern "C" void MicantRenderEarlyBootStatus(const char*) noexcept;
 
 #if defined(MICANT_BOOTSTRAP_CMD_TEST)
 namespace micant::km::hid {
@@ -96,10 +97,12 @@ constexpr uint64_t kGuardLeaf = uint64_t{1} << 10;
 constexpr uint64_t kNoAccessLeaf = uint64_t{1} << 11;
 constexpr uint64_t kUserBase = uint64_t{128} << 39;
 constexpr uint64_t kUserTebBase = kUserBase + 0x8000;
-// Slot 128 remains the user TEB range. Slot 127 is supervisor-only and is
-// outside the process VAD arena (133–255), so it can alias managed PFNs.
-constexpr uint64_t kManagedPhysicalAliasBase = uint64_t{127} << 39;
+// Slot 128 remains the user TEB range. The managed-PFN alias uses a free
+// PML4 slot when possible, or shares the HAL-owned physical scratch slot.
+uint16_t g_managedPhysicalAliasPml4Index{127};
+uint64_t g_managedPhysicalAliasBase{uint64_t{127} << 39};
 constexpr uint64_t kManagedPhysicalAliasSize = uint64_t{1} << 39;
+uint64_t g_managedPhysicalAliasSize{kManagedPhysicalAliasSize};
 constexpr uint64_t kDeviceBase = uint64_t{129} << 39;
 constexpr uint64_t kPhysicalAccessBase = uint64_t{132} << 39;
 // Slot 129 is a supervisor-only kernel mapping. Keep one page at its base
@@ -117,6 +120,9 @@ constexpr uint64_t kKuserRootAlias = kKuserKernelAlias + 4096;
 constexpr uint64_t kUserStackBase = kUserBase + 4096;
 alignas(4096) uint64_t g_pml4[512]{};
 alignas(4096) uint64_t g_physicalAccessTables[3][512]{};
+uint64_t g_physicalAccessPdptPhysical{};
+uint64_t g_physicalAccessPdPhysical{};
+uint64_t g_physicalAccessPtPhysical{};
 std::atomic_flag g_physicalAccessLock = ATOMIC_FLAG_INIT;
 uint64_t g_physicalAccessSavedFlags{};
 uint64_t g_deviceNext = kDeviceBase + 4096;
@@ -271,15 +277,20 @@ volatile bool g_managedFaultArmed{};
 volatile bool g_managedFaultObserved{};
 
 bool managedPhysicalAliasMaps(uint64_t physical) noexcept {
-    if (!g_managedPhysicalAliasReady || physical >= kManagedPhysicalAliasSize ||
+    if (!g_managedPhysicalAliasReady || !g_managedPhysicalAliasPml4Index ||
+        physical >= g_managedPhysicalAliasSize ||
         !g_managedPhysicalAliasPdptPhysical) return false;
-    const uint64_t virtualAddress = kManagedPhysicalAliasBase + physical;
+    const uint64_t virtualAddress = g_managedPhysicalAliasBase + physical;
     const auto* pdpt = reinterpret_cast<const uint64_t*>(g_managedPhysicalAliasPdptPhysical);
     const uint64_t pdptEntry = pdpt[(virtualAddress >> 30) & 511];
-    if (!(pdptEntry & kPresent) || !(pdptEntry & kOwnedTable)) return false;
+    if (!(pdptEntry & kPresent) ||
+        (!(pdptEntry & kOwnedTable) &&
+         (pdptEntry & kPhysicalMask) != g_physicalAccessPdPhysical)) return false;
     const auto* pd = reinterpret_cast<const uint64_t*>(pdptEntry & kPhysicalMask);
     const uint64_t pdEntry = pd[(virtualAddress >> 21) & 511];
-    if (!(pdEntry & kPresent) || !(pdEntry & kOwnedTable)) return false;
+    if (!(pdEntry & kPresent) ||
+        (!(pdEntry & kOwnedTable) &&
+         (pdEntry & kPhysicalMask) != g_physicalAccessPtPhysical)) return false;
     const auto* pt = reinterpret_cast<const uint64_t*>(pdEntry & kPhysicalMask);
     const uint64_t pte = pt[(virtualAddress >> micant::mm::PageShift4KB) & 511];
     return (pte & kPresent) && (pte & kPhysicalMask) ==
@@ -290,7 +301,7 @@ uint64_t* pageTablePointer(uint64_t physical) noexcept {
     physical &= kPhysicalMask;
     if (physical == reinterpret_cast<uint64_t>(g_pml4)) return g_pml4;
     if (managedPhysicalAliasMaps(physical))
-        return reinterpret_cast<uint64_t*>(kManagedPhysicalAliasBase + physical);
+        return reinterpret_cast<uint64_t*>(g_managedPhysicalAliasBase + physical);
     return reinterpret_cast<uint64_t*>(physical);
 }
 
@@ -378,7 +389,7 @@ uint64_t allocateIdentityMappedPageTable() noexcept {
     const uint64_t pageCount = database.getTotalPages();
     if (g_managedPhysicalAliasReady) {
         if (pageCount <= 1) return 0;
-        const uint64_t aliasPageLimit = kManagedPhysicalAliasSize >>
+        const uint64_t aliasPageLimit = g_managedPhysicalAliasSize >>
             micant::mm::PageShift4KB;
         const uint64_t lastPfn = std::min(pageCount - 1, aliasPageLimit - 1);
         return database.allocatePageInRange(1, lastPfn);
@@ -2870,23 +2881,124 @@ bool initializeBootstrapAddressSpace(void (*log)(const char*) noexcept) noexcept
     if (g_addressSpaceReady) {
         return true;
     }
+    MicantRenderEarlyBootStatus("Page tables: reading firmware CR3/CR4...");
     uint64_t cr3{};
     uint64_t cr4{};
     __asm__ __volatile__("movq %%cr3, %0; movq %%cr4, %1" : "=r"(cr3), "=r"(cr4));
+    MicantRenderEarlyBootStatus("Page tables: validating firmware paging mode...");
     if (cr4 & (uint64_t{1} << 12)) {
         return false;
     }
+    MicantRenderEarlyBootStatus("Page tables: locating current PML4...");
     const auto* oldRoot = pageTablePointer(cr3);
-    if (oldRoot[127] || oldRoot[128] || oldRoot[129] || oldRoot[130] || oldRoot[131] || oldRoot[132] ||
-        walk(cr3, reinterpret_cast<uint64_t>(g_pml4)) !=
-            reinterpret_cast<uint64_t>(g_pml4)) {
+    MicantRenderEarlyBootStatus("Page tables: reading firmware PML4 slot 127...");
+    const uint64_t slot127 = oldRoot[127];
+    MicantRenderEarlyBootStatus(slot127 ? "Page tables: preserving firmware PML4 slot 127; reading 128..."
+                                        : "Page tables: PML4 slot 127 clear; reading 128...");
+    const uint64_t slot128 = oldRoot[128];
+    MicantRenderEarlyBootStatus(slot128 ? "Page tables: slot 128 occupied; kernel will replace it."
+                                        : "Page tables: slot 128 clear; reading 129...");
+    const uint64_t slot129 = oldRoot[129];
+    MicantRenderEarlyBootStatus(slot129 ? "Page tables: slot 129 occupied; kernel will replace it."
+                                        : "Page tables: slot 129 clear; reading 130...");
+    const uint64_t slot130 = oldRoot[130];
+    MicantRenderEarlyBootStatus(slot130 ? "Page tables: slot 130 occupied; kernel will replace it."
+                                        : "Page tables: slot 130 clear; reading 131...");
+    const uint64_t slot131 = oldRoot[131];
+    MicantRenderEarlyBootStatus(slot131 ? "Page tables: slot 131 occupied; kernel will replace it."
+                                        : "Page tables: slot 131 clear; reading 132...");
+    const uint64_t slot132 = oldRoot[132];
+    MicantRenderEarlyBootStatus(slot132 ? "Page tables: slot 132 occupied; kernel will replace it."
+                                        : "Page tables: reserved PML4 slots clear; checking kernel mapping...");
+    const uint64_t kernelPml4Virtual = reinterpret_cast<uint64_t>(g_pml4);
+    MicantRenderEarlyBootStatus("Page tables: translating kernel PML4 address...");
+    const uint64_t kernelMapping = walk(cr3, kernelPml4Virtual);
+    if (g_log) {
+        g_log("[MicaNT Hal] Bootstrap PML4 VA=0x");
+        logTrapValue("", kernelPml4Virtual);
+        logTrapValue(" PA=0x", kernelMapping);
+        g_log("\r\n");
+    }
+    if (!kernelMapping) {
+        MicantRenderEarlyBootStatus("Page tables: kernel PML4 address is unmapped.");
         return false;
     }
-    for (size_t slot = 133; slot < 256; ++slot)
-        if (oldRoot[slot]) return false;
-    for (size_t index = 0; index < 512; ++index) {
-        g_pml4[index] = oldRoot[index] & ~kUser;
+    if (kernelMapping != kernelPml4Virtual) {
+        MicantRenderEarlyBootStatus("Page tables: kernel PML4 is not identity mapped.");
+        return false;
     }
+    MicantRenderEarlyBootStatus("Page tables: kernel PML4 identity mapping verified.");
+    uintptr_t currentStack{};
+    __asm__ __volatile__("movq %%rsp, %0" : "=r"(currentStack));
+    const uint64_t currentCode = reinterpret_cast<uint64_t>(&initializeBootstrapAddressSpace);
+    const auto inReclaimedUserSlot = [](uint64_t address) noexcept {
+        const uint64_t index = (address >> 39) & 0x1ff;
+        return index >= 128 && index < 256;
+    };
+    if (inReclaimedUserSlot(currentStack) || inReclaimedUserSlot(currentCode)) {
+        MicantRenderEarlyBootStatus("Page tables: active code or stack overlaps reclaimed user VA.");
+        return false;
+    }
+    uint16_t managedAliasIndex{};
+    for (uint16_t slot = 127; slot != 0; --slot) {
+        if (oldRoot[slot] == 0) {
+            managedAliasIndex = slot;
+            break;
+        }
+    }
+    if (!managedAliasIndex) {
+        MicantRenderEarlyBootStatus("Page tables: searching free high-half PML4 slots...");
+        for (uint16_t slot = 256; slot < 512; ++slot) {
+            if (oldRoot[slot] == 0) {
+                managedAliasIndex = slot;
+                break;
+            }
+        }
+    }
+    if (!managedAliasIndex) {
+        // Slot 132 is already owned by this HAL for two serialized physical
+        // scratch pages. Share that page-table subtree and start the direct
+        // PFN alias immediately after those pages instead of replacing an EFI
+        // mapping or stealing another subsystem's virtual-address window.
+        managedAliasIndex = 132;
+        g_managedPhysicalAliasBase = kPhysicalAccessBase + 2 * mm::PageSize4KB;
+        g_managedPhysicalAliasSize = kManagedPhysicalAliasSize -
+            2 * mm::PageSize4KB;
+        MicantRenderEarlyBootStatus("Page tables: sharing HAL slot 132 after its two scratch pages...");
+    } else {
+        g_managedPhysicalAliasBase = uint64_t{managedAliasIndex} << 39;
+        if (managedAliasIndex >= 256)
+            g_managedPhysicalAliasBase |= 0xFFFF000000000000ULL;
+        g_managedPhysicalAliasSize = kManagedPhysicalAliasSize;
+    }
+    g_managedPhysicalAliasPml4Index = managedAliasIndex;
+    if (g_log) {
+        logTrapValue("[MicaNT Hal] PFN alias PML4 slot=0x", managedAliasIndex);
+        logTrapValue("[MicaNT Hal] PFN alias virtual base=0x", g_managedPhysicalAliasBase);
+    }
+    MicantRenderEarlyBootStatus("Page tables: selected an unused slot for the PFN alias...");
+    size_t reclaimedFirmwareUserSlots{};
+    for (size_t slot = 133; slot < 256; ++slot) {
+        if (oldRoot[slot]) ++reclaimedFirmwareUserSlots;
+    }
+    if (reclaimedFirmwareUserSlots && g_log) {
+        g_log("[MicaNT Hal] Reclaiming firmware PML4 entries in user VA range; count=0x");
+        logTrapValue("", reclaimedFirmwareUserSlots);
+        g_log(" (UEFI boot services exited)\r\n");
+    }
+    MicantRenderEarlyBootStatus(reclaimedFirmwareUserSlots
+        ? "Page tables: reclaiming firmware user VA mappings..."
+        : "Page tables: copying firmware mappings...");
+    for (size_t index = 0; index < 512; ++index) {
+        g_pml4[index] = index >= 128 && index < 256
+            ? 0 : oldRoot[index] & ~kUser;
+    }
+    // UEFI boot services have ended. PML4[128..255] is the kernel's user
+    // address arena (including the bootstrap TEB and process VAD range), so
+    // firmware mappings there must be reclaimed before Mm can publish user
+    // mappings. The active code and stack were checked above before clearing.
+    MicantRenderEarlyBootStatus("Page tables: firmware user VA range reclaimed.");
+    MicantRenderEarlyBootStatus("Page tables: validating bootstrap table mappings...");
     for (size_t level = 0; level < 3; ++level) {
         const uint64_t virtualAddress = reinterpret_cast<uint64_t>(g_physicalAccessTables[level]);
         const uint64_t physicalAddress = walk(cr3, virtualAddress);
@@ -2896,15 +3008,22 @@ bool initializeBootstrapAddressSpace(void (*log)(const char*) noexcept) noexcept
     const uint64_t pd = walk(cr3, reinterpret_cast<uint64_t>(g_physicalAccessTables[1]));
     const uint64_t pt = walk(cr3, reinterpret_cast<uint64_t>(g_physicalAccessTables[2]));
     if (!pdpt || !pd || !pt) return false;
+    g_physicalAccessPdptPhysical = pdpt;
+    g_physicalAccessPdPhysical = pd;
+    g_physicalAccessPtPhysical = pt;
     g_physicalAccessTables[0][0] = pd | kPresent | kWritable;
     g_physicalAccessTables[1][0] = pt | kPresent | kWritable;
-    g_pml4[132] = pdpt | kPresent | kWritable | kOwnedTable;
+    g_pml4[132] = pdpt | kPresent | kWritable | kNoExecute | kOwnedTable;
+    MicantRenderEarlyBootStatus("Page tables: enabling NX and preparing CR3 switch...");
     cpu::cpuWrmsr(cpu::MSR_EFER, cpu::cpuRdmsr(cpu::MSR_EFER) | cpu::EFER_NXE);
     // CR3 reload alone can retain firmware global translations.
     __asm__ __volatile__("movq %0, %%cr4" : : "r"(cr4 & ~uint64_t{128}) : "memory");
+    MicantRenderEarlyBootStatus("Page tables: loading kernel PML4 into CR3...");
     __asm__ __volatile__("movq %0, %%cr3" : : "r"(g_pml4) : "memory");
+    MicantRenderEarlyBootStatus("Page tables: kernel CR3 active; restoring CR4...");
     __asm__ __volatile__("movq %0, %%cr4" : : "r"(cr4) : "memory");
     g_addressSpaceReady = true;
+    MicantRenderEarlyBootStatus("Page tables: kernel address space active.");
     return true;
 }
 
@@ -3035,7 +3154,8 @@ bool destroyProcessPagingRoot(ProcessPagingRoot& root) noexcept {
     while (*link && *link != &root) link = &(*link)->next;
     if (!*link) return false;
     auto* table = pageTablePointer(root.pfn << mm::PageShift4KB);
-    if (table[127] != g_pml4[127] || table[128]) return false;
+    if (table[g_managedPhysicalAliasPml4Index] !=
+            g_pml4[g_managedPhysicalAliasPml4Index] || table[128]) return false;
     for (size_t slot = 133; slot < 256; ++slot)
         if (table[slot]) return false;
     *link = root.next;
@@ -3628,11 +3748,21 @@ bool reserveBootstrapPageTableStorage(size_t& reservedPages) noexcept {
 }
 
 bool initializeBootstrapManagedPhysicalAlias() noexcept {
-    if (!bootstrapPagingContext() || g_managedPhysicalAliasReady || g_pml4[127])
+    if (!bootstrapPagingContext() || g_managedPhysicalAliasReady ||
+        !g_managedPhysicalAliasPml4Index)
         return false;
+    const bool sharesPhysicalAccessWindow = g_managedPhysicalAliasPml4Index == 132;
+    if (sharesPhysicalAccessWindow) {
+        if (!g_physicalAccessPdptPhysical || !g_physicalAccessPdPhysical ||
+            !g_physicalAccessPtPhysical ||
+            (g_pml4[132] & kPhysicalMask) != g_physicalAccessPdptPhysical)
+            return false;
+    } else if (g_pml4[g_managedPhysicalAliasPml4Index]) {
+        return false;
+    }
     auto& database = mm::PfnDatabase::get();
     const uint64_t pageCount = database.getTotalPages();
-    const uint64_t aliasPageLimit = kManagedPhysicalAliasSize >> mm::PageShift4KB;
+    const uint64_t aliasPageLimit = g_managedPhysicalAliasSize >> mm::PageShift4KB;
 
     const auto allocateTable = [&]() noexcept -> uint64_t {
         const uint64_t pfn = allocateIdentityMappedPageTable();
@@ -3642,20 +3772,24 @@ bool initializeBootstrapManagedPhysicalAlias() noexcept {
         }
         return pfn << mm::PageShift4KB;
     };
-    const uint64_t pdptPhysical = allocateTable();
+    const uint64_t pdptPhysical = sharesPhysicalAccessWindow
+        ? g_physicalAccessPdptPhysical : allocateTable();
     if (!pdptPhysical) return false;
     g_managedPhysicalAliasPdptPhysical = pdptPhysical;
-    g_pml4[127] = pdptPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
+    if (!sharesPhysicalAccessWindow) {
+        g_pml4[g_managedPhysicalAliasPml4Index] =
+            pdptPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
+    }
 
     const auto addManagedPage = [&](uint64_t pfn) noexcept -> bool {
         if (!pfn) return true;
         if (pfn >= pageCount) return false;
-        // Slot 127 is a bootstrap page-table pointer aperture. High PFN data
+        // The selected slot is a bootstrap page-table pointer aperture. High PFN data
         // remains managed by Mm and is accessed through the serialized
         // temporary physical-page mapping; it does not need a direct alias.
         if (pfn >= aliasPageLimit) return true;
         const uint64_t physical = pfn << mm::PageShift4KB;
-        const uint64_t virtualAddress = kManagedPhysicalAliasBase + physical;
+        const uint64_t virtualAddress = g_managedPhysicalAliasBase + physical;
         auto* pdpt = reinterpret_cast<uint64_t*>(pdptPhysical);
         const size_t pdptIndex = static_cast<size_t>((virtualAddress >> 30) & 511);
         uint64_t& pdptEntry = pdpt[pdptIndex];
@@ -3664,7 +3798,9 @@ bool initializeBootstrapManagedPhysicalAlias() noexcept {
             pdPhysical = allocateTable();
             if (!pdPhysical) return false;
             pdptEntry = pdPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
-        } else if (!(pdptEntry & kOwnedTable) || (pdptEntry & 128)) {
+        } else if ((pdptEntry & 128) ||
+                   (!(pdptEntry & kOwnedTable) &&
+                    !(pdptIndex == 0 && pdPhysical == g_physicalAccessPdPhysical))) {
             return false;
         }
         auto* pd = reinterpret_cast<uint64_t*>(pdPhysical);
@@ -3675,7 +3811,10 @@ bool initializeBootstrapManagedPhysicalAlias() noexcept {
             ptPhysical = allocateTable();
             if (!ptPhysical) return false;
             pdEntry = ptPhysical | kPresent | kWritable | kNoExecute | kOwnedTable;
-        } else if (!(pdEntry & kOwnedTable) || (pdEntry & 128)) {
+        } else if ((pdEntry & 128) ||
+                   (!(pdEntry & kOwnedTable) &&
+                    !(pdptIndex == 0 && pdIndex == 0 &&
+                      ptPhysical == g_physicalAccessPtPhysical))) {
             return false;
         }
         auto* pt = reinterpret_cast<uint64_t*>(ptPhysical);

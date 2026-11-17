@@ -2096,7 +2096,24 @@ public:
         }
 
         UartSerial::print("[MicaNT Boot] Countdown elapsed. Proceeding to KiSystemStartup bare-metal handover.\r\n");
+        showBootProgress("Countdown complete. Preparing kernel handoff...");
         return 1;
+    }
+
+    void showBootProgress(const char* message) noexcept {
+        if (m_videoDriver.isInitialized() && message) {
+            const uint32_t width = m_videoDriver.getWidth();
+            const uint32_t height = m_videoDriver.getHeight();
+            if (width >= 80 && height >= 32) {
+                constexpr bootvid::Color background{10, 14, 22};
+                m_videoDriver.fillRectangle(0, height - 30, width, 30, background);
+                m_videoDriver.drawString(16, height - 22, message,
+                    bootvid::Color{255, 230, 120}, background, 1);
+            }
+        }
+        UartSerial::print("[MicaNT Boot] Stage: ");
+        UartSerial::print(message ? message : "unknown");
+        UartSerial::print("\r\n");
     }
 
     void collectFirmwarePciResources() noexcept {
@@ -2775,6 +2792,8 @@ extern "C" micant::uefi::EfiStatus EfiMain(
         micant::bootloader::HalpColdResetServer();
     }
 
+    engine.showBootProgress("Countdown finished. Validating kernel image...");
+
     // 6. Verify standalone ntoskrnl.exe is mapped BEFORE terminating Boot Services
     if (!micant::bootloader::s_ntoskrnlLoadedFromDisk || micant::bootloader::s_ntoskrnlEntryPoint == 0) {
         micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: \\EFI\\MicaNT\\ntoskrnl.exe was not loaded from disk!\r\n");
@@ -2794,6 +2813,7 @@ extern "C" micant::uefi::EfiStatus EfiMain(
     }
     micant::bootloader::UartSerial::print("\r\n[MicaNT Boot] Calling ExitBootServices to terminate UEFI firmware...\r\n");
 
+    engine.showBootProgress("Collecting UEFI device resources...");
     engine.collectFirmwarePciResources();
     // Reserve PFN metadata and a range array from UEFI before taking the final
     // map. Their sizes follow the highest conventional PFN and the map-buffer
@@ -2807,6 +2827,7 @@ extern "C" micant::uefi::EfiStatus EfiMain(
         micant::bootloader::UartSerial::print("[MicaNT Boot] FATAL: memory map unavailable for PFN sizing.\r\n");
         return mapStatus;
     }
+    engine.showBootProgress("Sizing physical-page metadata from UEFI memory map...");
     uint64_t highestReclaimablePfn{};
     const size_t descriptorCount = static_cast<size_t>(memoryMapSize / descriptorSize);
     for (size_t index = 0; index < descriptorCount; ++index) {
@@ -2834,6 +2855,7 @@ extern "C" micant::uefi::EfiStatus EfiMain(
     const uint64_t rangeCapacity = s_memoryMapCapacity /
         sizeof(micant::uefi::EfiMemoryDescriptor) + 1;
     const uint64_t rangeBytes = rangeCapacity * sizeof(micant::mm::PhysicalPageRange);
+    engine.showBootProgress("Allocating kernel physical-page metadata...");
     using AllocatePool = micant::uefi::EfiStatus (*)(micant::uefi::EfiMemoryType, uint64_t, void**);
     const auto allocatePool = reinterpret_cast<AllocatePool>(systemTable->bootServices->allocatePool);
     void* pfnMetadata{};
@@ -2860,6 +2882,7 @@ extern "C" micant::uefi::EfiStatus EfiMain(
                            descriptorVersion);
 
     engine.refreshBootTimeSample();
+    engine.showBootProgress("Exiting UEFI services and entering the kernel...");
     micant::uefi::EfiStatus exitStatus = engine.exitBootServices(mapKey);
     if (exitStatus != micant::uefi::EFI_SUCCESS) {
         memoryMapSize = s_memoryMapCapacity;
@@ -2885,6 +2908,7 @@ extern "C" micant::uefi::EfiStatus EfiMain(
     }
 
     micant::bootloader::UartSerial::print("[MicaNT Boot] ExitBootServices SUCCESS! CPU now in pure 64-bit Long Mode.\r\n");
+    engine.showBootProgress("ExitBootServices succeeded. Entering kernel entry point...");
     micant::bootloader::UartSerial::print("[MicaNT Boot] Handing silicon control to ntoskrnl.exe!KiSystemStartup at 0x");
     micant::bootloader::UartSerial::printHex64(micant::bootloader::s_ntoskrnlEntryPoint);
     micant::bootloader::UartSerial::print("...\r\n\r\n");

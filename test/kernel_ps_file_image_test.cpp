@@ -198,20 +198,34 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
             reportFailure("[MicaNT Ps] SEC_IMAGE source path", NtStatus::InvalidImageFormat);
             return false;
         }
-        for (size_t index = 0; index < imagePathLength; ++index)
-            if (image->getFileName()[index] != imagePath[index]) return false;
+        for (size_t index = 0; index < imagePathLength; ++index) {
+            if (image->getFileName()[index] != imagePath[index]) {
+                reportFailure("[MicaNT Ps] SEC_IMAGE source path mismatch", NtStatus::InvalidImageFormat);
+                return false;
+            }
+        }
 
         ps::EProcess process;
-        if (process.initializeAddressSpace() != NtStatus::Success) return false;
+        status = process.initializeAddressSpace();
+        if (status != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE address-space creation", status);
+            return false;
+        }
         uintptr_t previous{};
         __asm__ __volatile__("movq %%cr3, %0" : "=r"(previous));
-        if (!hal::amd64::switchProcessPagingRootByPhysical(process.getDirectoryTableBase()))
+        if (!hal::amd64::switchProcessPagingRootByPhysical(process.getDirectoryTableBase())) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE address-space attach", NtStatus::Unsuccessful);
             return false;
+        }
         const auto imageStatus = process.initializeMainImageFromSection(*image,
                                                                         sectionReference.value);
         const bool restored = hal::amd64::switchProcessPagingRootByPhysical(previous);
-        if (!restored) return false;
+        if (!restored) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE address-space restore", NtStatus::Unsuccessful);
+            return false;
+        }
         if (imageStatus != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE main image initialization", imageStatus);
             (void)process.closeAddressSpace();
             return false;
         }
@@ -219,15 +233,21 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         // main module is the file we opened.
         if (!process.nativeImagesFinalized() || !process.nativeImages() ||
             !process.nativeImages()->size() || !process.userPebAddress()) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE loader state", NtStatus::InvalidImageFormat);
             (void)process.closeAddressSpace();
             return false;
         }
         const auto* module = process.nativeImages()->module(0);
         if (!module || !module->base || module->name != "fileimage.exe") {
+            reportFailure("[MicaNT Ps] SEC_IMAGE main module", NtStatus::InvalidImageFormat);
             (void)process.closeAddressSpace();
             return false;
         }
-        if (process.closeAddressSpace() != NtStatus::Success) return false;
+        status = process.closeAddressSpace();
+        if (status != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE address-space teardown", status);
+            return false;
+        }
 
         // Exercise the same M4 ownership chain used by a native executable:
         // create an Ob-owned process from this section, start its mapped PE
@@ -322,8 +342,10 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
         }
         if (waitAttachAcquired) ke::KeUnstackDetachProcess(&waitAttachState);
         if (callerThread->processAttachDepth != waitAttachDepth ||
-            callerThread->directoryTableBase != previousRoot || callerThread->attachedProcess)
+            callerThread->directoryTableBase != previousRoot || callerThread->attachedProcess) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE wait detach", NtStatus::Unsuccessful);
             return false;
+        }
         if (status != NtStatus::Success || threadExitStatus != NtStatus::Success) {
             reportFailure("[MicaNT Ps] SEC_IMAGE initial thread exit/wait",
                 status != NtStatus::Success ? status : threadExitStatus);
@@ -336,11 +358,18 @@ extern "C" bool MicantTestPsFileBackedImage() noexcept {
                 status != NtStatus::Success ? status : createdProcess->exitStatus());
             return false;
         }
-        if (sys::NtClose(processHandle.value) != NtStatus::Success) return false;
+        status = sys::NtClose(processHandle.value);
+        if (status != NtStatus::Success) {
+            reportFailure("[MicaNT Ps] SEC_IMAGE process handle close", status);
+            return false;
+        }
         processHandle.value = 0;
     }
 
-    if (!drainDeferredCleanup(activeBefore)) return false;
+    if (!drainDeferredCleanup(activeBefore)) {
+        reportFailure("[MicaNT Ps] SEC_IMAGE final cleanup", NtStatus::Unsuccessful);
+        return false;
+    }
     // Every PFN the image path acquired must be released again.
     const size_t activeAfter = mm::PfnDatabase::get().getActiveCount();
     if (activeAfter != activeBefore) {

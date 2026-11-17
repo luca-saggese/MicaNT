@@ -69,6 +69,13 @@ def stage(root: Path) -> None:
         source = ROOT / "build" / name
         if source.is_file():
             shutil.copy2(source, system32 / name)
+
+    # The boot-time SEC_IMAGE integration check opens this fixture from the
+    # mounted system volume. qemu.py --build-only builds it, but it is not an
+    # optional desktop app and must be present on bare-metal installations.
+    image_fixture = require_file(ROOT / "build/fileimage.exe",
+                                 "file-backed SEC_IMAGE verification image")
+    shutil.copy2(image_fixture, system32 / image_fixture.name)
     for relative in ("assets/wallpaper.png",):
         source = ROOT / relative
         if source.is_file():
