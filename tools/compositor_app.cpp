@@ -38,7 +38,13 @@ extern "C" void* memcpy(void* destination, const void* source, size_t count) {
 namespace {
 
 uint32_t* g_frame{};
-micant::compositor::glass::Cache g_liquidGlassCache{};
+constexpr size_t kLiquidGlassCacheCount = 8;
+struct LiquidGlassCacheEntry {
+    micant::compositor::glass::Cache cache{};
+    uint64_t lastUse{};
+};
+LiquidGlassCacheEntry g_liquidGlassCaches[kLiquidGlassCacheCount]{};
+uint64_t g_liquidGlassUseSequence{};
 constexpr int64_t kWindowEffectRadiusLimit = 32;
 constexpr int64_t kWindowBlurRadius = 2;
 constexpr size_t kDamageRegionComplexityBudget = 16;
@@ -55,15 +61,26 @@ struct LocalPerformanceStats {
     uint64_t fullRedraws{};
     uint64_t partialRedraws{};
     uint64_t pixelsComposited{};
+    uint64_t pixelsPresented{};
     uint64_t bytesTransferred{};
     uint64_t surfaceCount{};
     uint64_t frames{};
     uint64_t wakeups{};
     uint64_t failedPresents{};
-    uint64_t loops{}, unstable{}, changed{}, waiting{}, writers{};
+    uint64_t loops{}, unstable{}, changed{}, waiting{}, writers{}, waitCalls{};
     uint64_t waitElapsedMilliseconds{}, waitTimeouts{}, waitFailures{}, metadataMilliseconds{};
     uint64_t lastReportMilliseconds{};
+    uint64_t glassSurfaces{}, glassRefreshes{}, glassCacheHits{}, glassRenderMicroseconds{};
+    uint64_t glassWidth{}, glassHeight{}, glassLastNoticeMilliseconds{};
+    uint64_t glassMissInvalid{}, glassMissScene{}, glassMissPosition{}, glassMissSize{};
+    uint64_t glassMissDescriptor{}, glassWindowId{};
+    uint64_t glassChangedPixels{};
+    uint32_t glassChangedLeft{}, glassChangedTop{}, glassChangedRight{}, glassChangedBottom{};
 };
+
+#if MICANT_COMPOSITOR_LOCAL_STATS
+void appendPerformanceValue(char*& cursor, uint64_t value) noexcept;
+#endif
 LocalPerformanceStats g_localPerformanceStats{};
 
 bool allocateZeroed(size_t bytes, void*& allocation) noexcept {
@@ -80,6 +97,104 @@ void releaseAllocation(void* allocation) noexcept {
     void* base = allocation;
     (void)micant::native_nt::NtFreeVirtualMemory(
         static_cast<micant::Handle>(-1), &base, &regionSize, 0x8000u);
+}
+
+void releaseLiquidGlassCache(micant::compositor::glass::Cache& cache) noexcept {
+    releaseAllocation(cache.raw);
+    releaseAllocation(cache.downsampled);
+    releaseAllocation(cache.sample);
+    releaseAllocation(cache.scratch);
+    releaseAllocation(cache.output);
+    cache = {};
+}
+
+micant::compositor::glass::Cache* acquireLiquidGlassCache(uint64_t window) noexcept {
+    if (!window) return nullptr;
+    if (g_liquidGlassUseSequence == UINT64_MAX) {
+        for (auto& entry : g_liquidGlassCaches) entry.lastUse = 0;
+        g_liquidGlassUseSequence = 0;
+    }
+    LiquidGlassCacheEntry* available{};
+    LiquidGlassCacheEntry* oldest = &g_liquidGlassCaches[0];
+    for (auto& entry : g_liquidGlassCaches) {
+        if (entry.cache.window == window) {
+            entry.lastUse = ++g_liquidGlassUseSequence;
+            return &entry.cache;
+        }
+        if (!entry.cache.window && !available) available = &entry;
+        if (entry.lastUse < oldest->lastUse) oldest = &entry;
+    }
+    auto* selected = available ? available : oldest;
+    releaseLiquidGlassCache(selected->cache);
+    selected->cache.window = window;
+    selected->lastUse = ++g_liquidGlassUseSequence;
+    return &selected->cache;
+}
+
+bool ensureLiquidGlassCacheStorage(micant::compositor::glass::Cache& cache,
+                                   const MicaLiquidGlassDescriptor& descriptor) noexcept {
+    using Cache = micant::compositor::glass::Cache;
+    const uint64_t captureWidth = static_cast<uint64_t>(descriptor.width) +
+        Cache::BackdropMargin * 2u;
+    const uint64_t captureHeight = static_cast<uint64_t>(descriptor.height) +
+        Cache::BackdropMargin * 2u;
+    if (!descriptor.width || !descriptor.height ||
+        descriptor.width > Cache::MaxCard || descriptor.height > Cache::MaxCard ||
+        captureWidth > Cache::MaxCapture || captureHeight > Cache::MaxCapture ||
+        captureWidth > SIZE_MAX / captureHeight) return false;
+    const uint64_t rawPixels = captureWidth * captureHeight;
+    const uint64_t sampleWidth = static_cast<uint64_t>(
+        static_cast<double>(captureWidth) * descriptor.downsample + 0.5);
+    const uint64_t sampleHeight = static_cast<uint64_t>(
+        static_cast<double>(captureHeight) * descriptor.downsample + 0.5);
+    if (!sampleWidth || !sampleHeight || sampleWidth > Cache::MaxCapture ||
+        sampleHeight > Cache::MaxCapture || sampleWidth > SIZE_MAX / sampleHeight ||
+        descriptor.width > SIZE_MAX / descriptor.height) return false;
+    const uint64_t samplePixels = sampleWidth * sampleHeight;
+    const uint64_t outputPixels = static_cast<uint64_t>(descriptor.width) *
+        descriptor.height;
+    if (rawPixels <= cache.rawCapacityPixels &&
+        samplePixels <= cache.downsampledCapacityPixels &&
+        samplePixels <= cache.sampleCapacityPixels &&
+        samplePixels <= cache.scratchCapacityPixels &&
+        outputPixels <= cache.outputCapacityPixels) return true;
+    if (rawPixels > SIZE_MAX / sizeof(uint32_t) ||
+        samplePixels > SIZE_MAX / sizeof(uint32_t) ||
+        outputPixels > SIZE_MAX / sizeof(uint32_t)) return false;
+    void* raw{};
+    void* downsampled{};
+    void* sample{};
+    void* scratch{};
+    void* output{};
+    if (!allocateZeroed(static_cast<size_t>(rawPixels) * sizeof(uint32_t), raw) ||
+        !allocateZeroed(static_cast<size_t>(samplePixels) * sizeof(uint32_t), downsampled) ||
+        !allocateZeroed(static_cast<size_t>(samplePixels) * sizeof(uint32_t), sample) ||
+        !allocateZeroed(static_cast<size_t>(samplePixels) * sizeof(uint32_t), scratch) ||
+        !allocateZeroed(static_cast<size_t>(outputPixels) * sizeof(uint32_t), output)) {
+        releaseAllocation(raw);
+        releaseAllocation(downsampled);
+        releaseAllocation(sample);
+        releaseAllocation(scratch);
+        releaseAllocation(output);
+        return false;
+    }
+    releaseAllocation(cache.raw);
+    releaseAllocation(cache.downsampled);
+    releaseAllocation(cache.sample);
+    releaseAllocation(cache.scratch);
+    releaseAllocation(cache.output);
+    cache.raw = static_cast<uint32_t*>(raw);
+    cache.downsampled = static_cast<uint32_t*>(downsampled);
+    cache.sample = static_cast<uint32_t*>(sample);
+    cache.scratch = static_cast<uint32_t*>(scratch);
+    cache.output = static_cast<uint32_t*>(output);
+    cache.rawCapacityPixels = static_cast<size_t>(rawPixels);
+    cache.downsampledCapacityPixels = static_cast<size_t>(samplePixels);
+    cache.sampleCapacityPixels = static_cast<size_t>(samplePixels);
+    cache.scratchCapacityPixels = static_cast<size_t>(samplePixels);
+    cache.outputCapacityPixels = static_cast<size_t>(outputPixels);
+    cache.valid = false;
+    return true;
 }
 MicaCompositorMetadataStore g_metadataSnapshot{};
 MicaCompositorSurfaceInfo* g_snapshotSurfaces{};
@@ -330,6 +445,9 @@ constexpr uint32_t kSystemProcessInformation = 5;
 constexpr size_t kHudProcessSnapshotBytes = 256u * 1024u;
 constexpr uint32_t kHudWidth = 480;
 constexpr uint32_t kHudHeight = 48;
+uint32_t g_hudUnderlay[kHudWidth * kHudHeight]{};
+uint32_t g_hudUnderlayWidth{}, g_hudUnderlayHeight{};
+bool g_hudUnderlayValid{};
 constexpr uint64_t kHudRefreshMilliseconds = 250;
 uint64_t g_hudLastRefresh{};
 uint64_t g_hudFps{};
@@ -465,6 +583,13 @@ void drawHud(uint64_t totalMemoryBytes, bool memoryValid,
     const uint32_t height = g_displayHeight < kHudHeight ? g_displayHeight : kHudHeight;
     if (!width || !height) return;
     const uint32_t left = g_displayWidth - width;
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            g_hudUnderlay[static_cast<size_t>(y) * kHudWidth + x] =
+                g_frame[static_cast<size_t>(y) * g_displayWidth + left + x];
+    g_hudUnderlayWidth = width;
+    g_hudUnderlayHeight = height;
+    g_hudUnderlayValid = true;
     constexpr uint32_t background = 0xE8202733u;
     constexpr uint32_t foreground = 0xFFF3F6FAu;
     for (uint32_t y = 0; y < height; ++y)
@@ -519,6 +644,16 @@ void drawHud(uint64_t totalMemoryBytes, bool memoryValid,
     drawText(line, 8, 27);
 }
 
+void restoreHudUnderlay() noexcept {
+    if (!g_hudUnderlayValid || !g_frame) return;
+    const uint32_t left = g_displayWidth - g_hudUnderlayWidth;
+    for (uint32_t y = 0; y < g_hudUnderlayHeight; ++y)
+        for (uint32_t x = 0; x < g_hudUnderlayWidth; ++x)
+            g_frame[static_cast<size_t>(y) * g_displayWidth + left + x] =
+                g_hudUnderlay[static_cast<size_t>(y) * kHudWidth + x];
+    g_hudUnderlayValid = false;
+}
+
 void updateHud(uint64_t now) noexcept {
     refreshHudMetrics(now);
     micant::SystemMemoryAccountingInformation memory{};
@@ -540,8 +675,6 @@ void updateHud(uint64_t now) noexcept {
     g_hudCursorValid = cursorValid;
     g_hudMouseX = request.rect.left;
     g_hudMouseY = request.rect.top;
-    drawHud(g_hudMemoryBytes, g_hudMemoryValid, g_hudCursorValid,
-            g_hudMouseX, g_hudMouseY);
     g_hudLastRefresh = now;
 }
 #endif
@@ -563,7 +696,7 @@ void reportLocalPerformanceStats() noexcept {
     if (!now || !stats.surfaceCount || (stats.lastReportMilliseconds &&
                  now - stats.lastReportMilliseconds < 5000u)) return;
     stats.lastReportMilliseconds = now;
-    char line[320]{};
+    char line[1024]{};
     char* cursor = line;
     const auto append = [&cursor](const char* text) noexcept {
         while (*text) *cursor++ = *text++;
@@ -574,6 +707,7 @@ void reportLocalPerformanceStats() noexcept {
     append(" full="); appendPerformanceValue(cursor, stats.fullRedraws);
     append(" partial="); appendPerformanceValue(cursor, stats.partialRedraws);
     append(" pixels="); appendPerformanceValue(cursor, stats.pixelsComposited);
+    append(" presented_pixels="); appendPerformanceValue(cursor, stats.pixelsPresented);
     append(" bytes="); appendPerformanceValue(cursor, stats.bytesTransferred);
     append(" surfaces="); appendPerformanceValue(cursor, stats.surfaceCount);
     append(" frames="); appendPerformanceValue(cursor, stats.frames);
@@ -586,8 +720,26 @@ void reportLocalPerformanceStats() noexcept {
     append(" writers="); appendPerformanceValue(cursor, stats.writers);
     append(" wait_ms="); appendPerformanceValue(cursor, stats.waitElapsedMilliseconds);
     append(" wait_timeout="); appendPerformanceValue(cursor, stats.waitTimeouts);
+    append(" wait_calls="); appendPerformanceValue(cursor, stats.waitCalls);
     append(" wait_fail="); appendPerformanceValue(cursor, stats.waitFailures);
     append(" metadata_ms="); appendPerformanceValue(cursor, stats.metadataMilliseconds);
+    append(" glass_seen="); appendPerformanceValue(cursor, stats.glassSurfaces);
+    append(" glass_refresh="); appendPerformanceValue(cursor, stats.glassRefreshes);
+    append(" glass_hits="); appendPerformanceValue(cursor, stats.glassCacheHits);
+    append(" glass_render_us="); appendPerformanceValue(cursor, stats.glassRenderMicroseconds);
+    append(" glass_size="); appendPerformanceValue(cursor, stats.glassWidth);
+    append("x"); appendPerformanceValue(cursor, stats.glassHeight);
+    append(" glass_window="); appendPerformanceValue(cursor, stats.glassWindowId);
+    append(" glass_miss_invalid="); appendPerformanceValue(cursor, stats.glassMissInvalid);
+    append(" glass_miss_scene="); appendPerformanceValue(cursor, stats.glassMissScene);
+    append(" glass_miss_pos="); appendPerformanceValue(cursor, stats.glassMissPosition);
+    append(" glass_miss_size="); appendPerformanceValue(cursor, stats.glassMissSize);
+    append(" glass_miss_desc="); appendPerformanceValue(cursor, stats.glassMissDescriptor);
+    append(" glass_changed_pixels="); appendPerformanceValue(cursor, stats.glassChangedPixels);
+    append(" glass_changed_rect="); appendPerformanceValue(cursor, stats.glassChangedLeft);
+    *cursor++ = ','; appendPerformanceValue(cursor, stats.glassChangedTop);
+    *cursor++ = '-'; appendPerformanceValue(cursor, stats.glassChangedRight);
+    *cursor++ = ','; appendPerformanceValue(cursor, stats.glassChangedBottom);
     append("\r\n");
     print(line, static_cast<size_t>(cursor - line));
     stats.composeMilliseconds = 0;
@@ -595,12 +747,21 @@ void reportLocalPerformanceStats() noexcept {
     stats.fullRedraws = 0;
     stats.partialRedraws = 0;
     stats.pixelsComposited = 0;
+    stats.pixelsPresented = 0;
     stats.bytesTransferred = 0;
     stats.frames = 0;
     stats.wakeups = 0;
     stats.failedPresents = 0;
     stats.loops = stats.unstable = stats.changed = stats.waiting = stats.writers = 0;
+    stats.waitCalls = 0;
     stats.waitElapsedMilliseconds = stats.waitTimeouts = stats.waitFailures = stats.metadataMilliseconds = 0;
+    stats.glassSurfaces = stats.glassRefreshes = stats.glassCacheHits = 0;
+    stats.glassRenderMicroseconds = 0;
+    stats.glassMissInvalid = stats.glassMissScene = stats.glassMissPosition = 0;
+    stats.glassMissSize = stats.glassMissDescriptor = 0;
+    stats.glassChangedPixels = 0;
+    stats.glassChangedLeft = stats.glassChangedTop = 0;
+    stats.glassChangedRight = stats.glassChangedBottom = 0;
 #endif
 }
 
@@ -908,7 +1069,8 @@ bool requiredPixelBytes(uint32_t width, uint32_t height, uint32_t stride,
 }
 
 uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
-                                const MicaCompositorSurfaceInfo& glassSurface) noexcept;
+                                const MicaCompositorSurfaceInfo& glassSurface,
+                                int64_t windowLeft, int64_t windowTop) noexcept;
 
 bool composeRegion(const MicaCompositorMetadataStore& metadata,
                    ScreenRect clip,
@@ -1345,6 +1507,13 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
             (windowStyle->flags & MICANT_THEME_HAS_BACKGROUND);
         const bool glassWindow = micant::compositor::glass::IsValid(
             surface.liquidGlass, surface.width, surface.height);
+        const int64_t glassOutputLeft = windowLeft + surface.liquidGlass.left;
+        const int64_t glassOutputTop = windowTop + surface.liquidGlass.top;
+        const bool glassOutputIntersectsClip = glassWindow &&
+            clip.left < glassOutputLeft + surface.liquidGlass.width &&
+            clip.right > glassOutputLeft &&
+            clip.top < glassOutputTop + surface.liquidGlass.height &&
+            clip.bottom > glassOutputTop;
         // The card is rendered from the already-composed wallpaper/backdrop.
         // Filling its host window first makes the shader refract a flat white
         // client area and also leaves an opaque square around the rounded card.
@@ -1357,24 +1526,89 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
         if (blurWindow)
             applyWindowBackdropBlur(left, top, clientRight, clientBottom,
                                     opacity, width, height);
-        if (glassWindow) {
+        if (glassWindow && glassOutputIntersectsClip) {
             const uint64_t sceneGeneration = glassBackdropGeneration(metadata,
-                                                                      surface);
+                surface, windowLeft, windowTop);
             const int32_t glassLeft = static_cast<int32_t>(windowLeft +
                 surface.liquidGlass.left);
             const int32_t glassTop = static_cast<int32_t>(windowTop +
                 surface.liquidGlass.top);
-            if (micant::compositor::glass::NeedsRefresh(g_liquidGlassCache,
+            auto* glassCache = acquireLiquidGlassCache(surface.window);
+            const bool refreshGlass = !glassCache ||
+                micant::compositor::glass::NeedsRefresh(*glassCache,
                     surface.window, sceneGeneration, glassLeft, glassTop,
-                    surface.liquidGlass)) {
-                micant::compositor::glass::Render(g_liquidGlassCache, g_frame,
-                    width, height, surface.window, sceneGeneration,
-                    static_cast<int32_t>(windowLeft), static_cast<int32_t>(windowTop),
                     surface.liquidGlass);
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            ++g_localPerformanceStats.glassSurfaces;
+            g_localPerformanceStats.glassWidth = surface.liquidGlass.width;
+            g_localPerformanceStats.glassHeight = surface.liquidGlass.height;
+            g_localPerformanceStats.glassWindowId = surface.window;
+            if (glassCache) {
+                if (!glassCache->valid) ++g_localPerformanceStats.glassMissInvalid;
+                else if (glassCache->window != surface.window) ++g_localPerformanceStats.glassMissInvalid;
+                else if (glassCache->sceneGeneration != sceneGeneration) ++g_localPerformanceStats.glassMissScene;
+                else if (glassCache->screenLeft != glassLeft || glassCache->screenTop != glassTop)
+                    ++g_localPerformanceStats.glassMissPosition;
+                else if (glassCache->width != surface.liquidGlass.width ||
+                         glassCache->height != surface.liquidGlass.height)
+                    ++g_localPerformanceStats.glassMissSize;
+                else if (glassCache->descriptorGeneration != surface.liquidGlass.generation)
+                    ++g_localPerformanceStats.glassMissDescriptor;
             }
-            micant::compositor::glass::Composite(g_liquidGlassCache, g_frame,
-                width, height, {static_cast<int32_t>(clipLeft), static_cast<int32_t>(clipTop),
-                    static_cast<int32_t>(right), static_cast<int32_t>(bottom)});
+#endif
+            if (refreshGlass && glassCache) {
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                ++g_localPerformanceStats.glassRefreshes;
+                const uint64_t noticeNow = performanceMilliseconds();
+                if (!g_localPerformanceStats.glassLastNoticeMilliseconds ||
+                    (noticeNow >= g_localPerformanceStats.glassLastNoticeMilliseconds &&
+                     noticeNow - g_localPerformanceStats.glassLastNoticeMilliseconds >= 5000u)) {
+                    g_localPerformanceStats.glassLastNoticeMilliseconds = noticeNow;
+                    char notice[96] = "[MicaNT Compositor Stats] glass_refresh_begin size=";
+                    char* noticeCursor = notice;
+                    while (*noticeCursor) ++noticeCursor;
+                    appendPerformanceValue(noticeCursor, surface.liquidGlass.width);
+                    *noticeCursor++ = 'x';
+                    appendPerformanceValue(noticeCursor, surface.liquidGlass.height);
+                    *noticeCursor++ = '\r'; *noticeCursor++ = '\n'; *noticeCursor = 0;
+                    print(notice, static_cast<size_t>(noticeCursor - notice));
+                }
+                const uint64_t glassStart = performanceMicroseconds();
+#endif
+                if (ensureLiquidGlassCacheStorage(*glassCache, surface.liquidGlass)) {
+                    micant::compositor::glass::Render(*glassCache, g_frame,
+                        width, height, surface.window, sceneGeneration,
+                        static_cast<int32_t>(windowLeft), static_cast<int32_t>(windowTop),
+                        surface.liquidGlass);
+                    g_localPerformanceStats.glassChangedPixels +=
+                        glassCache->changedBackdropPixels;
+                    if (glassCache->changedBackdropPixels) {
+                        g_localPerformanceStats.glassChangedLeft =
+                            glassCache->changedBackdropLeft;
+                        g_localPerformanceStats.glassChangedTop =
+                            glassCache->changedBackdropTop;
+                        g_localPerformanceStats.glassChangedRight =
+                            glassCache->changedBackdropRight;
+                        g_localPerformanceStats.glassChangedBottom =
+                            glassCache->changedBackdropBottom;
+                    }
+                } else {
+                    glassCache->valid = false;
+                }
+#if MICANT_COMPOSITOR_LOCAL_STATS
+                const uint64_t glassEnd = performanceMicroseconds();
+                if (glassEnd >= glassStart)
+                    g_localPerformanceStats.glassRenderMicroseconds += glassEnd - glassStart;
+#endif
+            }
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            else if (!refreshGlass && glassCache)
+                ++g_localPerformanceStats.glassCacheHits;
+#endif
+            if (glassCache)
+                micant::compositor::glass::Composite(*glassCache, g_frame,
+                    width, height, {static_cast<int32_t>(clipLeft), static_cast<int32_t>(clipTop),
+                        static_cast<int32_t>(right), static_cast<int32_t>(bottom)});
         }
         for (int64_t y = clipTop; y < bottom; ++y) {
             const size_t sourceY = animation.active
@@ -1588,7 +1822,8 @@ void addDamageRegion(DamageSet& damage, ScreenRect incoming,
 }
 
 uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
-                                const MicaCompositorSurfaceInfo& glassSurface) noexcept {
+                                const MicaCompositorSurfaceInfo& glassSurface,
+                                int64_t windowLeft, int64_t windowTop) noexcept {
     uint64_t generation = 1469598103934665603ull;
     const auto mix = [&generation](uint64_t value) noexcept {
         generation ^= value;
@@ -1598,42 +1833,28 @@ uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
     mix(metadata.screenWidth);
     mix(metadata.screenHeight);
     mix(glassSurface.liquidGlass.generation);
-
-    const int64_t glassLeft = static_cast<int64_t>(glassSurface.x) +
-        glassSurface.liquidGlass.left;
-    const int64_t glassTop = static_cast<int64_t>(glassSurface.y) +
-        glassSurface.liquidGlass.top;
-    const ScreenRect backdrop{
-        glassLeft - micant::compositor::glass::Cache::BackdropMargin,
-        glassTop - micant::compositor::glass::Cache::BackdropMargin,
-        glassLeft + glassSurface.liquidGlass.width +
-            micant::compositor::glass::Cache::BackdropMargin,
-        glassTop + glassSurface.liquidGlass.height +
-            micant::compositor::glass::Cache::BackdropMargin};
-    for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
-        const auto& surface = metadata.surfaces[index];
-        if (surface.window == glassSurface.window ||
-            (surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
-                              MICANT_COMPOSITOR_SURFACE_VISIBLE)) !=
-                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
-                 MICANT_COMPOSITOR_SURFACE_VISIBLE) ||
-            surface.zOrder >= glassSurface.zOrder || !surface.width ||
-            !surface.height)
-            continue;
-        const ScreenRect bounds{surface.x, surface.y,
-            static_cast<int64_t>(surface.x) + surface.width,
-            static_cast<int64_t>(surface.y) + surface.height};
-        if (bounds.right <= backdrop.left || bounds.left >= backdrop.right ||
-            bounds.bottom <= backdrop.top || bounds.top >= backdrop.bottom)
-            continue;
-        mix(surface.window);
-        mix(surface.contentGeneration);
-        mix((static_cast<uint64_t>(static_cast<uint32_t>(surface.x)) << 32) |
-            static_cast<uint32_t>(surface.y));
-        mix((static_cast<uint64_t>(surface.width) << 32) | surface.height);
-        mix((static_cast<uint64_t>(surface.pitch) << 32) | surface.zOrder);
-        mix(surface.surfaceAddress);
-        mix(surface.surfaceSizeBytes);
+    const auto& descriptor = glassSurface.liquidGlass;
+    const int64_t captureLeft = windowLeft + descriptor.left -
+        micant::compositor::glass::Cache::BackdropMargin;
+    const int64_t captureTop = windowTop + descriptor.top -
+        micant::compositor::glass::Cache::BackdropMargin;
+    const uint32_t captureWidth = descriptor.width +
+        micant::compositor::glass::Cache::BackdropMargin * 2u;
+    const uint32_t captureHeight = descriptor.height +
+        micant::compositor::glass::Cache::BackdropMargin * 2u;
+    // Surface content generations change when any part of a large surface is
+    // repainted. Hash the actual backdrop pixels instead so unrelated damage
+    // elsewhere in that surface does not force another expensive Glass pass.
+    for (uint32_t y = 0; y < captureHeight; ++y) {
+        const int64_t sourceY = captureTop + y;
+        const uint32_t screenY = static_cast<uint32_t>(sourceY < 0 ? 0 :
+            sourceY >= metadata.screenHeight ? metadata.screenHeight - 1 : sourceY);
+        for (uint32_t x = 0; x < captureWidth; ++x) {
+            const int64_t sourceX = captureLeft + x;
+            const uint32_t screenX = static_cast<uint32_t>(sourceX < 0 ? 0 :
+                sourceX >= metadata.screenWidth ? metadata.screenWidth - 1 : sourceX);
+            mix(g_frame[static_cast<size_t>(screenY) * metadata.screenWidth + screenX]);
+        }
     }
     return generation ? generation : 1;
 }
@@ -2106,9 +2327,10 @@ extern "C" void _start() noexcept {
         const uint64_t waitEnd = performanceMilliseconds();
 #if MICANT_COMPOSITOR_LOCAL_STATS
         if (waitEnd >= waitStart) g_localPerformanceStats.waitElapsedMilliseconds += waitEnd - waitStart;
+        ++g_localPerformanceStats.waitCalls;
         if (status == 0x00000102u) ++g_localPerformanceStats.waitTimeouts;
-        else if (status != 0) ++g_localPerformanceStats.waitFailures;
-        ++g_localPerformanceStats.wakeups;
+        else if (status == 0) ++g_localPerformanceStats.wakeups;
+        else ++g_localPerformanceStats.waitFailures;
         reportLocalPerformanceStats();
 #else
         (void)status;
@@ -2181,6 +2403,48 @@ extern "C" void _start() noexcept {
              hudNow - g_hudLastRefresh >= kHudRefreshMilliseconds);
 #else
         constexpr bool hudDue = false;
+#endif
+#if MICANT_COMPOSITOR_DEBUG_HUD
+        if (!newMetadata && !animationDamagePending && hudDue) {
+            const uint64_t renderStartMicroseconds = performanceMicroseconds();
+            const uint64_t composeStartMilliseconds = performanceMilliseconds();
+            updateHud(hudNow);
+            restoreHudUnderlay();
+            drawHud(g_hudMemoryBytes, g_hudMemoryValid, g_hudCursorValid,
+                    g_hudMouseX, g_hudMouseY);
+            const uint64_t composeEndMilliseconds = performanceMilliseconds();
+            const uint32_t hudWidth = g_displayWidth < kHudWidth
+                ? g_displayWidth : kHudWidth;
+            const uint32_t hudHeight = g_displayHeight < kHudHeight
+                ? g_displayHeight : kHudHeight;
+            const ScreenRect hudClip{
+                static_cast<int32_t>(g_displayWidth - hudWidth), 0,
+                static_cast<int32_t>(g_displayWidth),
+                static_cast<int32_t>(hudHeight)};
+            const uint64_t presentStartMilliseconds = performanceMilliseconds();
+            const bool presented = presentRegion(g_displayWidth, hudClip);
+            const uint64_t presentEndMilliseconds = performanceMilliseconds();
+            recordHudRender(renderStartMicroseconds);
+            ++g_hudPresentedFrames;
+#if MICANT_COMPOSITOR_LOCAL_STATS
+            if (composeEndMilliseconds >= composeStartMilliseconds)
+                g_localPerformanceStats.composeMilliseconds +=
+                    composeEndMilliseconds - composeStartMilliseconds;
+            if (presentEndMilliseconds >= presentStartMilliseconds)
+                g_localPerformanceStats.presentMilliseconds +=
+                    presentEndMilliseconds - presentStartMilliseconds;
+            if (!presented) ++g_localPerformanceStats.failedPresents;
+            else {
+                ++g_localPerformanceStats.partialRedraws;
+                ++g_localPerformanceStats.frames;
+                const uint64_t hudPixels = static_cast<uint64_t>(hudWidth) * hudHeight;
+                g_localPerformanceStats.pixelsComposited += hudPixels;
+                g_localPerformanceStats.bytesTransferred += hudPixels * sizeof(uint32_t);
+            }
+            reportLocalPerformanceStats();
+#endif
+            continue;
+        }
 #endif
         if (!newMetadata && !animationDamagePending && !hudDue) {
 #if MICANT_COMPOSITOR_LOCAL_STATS
@@ -2257,23 +2521,27 @@ extern "C" void _start() noexcept {
                 addDamageRegion(damage, frame.damage[index],
                                 g_displayWidth, g_displayHeight);
         }
-#if MICANT_COMPOSITOR_DEBUG_HUD
-        if (hudDue) {
-            const int32_t hudLeft = static_cast<int32_t>(g_displayWidth > kHudWidth
-                ? g_displayWidth - kHudWidth : 0);
-            addDamageRegion(damage,
-                {hudLeft, 0, static_cast<int32_t>(g_displayWidth),
-                 static_cast<int32_t>(g_displayHeight < kHudHeight
-                    ? g_displayHeight : kHudHeight)},
-                g_displayWidth, g_displayHeight);
-            composed = true;
-        }
-#endif
         if (surfaceSetChanged) {
             damage.count = 1;
             damage.regions[0] = {0, 0, g_displayWidth, g_displayHeight};
             composed = true;
         }
+        DamageSet presentationDamage = damage;
+#if MICANT_COMPOSITOR_DEBUG_HUD
+        if (hudDue) {
+            // The HUD is a final overlay, not a compositor surface. Present
+            // its rectangle without composing it into the Glass backdrop;
+            // otherwise a partial HUD clip can make the uncopied part of a
+            // glass card look like changed backdrop pixels.
+            const int32_t hudLeft = static_cast<int32_t>(g_displayWidth > kHudWidth
+                ? g_displayWidth - kHudWidth : 0);
+            addDamageRegion(presentationDamage,
+                {hudLeft, 0, static_cast<int32_t>(g_displayWidth),
+                 static_cast<int32_t>(g_displayHeight < kHudHeight
+                    ? g_displayHeight : kHudHeight)},
+                g_displayWidth, g_displayHeight);
+        }
+#endif
         if (__atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) != sequence) {
 #if MICANT_COMPOSITOR_LOCAL_STATS
             ++g_localPerformanceStats.changed;
@@ -2287,13 +2555,16 @@ extern "C" void _start() noexcept {
 #if MICANT_COMPOSITOR_LOCAL_STATS
             const uint64_t composeStart = performanceMilliseconds();
 #endif
+#if MICANT_COMPOSITOR_DEBUG_HUD
+            restoreHudUnderlay();
+#endif
             composed = composeDamageRegions(snapshot, animationFrames,
                                              decorPixels, damage);
 #if MICANT_COMPOSITOR_DEBUG_HUD
             if (composed) {
                 if (hudDue) updateHud(hudNow);
-                else drawHud(g_hudMemoryBytes, g_hudMemoryValid,
-                            g_hudCursorValid, g_hudMouseX, g_hudMouseY);
+                drawHud(g_hudMemoryBytes, g_hudMemoryValid,
+                        g_hudCursorValid, g_hudMouseX, g_hudMouseY);
             }
 #endif
 #if MICANT_COMPOSITOR_LOCAL_STATS
@@ -2306,8 +2577,8 @@ extern "C" void _start() noexcept {
 #if MICANT_COMPOSITOR_LOCAL_STATS
                 const uint64_t presentStart = performanceMilliseconds();
 #endif
-                composed = presentDamage(snapshot.screenWidth, damage);
-                frameWasPresented = composed && damage.count != 0;
+                composed = presentDamage(snapshot.screenWidth, presentationDamage);
+                frameWasPresented = composed && presentationDamage.count != 0;
 #if MICANT_COMPOSITOR_LOCAL_STATS
                 const uint64_t presentEnd = performanceMilliseconds();
                 if (presentEnd >= presentStart)
@@ -2323,6 +2594,9 @@ extern "C" void _start() noexcept {
             const ScreenRect fullScreen{0, 0, g_displayWidth, g_displayHeight};
 #if MICANT_COMPOSITOR_LOCAL_STATS
             const uint64_t composeStart = performanceMilliseconds();
+#endif
+#if MICANT_COMPOSITOR_DEBUG_HUD
+            restoreHudUnderlay();
 #endif
             composed = composeRegion(snapshot, fullScreen, animationFrames,
                                      decorPixels);
@@ -2375,6 +2649,8 @@ extern "C" void _start() noexcept {
                     static_cast<uint64_t>(g_displayWidth) * g_displayHeight;
                 const uint64_t damagedPixels = usedFullRedraw
                     ? screenPixels : damagePixelCount(damage);
+                const uint64_t presentedPixels = usedFullRedraw
+                    ? screenPixels : damagePixelCount(presentationDamage);
                 const bool fullDamage = usedFullRedraw ||
                     (damage.count == 1 && damage.regions[0].left == 0 &&
                      damage.regions[0].top == 0 &&
@@ -2387,8 +2663,13 @@ extern "C" void _start() noexcept {
                     g_localPerformanceStats.pixelsComposited = UINT64_MAX;
                 else
                     g_localPerformanceStats.pixelsComposited += damagedPixels;
-                const uint64_t transferredBytes = damagedPixels > UINT64_MAX / 4u
-                    ? UINT64_MAX : damagedPixels * 4u;
+                if (presentedPixels > UINT64_MAX -
+                        g_localPerformanceStats.pixelsPresented)
+                    g_localPerformanceStats.pixelsPresented = UINT64_MAX;
+                else
+                    g_localPerformanceStats.pixelsPresented += presentedPixels;
+                const uint64_t transferredBytes = presentedPixels > UINT64_MAX / 4u
+                    ? UINT64_MAX : presentedPixels * 4u;
                 if (transferredBytes > UINT64_MAX -
                         g_localPerformanceStats.bytesTransferred)
                     g_localPerformanceStats.bytesTransferred = UINT64_MAX;
@@ -2415,6 +2696,9 @@ extern "C" void _start() noexcept {
                 g_lastThemeGeneration = snapshot.themeGeneration;
             }
         }
+#if MICANT_COMPOSITOR_LOCAL_STATS
+        reportLocalPerformanceStats();
+#endif
         if (animationActive &&
             __atomic_load_n(&metadata->frameSequence, __ATOMIC_ACQUIRE) == sequence)
             waitForUpdate(sequence, kAnimationFrameInterval100ns);

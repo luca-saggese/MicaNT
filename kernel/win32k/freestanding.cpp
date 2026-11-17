@@ -2404,25 +2404,33 @@ void publishCompositorSurfaces() noexcept {
 
 micant::NtStatus waitForCompositorUpdate(uint64_t observedSequence,
                                          uint64_t timeout100ns) noexcept {
+    constexpr uint64_t maximumTimeout100ns = 2'500'000; // The compositor's 250 ms HUD cadence.
     auto* current = ke::KeGetCurrentThread();
     auto* store = g_compositorStore;
     if (!current || !store || current->eventWaitInProgress ||
         ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL ||
-        timeout100ns > 1000000u)
+        timeout100ns > maximumTimeout100ns)
         return micant::NtStatus::InvalidDeviceState;
 
     // Reset before checking the generation. A concurrent publication either
     // changes the observed generation or leaves the event set for this wait.
     (void)g_compositorWakeEvent.reset();
     const uint64_t sequence = __atomic_load_n(&store->frameSequence, __ATOMIC_ACQUIRE);
-    if (!(sequence & 1u) && sequence != observedSequence)
+    if (!(sequence & 1u) && sequence != observedSequence) {
+#if defined(MICANT_KERNEL_PERF_DIAGNOSTICS)
+        ke::KeRecordCompositorWaitResult(false);
+#endif
         return micant::NtStatus::Success;
+    }
 
     current->eventWaitInProgress = true;
     current->eventWaitUserMode = current->previousUserMode;
     current->eventWaitCanTerminate = current->eventWaitUserMode &&
         ke::KeGetCurrentIrql() == ke::PASSIVE_LEVEL;
     const auto result = g_compositorWakeEvent.wait(false, false, timeout100ns);
+#if defined(MICANT_KERNEL_PERF_DIAGNOSTICS)
+    ke::KeRecordCompositorWaitResult(result == micant::NtStatus::Timeout);
+#endif
     const bool terminate = current->terminationRequested && current->eventWaitCanTerminate &&
         current->serviceTermination;
     auto terminationRoutine = current->serviceTermination;

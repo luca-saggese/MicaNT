@@ -20,9 +20,8 @@ float mixf(float a, float b, float t) noexcept { return a + (b - a) * t; }
 
 float sqrtApprox(float value) noexcept {
     if (value <= 0.0f) return 0.0f;
-    float result = value > 1.0f ? value : 1.0f;
-    for (uint32_t i = 0; i < 7; ++i)
-        result = 0.5f * (result + value / result);
+    float result{};
+    __asm__ __volatile__("sqrtss %1, %0" : "=x"(result) : "x"(value));
     return result;
 }
 
@@ -35,9 +34,13 @@ float expNegative(float value) noexcept {
     const float x2 = x * x;
     const float x3 = x2 * x;
     const float x4 = x3 * x;
-    float result = 1.0f - x + x2 * 0.5f - x3 * 0.16666667f + x4 * 0.04166667f;
-    while (whole--) result *= 0.5f;
-    return result;
+    const float polynomial = 1.0f - x + x2 * 0.5f - x3 * 0.16666667f +
+        x4 * 0.04166667f;
+    // `value < 40` bounds whole to 57, so this normal IEEE-754 power-of-two
+    // scale exactly replaces the old repeated halving loop.
+    union { uint32_t bits; float value; } scale{
+        static_cast<uint32_t>(127u - whole) << 23};
+    return polynomial * scale.value;
 }
 
 float logApprox(float value) noexcept {
@@ -153,8 +156,69 @@ uint32_t* blurVertical(uint32_t* source, uint32_t* target,
     return target;
 }
 
-uint32_t sampleBilinear(const Cache& cache, float logicalX,
-                        float logicalY) noexcept {
+Rect expandHorizontal(Rect rect, uint32_t radius, uint32_t width) noexcept {
+    rect.left = rect.left > static_cast<int32_t>(radius)
+        ? rect.left - static_cast<int32_t>(radius) : 0;
+    const uint64_t right = static_cast<uint64_t>(rect.right) + radius;
+    rect.right = static_cast<int32_t>(right < width ? right : width);
+    return rect;
+}
+
+Rect expandVertical(Rect rect, uint32_t radius, uint32_t height) noexcept {
+    rect.top = rect.top > static_cast<int32_t>(radius)
+        ? rect.top - static_cast<int32_t>(radius) : 0;
+    const uint64_t bottom = static_cast<uint64_t>(rect.bottom) + radius;
+    rect.bottom = static_cast<int32_t>(bottom < height ? bottom : height);
+    return rect;
+}
+
+void blurHorizontalRect(const uint32_t* source, uint32_t* target,
+                        uint32_t width, uint32_t height, uint32_t radius,
+                        Rect rect) noexcept {
+    for (int32_t y = rect.top; y < rect.bottom; ++y) {
+        for (int32_t x = rect.left; x < rect.right; ++x) {
+            uint32_t sum[4]{};
+            uint32_t count = 0;
+            const uint32_t begin = static_cast<uint32_t>(x) > radius
+                ? static_cast<uint32_t>(x) - radius : 0;
+            const uint32_t end = static_cast<uint32_t>(x) + radius < width
+                ? static_cast<uint32_t>(x) + radius : width - 1;
+            for (uint32_t sx = begin; sx <= end; ++sx) {
+                const uint32_t pixel = source[static_cast<size_t>(y) * width + sx];
+                for (uint32_t ch = 0; ch < 4; ++ch)
+                    sum[ch] += (pixel >> (ch * 8)) & 255u;
+                ++count;
+            }
+            target[static_cast<size_t>(y) * width + x] = averageColor(sum, count);
+        }
+    }
+    (void)height;
+}
+
+void blurVerticalRect(const uint32_t* source, uint32_t* target,
+                      uint32_t width, uint32_t height, uint32_t radius,
+                      Rect rect) noexcept {
+    for (int32_t y = rect.top; y < rect.bottom; ++y) {
+        for (int32_t x = rect.left; x < rect.right; ++x) {
+            uint32_t sum[4]{};
+            uint32_t count = 0;
+            const uint32_t begin = static_cast<uint32_t>(y) > radius
+                ? static_cast<uint32_t>(y) - radius : 0;
+            const uint32_t end = static_cast<uint32_t>(y) + radius < height
+                ? static_cast<uint32_t>(y) + radius : height - 1;
+            for (uint32_t sy = begin; sy <= end; ++sy) {
+                const uint32_t pixel = source[static_cast<size_t>(sy) * width + x];
+                for (uint32_t ch = 0; ch < 4; ++ch)
+                    sum[ch] += (pixel >> (ch * 8)) & 255u;
+                ++count;
+            }
+            target[static_cast<size_t>(y) * width + x] = averageColor(sum, count);
+        }
+    }
+}
+
+uint32_t sampleBilinearChannel(const Cache& cache, float logicalX,
+                               float logicalY, uint32_t shift) noexcept {
     float x = logicalX * cache.downsample - 0.5f;
     float y = logicalY * cache.downsample - 0.5f;
     x = clampf(x, 0.0f, static_cast<float>(cache.sampleWidth - 1));
@@ -163,22 +227,15 @@ uint32_t sampleBilinear(const Cache& cache, float logicalX,
     const uint32_t x1 = x0 + 1 < cache.sampleWidth ? x0 + 1 : x0;
     const uint32_t y1 = y0 + 1 < cache.sampleHeight ? y0 + 1 : y0;
     const float fx = x - x0, fy = y - y0;
-    const uint32_t pixels[4]{
-        cache.sample[static_cast<size_t>(y0) * cache.sampleWidth + x0],
-        cache.sample[static_cast<size_t>(y0) * cache.sampleWidth + x1],
-        cache.sample[static_cast<size_t>(y1) * cache.sampleWidth + x0],
-        cache.sample[static_cast<size_t>(y1) * cache.sampleWidth + x1]};
-    uint32_t result = 0;
-    for (uint32_t shift = 0; shift < 32; shift += 8) {
-        const float a = mixf(static_cast<float>((pixels[0] >> shift) & 255u),
-                             static_cast<float>((pixels[1] >> shift) & 255u), fx);
-        const float b = mixf(static_cast<float>((pixels[2] >> shift) & 255u),
-                             static_cast<float>((pixels[3] >> shift) & 255u), fx);
-        const uint32_t channel = static_cast<uint32_t>(clampf(mixf(a, b, fy) + 0.5f,
-                                                               0.0f, 255.0f));
-        result |= channel << shift;
-    }
-    return result;
+    const float a = mixf(static_cast<float>((cache.sample[
+        static_cast<size_t>(y0) * cache.sampleWidth + x0] >> shift) & 255u),
+        static_cast<float>((cache.sample[static_cast<size_t>(y0) *
+        cache.sampleWidth + x1] >> shift) & 255u), fx);
+    const float b = mixf(static_cast<float>((cache.sample[
+        static_cast<size_t>(y1) * cache.sampleWidth + x0] >> shift) & 255u),
+        static_cast<float>((cache.sample[static_cast<size_t>(y1) *
+        cache.sampleWidth + x1] >> shift) & 255u), fx);
+    return static_cast<uint32_t>(clampf(mixf(a, b, fy) + 0.5f, 0.0f, 255.0f));
 }
 
 float ign(float x, float y) noexcept {
@@ -242,11 +299,23 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             uint32_t screenHeight, uint64_t window, uint64_t sceneGeneration,
             int32_t windowLeft, int32_t windowTop,
             const MicaLiquidGlassDescriptor& d) noexcept {
-    if (!frame || !screenWidth || !screenHeight ||
+    const bool hadPriorCapture = cache.valid && cache.raw &&
+        cache.captureWidth == d.width + kBackdropMargin * 2u &&
+        cache.captureHeight == d.height + kBackdropMargin * 2u;
+    cache.valid = false;
+    cache.changedBackdropPixels = 0;
+    cache.changedBackdropLeft = cache.changedBackdropTop = UINT32_MAX;
+    cache.changedBackdropRight = cache.changedBackdropBottom = 0;
+    if (!cache.raw || !cache.sample || !cache.scratch || !cache.output ||
+        !frame || !screenWidth || !screenHeight ||
         !IsValid(d, static_cast<uint32_t>(windowLeft < 0 ? 0 : screenWidth),
                     static_cast<uint32_t>(windowTop < 0 ? 0 : screenHeight))) return;
     const int32_t glassLeft = windowLeft + d.left;
     const int32_t glassTop = windowTop + d.top;
+    const bool partialEligible = hadPriorCapture && cache.window == window &&
+        cache.screenLeft == glassLeft && cache.screenTop == glassTop &&
+        cache.width == d.width && cache.height == d.height &&
+        cache.descriptorGeneration == d.generation && cache.downsample == d.downsample;
     const int32_t captureLeft = glassLeft - static_cast<int32_t>(kBackdropMargin);
     const int32_t captureTop = glassTop - static_cast<int32_t>(kBackdropMargin);
     const uint32_t captureWidth = d.width + kBackdropMargin * 2;
@@ -260,8 +329,15 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             const int64_t sx = static_cast<int64_t>(captureLeft) + x;
             const uint32_t cx = static_cast<uint32_t>(sx < 0 ? 0 :
                 sx >= screenWidth ? screenWidth - 1 : sx);
-            cache.raw[static_cast<size_t>(y) * captureWidth + x] =
-                frame[static_cast<size_t>(cy) * screenWidth + cx];
+            const uint32_t pixel = frame[static_cast<size_t>(cy) * screenWidth + cx];
+            if (hadPriorCapture && cache.raw[static_cast<size_t>(y) * captureWidth + x] != pixel) {
+                ++cache.changedBackdropPixels;
+                if (x < cache.changedBackdropLeft) cache.changedBackdropLeft = x;
+                if (y < cache.changedBackdropTop) cache.changedBackdropTop = y;
+                if (x + 1 > cache.changedBackdropRight) cache.changedBackdropRight = x + 1;
+                if (y + 1 > cache.changedBackdropBottom) cache.changedBackdropBottom = y + 1;
+            }
+            cache.raw[static_cast<size_t>(y) * captureWidth + x] = pixel;
         }
     }
     cache.downsample = d.downsample;
@@ -272,25 +348,65 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
     if (!cache.sampleWidth || !cache.sampleHeight ||
         cache.sampleWidth > Cache::MaxCapture || cache.sampleHeight > Cache::MaxCapture)
         return;
-    for (uint32_t y = 0; y < cache.sampleHeight; ++y) {
-        for (uint32_t x = 0; x < cache.sampleWidth; ++x) {
+    const uint32_t boxRadius = static_cast<uint32_t>(d.sourceBlur * 0.58f + 0.5f);
+    Rect changedSample{};
+    const bool incrementalBlur = partialEligible && cache.changedBackdropPixels && boxRadius;
+    if (incrementalBlur) {
+        // The downsampled source is retained separately from its blurred copy.
+        // A changed raw backdrop rectangle maps to this bounded source region;
+        // each horizontal/vertical box pass expands its output by one radius.
+        const uint32_t left = static_cast<uint32_t>(cache.changedBackdropLeft * d.downsample);
+        const uint32_t top = static_cast<uint32_t>(cache.changedBackdropTop * d.downsample);
+        const uint32_t right = static_cast<uint32_t>(cache.changedBackdropRight * d.downsample + 1.0f);
+        const uint32_t bottom = static_cast<uint32_t>(cache.changedBackdropBottom * d.downsample + 1.0f);
+        changedSample = {
+            static_cast<int32_t>(left ? left - 1 : 0),
+            static_cast<int32_t>(top ? top - 1 : 0),
+            static_cast<int32_t>(right < cache.sampleWidth ? right + 1 : cache.sampleWidth),
+            static_cast<int32_t>(bottom < cache.sampleHeight ? bottom + 1 : cache.sampleHeight)};
+    } else {
+        changedSample = {0, 0, static_cast<int32_t>(cache.sampleWidth),
+                         static_cast<int32_t>(cache.sampleHeight)};
+    }
+    for (int32_t y = changedSample.top; y < changedSample.bottom; ++y) {
+        for (int32_t x = changedSample.left; x < changedSample.right; ++x) {
             if (d.downsample < 0.75f) {
-                const uint32_t sx = x * 2, sy = y * 2;
+                const uint32_t sx = static_cast<uint32_t>(x) * 2;
+                const uint32_t sy = static_cast<uint32_t>(y) * 2;
                 const uint32_t x1 = sx + 1 < captureWidth ? sx + 1 : sx;
                 const uint32_t y1 = sy + 1 < captureHeight ? sy + 1 : sy;
-                cache.sample[static_cast<size_t>(y) * cache.sampleWidth + x] = average4(
+                cache.downsampled[static_cast<size_t>(y) * cache.sampleWidth + x] = average4(
                     cache.raw[static_cast<size_t>(sy) * captureWidth + sx],
                     cache.raw[static_cast<size_t>(sy) * captureWidth + x1],
                     cache.raw[static_cast<size_t>(y1) * captureWidth + sx],
                     cache.raw[static_cast<size_t>(y1) * captureWidth + x1]);
             } else {
-                cache.sample[static_cast<size_t>(y) * cache.sampleWidth + x] =
+                cache.downsampled[static_cast<size_t>(y) * cache.sampleWidth + x] =
                     cache.raw[static_cast<size_t>(y) * captureWidth + x];
             }
         }
     }
-    const uint32_t boxRadius = static_cast<uint32_t>(d.sourceBlur * 0.58f + 0.5f);
-    if (boxRadius) {
+    if (incrementalBlur) {
+        Rect affected = changedSample;
+        const uint32_t* blurSource = cache.downsampled;
+        for (uint32_t pass = 0; pass < 3; ++pass) {
+            const Rect horizontal = expandHorizontal(affected, boxRadius,
+                                                     cache.sampleWidth);
+            blurHorizontalRect(blurSource, cache.scratch, cache.sampleWidth,
+                               cache.sampleHeight, boxRadius, horizontal);
+            const Rect verticalOutput = expandVertical(horizontal, boxRadius,
+                                                       cache.sampleHeight);
+            blurVerticalRect(cache.scratch, cache.sample, cache.sampleWidth,
+                             cache.sampleHeight, boxRadius, verticalOutput);
+            affected = verticalOutput;
+            blurSource = cache.sample;
+        }
+    } else {
+        for (size_t index = 0; index < static_cast<size_t>(cache.sampleWidth) *
+             cache.sampleHeight; ++index)
+            cache.sample[index] = cache.downsampled[index];
+    }
+    if (boxRadius && !incrementalBlur) {
         for (uint32_t pass = 0; pass < 3; ++pass) {
             blurHorizontal(cache.sample, cache.scratch, cache.sampleWidth,
                            cache.sampleHeight, boxRadius);
@@ -302,8 +418,78 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
     const float halfWidth = d.width * 0.5f, halfHeight = d.height * 0.5f;
     const float radius = minf(d.radius, minf(halfWidth, halfHeight));
     const float bezelWidth = maxf(d.bezel, 1.0f) * 1.45f;
-    for (uint32_t y = 0; y < d.height; ++y) {
-        for (uint32_t x = 0; x < d.width; ++x) {
+    struct GlassTap {
+        float radius{};
+        float sine{};
+        float cosine{};
+        float weight{};
+    };
+    // Source blur already supplies a broad, three-pass diffusion. Use fewer
+    // glass refraction taps in that case; retaining 24 taps only adds
+    // redundant sampling work on the heavily blurred backdrop.
+    const uint32_t tapCount = d.sourceBlur >= 8.0f ? 8u : 24u;
+    GlassTap taps[24]{};
+    for (uint32_t tap = 0; tap < tapCount; ++tap) {
+        const float fi = static_cast<float>(tap) + 0.5f;
+        taps[tap].radius = sqrtApprox(fi / static_cast<float>(tapCount));
+        sinCos(fi * kGoldenAngle, taps[tap].sine, taps[tap].cosine);
+        taps[tap].weight = expNegative(2.2f * taps[tap].radius * taps[tap].radius);
+    }
+    uint32_t outputLeft = 0, outputTop = 0;
+    uint32_t outputRight = d.width, outputBottom = d.height;
+    if (partialEligible && cache.changedBackdropPixels && cache.changedBackdropRight >
+            cache.changedBackdropLeft && cache.changedBackdropBottom >
+            cache.changedBackdropTop) {
+        const uint32_t boxRadius = static_cast<uint32_t>(d.sourceBlur * 0.58f + 0.5f);
+        const float sampleRadius = static_cast<float>(boxRadius * 3u) / d.downsample + 2.0f;
+        const float refractionRadius = d.thickness * 1.35f * 1.5f *
+            (1.0f + d.dispersion);
+        const float tapRadius = maxf(d.blurPx, 0.5f) * 1.5f;
+        const float dirtyMargin = sampleRadius + refractionRadius + tapRadius + 2.0f;
+        // Expand by the source blur kernel, refraction and tap footprint, then
+        // clip to the card. Large or extreme descriptors naturally become a
+        // full redraw, while small backdrop updates stay local.
+        {
+            const float left = static_cast<float>(cache.changedBackdropLeft) -
+                kBackdropMargin - dirtyMargin;
+            const float right = static_cast<float>(cache.changedBackdropRight) -
+                kBackdropMargin + dirtyMargin;
+            const float yScale = 1.0f - 1.5f * d.magnify;
+            const float sourceTop = static_cast<float>(cache.changedBackdropTop) -
+                kBackdropMargin - dirtyMargin;
+            const float sourceBottom = static_cast<float>(cache.changedBackdropBottom) -
+                kBackdropMargin + dirtyMargin;
+            const float yA = (sourceTop - halfHeight) / yScale + halfHeight;
+            const float yB = (sourceBottom - halfHeight) / yScale + halfHeight;
+            const float top = yA < yB ? yA : yB;
+            const float bottom = yA > yB ? yA : yB;
+            outputLeft = static_cast<uint32_t>(clampf(left, 0.0f,
+                static_cast<float>(d.width)));
+            outputRight = static_cast<uint32_t>(clampf(right + 1.0f, 0.0f,
+                static_cast<float>(d.width)));
+            outputTop = static_cast<uint32_t>(clampf(top, 0.0f,
+                static_cast<float>(d.height)));
+            outputBottom = static_cast<uint32_t>(clampf(bottom + 1.0f, 0.0f,
+                static_cast<float>(d.height)));
+            if (outputRight <= outputLeft || outputBottom <= outputTop) {
+                // The changed backdrop lies outside the card's complete blur,
+                // refraction and tap footprint. Keep the existing output; a
+                // full-card render here turns harmless edge updates (such as
+                // the debug HUD above the card) into a large CPU spike.
+                cache.valid = true;
+                cache.window = window;
+                cache.sceneGeneration = sceneGeneration;
+                cache.descriptorGeneration = d.generation;
+                cache.screenLeft = glassLeft;
+                cache.screenTop = glassTop;
+                cache.width = d.width;
+                cache.height = d.height;
+                return;
+            }
+        }
+    }
+    for (uint32_t y = outputTop; y < outputBottom; ++y) {
+        for (uint32_t x = outputLeft; x < outputRight; ++x) {
             const float px = d.left + static_cast<float>(x) + 0.5f;
             const float py = d.top + static_cast<float>(y) + 0.5f;
             // The output buffer already begins at the glass bounds. Keep the
@@ -360,33 +546,32 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
             const float dispersion = d.dispersion * 0.6f;
             const float rotation = ign(static_cast<float>(glassLeft + x),
                                        static_cast<float>(glassTop + y)) * kTau;
+            float rotSin{}, rotCos{};
+            sinCos(rotation, rotSin, rotCos);
             float red = 0, green = 0, blue = 0, weightSum = 0;
-            for (uint32_t tap = 0; tap < 24; ++tap) {
-                const float fi = static_cast<float>(tap) + 0.5f;
-                const float r = sqrtApprox(fi / 24.0f);
-                float baseSin{}, baseCos{}, rotSin{}, rotCos{};
-                sinCos(fi * kGoldenAngle, baseSin, baseCos);
-                sinCos(rotation, rotSin, rotCos);
-                const float ox = (baseCos * rotCos - baseSin * rotSin) * r * tapRadius;
-                const float oy = (baseSin * rotCos + baseCos * rotSin) * r * tapRadius;
-                const float weight = expNegative(2.2f * r * r);
-                const uint32_t cr = sampleBilinear(cache,
+            for (uint32_t tap = 0; tap < tapCount; ++tap) {
+                const auto& sample = taps[tap];
+                const float ox = (sample.cosine * rotCos - sample.sine * rotSin) *
+                    sample.radius * tapRadius;
+                const float oy = (sample.sine * rotCos + sample.cosine * rotSin) *
+                    sample.radius * tapRadius;
+                const uint32_t cr = sampleBilinearChannel(cache,
                     static_cast<float>(x) + kBackdropMargin + ox + dispX * (1.0f + dispersion),
-                    sy + kBackdropMargin + oy + dispY * (1.0f + dispersion));
-                const uint32_t cg = sampleBilinear(cache,
+                    sy + kBackdropMargin + oy + dispY * (1.0f + dispersion), 16);
+                const uint32_t cg = sampleBilinearChannel(cache,
                     static_cast<float>(x) + kBackdropMargin + ox + dispX,
-                    sy + kBackdropMargin + oy + dispY);
-                const uint32_t cb = sampleBilinear(cache,
+                    sy + kBackdropMargin + oy + dispY, 8);
+                const uint32_t cb = sampleBilinearChannel(cache,
                     static_cast<float>(x) + kBackdropMargin + ox + dispX * (1.0f - dispersion),
-                    sy + kBackdropMargin + oy + dispY * (1.0f - dispersion));
-                red += static_cast<float>((cr >> 16) & 255u) * weight;
-                green += static_cast<float>((cg >> 8) & 255u) * weight;
-                blue += static_cast<float>(cb & 255u) * weight;
-                weightSum += weight;
+                    sy + kBackdropMargin + oy + dispY * (1.0f - dispersion), 0);
+                red += static_cast<float>(cr) * sample.weight;
+                green += static_cast<float>(cg) * sample.weight;
+                blue += static_cast<float>(cb) * sample.weight;
+                weightSum += sample.weight;
             }
-            const uint32_t alphaPixel = sampleBilinear(cache,
-                static_cast<float>(x) + kBackdropMargin, sy + kBackdropMargin);
-            const float baseAlpha = static_cast<float>(alphaPixel >> 24) / 255.0f;
+            const uint32_t alphaChannel = sampleBilinearChannel(cache,
+                static_cast<float>(x) + kBackdropMargin, sy + kBackdropMargin, 24);
+            const float baseAlpha = static_cast<float>(alphaChannel) / 255.0f;
             const float inverseAlpha = 1.0f / maxf(baseAlpha, 1.0e-3f);
             float colorR = red / maxf(weightSum, 1.0e-3f) / 255.0f * inverseAlpha;
             float colorG = green / maxf(weightSum, 1.0e-3f) / 255.0f * inverseAlpha;
@@ -487,7 +672,7 @@ void Render(Cache& cache, uint32_t* frame, uint32_t screenWidth,
 
 void Composite(const Cache& cache, uint32_t* frame, uint32_t screenWidth,
                uint32_t screenHeight, Rect clip) noexcept {
-    if (!cache.valid || !frame) return;
+    if (!cache.valid || !cache.output || !frame) return;
     const int64_t right = static_cast<int64_t>(cache.screenLeft) + cache.width;
     const int64_t bottom = static_cast<int64_t>(cache.screenTop) + cache.height;
     const int64_t left = max64(cache.screenLeft, clip.left);

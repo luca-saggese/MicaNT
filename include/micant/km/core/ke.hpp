@@ -840,6 +840,12 @@ static_assert(offsetof(KThreadContext, xmm6To15) == 96);
 extern "C" bool MicantAmd64SwitchContext(KThreadContext*, KThreadContext*) noexcept;
 extern "C" bool MicantAmd64ConfigureExtendedState() noexcept;
 extern "C" uint32_t MicantAmd64ExtendedSize;
+#if defined(MICANT_KERNEL_PERF_DIAGNOSTICS)
+void KeRecordContextSwitch(KThread*, KThread*) noexcept;
+void KeRecordContextResume(KThread*) noexcept;
+void KeRecordCompositorWaitResult(bool timeout) noexcept;
+void KeRecordTimerContext(uint64_t savedCs, uint64_t savedRip) noexcept;
+#endif
 static_assert(offsetof(KThreadContext, extendedState) == 256);
 #endif
 
@@ -1503,12 +1509,18 @@ inline bool KiSwapContext(KThread* outgoing, KThread* incoming, bool prequeued =
     if (outgoing->state == ThreadState::Running) {
         outgoing->state = ThreadState::Ready;
     }
+#if defined(MICANT_KERNEL_PERF_DIAGNOSTICS)
+    KeRecordContextSwitch(outgoing, incoming);
+#endif
     g_CurrentCpu.currentThread = incoming;
     g_CurrentCpu.contextSwitches++;
     incoming->state = ThreadState::Running;
     if (outgoing->state == ThreadState::Terminated && outgoing->terminationNotify)
         outgoing->terminationNotify(outgoing->terminationContext);
     const bool switched = MicantAmd64SwitchContext(&outgoing->context, &incoming->context);
+#if defined(MICANT_KERNEL_PERF_DIAGNOSTICS)
+    KeRecordContextResume(outgoing);
+#endif
     CMD_KE_VALIDATE_HID("KiSwapContext resumed");
     return switched;
 #else

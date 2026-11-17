@@ -292,6 +292,10 @@ def main() -> int:
         "--compositor-local-stats", action="store_true",
         help="enable aggregated compositor timing, repaint and present counters",
     )
+    parser.add_argument("--kernel-perf-diagnostics", action="store_true",
+                        help="log aggregated 5-second timer, thread-state and context-switch counters")
+    parser.add_argument("--compositor-debug-hud", action="store_true",
+                        help="build the compositor with its diagnostic HUD enabled")
     parser.add_argument(
         "--process-memory-selftest", action="store_true",
         help="exercise process memory queries, bounded dump streaming and cleanup in QEMU",
@@ -392,6 +396,8 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_TASKMGR_SELFTEST:BOOL={'ON' if args.taskmgr_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_THEME_TEST:BOOL={'ON' if args.theme_test else 'OFF'}",
                 f"-DMICANT_COMPOSITOR_LOCAL_STATS:BOOL={'ON' if args.compositor_local_stats else 'OFF'}",
+                f"-DMICANT_KERNEL_PERF_DIAGNOSTICS:BOOL={'ON' if args.kernel_perf_diagnostics else 'OFF'}",
+                f"-DMICANT_COMPOSITOR_DEBUG_HUD:BOOL={'ON' if args.compositor_debug_hud else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST:BOOL={'ON' if args.process_memory_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CMD_TEST:BOOL={'ON' if args.cmd_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST:BOOL={'ON' if args.crash_dump_selftest else 'OFF'}",

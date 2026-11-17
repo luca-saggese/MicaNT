@@ -1,6 +1,7 @@
 #pragma once
 
 #include "micant/shared/liquid_glass.h"
+#include <stddef.h>
 #include <stdint.h>
 
 namespace micant::compositor::glass {
@@ -21,10 +22,19 @@ struct Cache {
     uint32_t width{}, height{}, captureWidth{}, captureHeight{};
     uint32_t sampleWidth{}, sampleHeight{};
     float downsample{};
-    uint32_t raw[MaxCapture * MaxCapture]{};
-    uint32_t sample[MaxCapture * MaxCapture]{};
-    uint32_t scratch[MaxCapture * MaxCapture]{};
-    uint32_t output[MaxCard * MaxCard]{};
+    uint32_t* raw{};
+    uint32_t* downsampled{};
+    uint32_t* sample{};
+    uint32_t* scratch{};
+    uint32_t* output{};
+    size_t rawCapacityPixels{};
+    size_t downsampledCapacityPixels{};
+    size_t sampleCapacityPixels{};
+    size_t scratchCapacityPixels{};
+    size_t outputCapacityPixels{};
+    uint64_t changedBackdropPixels{};
+    uint32_t changedBackdropLeft{}, changedBackdropTop{};
+    uint32_t changedBackdropRight{}, changedBackdropBottom{};
 };
 
 bool IsValid(const MicaLiquidGlassDescriptor& descriptor,

@@ -16,6 +16,8 @@ option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-mem
 option(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST "Fault, persist, reboot and recover a LuceOS crash dump in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
 option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
+option(MICANT_KERNEL_PERF_DIAGNOSTICS "Emit aggregated 5-second Ke scheduler/accounting diagnostics" OFF)
+option(MICANT_COMPOSITOR_DEBUG_HUD "Build the compositor debug HUD" OFF)
 
 if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST AND MICANT_BOOTSTRAP_TIMER_SELFTEST)
     message(FATAL_ERROR "Bootstrap runtime and timer self-tests are mutually exclusive")
@@ -361,6 +363,9 @@ if (MICANT_ENABLE_BAREMETAL)
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
     target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_FREESTANDING MICANT_BAREMETAL)
+    if (MICANT_KERNEL_PERF_DIAGNOSTICS)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_KERNEL_PERF_DIAGNOSTICS=1)
+    endif()
     if (MICANT_BOOTSTRAP_RUNTIME_SELFTEST)
         target_sources(ntoskrnl_core_baremetal PRIVATE test/kernel_cxx_lifecycle_fixture.cpp)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_KERNEL_CXX_LIFECYCLE_SELFTEST)
@@ -726,6 +731,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
     )
+    target_compile_definitions(compositor_boot PRIVATE MICANT_COMPOSITOR_DEBUG_HUD=$<BOOL:${MICANT_COMPOSITOR_DEBUG_HUD}>)
     target_compile_definitions(compositor_boot PRIVATE MICANT_NATIVE_USERMODE)
     if (MICANT_COMPOSITOR_LOCAL_STATS)
         target_compile_definitions(compositor_boot PRIVATE MICANT_COMPOSITOR_LOCAL_STATS=1)
