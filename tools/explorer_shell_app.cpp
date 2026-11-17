@@ -2177,82 +2177,177 @@ void updateClock() noexcept {
         std::memcpy(g.clockText, "--:--", 6);
     }
     if (g.clockPixels) {
-        constexpr float scale = 168.0f / 158.0f;
-        constexpr float radius = 28.0f * scale;
-        constexpr float center = 84.0f;
+        constexpr float cardWidth = static_cast<float>(CLOCK_CARD);
+        constexpr float cardHeight = static_cast<float>(CLOCK_CARD);
+        constexpr float unit = cardWidth / 158.0f;
+        constexpr float inset = 9.0f * unit;
+        constexpr float halfWidth = cardWidth * 0.5f;
+        constexpr float halfHeight = cardHeight * 0.5f;
+        constexpr float halfBoxWidth = halfWidth - inset;
+        constexpr float halfBoxHeight = halfHeight - inset;
+        constexpr float cornerRadius = 29.8f - inset;
+        constexpr float tickLength = 5.6f * unit;
+        constexpr float kTau = 6.28318530718f;
+        constexpr float kPi = 3.14159265359f;
+        const auto sqrtClock = [](float value) noexcept {
+            if (value <= 0.0f) return 0.0f;
+            float result = value > 1.0f ? value : 1.0f;
+            for (uint32_t i = 0; i < 7; ++i)
+                result = 0.5f * (result + value / result);
+            return result;
+        };
         for (uint32_t y = 0; y < CLOCK_WINDOW; ++y)
             for (uint32_t x = 0; x < CLOCK_WINDOW; ++x)
                 g.clockPixels[y * CLOCK_WINDOW + x] = 0;
-        const float seconds = static_cast<float>(value.second);
+
+        // MacShell places each tick on the inset rounded-rectangle contour.
+        // The former small-radius circle clustered the 60 marks around the
+        // clock center, which made the face look broken.
+        const float seconds = timeAvailable ? static_cast<float>(value.second) : 0.0f;
         for (uint32_t i = 0; i < 60; ++i) {
-            float a = static_cast<float>(i) * 6.28318530718f / 60.0f;
-            if (a > 3.14159265f) a -= 6.28318531f;
-            const float a2 = a * a;
-            const float sine = a * (1.0f - a2 / 6.0f + a2 * a2 / 120.0f);
-            const float cosine = 1.0f - a2 / 2.0f + a2 * a2 / 24.0f;
-            const float inner = radius - 9.0f * scale;
-            const float outer = inner + 5.6f * scale;
-            const auto roundPixel = [](float v) noexcept { return static_cast<int>(v + (v >= 0 ? 0.5f : -0.5f)); };
-            const int x0 = roundPixel(center + sine * inner);
-            const int y0 = roundPixel(center - cosine * inner);
-            const int x1 = roundPixel(center + sine * outer);
-            const int y1 = roundPixel(center - cosine * outer);
-            const float alpha = i <= value.second
-                ? 0.40f + 0.58f * (static_cast<float>(i) / static_cast<float>(value.second ? value.second : 1))
-                : 0.12f + 0.28f * (static_cast<float>(i - value.second) /
-                    static_cast<float>(value.second < 60 ? 60 - value.second : 1));
-            const uint32_t a8 = static_cast<uint32_t>(alpha * 255.0f);
-            const uint32_t c = (a8 << 24) | (a8 << 16) | (a8 << 8) | a8;
-            const int deltaX = x1 - x0, deltaY = y1 - y0;
-            const int dx = deltaX < 0 ? -deltaX : deltaX, sx = x0 < x1 ? 1 : -1;
-            const int dy = -(deltaY < 0 ? -deltaY : deltaY), sy = y0 < y1 ? 1 : -1;
-            int err = dx + dy, x = x0, y = y0;
-            for (;;) {
-                if (x >= 0 && x < static_cast<int>(CLOCK_WINDOW) && y >= 0 && y < static_cast<int>(CLOCK_WINDOW))
-                    g.clockPixels[static_cast<size_t>(y) * CLOCK_WINDOW + static_cast<size_t>(x)] = c;
-                if (x == x1 && y == y1) break;
-                const int e2 = 2 * err;
-                if (e2 >= dy) { err += dy; x += sx; }
-                if (e2 <= dx) { err += dx; y += sy; }
+            float angle = static_cast<float>(i) * kTau / 60.0f;
+            if (angle > kPi) angle -= kTau;
+            const float a2 = angle * angle;
+            const float dx = angle * (1.0f - a2 / 6.0f + a2 * a2 / 120.0f);
+            const float dy = -(1.0f - a2 / 2.0f + a2 * a2 / 24.0f);
+            const float ax = dx < 0.0f ? -dx : dx;
+            const float ay = dy < 0.0f ? -dy : dy;
+            float distance = (ax > 1.0e-6f ? halfBoxWidth / ax : 1.0e9f);
+            const float edgeY = ay > 1.0e-6f ? halfBoxHeight / ay : 1.0e9f;
+            if (edgeY < distance) distance = edgeY;
+            float px = ax * distance;
+            float py = ay * distance;
+            const float cornerX = halfBoxWidth - cornerRadius;
+            const float cornerY = halfBoxHeight - cornerRadius;
+            if (px > cornerX && py > cornerY) {
+                const float b = ax * cornerX + ay * cornerY;
+                const float c = cornerX * cornerX + cornerY * cornerY -
+                    cornerRadius * cornerRadius;
+                float root = b * b - c;
+                if (root < 0.0f) root = 0.0f;
+                distance = b + sqrtClock(root);
+                px = ax * distance;
+                py = ay * distance;
+            }
+            const float outerX = halfWidth + (dx < 0.0f ? -px : px);
+            const float outerY = halfHeight + (dy < 0.0f ? -py : py);
+            const float innerX = outerX - dx * tickLength;
+            const float innerY = outerY - dy * tickLength;
+            const float segmentX = innerX - outerX;
+            const float segmentY = innerY - outerY;
+            const float segmentLength2 = segmentX * segmentX + segmentY * segmentY;
+            const float past = 0.40f + 0.58f *
+                (static_cast<float>(i) / (seconds > 1.0f ? seconds : 1.0f));
+            const float aheadRatio = static_cast<float>(i) - seconds;
+            const float ahead = 0.12f + 0.28f *
+                (aheadRatio / (seconds < 60.0f ? 60.0f - seconds : 1.0f));
+            const float fraction = seconds - static_cast<float>(i);
+            const float fade = fraction <= 0.0f ? ahead :
+                fraction >= 1.0f ? past : ahead + (past - ahead) * fraction;
+            const float alpha = (timeAvailable ? 0.90f : 0.55f) * fade;
+
+            const float screenOuterX = outerX + 10.0f;
+            const float screenOuterY = outerY + 10.0f;
+            const float screenInnerX = innerX + 10.0f;
+            const float screenInnerY = innerY + 10.0f;
+            int left = static_cast<int>(screenOuterX < screenInnerX ? screenOuterX : screenInnerX) - 2;
+            int right = static_cast<int>(screenOuterX > screenInnerX ? screenOuterX : screenInnerX) + 2;
+            int top = static_cast<int>(screenOuterY < screenInnerY ? screenOuterY : screenInnerY) - 2;
+            int bottom = static_cast<int>(screenOuterY > screenInnerY ? screenOuterY : screenInnerY) + 2;
+            if (left < 0) left = 0;
+            if (top < 0) top = 0;
+            if (right >= static_cast<int>(CLOCK_WINDOW)) right = CLOCK_WINDOW - 1;
+            if (bottom >= static_cast<int>(CLOCK_WINDOW)) bottom = CLOCK_WINDOW - 1;
+            for (int y = top; y <= bottom; ++y) {
+                for (int x = left; x <= right; ++x) {
+                    const float qx = static_cast<float>(x) + 0.5f - screenOuterX;
+                    const float qy = static_cast<float>(y) + 0.5f - screenOuterY;
+                    float along = (qx * segmentX + qy * segmentY) /
+                        (segmentLength2 > 1.0e-5f ? segmentLength2 : 1.0f);
+                    if (along < 0.0f) along = 0.0f;
+                    if (along > 1.0f) along = 1.0f;
+                    const float rx = qx - segmentX * along;
+                    const float ry = qy - segmentY * along;
+                    const float distance2 = rx * rx + ry * ry;
+                    if (distance2 > 1.0f) continue;
+                    const float coverage = 1.0f - sqrtClock(distance2) * 0.5f;
+                    const uint32_t a8 = static_cast<uint32_t>(
+                        alpha * coverage * 255.0f + 0.5f);
+                    const uint32_t pixel = (a8 << 24) | (a8 << 16) |
+                        (a8 << 8) | a8;
+                    g.clockPixels[static_cast<size_t>(y) * CLOCK_WINDOW +
+                                  static_cast<size_t>(x)] = pixel;
+                }
             }
         }
-        // Small MIT-reference adaptation: text remains native GDI because the original font is not bundled.
+
         SetBkMode(g.clockDc, TRANSPARENT);
-        SetTextColor(g.clockDc, RGB(255, 255, 255));
+        // The source uses Open Runde Semibold at 11.5 px for the city label.
+        // Arial is the closest installed runtime face; keep the same size and
+        // muted dark-glass label color.
+        SetTextColor(g.clockDc, RGB(142, 142, 148));
         HFONT font = CreateFontW(12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH | FF_SWISS, L"Arial");
         if (font) {
             HGDIOBJ old = SelectObject(g.clockDc, font);
             const wchar_t city[] = L"RIY";
-            TextOutW(g.clockDc, 73, 24, city, 3);
-            wchar_t time[6]{};
-            unsigned hour12 = value.hour % 12;
-            if (!hour12) hour12 = 12;
-            time[0] = static_cast<wchar_t>(L'0' + hour12 / 10);
-            time[1] = static_cast<wchar_t>(L'0' + hour12 % 10);
-            time[2] = L':';
-            time[3] = static_cast<wchar_t>(L'0' + value.minute / 10);
-            time[4] = static_cast<wchar_t>(L'0' + value.minute % 10);
-            if (!timeAvailable) {
-                time[0] = L'-'; time[1] = L'-'; time[2] = L':';
-                time[3] = L'-'; time[4] = L'-';
-            }
+            SIZE cityExtent{};
+            if (GetTextExtentPoint32W(g.clockDc, city, 3, &cityExtent))
+                TextOutW(g.clockDc, 10 + (static_cast<int>(CLOCK_CARD) - cityExtent.cx) / 2,
+                    10 + 34 - cityExtent.cy / 2, city, 3);
             SelectObject(g.clockDc, old);
             DeleteObject(font);
-            font = CreateFontW(68, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                DEFAULT_PITCH | FF_SWISS, L"Arial");
+        }
+
+        // ClockWidget.qml uses a 64 px semibold face, then Text.Fit within a
+        // 108.5 px content width. Fit the actual installed GDI face and center
+        // the resulting glyph run in the 168 px card; this also keeps the
+        // explicit --:-- state legible while the firmware has no UTC source.
+        wchar_t time[6]{};
+        int32_t timeLength = 0;
+        const uint8_t hour12 = static_cast<uint8_t>(value.hour % 12 ? value.hour % 12 : 12);
+        if (timeAvailable && hour12 >= 10) time[timeLength++] = static_cast<wchar_t>(L'0' + hour12 / 10);
+        time[timeLength++] = static_cast<wchar_t>(L'0' + hour12 % 10);
+        time[timeLength++] = L':';
+        time[timeLength++] = static_cast<wchar_t>(L'0' + value.minute / 10);
+        time[timeLength++] = static_cast<wchar_t>(L'0' + value.minute % 10);
+        if (!timeAvailable) {
+            time[0] = L'-'; time[1] = L'-'; time[2] = L':';
+            time[3] = L'-'; time[4] = L'-';
+            timeLength = 5;
+        }
+        SetTextColor(g.clockDc, RGB(255, 255, 255));
+        const int32_t initialFontHeight = static_cast<int32_t>(64.0f * unit + 0.5f);
+        font = CreateFontW(initialFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Arial");
+        if (font) {
+            HGDIOBJ old = SelectObject(g.clockDc, font);
+            SIZE extent{};
+            if (GetTextExtentPoint32W(g.clockDc, time, timeLength, &extent) && extent.cx > 0) {
+                constexpr int32_t targetWidth = 108;
+                if (extent.cx > targetWidth) {
+                    SelectObject(g.clockDc, old);
+                    DeleteObject(font);
+                    const int32_t fittedHeight = initialFontHeight * targetWidth / extent.cx;
+                    font = CreateFontW(fittedHeight > 0 ? fittedHeight : 1,
+                        0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Arial");
+                    if (font) old = SelectObject(g.clockDc, font);
+                    extent = {};
+                    if (font) (void)GetTextExtentPoint32W(g.clockDc, time, timeLength, &extent);
+                }
+                if (extent.cx > 0 && extent.cy > 0)
+                    TextOutW(g.clockDc, 10 + (static_cast<int>(CLOCK_CARD) - extent.cx) / 2,
+                        10 + (static_cast<int>(CLOCK_CARD) - extent.cy) / 2 - 1,
+                        time, timeLength);
+            }
             if (font) {
-                old = SelectObject(g.clockDc, font);
-                TextOutW(g.clockDc, 19, 70, time, 5);
                 SelectObject(g.clockDc, old);
                 DeleteObject(font);
             }
-        }
-        // GDI on a 32-bit BI_RGB DIB leaves alpha undefined; make glyph pixels opaque.
-        for (size_t i = 0; i < static_cast<size_t>(CLOCK_WINDOW) * CLOCK_WINDOW; ++i) {
-            if (g.clockPixels[i] & 0x00FFFFFFu) g.clockPixels[i] |= 0xFF000000u;
         }
         present(g.clockWidget);
     }
