@@ -21,6 +21,9 @@
 extern "C" volatile bool g_ring3ProbeActive{};
 extern "C" volatile bool g_ring3ClockProbeActive{};
 extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+extern "C" void MicantBootstrapWakeKernelMonitor() noexcept;
+extern "C" void MicantRenderFatalScreen(const char*, const char*, uint64_t,
+                                         uint64_t, uint64_t, uint64_t) noexcept;
 
 #if defined(MICANT_BOOTSTRAP_CMD_TEST)
 namespace micant::km::hid {
@@ -158,6 +161,7 @@ uint32_t g_probeMode{};
 uint64_t g_probeReturnRip{};
 micant::hal::amd64::UserServiceRoutine g_dispatch{};
 bool g_schedulerClockActive{};
+bool g_kernelMonitorFailureNotified{};
 bool g_clockIrqlMaskReady{};
 uint32_t g_schedulerTimerPeriod{};
 std::atomic<uint64_t> g_bootstrapApicClockTicks{};
@@ -897,6 +901,7 @@ bool decodeCmosValue(uint8_t raw, bool binary, uint8_t& value) noexcept {
 }
 
 [[noreturn]] void stopOnTrap() noexcept {
+    MicantRenderFatalScreen("UNEXPECTED KERNEL TRAP", nullptr, 0, 0, 0, 0);
     if (g_log) {
         g_log("[MicaNT Hal] FATAL: unexpected bootstrap trap\r\n");
     }
@@ -990,7 +995,7 @@ void MicantBootstrapInterruptExit(uint64_t* hardwareFrame, uint64_t* savedRegist
     }
 }
 
-void MicantBootstrapTimerDispatch(uint64_t savedCs) noexcept {
+void MicantBootstrapTimerDispatch(uint64_t savedCs, uint64_t savedRip) noexcept {
     MicantTimerTicks = MicantTimerTicks + 1;
     // This clock-source count is monotonic across scheduler/test counters,
     // which intentionally reset while validating interrupt behavior.
@@ -1004,6 +1009,9 @@ void MicantBootstrapTimerDispatch(uint64_t savedCs) noexcept {
     }
 #if defined(MICANT_FREESTANDING) && defined(MICANT_BAREMETAL)
     micant::ke::KeAccountClockInterruptTime((savedCs & 3) == 3);
+#if defined(MICANT_KERNEL_PERF_DIAGNOSTICS)
+    micant::ke::KeRecordTimerContext(savedCs, savedRip);
+#endif
     micant::ke::clock_timer::onClockInterrupt();
 #endif
     if (!MicantTimerPreemptionEnabled) return;
@@ -1028,6 +1036,10 @@ void MicantBootstrapTimerDispatch(uint64_t savedCs) noexcept {
             MicantTimerDispatchFailed = true;
         }
         else MicantTimerBootQueued = true;
+    }
+    if (MicantTimerDispatchFailed && !g_kernelMonitorFailureNotified) {
+        g_kernelMonitorFailureNotified = true;
+        MicantBootstrapWakeKernelMonitor();
     }
     auto* next = scheduler.selectOnClockTick(current);
     if (next && !KiSwapContext(current, next, current != g_CurrentCpu.idleThread)) {
@@ -1087,7 +1099,8 @@ __attribute__((naked)) void MicantBootstrapTimerInterrupt() noexcept {
         "xsave64 (%r13)\njmp 2f\n"
         "1: fxsave64 64(%rsp)\n"
         "2: movq 128(%r12), %rcx\ncallq MicantBootstrapEnterInterrupt\n"
-        "movq %rax, 40(%rsp)\nmovq 128(%r12), %rcx\ncallq MicantBootstrapTimerDispatch\n"
+        "movq %rax, 40(%rsp)\nmovq 128(%r12), %rcx\nmovq 120(%r12), %rdx\n"
+        "callq MicantBootstrapTimerDispatch\n"
         "leaq 120(%r12), %rcx\nmovq %r12, %rdx\nleaq 64(%rsp), %r8\n"
         "callq MicantBootstrapInterruptExit\n"
         "movq 40(%rsp), %rcx\ncallq MicantBootstrapLeaveInterrupt\n"
@@ -2066,6 +2079,8 @@ void MicantProbeUnexpectedInvalidOpcode(const uint64_t* frame) noexcept {
         g_log("[MicaNT Hal] Unexpected bootstrap invalid opcode (#UD)\r\n");
     }
     logTrapValue("[MicaNT Hal] UD RIP=0x", frame[0]);
+    MicantRenderFatalScreen("UNHANDLED INVALID OPCODE", nullptr,
+                            0x10000006u, 6, frame[0], 0);
     stopOnTrap();
 }
 
@@ -2073,6 +2088,8 @@ void MicantProbeUnexpectedGeneralProtection() noexcept {
     if (g_log) {
         g_log("[MicaNT Hal] Unexpected bootstrap general protection fault (#GP)\r\n");
     }
+    MicantRenderFatalScreen("GENERAL PROTECTION FAULT", nullptr,
+                            0x1000000Du, 13, 0, 0);
     stopOnTrap();
 }
 
@@ -2200,6 +2217,8 @@ extern "C" [[noreturn]] void MicantCaptureFatalException(
     logTrapValue("[LuceOS Crash] build ID=0x", evidence.buildId);
     if (g_log) g_log(persisted ? "[LuceOS Crash] persistent dump committed=1\r\n"
                               : "[LuceOS Crash] persistent dump committed=0\r\n");
+    MicantRenderFatalScreen("UNHANDLED KERNEL EXCEPTION", nullptr,
+                            evidence.bugCheckCode, vector, evidence.rip, evidence.cr2);
     stopOnTrap();
 }
 
@@ -2218,6 +2237,7 @@ __attribute__((naked)) void MicantProbeGeneralProtectionEntry() {
 }
 
 void MicantProbeUnexpectedTrap() noexcept {
+    MicantRenderFatalScreen("UNEXPECTED KERNEL TRAP", nullptr, 0, 0, 0, 0);
     stopOnTrap();
 }
 
@@ -2306,6 +2326,9 @@ void MicantProbeUnexpectedException(const uint64_t* frame, uint64_t vector) noex
         logTrapValue("[MicaNT Hal] Execution stack top=0x", MicantBootstrapExecutionStackTop);
         logTrapValue("[MicaNT Hal] Interrupt stack floor=0x", MicantBootstrapInterruptStackFloor);
     }
+    MicantRenderFatalScreen("UNHANDLED KERNEL EXCEPTION", nullptr,
+                            0x10000000u | static_cast<uint32_t>(vector), vector,
+                            frame ? frame[1] : 0, frame ? trap.faultAddress : 0);
     stopOnTrap();
 }
 

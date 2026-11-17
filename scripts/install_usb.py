@@ -3,8 +3,8 @@
 
 This script erases the selected device. It stages the same basic UEFI and FAT32
 layout used by the QEMU boot path, then creates a single GPT/FAT32 partition.
-Linux and macOS are supported. Build MicaNT first; see --help for the required
-explicit confirmation flag.
+It builds the AMD64 boot artifacts first. Linux and macOS are supported; see
+--help for build options and the required explicit confirmation flag.
 """
 
 from __future__ import annotations
@@ -81,6 +81,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("device", help="whole USB device (Linux: /dev/sdb; macOS: /dev/diskN)")
     parser.add_argument("--yes", action="store_true", help="confirm erasing and repartitioning this device")
+    parser.add_argument("--cxx", help="LLVM-MinGW x86_64-w64-mingw32-clang++ path")
+    parser.add_argument("--cmake-build-dir", type=Path,
+                        help="CMake build directory (default: build/qemu-cmake-mingw)")
     args = parser.parse_args()
 
     if sys.platform not in ("linux", "darwin"):
@@ -108,6 +111,14 @@ def main() -> int:
     print(f"Target: {device} ({size / (1024**3):.1f} GiB). All data on it will be erased.", flush=True)
     if not args.yes:
         parser.error("nothing written; rerun with --yes after checking the target device")
+
+    print("Building the latest MicaNT AMD64 UEFI and desktop artifacts...", flush=True)
+    build_command = [sys.executable, str(ROOT / "qemu.py"), "--build-only"]
+    if args.cxx:
+        build_command.extend(["--cxx", args.cxx])
+    if args.cmake_build_dir:
+        build_command.extend(["--cmake-build-dir", str(args.cmake_build_dir)])
+    run(build_command)
 
     tools = (("parted", "mkfs.fat", "mount", "umount", "blockdev", "partprobe")
              if sys.platform == "linux" else ("diskutil",))

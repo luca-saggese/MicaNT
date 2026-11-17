@@ -1,6 +1,7 @@
 #if defined(MICANT_FREESTANDING)
 
 #include "micant/km/hal/boot_contract.hpp"
+#include "micant/km/hal/bootvid.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
 #include "micant/km/hal/amd64_firmware_interrupts.hpp"
 #include "micant/km/executive/mm.hpp"
@@ -20,6 +21,7 @@
 #include "micant/km/executive/arbiter.hpp"
 #include "micant/km/executive/dma_baremetal.hpp"
 #include "micant/km/core/ke.hpp"
+#include "micant/km/core/sync_baremetal.hpp"
 #include "micant/km/core/passive_work.hpp"
 #include "micant/km/drivers/usb/usb_host_baremetal.hpp"
 #include "micant/km/drivers/input/input_device_baremetal.hpp"
@@ -60,6 +62,8 @@ void DebugValidateInputQueues(const char* stage) noexcept;
 #endif
 
 extern "C" const unsigned char __ImageBase;
+extern "C" void MicantRenderFatalScreen(const char*, const char*, uint64_t,
+                                        uint64_t, uint64_t, uint64_t) noexcept;
 
 namespace micant::tcpip::kernel_api {
 bool hasAdapter() noexcept { return NetworkStack::get().hasAdapter(); }
@@ -155,6 +159,8 @@ alignas(4096) uint8_t MicantBootstrapMainStack[131072]{};
 #endif
 
 namespace {
+micant::sync::detail::BootstrapEvent g_schedulerFailureMonitorEvent{true, false};
+
 
 constexpr uint32_t kWidth = 1024;
 constexpr uint32_t kHeight = 768;
@@ -164,6 +170,7 @@ micant::boot_driver::KernelServices g_displayServices{};
 micant::boot_driver::DisplayDevice g_display{};
 micant::boot_driver::DriverObject g_displayDriver{};
 micant::boot::KernelFramebufferV1 g_bootFramebufferInfo{};
+bool g_bootstrapAddressSpaceReady{};
 struct GopDisplayContext {
     volatile uint32_t* Pixels{};
     uint32_t Width{};
@@ -361,6 +368,7 @@ void serialWriteChar(char value) noexcept {
 
 [[noreturn]] void stopWithError(const char* message) noexcept {
     serialWrite(message);
+    MicantRenderFatalScreen("KERNEL STOPPED DURING BOOT", message, 0, 0, 0, 0);
     for (;;) {
         __asm__ __volatile__("cli; hlt");
     }
@@ -5304,14 +5312,90 @@ void pollKeyboardInput() noexcept {
         stopWithError("[MicaNT ProcessMemoryTest] Process handle close failed\r\n");
     serialWrite("[MicaNT ProcessMemoryTest] report, page read, dump CRC and release verified\r\n");
 #endif
+    if (!clockActive) {
+        for (;;) __asm__ __volatile__("sti; hlt; cli" : : : "memory");
+    }
     for (;;) {
-        if (clockActive && micant::hal::amd64::bootstrapSchedulerClockFailed())
+        if (micant::hal::amd64::bootstrapSchedulerClockFailed())
             stopWithError("[MicaNT Ke] Runtime scheduler dispatch failed\r\n");
-        __asm__ __volatile__("pause");
+        if (g_schedulerFailureMonitorEvent.wait() != micant::NtStatus::Success ||
+            micant::hal::amd64::bootstrapSchedulerClockFailed())
+            stopWithError("[MicaNT Ke] Runtime scheduler dispatch failed\r\n");
     }
 }
 
 } // namespace
+
+extern "C" void MicantBootstrapWakeKernelMonitor() noexcept {
+    (void)g_schedulerFailureMonitorEvent.set();
+}
+
+extern "C" void MicantRenderFatalScreen(const char* title, const char* detail,
+                                         uint64_t stopCode, uint64_t vector,
+                                         uint64_t rip, uint64_t faultAddress) noexcept {
+    if (!g_bootstrapAddressSpaceReady || !g_bootFramebufferInfo.physicalBase ||
+        !g_bootFramebufferInfo.size) return;
+    static std::atomic_flag rendered = ATOMIC_FLAG_INIT;
+    if (rendered.test_and_set(std::memory_order_acq_rel)) return;
+    if (!initializeGopFramebuffer(g_bootFramebufferInfo, false)) {
+        rendered.clear(std::memory_order_release);
+        return;
+    }
+
+    micant::bootvid::BootVideoDriver video;
+    const micant::boot::FramebufferDescriptor framebuffer{
+        .physicalBase = reinterpret_cast<uintptr_t>(g_gopDisplayContext.Pixels),
+        .size = g_gopDisplayContext.ByteSize,
+        .width = g_gopDisplayContext.Width,
+        .height = g_gopDisplayContext.Height,
+        .pixelsPerScanLine = g_gopDisplayContext.Pitch,
+        .pixelFormat = g_gopDisplayContext.PixelFormat,
+    };
+    if (!video.initialize(framebuffer)) {
+        rendered.clear(std::memory_order_release);
+        return;
+    }
+
+    video.clear(micant::bootvid::Color{0, 120, 215});
+    const auto white = micant::bootvid::Color::white();
+    const auto pale = micant::bootvid::Color{225, 240, 255};
+    video.drawString(48, 48, ":(", white, micant::bootvid::Color::transparent(), 4);
+    video.drawString(48, 100, title ? title : "KERNEL FATAL ERROR", white,
+                     micant::bootvid::Color::transparent(), 2);
+    video.drawString(48, 148, "The system stopped to prevent further damage.", pale);
+    if (detail) {
+        char detailLine[96]{};
+        size_t index{};
+        while (detail[index] && detail[index] != '\r' && detail[index] != '\n' &&
+               index + 1 < sizeof(detailLine)) {
+            detailLine[index] = detail[index];
+            ++index;
+        }
+        video.drawString(48, 176, detailLine, pale);
+    }
+    if (stopCode || vector || rip || faultAddress) {
+        char line[48] = "MicaNT trap code: 0x0000000000000000";
+        constexpr char hex[] = "0123456789ABCDEF";
+        for (size_t digit = 0; digit < 16; ++digit)
+            line[20 + digit] = hex[(stopCode >> ((15 - digit) * 4)) & 0xF];
+        video.drawString(48, 220, line, white);
+        auto appendHex = [&](char* target, const char* prefix, uint64_t value) noexcept {
+            size_t index{};
+            while (prefix[index]) { target[index] = prefix[index]; ++index; }
+            for (size_t digit = 0; digit < 16; ++digit)
+                target[index++] = hex[(value >> ((15 - digit) * 4)) & 0xF];
+            target[index] = '\0';
+        };
+        appendHex(line, "Trap vector: 0x", vector);
+        video.drawString(48, 244, line, white);
+        appendHex(line, "Instruction pointer: 0x", rip);
+        video.drawString(48, 268, line, white);
+        appendHex(line, "Fault address (CR2): 0x", faultAddress);
+        video.drawString(48, 292, line, white);
+    }
+    video.drawString(48, 336, "Technical details were sent to the serial log.", pale);
+    video.drawString(48, 360, "Power off or restart the computer.", pale);
+}
 
 namespace {
 void (*const g_serialWriteBridge)(const char*) noexcept = serialWrite;
@@ -5379,6 +5463,7 @@ extern "C" micant::NtStatus KiSystemStartup(
     if (!micant::hal::amd64::initializeBootstrapAddressSpace(serialWrite)) {
         stopWithError("[MicaNT] Bootstrap address-space initialization failed\r\n");
     }
+    g_bootstrapAddressSpaceReady = true;
     serialWrite("[MicaNT] Kernel-owned page-table root active\r\n");
     if (handoff->userImageFile.size &&
         !micant::hal::amd64::bootstrapKernelRange(

@@ -1873,49 +1873,63 @@ public:
         copyStr(lineBuf, "CPU Model:      ", sizeof(lineBuf));
         {
             size_t len = strlen(lineBuf);
-            copyStr(lineBuf + len, m_cpuBrand[0] ? m_cpuBrand : "Intel(R) Xeon(R) CPU E3-1270 v6 @ 3.80GHz", sizeof(lineBuf) - len);
+            copyStr(lineBuf + len, m_cpuBrand[0] ? m_cpuBrand : "Unavailable", sizeof(lineBuf) - len);
         }
         m_videoDriver.drawString(cardX + 24, cardY + 46, lineBuf, bootvid::Color{220, 235, 255}, bootvid::Color{16, 22, 34}, 1);
 
-        // Cores / Threads & Temp
-        copyStr(lineBuf, "Topology:       4 Physical Cores / 8 Logical Threads (SMP) | MSR DTS Temp: ", sizeof(lineBuf));
-        {
-            size_t len = strlen(lineBuf);
-            lineBuf[len++] = '0' + (char)((m_cpuTempC / 10) % 10);
-            lineBuf[len++] = '0' + (char)(m_cpuTempC % 10);
-            lineBuf[len++] = ' ';
-            lineBuf[len++] = 'C';
-            lineBuf[len] = '\0';
-        }
+        // Display firmware-probed values only; unknown values remain explicit.
+        char number[24];
+        const auto appendNumber = [&lineBuf, &number](uint64_t value) noexcept {
+            formatUint(number, value);
+            concatStr(lineBuf, number, sizeof(lineBuf));
+        };
+        copyStr(lineBuf, "Topology:       ", sizeof(lineBuf));
+        appendNumber(m_hw.cpuPhysicalCores);
+        concatStr(lineBuf, " cores / ", sizeof(lineBuf));
+        appendNumber(m_hw.cpuLogicalThreads);
+        concatStr(lineBuf, " logical CPUs (CPUID)", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 70, lineBuf, bootvid::Color{220, 235, 255}, bootvid::Color{16, 22, 34}, 1);
 
         // Physical RAM
-        copyStr(lineBuf, "Physical RAM:   32,768 MB Total ECC Memory (32,600+ MB Free Conventional)", sizeof(lineBuf));
+        copyStr(lineBuf, "Physical RAM:   ", sizeof(lineBuf));
+        appendNumber(m_hw.ramTotalMB);
+        concatStr(lineBuf, " MB total / ", sizeof(lineBuf));
+        appendNumber(m_hw.ramFreeMB);
+        concatStr(lineBuf, " MB available (UEFI map)", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 94, lineBuf, bootvid::Color{220, 235, 255}, bootvid::Color{16, 22, 34}, 1);
 
         // ACPI
-        copyStr(lineBuf, "ACPI Tables:    ACPI 2.0 RSDP Table Verified | MADT 8 APIC IDs Initialized", sizeof(lineBuf));
+        copyStr(lineBuf, "ACPI:           ", sizeof(lineBuf));
+        appendNumber(m_hw.acpiTableCount);
+        concatStr(lineBuf, " tables discovered", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 118, lineBuf, bootvid::Color{220, 235, 255}, bootvid::Color{16, 22, 34}, 1);
 
         // GOP Framebuffer
-        copyStr(lineBuf, "GOP Display:    Linear Framebuffer (1024x768 @ 32 bpp BGRA) Active", sizeof(lineBuf));
+        copyStr(lineBuf, "GOP display:    ", sizeof(lineBuf));
+        appendNumber(m_videoDriver.getWidth());
+        concatStr(lineBuf, "x", sizeof(lineBuf));
+        appendNumber(m_videoDriver.getHeight());
+        concatStr(lineBuf, " framebuffer", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 142, lineBuf, bootvid::Color{220, 235, 255}, bootvid::Color{16, 22, 34}, 1);
 
         // Disks
-        copyStr(lineBuf, "SATA AHCI:      2x 2TB HGST Ultrastar Enterprise SATA Disks Discovered", sizeof(lineBuf));
+        copyStr(lineBuf, "Storage:        ", sizeof(lineBuf));
+        appendNumber(m_hw.ahciDriveCount);
+        concatStr(lineBuf, " AHCI devices / ", sizeof(lineBuf));
+        appendNumber(m_hw.physicalDiskCount);
+        concatStr(lineBuf, " UEFI disks", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 166, lineBuf, bootvid::Color{220, 235, 255}, bootvid::Color{16, 22, 34}, 1);
 
-        // Ext4
-        copyStr(lineBuf, "Linux Ext4:     Physical Ext4 Partition at LBA 2 (Magic 0xEF53) -> \\DosDevices\\E: (Read-Only)", sizeof(lineBuf));
+        uint32_t extPartitions{};
+        for (size_t index = 0; index < m_hw.blockDeviceCount; ++index)
+            if (m_hw.blockDevices[index].isExtFs) ++extPartitions;
+        copyStr(lineBuf, "Ext partitions: ", sizeof(lineBuf));
+        appendNumber(extPartitions);
+        concatStr(lineBuf, " detected by UEFI probe", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 190, lineBuf, bootvid::Color{100, 240, 160}, bootvid::Color{16, 22, 34}, 1);
 
-        // Kernel Units
-        copyStr(lineBuf, "MicaNT Kernel:  91 Sovereign Units | 44 PE32+ DLLs | 335 Test Suites Verified", sizeof(lineBuf));
+        copyStr(lineBuf, "Boot manager:   MicaNT UEFI loader", sizeof(lineBuf));
         m_videoDriver.drawString(cardX + 24, cardY + 214, lineBuf, bootvid::Color{0, 210, 255}, bootvid::Color{16, 22, 34}, 1);
-
-        // Security
-        copyStr(lineBuf, "Compliance:     100% Clean-Room Sovereign Implementation | Zero Telemetry", sizeof(lineBuf));
-        m_videoDriver.drawString(cardX + 24, cardY + 238, lineBuf, bootvid::Color{180, 200, 230}, bootvid::Color{16, 22, 34}, 1);
 
         // Handover Box (Boot Manager)
         uint32_t handY = cardY + cardH + 20;
@@ -1925,16 +1939,16 @@ public:
 
         m_videoDriver.drawString(cardX + 20, handY + 14, "MicaNT CUTLER EDITION - BARE-METAL BOOT MANAGER", bootvid::Color{0, 229, 255}, bootvid::Color{14, 18, 28}, 1);
 
-        m_videoDriver.drawString(cardX + 24, handY + 40, "[1] MicaNT Cutler Edition (Sovereign OS on /dev/sdb2)       [1/b/Enter]", bootvid::Color{240, 245, 255}, bootvid::Color{14, 18, 28}, 1);
+        m_videoDriver.drawString(cardX + 24, handY + 40, "[1] Start MicaNT (UEFI boot volume)                           [1/b/Enter]", bootvid::Color{240, 245, 255}, bootvid::Color{14, 18, 28}, 1);
         m_videoDriver.drawString(cardX + 24, handY + 62, "[2] Return to UEFI Firmware                                    [2/s]", bootvid::Color{180, 200, 230}, bootvid::Color{14, 18, 28}, 1);
-        m_videoDriver.drawString(cardX + 24, handY + 84, "[3] Cold Reboot Bare-Metal Server (Intel PCH Port 0xCF9)           [3/r]", bootvid::Color{255, 140, 140}, bootvid::Color{14, 18, 28}, 1);
+        m_videoDriver.drawString(cardX + 24, handY + 84, "[3] Reboot machine (platform reset port 0xCF9)                   [3/r]", bootvid::Color{255, 140, 140}, bootvid::Color{14, 18, 28}, 1);
         m_videoDriver.fillRectangle(cardX + 24, handY + 106, cardW - 48, 22, bootvid::Color{14, 18, 28});
 
         // COM1 announcement
         UartSerial::print("\r\n=======================================================\r\n");
         UartSerial::print("  MicaNT Cutler Edition - Bare-Metal Boot Manager\r\n");
         UartSerial::print("=======================================================\r\n");
-        UartSerial::print("  [1] MicaNT Cutler Edition (Sovereign OS on sdb2)\r\n");
+        UartSerial::print("  [1] Start MicaNT (UEFI boot volume)\r\n");
         UartSerial::print("  [2] Return to UEFI Firmware\r\n");
         UartSerial::print("  [3] Cold Reboot Server (Port 0xCF9)\r\n");
         UartSerial::print("  Press [1] or Enter for MicaNT, [2] for Setup, [3] for Reboot.\r\n");
@@ -1960,7 +1974,7 @@ public:
                 sizeof(iniBuf) - 1
             );
         }
-        // If not found on image handle, probe all mounted UEFI filesystems (e.g. sdb2 MICA-SYS)
+        // If not found on image handle, probe all mounted UEFI filesystems.
         if (iniSz == 0 && m_systemTable->bootServices && m_systemTable->bootServices->locateHandleBuffer) {
             auto* bs = m_systemTable->bootServices;
             uefi::EfiHandle* handles = nullptr;
