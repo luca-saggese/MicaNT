@@ -652,6 +652,7 @@ if (MICANT_ENABLE_BAREMETAL)
         ${_doomgeneric_engine_sources}
         tools/doom_platform.cpp
         tools/doom_audio.cpp
+        tools/doom_music.cpp
         tools/doom_crt.cpp
         tools/doom_wad_file.cpp
     )

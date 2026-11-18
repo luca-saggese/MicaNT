@@ -725,14 +725,25 @@ def verify_cmd_terminal(
 
                 audio_deadline = time.monotonic() + 8
                 while time.monotonic() < audio_deadline:
-                    if "[MicaNT DoomAudio] HDA PCM effects submitted" in serial_path.read_text(
+                    if "[MicaNT DoomAudio] HDA PCM submitted" in serial_path.read_text(
                             encoding="utf-8", errors="replace"):
                         break
                     time.sleep(0.1)
-                audio_confirmed = "[MicaNT DoomAudio] HDA PCM effects submitted" in serial_path.read_text(
+                audio_confirmed = "[MicaNT DoomAudio] HDA PCM submitted" in serial_path.read_text(
                     encoding="utf-8", errors="replace")
                 if not audio_confirmed and not leave_doom_open:
-                    raise RuntimeError("DOOM gameplay produced no confirmed HDA PCM effects")
+                    raise RuntimeError("DOOM gameplay produced no confirmed HDA PCM audio")
+
+                music_deadline = time.monotonic() + 8
+                while time.monotonic() < music_deadline:
+                    if "[MicaNT DoomMusic] MUS playback started" in serial_path.read_text(
+                            encoding="utf-8", errors="replace"):
+                        break
+                    time.sleep(0.1)
+                music_confirmed = "[MicaNT DoomMusic] MUS playback started" in serial_path.read_text(
+                    encoding="utf-8", errors="replace")
+                if not music_confirmed and not leave_doom_open:
+                    raise RuntimeError("DOOM did not start MUS background music")
 
                 if leave_doom_open:
                     if not audio_confirmed:
