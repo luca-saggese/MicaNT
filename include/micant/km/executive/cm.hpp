@@ -810,6 +810,16 @@ public:
         : name_(std::move(name)), isVolatile_(isVolatile) {}
 
     [[nodiscard]] const std::wstring& getName() const noexcept { return name_; }
+
+    static bool nameEquals(std::wstring_view left, std::wstring_view right) noexcept {
+        if (left.size() != right.size()) return false;
+        for (size_t i = 0; i < left.size(); ++i) {
+            const wchar_t a = left[i] >= L'a' && left[i] <= L'z' ? left[i] - (L'a' - L'A') : left[i];
+            const wchar_t b = right[i] >= L'a' && right[i] <= L'z' ? right[i] - (L'a' - L'A') : right[i];
+            if (a != b) return false;
+        }
+        return true;
+    }
     [[nodiscard]] bool isVolatile() const noexcept { return isVolatile_; }
     void setVolatile(bool v) noexcept { isVolatile_ = v; }
 
@@ -863,6 +873,10 @@ public:
         uint32_t desiredAccess = KEY_READ
     ) const {
         auto it = subkeys_.find(std::wstring(name));
+        if (it == subkeys_.end())
+            it = std::find_if(subkeys_.begin(), subkeys_.end(), [&](const auto& entry) {
+                return nameEquals(entry.first, name);
+            });
         if (it == subkeys_.end()) return nullptr;
 
         if (callerToken) {
@@ -1093,6 +1107,10 @@ public:
         }
 
         auto it = values_.find(std::wstring(valName));
+        if (it == values_.end())
+            it = std::find_if(values_.begin(), values_.end(), [&](const auto& entry) {
+                return nameEquals(entry.first, valName);
+            });
         if (it != values_.end()) {
             std::lock_guard<std::mutex> lk(g_CmTelemetryMutex);
             g_CmTelemetry.totalValuesQueried++;
@@ -1179,7 +1197,7 @@ public:
         auto user = rootKey_->createSubkey(L"User");
         
         auto system = machine->createSubkey(L"SYSTEM");
-        machine->createSubkey(L"SOFTWARE");
+        auto software = machine->createSubkey(L"SOFTWARE");
         machine->createSubkey(L"SAM");
         machine->createSubkey(L"SECURITY");
         user->createSubkey(L".DEFAULT");
@@ -1191,6 +1209,15 @@ public:
         session->setValueString(L"OSName", L"MicaNT Modern C++23 Clean-Room Executive");
         session->setValueDword(L"OSBuild", 26100);
         session->setValueDword(L"ZeroTelemetryEnabled", 1);
+
+        // Publish the standard NT product identity consumed by applications
+        // such as winver through HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion.
+        auto microsoft = software->createSubkey(L"Microsoft");
+        auto windowsNt = microsoft->createSubkey(L"Windows NT");
+        auto currentVersion = windowsNt->createSubkey(L"CurrentVersion");
+        currentVersion->setValueString(L"ProductName", L"LuceOS");
+        currentVersion->setValueString(L"CurrentVersion", L"10.0");
+        currentVersion->setValueString(L"CurrentBuildNumber", L"26100");
 
         // Assign default Security Descriptor to Session Manager (Admin Full, Users Read)
         se::SecurityDescriptor sessionSd;

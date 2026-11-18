@@ -265,6 +265,14 @@ void copyMessage(const MicaWin32kRequest& source,
 
 extern "C" {
 
+int32_t MicaWin32kGetSystemMetrics(int32_t index) {
+    if (index != 0 && index != 1) return 0;
+    MicaWin32kRequest value{};
+    value.operation = MICANT_WIN32K_OP_GET_SYSTEM_METRICS;
+    value.args[0] = static_cast<uint32_t>(index);
+    return request(value.operation, value) ? static_cast<int32_t>(value.result) : 0;
+}
+
 void* MicaWin32kCreateWindowExW(uint32_t exStyle, const wchar_t* className,
     const wchar_t* title, uint32_t style, int32_t x, int32_t y, int32_t width,
     int32_t height, void* parent, void* menu, void* instance, void* parameter) {

@@ -53,7 +53,10 @@ NtStatus NtClose(Handle handle) {
     return internal::ObCloseGenericHandle(handle);
 }
 #else
+namespace internal { bool CmCloseKeyHandle(Handle h); }
+
 NtStatus NtClose(Handle handle) {
+    if (internal::CmCloseKeyHandle(handle)) return NtStatus::Success;
     ob::HandleTable* table{};
     Handle raw{};
     const auto status = ob::detail::resolveHandle(handle, table, raw);

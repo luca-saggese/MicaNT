@@ -1113,8 +1113,19 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         window.windowProcedure = windowClass->windowProcedure;
         window.visible = (window.style & 0x10000000u) != 0;
         copyText(window.title, request.title);
+        // A top-level window created with WS_VISIBLE is immediately eligible
+        // for composition and painting. ShowWindow cannot be relied on to
+        // assign the slot or invalidate it: callers may create an already-
+        // visible window and enter their message loop directly.
+        if (window.visible && !window.parent) {
+            if (freeMessageSlots() < 5 || !ensureCompositorSlot(window) ||
+                !activateWindow(&window) ||
+                !enqueueWindowMessage(window, kWmPaint, 0, 0)) {
+                window = {};
+                return NtStatus::InsufficientResources;
+            }
+        }
         request.result = window.handle;
-        if (window.visible && !window.parent) (void)activateWindow(&window);
         markWindowBounds(window);
         return NtStatus::Success;
     }
@@ -1215,6 +1226,11 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
     switch (request.operation) {
         case MICANT_WIN32K_OP_REGISTER_CLASS:
             return registerClass(request, ownerProcessId);
+        case MICANT_WIN32K_OP_GET_SYSTEM_METRICS:
+            if (request.args[0] == 0) request.result = static_cast<uint32_t>(g_screenWidth);
+            else if (request.args[0] == 1) request.result = static_cast<uint32_t>(g_screenHeight);
+            else return NtStatus::NotSupported;
+            return NtStatus::Success;
         case MICANT_WIN32K_OP_CREATE_WINDOW:
             return createWindow(request, ownerProcessId);
         case MICANT_WIN32K_OP_GET_WINDOW_SURFACE: {

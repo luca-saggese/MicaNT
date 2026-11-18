@@ -30,6 +30,8 @@
 #include "micant/km/drivers/input/mouclass_contract.hpp"
 #include "micant/km/fsrtl/fat_boot.hpp"
 #include "micant/km/core/syscalls.hpp"
+#include "micant/km/core/dispatcher.hpp"
+#include "micant/km/core/ntos_internal.hpp"
 #include "micant/km/win32k/freestanding.hpp"
 #include "micant/shared/boot_driver.hpp"
 #include "micant/km/drivers/net/ndis.hpp"
@@ -61,7 +63,16 @@ namespace {
 alignas(16) micant::boot::UefiKernelHandoffV8 g_kernelBootHandoff{};
 }
 
-#if defined(MICANT_BOOTSTRAP_CMD_TEST)
+#if defined(MICANT_BOOTSTRAP_CMD_TEST) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_SOL) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD)
 namespace micant::km::hid {
 void DebugValidateInputQueues(const char* stage) noexcept;
 }
@@ -2727,6 +2738,8 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
 // for the lifetime of the initial interactive session.
 micant::Handle g_explorerProcessHandle{};
 micant::Handle g_explorerProcessId{};
+micant::Handle g_reactosAppProcessHandle{};
+micant::Handle g_reactosAppProcessId{};
 micant::Handle g_taskmgrProcessHandle{};
 micant::Handle g_taskmgrProcessId{};
 micant::Handle g_taskmgrProbeProcessHandle{};
@@ -3081,7 +3094,8 @@ bool launchUserImageProcess(const char16_t* imageName,
                             micant::Handle& processHandle,
                             micant::Handle& processId,
                             bool startSuspended = false,
-                            micant::Handle* suspendedThreadHandle = nullptr) noexcept {
+                            micant::Handle* suspendedThreadHandle = nullptr,
+                            bool reactosAppImage = false) noexcept {
     using namespace micant;
     char16_t path[256]{};
     size_t directoryLength{};
@@ -3092,8 +3106,14 @@ bool launchUserImageProcess(const char16_t* imageName,
         serialWrite("\r\n");
         return false;
     }
-    size_t length = directoryLength;
-    if (path[length - 1] != u'\\') {
+    size_t length = reactosAppImage ? 3 : directoryLength;
+    if (reactosAppImage) {
+        if (directoryLength < 3 || path[1] != u':' || path[2] != u'\\') return false;
+        constexpr char16_t appDirectory[] = u"ReactOSApps\\";
+        if (length + std::size(appDirectory) - 1 >= std::size(path)) return false;
+        std::memcpy(path + length, appDirectory, (std::size(appDirectory) - 1) * sizeof(char16_t));
+        length += std::size(appDirectory) - 1;
+    } else if (path[length - 1] != u'\\') {
         if (length + 1 >= std::size(path)) return false;
         path[length++] = u'\\';
     }
@@ -3235,7 +3255,7 @@ bool launchUserImageProcess(const char16_t* imageName,
     constexpr bool cmdTestImage = false;
 #endif
     if (processHandle == g_compositorProcessHandle || processHandle == g_explorerProcessHandle ||
-        taskManagerImage || themeTestImage || cmdTestImage) {
+        processHandle == g_reactosAppProcessHandle || taskManagerImage || themeTestImage || cmdTestImage) {
         uintptr_t metadataBase{};
         size_t metadataView = sizeof(MicaCompositorMetadataStore);
         const uint32_t metadataProtection = processHandle == g_compositorProcessHandle
@@ -3333,6 +3353,40 @@ bool launchExplorerProcess() noexcept {
                                   g_explorerProcessId);
 }
 
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_SOL) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD)
+bool launchReactosAppProcess() noexcept {
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER)
+    constexpr auto imageName = u"winver.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+    constexpr auto imageName = u"notepad.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+    constexpr auto imageName = u"calc.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+    constexpr auto imageName = u"winmine.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_SOL)
+    constexpr auto imageName = u"sol.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT)
+    constexpr auto imageName = u"mspaint.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT)
+    constexpr auto imageName = u"regedit.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
+    constexpr auto imageName = u"taskmgr.exe";
+#else
+    constexpr auto imageName = u"wordpad.exe";
+#endif
+    return launchUserImageProcess(imageName, g_reactosAppProcessHandle,
+        g_reactosAppProcessId, false, nullptr, true);
+}
+#endif
+
 void recoverPendingCrashDumpAfterMount() noexcept {
     if (!g_crashDumpStorageOwner.BackendReady) return;
     micant::Handle processHandle{}, processId{}, threadHandle{};
@@ -3410,6 +3464,68 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(NtStatus::NotImplemented);
     if (number == sys::SSN_NtQuerySystemTime) {
         const auto result = sys::NtQuerySystemTime(reinterpret_cast<LargeInteger*>(first));
+        return status(result);
+    }
+    if (number == sys::SSN_NtOpenKey) {
+        ObjectAttributes attributes{};
+        UnicodeString name{};
+        wchar_t nameBuffer[1024]{};
+        Handle resultHandle{};
+        auto* outputHandle = reinterpret_cast<Handle*>(first);
+        if (!outputHandle ||
+            ex::ProbeForWrite(outputHandle, sizeof(*outputHandle), alignof(Handle)) != NtStatus::Success ||
+            ex::ExSafeCopyFromUser(&attributes, reinterpret_cast<const void*>(args.third), sizeof(attributes)) != NtStatus::Success ||
+            attributes.length != sizeof(ObjectAttributes) || attributes.rootDirectory ||
+            !attributes.objectName || attributes.securityDescriptor || attributes.securityQualityOfService ||
+            ex::ExSafeCopyFromUser(&name, attributes.objectName, sizeof(name)) != NtStatus::Success ||
+            !name.length || (name.length & 1) || name.length > name.maximumLength ||
+            name.length > sizeof(nameBuffer) - sizeof(wchar_t) || !name.buffer ||
+            ex::ExSafeCopyFromUser(nameBuffer, name.buffer, name.length) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        nameBuffer[name.length / sizeof(wchar_t)] = L'\0';
+        name.buffer = nameBuffer;
+        attributes.objectName = &name;
+        sys::SyscallFrame frame{sys::SSN_NtOpenKey,
+            reinterpret_cast<uint64_t>(&resultHandle), second,
+            reinterpret_cast<uint64_t>(&attributes), 0, nullptr, 0};
+        const auto result = sys::internal::NtOpenKeySys(frame);
+        if (result == NtStatus::Success &&
+            ex::ExSafeCopyToUser(outputHandle, &resultHandle, sizeof(resultHandle)) != NtStatus::Success) {
+            (void)sys::NtClose(resultHandle);
+            return status(NtStatus::AccessViolation);
+        }
+        return status(result);
+    }
+    if (number == sys::SSN_NtQueryValueKey) {
+        uint64_t extra[2]{};
+        UnicodeString name{};
+        wchar_t nameBuffer[256]{};
+        if (args.userStack > UINT64_MAX - 40 ||
+            ex::ExSafeCopyFromUser(extra, reinterpret_cast<const void*>(args.userStack + 40), sizeof(extra)) != NtStatus::Success ||
+            ex::ExSafeCopyFromUser(&name, reinterpret_cast<const void*>(second), sizeof(name)) != NtStatus::Success ||
+            !name.length || (name.length & 1) || name.length > name.maximumLength ||
+            name.length > sizeof(nameBuffer) - sizeof(wchar_t) || !name.buffer ||
+            ex::ExSafeCopyFromUser(nameBuffer, name.buffer, name.length) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        nameBuffer[name.length / sizeof(wchar_t)] = L'\0';
+        name.buffer = nameBuffer;
+        const size_t requested = static_cast<size_t>(extra[0]);
+        const size_t capacity = requested < 4096 ? requested : 4096;
+        auto* userBuffer = reinterpret_cast<void*>(args.fourth);
+        if (userBuffer && capacity && ex::ProbeForWrite(userBuffer, capacity, 1) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        uint8_t information[4096]{};
+        size_t returned{};
+        size_t stackArgs[2]{capacity, reinterpret_cast<size_t>(&returned)};
+        sys::SyscallFrame frame{sys::SSN_NtQueryValueKey, first,
+            reinterpret_cast<uint64_t>(&name), args.third,
+            userBuffer ? reinterpret_cast<uint64_t>(information) : 0, stackArgs, 2};
+        const auto result = sys::internal::NtQueryValueKeySys(frame);
+        if (extra[1] && ex::ExSafeCopyToUser(reinterpret_cast<void*>(extra[1]), &returned, sizeof(returned)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        if (result == NtStatus::Success && returned &&
+            ex::ExSafeCopyToUser(userBuffer, information, returned) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
         return status(result);
     }
     if (number == sys::SSN_NtQueryPerformanceCounter) {
@@ -5390,6 +5506,40 @@ void pollKeyboardInput() noexcept {
         stopWithError("[MicaNT Explorer] Desktop presentation timed out\r\n");
     MicantRenderBootStatus("Desktop presented; continuing shell startup...");
     serialWrite("[MicaNT Explorer] Visible desktop presented; shell startup continues\r\n");
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_SOL) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD)
+    serialWrite("[MicaNT ReactOSApps] Launching original AMD64 PE after Explorer\r\n");
+    if (!launchReactosAppProcess())
+        stopWithError("[MicaNT ReactOSApps] Original AMD64 PE launch failed\r\n");
+    serialWrite("[MicaNT ReactOSApps] Original AMD64 PE process started PID=");
+    serialWriteNumber(static_cast<uint32_t>(g_reactosAppProcessId));
+    serialWrite("\r\n");
+    const auto appWait = micant::sys::NtWaitForSingleObject(
+        g_reactosAppProcessHandle, false, nullptr);
+    micant::ProcessBasicInformation appExit{};
+    uint32_t appExitBytes{};
+    const auto appQuery = micant::sys::NtQueryInformationProcess(
+        g_reactosAppProcessHandle, micant::ProcessInformationClass::ProcessBasicInformation,
+        &appExit, sizeof(appExit), &appExitBytes);
+    if (appWait != micant::NtStatus::Success || appQuery != micant::NtStatus::Success ||
+        appExitBytes != sizeof(appExit))
+        stopWithError("[MicaNT ReactOSApps] Process wait/query failed\r\n");
+    serialWrite("[MicaNT ReactOSApps] Process terminated exit NTSTATUS=");
+    serialWriteNumber(static_cast<uint32_t>(appExit.exitStatus));
+    serialWrite("\r\n");
+    const auto appClose = micant::sys::NtClose(g_reactosAppProcessHandle);
+    g_reactosAppProcessHandle = 0;
+    if (appClose != micant::NtStatus::Success)
+        stopWithError("[MicaNT ReactOSApps] Process handle cleanup failed\r\n");
+    serialWrite("[MicaNT ReactOSApps] Process handle cleanup complete\r\n");
+#endif
 #if defined(MICANT_BOOTSTRAP_THEME_TEST)
     serialWrite("[MicaNT ThemeTest] Launching dedicated control test app\r\n");
     micant::Handle themeTestProcessHandle = 0;

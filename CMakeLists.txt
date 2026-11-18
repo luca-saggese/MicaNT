@@ -18,6 +18,8 @@ option(MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST "Exercise HDA PCI/MMIO rollback an
 option(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST "Launch a Ring 3 client and verify real HDA PCM DMA in QEMU" OFF)
 option(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST "Launch a Ring 3 client and verify HDA ADC DMA in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
+set(MICANT_BOOTSTRAP_REACTOS_APP "" CACHE STRING "Launch one verified original AMD64 ReactOS PE instead of Explorer")
+set_property(CACHE MICANT_BOOTSTRAP_REACTOS_APP PROPERTY STRINGS "" winver notepad calc winmine sol mspaint regedit taskmgr wordpad)
 option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
 option(MICANT_KERNEL_PERF_DIAGNOSTICS "Emit aggregated 5-second Ke scheduler/accounting diagnostics" OFF)
 option(MICANT_COMPOSITOR_DEBUG_HUD "Build the compositor debug HUD" OFF)
@@ -318,6 +320,7 @@ if (MICANT_ENABLE_BAREMETAL)
         kernel/ke/process.cpp
         kernel/ke/event.cpp
         kernel/ke/time.cpp
+        kernel/cm/ntreg.cpp
         kernel/hal/amd64_bootstrap.cpp
         kernel/hal/amd64_firmware_interrupts.cpp
         kernel/win32k/freestanding.cpp
@@ -462,7 +465,8 @@ if (MICANT_ENABLE_BAREMETAL)
     # Shell32's icon extraction stays in Ring 3 and delegates HICON ownership
     # to User32. This target is intentionally separate from the historical
     # kernel API seal source.
-    add_library(shell32_boot SHARED EXCLUDE_FROM_ALL tools/dlls/shell32_icon.cpp
+    add_library(shell32_boot SHARED EXCLUDE_FROM_ALL tools/dlls/shell32.cpp
+        tools/dlls/shell32_icon.cpp
         kernel/ex/freestanding_memory.cpp)
     target_include_directories(shell32_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
     target_compile_definitions(shell32_boot PRIVATE MICANT_NATIVE_USERMODE)
@@ -474,7 +478,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(shell32_boot PRIVATE
         -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
     )
-    target_link_libraries(shell32_boot PRIVATE user32_boot ntdll_boot)
+    target_link_libraries(shell32_boot PRIVATE user32_boot gdi32_boot ntdll_boot)
     set_target_properties(shell32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "shell32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -647,6 +651,7 @@ if (MICANT_ENABLE_BAREMETAL)
     add_executable(doom_boot EXCLUDE_FROM_ALL
         ${_doomgeneric_engine_sources}
         tools/doom_platform.cpp
+        tools/doom_audio.cpp
         tools/doom_crt.cpp
         tools/doom_wad_file.cpp
     )
@@ -656,7 +661,7 @@ if (MICANT_ENABLE_BAREMETAL)
     )
     target_compile_definitions(doom_boot PRIVATE
         _WIN32 WIN32_LEAN_AND_MEAN DOOMGENERIC_RESX=640 DOOMGENERIC_RESY=400
-        MICANT_NATIVE_USERMODE MICANT_GDI32_IMPORTS
+        MICANT_NATIVE_USERMODE MICANT_GDI32_IMPORTS FEATURE_SOUND MICANT_DOOM_NATIVE_AUDIO
     )
     target_compile_options(doom_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
@@ -815,6 +820,15 @@ if (MICANT_ENABLE_BAREMETAL)
     endif()
     if (MICANT_BOOTSTRAP_CMD_TEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CMD_TEST)
+    endif()
+    if (MICANT_BOOTSTRAP_REACTOS_APP)
+        set(_micant_reactos_app_names winver notepad calc winmine sol mspaint regedit taskmgr wordpad)
+        if (NOT MICANT_BOOTSTRAP_REACTOS_APP IN_LIST _micant_reactos_app_names)
+            message(FATAL_ERROR "Unsupported MICANT_BOOTSTRAP_REACTOS_APP: ${MICANT_BOOTSTRAP_REACTOS_APP}")
+        endif()
+        string(TOUPPER "${MICANT_BOOTSTRAP_REACTOS_APP}" _micant_reactos_app_upper)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE
+            "MICANT_BOOTSTRAP_REACTOS_APP_${_micant_reactos_app_upper}")
     endif()
     if (MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
@@ -1150,6 +1164,21 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
+    add_library(advapi32_boot SHARED EXCLUDE_FROM_ALL
+        kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp)
+    target_include_directories(advapi32_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(advapi32_boot PRIVATE
+        BUILD_SYSTEM32_STANDALONE_DLL BUILD_SYSTEM32_ADVAPI32_DLL MICANT_NATIVE_USERMODE)
+    target_compile_options(advapi32_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-emulated-tls
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2)
+    target_link_options(advapi32_boot PRIVATE -nostdlib -Wl,--entry,DllMainCRTStartup)
+    target_link_libraries(advapi32_boot PRIVATE ntdll_boot)
+    set_target_properties(advapi32_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "advapi32"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
     add_library(ucrtbase_boot SHARED EXCLUDE_FROM_ALL
         kernel/ps/winnt_ucrtbase_runtime_abi.cpp
         kernel/ps/ucrt_native_heap_syscalls.cpp
@@ -1169,8 +1198,32 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
+    add_library(msvcrt_boot SHARED EXCLUDE_FROM_ALL tools/dlls/msvcrt.cpp tools/dlls/msvcrt.def)
+    target_include_directories(msvcrt_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(msvcrt_boot PRIVATE MICANT_NATIVE_USERMODE)
+    target_compile_options(msvcrt_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-emulated-tls
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2)
+    target_link_options(msvcrt_boot PRIVATE -nostdlib -Wl,--entry,DllMainCRTStartup)
+    target_link_libraries(msvcrt_boot PRIVATE ucrtbase_boot ntdll_boot)
+    set_target_properties(msvcrt_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "msvcrt"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+    add_executable(msvcrt_probe_boot EXCLUDE_FROM_ALL tools/msvcrt_probe.cpp)
+    target_compile_options(msvcrt_probe_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -O2)
+    target_link_options(msvcrt_probe_boot PRIVATE
+        -nostdlib -fuse-ld=lld -Wl,-e,MsvcrtProbeStartup -Wl,--subsystem,windows)
+    target_link_libraries(msvcrt_probe_boot PRIVATE msvcrt_boot)
+    set_target_properties(msvcrt_probe_boot PROPERTIES
+        OUTPUT_NAME "msvcrt_probe" SUFFIX ".exe"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot dwrite_boot uxtheme_boot luceglass_boot
+        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)

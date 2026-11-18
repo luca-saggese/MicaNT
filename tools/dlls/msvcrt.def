@@ -1,0 +1,11 @@
+LIBRARY msvcrt.dll
+EXPORTS
+    malloc=ucrtbase.malloc
+    free=ucrtbase.free
+    realloc=ucrtbase.realloc
+    memcpy=ucrtbase.memcpy
+    memset=ucrtbase.memset
+    _errno=ucrtbase._errno
+    _initterm=ucrtbase._initterm
+    _initterm_e=ucrtbase._initterm_e
+    localeconv=ucrtbase.localeconv

@@ -318,6 +318,7 @@ public:
 
     NtStatus inspect(std::span<const uint8_t> file) noexcept {
         *this = {};
+        mappedImage_ = false;
         ImageDosHeader dos{};
         if (!read(file, 0, dos) || dos.e_magic != DOS_MAGIC ||
             dos.e_lfanew < static_cast<int32_t>(sizeof(ImageDosHeader))) {
@@ -405,6 +406,21 @@ public:
         return NtStatus::Success;
     }
 
+    // Inspect an image already mapped at its preferred loader layout. Resource
+    // RVAs then address the image directly, while all PE header validation is
+    // shared with the raw-file path above.
+    NtStatus inspectMapped(std::span<const uint8_t> image) noexcept {
+        const NtStatus status = inspect(image);
+        if (status != NtStatus::Success) return status;
+        if (headers_.optionalHeader.sizeOfImage > image.size()) {
+            *this = {};
+            return NtStatus::InvalidImageFormat;
+        }
+        file_ = image.first(headers_.optionalHeader.sizeOfImage);
+        mappedImage_ = true;
+        return NtStatus::Success;
+    }
+
     [[nodiscard]] const ImageNtHeaders64& headers() const noexcept { return headers_; }
     [[nodiscard]] std::span<const uint8_t> fileBytes() const noexcept { return file_; }
     [[nodiscard]] ImageSectionHeader section(size_t index) const noexcept {
@@ -433,6 +449,8 @@ public:
     [[nodiscard]] std::span<const uint8_t> fileBackedRange(
         uint32_t rva, size_t count) const noexcept {
         if (file_.empty() || !count) return {};
+        if (mappedImage_)
+            return mappedRange(rva, count) ? file_.subspan(rva, count) : std::span<const uint8_t>{};
         if (rva < headers_.optionalHeader.sizeOfHeaders) {
             const size_t available = headers_.optionalHeader.sizeOfHeaders - rva;
             if (count <= available && fits(file_.size(), rva, count))
@@ -956,6 +974,7 @@ private:
         return false;
     }
     std::span<const uint8_t> file_{};
+    bool mappedImage_{};
     ImageNtHeaders64 headers_{};
     size_t sectionsOffset_{};
 };

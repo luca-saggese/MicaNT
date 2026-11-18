@@ -28,6 +28,7 @@ struct ProcessParametersPrefix64 {
     UnicodeString64 DllPath{};
     UnicodeString64 ImagePathName{};
     UnicodeString64 CommandLine{};
+    char16_t* Environment{};
 };
 
 struct PebPrefix64 {
@@ -40,6 +41,7 @@ static_assert(offsetof(ProcessParametersPrefix64, CurrentDirectoryDosPath) == 0x
 static_assert(offsetof(ProcessParametersPrefix64, DllPath) == 0x50);
 static_assert(offsetof(ProcessParametersPrefix64, ImagePathName) == 0x60);
 static_assert(offsetof(ProcessParametersPrefix64, CommandLine) == 0x70);
+static_assert(offsetof(ProcessParametersPrefix64, Environment) == 0x80);
 static_assert(offsetof(PebPrefix64, ProcessParameters) == 0x20);
 
 inline bool currentCommandLine(UnicodeString64& commandLine) noexcept {
@@ -52,6 +54,17 @@ inline bool currentCommandLine(UnicodeString64& commandLine) noexcept {
     commandLine = peb->ProcessParameters->CommandLine;
     return commandLine.Buffer != nullptr && commandLine.Length != 0 &&
         (commandLine.Length & 1) == 0 && commandLine.Length <= commandLine.MaximumLength;
+}
+
+inline bool currentEnvironment(char16_t*& environment) noexcept {
+    environment = nullptr;
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb || teb > UINTPTR_MAX - 0x60) return false;
+    const auto* peb = *reinterpret_cast<const PebPrefix64* const*>(teb + 0x60);
+    if (!peb || peb->ProcessParameters == nullptr) return false;
+    environment = peb->ProcessParameters->Environment;
+    return environment != nullptr;
 }
 
 inline bool currentImagePath(UnicodeString64& imagePath) noexcept {

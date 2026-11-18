@@ -88,6 +88,7 @@ private:
     CursorMutex& lock_;
 };
 std::array<AnimatedCursor, 16> g_animatedCursors{};
+uint32_t g_animatedCursorSelected{};
 struct ButtonState {
     void* hwnd{};
     void* parent{};
@@ -464,6 +465,9 @@ uint64_t cursorClockMs() noexcept {
 
 void updateAnimatedCursor() noexcept {
     using namespace micant::um;
+    // Message loops call this before every blocking GetMessage probe. Avoid a
+    // Win32k syscall on every idle poll when the selected cursor is static.
+    if (!__atomic_load_n(&g_animatedCursorSelected, __ATOMIC_ACQUIRE)) return;
     using InfoFn = int32_t (*)(MicaWin32kCursorInfo*);
     using SetFn = void* (*)(void*, const uint32_t*, uint32_t, uint32_t,
                             uint32_t, uint32_t, uint32_t);
@@ -566,7 +570,7 @@ void* loadAniCursor(std::span<const uint8_t> encoded,
     return nullptr;
 }
 
-bool loadedModulePath(void* moduleHandle, wchar_t (&path)[512]) noexcept {
+bool loadedModulePath(void* moduleHandle, wchar_t (&path)[512], uint32_t* loadedImageSize = nullptr) noexcept {
     constexpr uintptr_t UserLimit = 0x00007FFFFFFF0000ULL;
     const uintptr_t wantedBase = reinterpret_cast<uintptr_t>(moduleHandle);
     if (wantedBase < 0x10000 || wantedBase >= UserLimit) return false;
@@ -596,11 +600,86 @@ bool loadedModulePath(void* moduleHandle, wchar_t (&path)[512]) noexcept {
             const size_t length = bytes / sizeof(wchar_t);
             for (size_t i = 0; i < length; ++i) path[i] = buffer[i];
             path[length] = L'\0';
+            if (loadedImageSize) *loadedImageSize = imageSize;
             return true;
         }
         link = *reinterpret_cast<const uintptr_t*>(link);
     }
     return false;
+}
+
+int32_t User32_LoadStringW(void* moduleHandle, uint32_t stringId,
+                           wchar_t* buffer, int32_t capacity) noexcept {
+    using namespace micant::um;
+    if (!buffer || capacity < 0 || (stringId >> 4) + 1 > UINT16_MAX) {
+        setThreadLastError(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    if (!moduleHandle) {
+        // The loader's image list supplies the current image base for a null
+        // HINSTANCE. Do not guess an image or search unrelated modules.
+        uintptr_t teb{};
+        __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+        if (teb < 0x10000 || teb >= 0x00007FFFFFFF0000ULL - 0x68) {
+            setThreadLastError(1814);
+            return 0;
+        }
+        const uintptr_t peb = *reinterpret_cast<const uintptr_t*>(teb + 0x60);
+        if (peb < 0x10000 || peb >= 0x00007FFFFFFF0000ULL - 0x10) {
+            setThreadLastError(1814);
+            return 0;
+        }
+        moduleHandle = *reinterpret_cast<void* const*>(peb + 0x10);
+    }
+    wchar_t ignoredPath[512]{};
+    uint32_t imageSize{};
+    if (!loadedModulePath(moduleHandle, ignoredPath, &imageSize)) {
+        setThreadLastError(1814); // ERROR_RESOURCE_NAME_NOT_FOUND
+        return 0;
+    }
+    pe::PeImageView64 image{};
+    const auto mapped = std::span<const uint8_t>(
+        static_cast<const uint8_t*>(moduleHandle), imageSize);
+    if (image.inspectMapped(mapped) != NtStatus::Success) {
+        setThreadLastError(13); // ERROR_INVALID_DATA
+        return 0;
+    }
+    const pe::PeResourceIdentifier type{6, {}, false}; // RT_STRING
+    const pe::PeResourceIdentifier block{
+        static_cast<uint16_t>((stringId >> 4) + 1), {}, false};
+    pe::PeResourceData resource{};
+    const NtStatus status = pe::PeResourceView(image).find(type, block, 0, resource);
+    if (status != NtStatus::Success) {
+        setThreadLastError(status == NtStatus::NotFound ? 1814 : 13);
+        return 0;
+    }
+    size_t offset{};
+    const uint32_t slot = stringId & 15u;
+    for (uint32_t index = 0; index <= slot; ++index) {
+        if (offset > resource.bytes.size() || resource.bytes.size() - offset < 2) {
+            setThreadLastError(13);
+            return 0;
+        }
+        const uint16_t chars = pe::PeResourceView::read16(resource.bytes.data() + offset);
+        offset += 2;
+        const size_t byteCount = static_cast<size_t>(chars) * 2;
+        if (byteCount > resource.bytes.size() - offset) {
+            setThreadLastError(13);
+            return 0;
+        }
+        if (index != slot) { offset += byteCount; continue; }
+        const auto* text = reinterpret_cast<const wchar_t*>(resource.bytes.data() + offset);
+        if (capacity == 0) {
+            *reinterpret_cast<const wchar_t**>(buffer) = text;
+            return chars;
+        }
+        const size_t copied = std::min<size_t>(chars, static_cast<size_t>(capacity - 1));
+        for (size_t i = 0; i < copied; ++i) buffer[i] = text[i];
+        buffer[copied] = L'\0';
+        return static_cast<int32_t>(copied);
+    }
+    setThreadLastError(13);
+    return 0;
 }
 
 void* loadPeCursor(void* moduleHandle, const wchar_t* resourceName,
@@ -727,6 +806,7 @@ void updateAnimatedCursor() noexcept {}
 
 template <typename T> T Win32kProc(const char* name) noexcept {
 #define MICA_WIN32K_PROC(exportName) if (std::strcmp(name, #exportName) == 0) return reinterpret_cast<T>(&exportName)
+    MICA_WIN32K_PROC(MicaWin32kGetSystemMetrics);
     MICA_WIN32K_PROC(MicaWin32kCreateWindowExW);
     MICA_WIN32K_PROC(MicaWin32kDestroyWindow);
     MICA_WIN32K_PROC(MicaWin32kShowWindow);
@@ -1283,7 +1363,12 @@ int32_t User32_DestroyCursor(void* cursor) noexcept {
     if (destroyed) {
         CursorLockGuard lock(g_animatedCursorLock);
         for (auto& animation : g_animatedCursors) {
-            if (animation.handle == cursor) { animation = {}; break; }
+            if (animation.handle == cursor) {
+                animation = {};
+                if (__atomic_load_n(&g_animatedCursorSelected, __ATOMIC_RELAXED))
+                    __atomic_store_n(&g_animatedCursorSelected, 0u, __ATOMIC_RELEASE);
+                break;
+            }
         }
     }
     return destroyed ? 1 : 0;
@@ -1391,6 +1476,17 @@ void* User32_SetCursor(void* cursor) noexcept {
         IconHandleTable::Lease previousLease{};
         if (previous && !ProcessIconHandles().acquireCursor(previous, previousLease)) return nullptr;
     }
+    bool animated = false;
+    if (cursor) {
+        CursorLockGuard lock(g_animatedCursorLock);
+        for (const auto& animation : g_animatedCursors) {
+            if (animation.handle == cursor && animation.frameCount && animation.stepCount) {
+                animated = true;
+                break;
+            }
+        }
+    }
+    __atomic_store_n(&g_animatedCursorSelected, animated ? 1u : 0u, __ATOMIC_RELEASE);
     return previous;
 }
 
@@ -2550,6 +2646,68 @@ void invalidateEdit(void* hwnd) noexcept {
     if (post) (void)post(hwnd, kWmPaint, 0, 0);
 }
 
+bool drawRoundedEditFocusRing(void* dc, int32_t width, int32_t height,
+                              uint32_t radius, uint32_t thickness,
+                              uint32_t color) noexcept {
+    if (!dc || width <= 0 || height <= 0 || !thickness) return false;
+    const uint32_t maxRadius = static_cast<uint32_t>(
+        std::min(width, height) / 2);
+    radius = std::min(radius, maxRadius);
+    thickness = std::min(thickness, maxRadius);
+    const auto integerSqrt = [](uint32_t value) noexcept {
+        uint32_t low = 0, high = 129;
+        while (low + 1 < high) {
+            const uint32_t middle = low + (high - low) / 2;
+            if (middle * middle <= value) low = middle;
+            else high = middle;
+        }
+        return low;
+    };
+    const auto roundedInset = [&](uint32_t cornerRadius,
+                                  uint32_t distance) noexcept {
+        if (!cornerRadius || distance >= cornerRadius) return uint32_t{0};
+        const uint32_t cornerY = cornerRadius - 1u - distance;
+        return cornerRadius - integerSqrt(cornerRadius * cornerRadius -
+                                          cornerY * cornerY);
+    };
+    bool drawn = true;
+    for (int32_t y = 0; y < height; ++y) {
+        const uint32_t outerY = static_cast<uint32_t>(
+            std::min(y, height - 1 - y));
+        const uint32_t outerInset = roundedInset(radius, outerY);
+        const int32_t outerLeft = static_cast<int32_t>(outerInset);
+        const int32_t outerRight = width - static_cast<int32_t>(outerInset);
+        const bool hasInner = radius > thickness && y >= static_cast<int32_t>(thickness) &&
+            y < height - static_cast<int32_t>(thickness);
+        if (!hasInner) {
+            drawn &= fillButtonRect(dc, {outerLeft, y, outerRight, y + 1}, color);
+            continue;
+        }
+        const uint32_t innerRadius = radius - thickness;
+        const uint32_t innerY = static_cast<uint32_t>(std::min(
+            y - static_cast<int32_t>(thickness),
+            height - static_cast<int32_t>(thickness) - 1 - y));
+        const uint32_t innerInset = roundedInset(innerRadius, innerY);
+        const int32_t innerLeft = static_cast<int32_t>(thickness + innerInset);
+        const int32_t innerRight = width - static_cast<int32_t>(thickness + innerInset);
+        drawn &= fillButtonRect(dc, {outerLeft, y, innerLeft, y + 1}, color);
+        drawn &= fillButtonRect(dc, {innerRight, y, outerRight, y + 1}, color);
+    }
+    return drawn;
+}
+
+void* createControlFont(void* dc, bool& ownsFont) noexcept {
+    ownsFont = false;
+    const int32_t dpi = std::max<int32_t>(1, Gdi32_GetDeviceCaps(dc, 90));
+    // WhiteSur's control labels use the desktop UI face at roughly 11pt. The
+    // stock GUI font is 9pt here and makes entry and button text look tiny.
+    const int32_t fontHeight = -std::max<int32_t>(1, (11 * dpi + 36) / 72);
+    void* font = CreateFontW(fontHeight, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+                             L"Segoe UI");
+    ownsFont = font != nullptr;
+    return font ? font : GetStockObject(kStockDefaultGuiFont);
+}
+
 bool drawEdit(void* hwnd, const EditState& edit, void* dc,
               int32_t width, int32_t height) noexcept {
     if (!dc || width <= 0 || height <= 0 || width > 4096 || height > 4096)
@@ -2567,12 +2725,16 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
         (void)DeleteDC(memoryDc);
         return false;
     }
+    std::fill_n(static_cast<uint32_t*>(pixels),
+                static_cast<size_t>(width) * static_cast<size_t>(height), 0u);
     void* oldBitmap = SelectObject(memoryDc, bitmap);
-    void* stockFont = GetStockObject(kStockDefaultGuiFont);
-    void* oldFont = stockFont ? SelectObject(memoryDc, stockFont) : nullptr;
+    bool ownsFont = false;
+    void* font = createControlFont(memoryDc, ownsFont);
+    void* oldFont = font ? SelectObject(memoryDc, font) : nullptr;
     if (!oldBitmap || !oldFont) {
         if (oldFont) (void)SelectObject(memoryDc, oldFont);
         if (oldBitmap) (void)SelectObject(memoryDc, oldBitmap);
+        if (ownsFont) (void)DeleteObject(font);
         (void)DeleteObject(bitmap);
         (void)DeleteDC(memoryDc);
         return false;
@@ -2589,8 +2751,13 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
         text = displayText;
     }
     void* theme = OpenThemeData(hwnd, L"EDIT");
-    const bool themed = theme && DrawThemeBackground(theme, dc, 1, themeState,
-                                                       &bounds, nullptr) == 0;
+    bool themed = theme && DrawThemeBackground(theme, dc, 1, themeState,
+                                                 &bounds, nullptr) == 0;
+    // A profile may define only the normal EDIT surface. Keep its dark fill
+    // when focused/disabled states omit a background instead of painting a
+    // classic white rectangle over it.
+    if (!themed && theme)
+        themed = DrawThemeBackground(theme, dc, 1, 1, &bounds, nullptr) == 0;
     if (!themed) {
         const uint32_t background = (edit.state & kButtonDisabled)
             ? kColorButtonDisabled : 0xFFFFFFFFu;
@@ -2600,13 +2767,9 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
         (void)fillButtonRect(dc, {0, 0, 1, height}, kColorBorder);
         (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
     }
-    uint32_t themedBorder{};
-    if (themed && GetThemeColor(theme, 1, themeState, 3801, &themedBorder) != 0) {
-        (void)fillButtonRect(dc, {0, 0, width, 1}, kColorBorder);
-        (void)fillButtonRect(dc, {0, height - 1, width, height}, kColorBorder);
-        (void)fillButtonRect(dc, {0, 0, 1, height}, kColorBorder);
-        (void)fillButtonRect(dc, {width - 1, 0, width, height}, kColorBorder);
-    }
+    // A themed entry can intentionally omit border-color (WhiteSur uses
+    // rounded backgrounds and box-shadow). Do not replace that style with the
+    // square classic border just because TMT_BORDERCOLOR is absent.
     // WhiteSur expresses the focused entry ring with box-shadow, which the
     // bounded native snapshot does not model. Keep the focus state visible
     // with a two-pixel GDI ring while retaining UxTheme for the surface.
@@ -2617,21 +2780,24 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
             (GetThemeColor(theme, 1, themeState, 3801, &themedFocus) == 0 ||
              GetThemeColor(theme, 1, 1, 3801, &themedFocus) == 0))
             kFocusRing = 0xFF000000u | colorRef(themedFocus);
-        (void)fillButtonRect(dc, {0, 0, width, 2}, kFocusRing);
-        (void)fillButtonRect(dc, {0, height - 2, width, height}, kFocusRing);
-        (void)fillButtonRect(dc, {0, 0, 2, height}, kFocusRing);
-        (void)fillButtonRect(dc, {width - 2, 0, width, height}, kFocusRing);
+        int32_t cornerRadius = 0;
+        if (theme) (void)GetThemeInt(theme, 1, themeState, 2404, &cornerRadius);
+        if (cornerRadius < 0 || cornerRadius > 128) cornerRadius = 0;
+        (void)drawRoundedEditFocusRing(dc, width, height,
+            static_cast<uint32_t>(cornerRadius), 2, kFocusRing);
     }
 
     uint32_t textColor = (edit.state & kButtonDisabled) ? 0xFF777777u : kColorWindowText;
     if (theme) {
         uint32_t queried{};
-        if (GetThemeColor(theme, 1, themeState, 3803, &queried) == 0) {
+        if (GetThemeColor(theme, 1, themeState, 3803, &queried) != 0)
+            (void)GetThemeColor(theme, 1, 1, 3803, &queried);
+        if (queried) {
             textColor = 0xFF000000u | ((queried & 0xFFu) << 16) |
                 (queried & 0x0000FF00u) | ((queried >> 16) & 0xFFu);
         }
     }
-    const int32_t textLeft = std::min(5, width);
+    const int32_t textLeft = std::min(8, width);
     const int32_t textTop = std::min(1, height);
     const WinNtRect textBounds{textLeft, textTop,
         std::max(textLeft, width - 4), std::max(textTop, height - 1)};
@@ -2639,13 +2805,19 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
                                textBounds.bottom > textBounds.top;
     bool textDrawn = edit.length == 0 || !hasTextBounds;
     if (edit.length && hasTextBounds) {
+        ButtonTextExtent textExtent{};
+        const bool measured = GetTextExtentPoint32W(dc, text,
+            static_cast<int32_t>(edit.length), &textExtent) != 0 &&
+            textExtent.cx >= 0 && textExtent.cy > 0;
         void* clipToken{};
-        const bool clipped = MicaGdiPushClipRect(dc, &textBounds, &clipToken) != 0 && clipToken;
+        const bool clipped = measured &&
+            MicaGdiPushClipRect(dc, &textBounds, &clipToken) != 0 && clipToken;
         if (clipped) {
             const uint32_t previousColor = SetTextColor(dc, colorRef(textColor));
             const int32_t previousMode = SetBkMode(dc, 1);
+            const int32_t textY = std::max(0, (height - textExtent.cy) / 2);
             textDrawn = previousColor != 0xFFFFFFFFu && previousMode > 0 &&
-                TextOutW(dc, textBounds.left, std::max(1, (height - 14) / 2),
+                TextOutW(dc, textBounds.left, textY,
                          text, edit.length) != 0;
             if (previousMode > 0) (void)SetBkMode(dc, previousMode);
             if (previousColor != 0xFFFFFFFFu) (void)SetTextColor(dc, previousColor);
@@ -2659,8 +2831,9 @@ bool drawEdit(void* hwnd, const EditState& edit, void* dc,
     const bool bitmapRestored = SelectObject(memoryDc, oldBitmap) != nullptr;
     const bool bitmapDeleted = DeleteObject(bitmap) != 0;
     const bool dcDeleted = DeleteDC(memoryDc) != 0;
+    const bool fontDeleted = !ownsFont || DeleteObject(font) != 0;
     return textDrawn && copied && fontRestored && bitmapRestored &&
-        bitmapDeleted && dcDeleted;
+        bitmapDeleted && dcDeleted && fontDeleted;
 }
 
 bool drawEditFallback(void* dc, const EditState& edit,
@@ -2785,6 +2958,11 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
 
     bool backgroundDrawn = theme &&
         DrawThemeBackground(theme, memoryDc, part, themeState, &bounds, nullptr) == 0;
+    // Normal state supplies the profile's surface when a hot, pressed, or
+    // disabled variant has text/border overrides but no background.
+    if (!backgroundDrawn && theme)
+        backgroundDrawn = DrawThemeBackground(theme, memoryDc, part, 1,
+                                                &bounds, nullptr) == 0;
 
     if (!backgroundDrawn && !checkable) drawButtonFallback(memoryDc, width, height, button);
     if (checkable && !backgroundDrawn) {
@@ -2802,8 +2980,11 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
     if (theme) {
 
         uint32_t themedColor{};
-        if (GetThemeColor(theme, part, themeState, 3803, &themedColor) == 0)
-            textColor = themedColor;
+        if (GetThemeColor(theme, part, themeState, 3803, &themedColor) != 0)
+            (void)GetThemeColor(theme, part, 1, 3803, &themedColor);
+        if (themedColor)
+            textColor = 0xFF000000u | ((themedColor & 0xFFu) << 16) |
+                (themedColor & 0x0000FF00u) | ((themedColor >> 16) & 0xFFu);
 
     }
     if (checkable && button.checkState != 0) {
@@ -3609,6 +3790,46 @@ intptr_t User32_DefWindowProcW(void* hWnd, uint32_t Msg, uintptr_t wParam, intpt
     return fn ? fn(hWnd,Msg,wParam,lParam) : 0;
 }
 
+thread_local uint8_t g_threadKeyboardState[256]{};
+thread_local uint8_t g_recentKeyPress[256]{};
+
+void updateThreadKeyboardState(const WinNtMsg& message) noexcept {
+    constexpr uint32_t kWmKeyDown = 0x0100u, kWmKeyUp = 0x0101u;
+    constexpr uint32_t kWmSysKeyDown = 0x0104u, kWmSysKeyUp = 0x0105u;
+    if (message.wParam >= 256) return;
+    const auto key = static_cast<uint8_t>(message.wParam);
+    if (message.message == kWmKeyDown || message.message == kWmSysKeyDown) {
+        if (!(g_threadKeyboardState[key] & 0x80u)) {
+            g_recentKeyPress[key] = 1;
+            if (key == 0x14u || key == 0x90u || key == 0x91u)
+                g_threadKeyboardState[key] ^= 0x01u;
+        }
+        g_threadKeyboardState[key] |= 0x80u;
+    } else if (message.message == kWmKeyUp || message.message == kWmSysKeyUp) {
+        g_threadKeyboardState[key] &= 0x7Fu;
+    }
+}
+
+int32_t User32_GetKeyboardState(uint8_t* state) noexcept {
+    if (!state) {
+        constexpr uint32_t errorInvalidParameter = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidParameter) : "memory");
+        return 0;
+    }
+    std::memcpy(state, g_threadKeyboardState, sizeof(g_threadKeyboardState));
+    return 1;
+}
+
+int16_t User32_GetAsyncKeyState(int32_t vKey) noexcept {
+    if (vKey < 0 || vKey >= 256) return 0;
+    const auto key = static_cast<size_t>(vKey);
+    const int16_t result = static_cast<int16_t>(
+        (g_threadKeyboardState[key] & 0x80u ? 0x8000u : 0u) |
+        (g_recentKeyPress[key] ? 0x0001u : 0u));
+    g_recentKeyPress[key] = 0;
+    return result;
+}
+
 int32_t User32_PeekMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax, uint32_t wRemoveMsg) noexcept {
     updateAnimatedCursor();
     if (!lpMsg) return 0;
@@ -3619,6 +3840,7 @@ int32_t User32_PeekMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin,
     if (!ok) return 0;
     lpMsg->hwnd=msg.hwnd; lpMsg->message=msg.message; lpMsg->wParam=msg.wParam;
     lpMsg->lParam=msg.lParam; lpMsg->time=msg.time; lpMsg->pt={msg.pt.x,msg.pt.y};
+    if (wRemoveMsg & 0x0001u) updateThreadKeyboardState(*lpMsg);
     return 1;
 }
 
@@ -3636,11 +3858,12 @@ int32_t User32_GetMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, 
             if (result > 0) {
                 lpMsg->hwnd=msg.hwnd;lpMsg->message=msg.message;lpMsg->wParam=msg.wParam;
                 lpMsg->lParam=msg.lParam;lpMsg->time=msg.time;lpMsg->pt={msg.pt.x,msg.pt.y};
+                updateThreadKeyboardState(*lpMsg);
             }
             return result;
         }
         micant::LargeInteger interval{};
-        interval.QuadPart = -100000; // 10ms: process input and animation deadlines while idle.
+        interval.QuadPart = -300000; // 30ms: cap idle input/ANI polling at about 33 Hz.
         if (micant::native_nt::NtDelayExecution(0, &interval) != micant::NtStatus::Success)
             return -1;
     }
@@ -3653,13 +3876,31 @@ int32_t User32_GetMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, 
     if (result > 0) {
         lpMsg->hwnd=msg.hwnd;lpMsg->message=msg.message;lpMsg->wParam=msg.wParam;
         lpMsg->lParam=msg.lParam;lpMsg->time=msg.time;lpMsg->pt={msg.pt.x,msg.pt.y};
+        updateThreadKeyboardState(*lpMsg);
     }
     return result;
 #endif
 }
 
+int32_t User32_PostMessageW(void* hWnd, uint32_t message,
+                            uintptr_t wParam, intptr_t lParam) noexcept;
+
 int32_t User32_TranslateMessage(const WinNtMsg* lpMsg) noexcept {
-    return lpMsg ? 1 : 0;
+    constexpr uint32_t WM_KEYDOWN = 0x0100u;
+    constexpr uint32_t WM_CHAR = 0x0102u;
+    if (!lpMsg || lpMsg->message != WM_KEYDOWN) return 0;
+
+    // The kernel input path already queues WM_CHAR for printable keys. It
+    // leaves control keys as WM_KEYDOWN, so translate the character-producing
+    // keys here just as TranslateMessage does for a normal message loop.
+    uint16_t character{};
+    switch (static_cast<uint32_t>(lpMsg->wParam)) {
+        case 0x08u: character = u'\b'; break; // VK_BACK
+        case 0x09u: character = u'\t'; break; // VK_TAB
+        case 0x0Du: character = u'\r'; break; // VK_RETURN
+        default: return 0;
+    }
+    return User32_PostMessageW(lpMsg->hwnd, WM_CHAR, character, lpMsg->lParam) ? 1 : 0;
 }
 
 intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
@@ -3920,12 +4161,14 @@ int32_t User32_ShowCursor(int32_t bShow) noexcept {
     return fn ? fn(bShow != 0) : INT32_MIN;
 }
 
-int16_t User32_GetAsyncKeyState(int32_t vKey) noexcept {
-    return (vKey == 0x57 /* 'W' */) ? static_cast<int16_t>(0x8000) : 0;
-}
-
 void* User32_MonitorFromWindow(void* /*hwnd*/, uint32_t /*dwFlags*/) noexcept {
     return reinterpret_cast<void*>(static_cast<uintptr_t>(0x00010001ULL));
+}
+
+int32_t User32_GetSystemMetrics(int32_t index) noexcept {
+    using Fn = int32_t (*)(int32_t);
+    const auto getMetrics = Win32kProc<Fn>("MicaWin32kGetSystemMetrics");
+    return getMetrics ? getMetrics(index) : 0;
 }
 
 int32_t User32_GetMonitorInfoW(void* hMonitor, void* lpmi) noexcept {
@@ -4704,6 +4947,11 @@ void WinNtUser32Gdi32Imm32InitializeExecutiveSubsystem() noexcept {
 
 #if defined(BUILD_SYSTEM32_USER32_DLL)
 extern "C" {
+__declspec(dllexport) int32_t LoadStringW(void* instance, uint32_t stringId,
+                                           wchar_t* buffer, int32_t capacity) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadStringW(
+        instance, stringId, buffer, capacity);
+}
 __declspec(dllexport) void* CreateIconFromResourceEx(
     const uint8_t* bits, uint32_t size, int32_t isIcon, uint32_t version,
     int32_t cx, int32_t cy, uint32_t flags) {
@@ -4834,6 +5082,9 @@ __declspec(dllexport) int32_t PeekMessageW(micant::um::winnt_user32_gdi32_imm32_
 __declspec(dllexport) int32_t GetMessageW(micant::um::winnt_user32_gdi32_imm32_abi::WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
 }
+__declspec(dllexport) int32_t GetKeyboardState(uint8_t* state) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetKeyboardState(state);
+}
 __declspec(dllexport) int32_t TranslateMessage(const micant::um::winnt_user32_gdi32_imm32_abi::WinNtMsg* lpMsg) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_TranslateMessage(lpMsg);
 }
@@ -4957,6 +5208,9 @@ __declspec(dllexport) int32_t ShowCursor(int32_t bShow) {
 }
 __declspec(dllexport) int16_t GetAsyncKeyState(int32_t vKey) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetAsyncKeyState(vKey);
+}
+__declspec(dllexport) int32_t GetSystemMetrics(int32_t index) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetSystemMetrics(index);
 }
 __declspec(dllexport) void* MonitorFromWindow(void* hwnd, uint32_t dwFlags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_MonitorFromWindow(hwnd, dwFlags);

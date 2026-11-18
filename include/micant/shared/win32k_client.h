@@ -123,7 +123,8 @@ enum {
     MICANT_WIN32K_OP_SET_CAPTURE,
     MICANT_WIN32K_OP_RELEASE_CAPTURE,
     MICANT_WIN32K_OP_GET_FOCUS,
-    MICANT_WIN32K_OP_SET_LIQUID_GLASS
+    MICANT_WIN32K_OP_SET_LIQUID_GLASS,
+    MICANT_WIN32K_OP_GET_SYSTEM_METRICS
 };
 
 enum {
@@ -247,6 +248,7 @@ MICANT_WIN32K_API int32_t MicaWin32kSetTaskbarButtonBounds(
     void*, const MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kFillRect(void*, const MicaWin32kRect*, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kBlendRect(void*, const MicaWin32kRect*, uint32_t);
+MICANT_WIN32K_API int32_t MicaWin32kGetSystemMetrics(int32_t);
 
 #ifdef __cplusplus
 }

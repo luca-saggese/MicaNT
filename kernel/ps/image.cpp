@@ -1058,6 +1058,10 @@ NtStatus EProcess::replaceMainImageFromSection(section::SectionObject& image,
                 !writer.append(processImagePath_, parameters->imagePathName) ||
                 !writer.append({commandCopy ? commandCopy.get() : u"", commandLength}, parameters->commandLine))
                 return NtStatus::BufferTooSmall;
+            detail::UserUnicodeString emptyEnvironment{};
+            if (!writer.append(std::u16string_view{u"\0", 1}, emptyEnvironment))
+                return NtStatus::BufferTooSmall;
+            parameters->environment = emptyEnvironment.buffer;
             ownedCommandLine_ = std::move(commandCopy);
             processCommandLine_ = {ownedCommandLine_.get(), commandLength};
             processParametersConfigured_ = true;
@@ -1520,6 +1524,24 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
         MicantNetbootSerialWrite("\r\n");
         return binding;
     }
+    // Keep a compact module map in the boot log while bringing up file-backed
+    // third-party PEs. This lets an exception RIP be attributed to the exact
+    // image that owns it instead of guessing from the process allocation range.
+    for (size_t moduleIndex = 0; moduleIndex < images_->size(); ++moduleIndex) {
+        const auto* loaded = images_->module(moduleIndex);
+        if (!loaded) continue;
+        MicantNetbootSerialWrite("[MicaNT Ps] SEC_IMAGE module ");
+        char moduleText[128]{};
+        const size_t moduleLength = loaded->name.size() < sizeof(moduleText) - 1
+            ? loaded->name.size() : sizeof(moduleText) - 1;
+        if (moduleLength) std::memcpy(moduleText, loaded->name.data(), moduleLength);
+        MicantNetbootSerialWrite(moduleText);
+        MicantNetbootSerialWrite(" base=");
+        MicantNetbootSerialWriteNumber(loaded->base);
+        MicantNetbootSerialWrite(" size=");
+        MicantNetbootSerialWriteNumber(loaded->view.headers().optionalHeader.sizeOfImage);
+        MicantNetbootSerialWrite("\r\n");
+    }
     for (size_t i = 0; i < images_->size() && !imageSectionBacked_; ++i) {
         const auto* module = images_->module(i);
         if (!module) __builtin_trap();
@@ -1596,6 +1618,10 @@ NtStatus EProcess::finalizeNativeImages() noexcept {
         if (!writer.append(processCurrentDirectory_, parameters->currentDirectory) ||
             !writer.append(processImagePath_, parameters->imagePathName) ||
             !writer.append(processCommandLine_, parameters->commandLine)) return NtStatus::BufferTooSmall;
+        detail::UserUnicodeString emptyEnvironment{};
+        if (!writer.append(std::u16string_view{u"\0", 1}, emptyEnvironment))
+            return NtStatus::BufferTooSmall;
+        parameters->environment = emptyEnvironment.buffer;
     }
     const auto* mainImage = images_->module(0);
     if (!mainImage) return NtStatus::InvalidImageFormat;
@@ -1791,8 +1817,19 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         section::SectionObject* dependencySection{};
         dependencyStatus = openSystemImageSection(dependencyPath,
             dependencySectionHandle, dependencySectionReference, dependencySection);
-        if (dependencyStatus != NtStatus::Success)
+        if (dependencyStatus != NtStatus::Success) {
+            char missingLibrary[132]{};
+            const size_t missingLength = library.size() < sizeof(missingLibrary) - 1
+                ? library.size() : sizeof(missingLibrary) - 1;
+            if (missingLength)
+                std::memcpy(missingLibrary, library.data(), missingLength);
+            MicantNetbootSerialWrite("[MicaNT Ps] SEC_IMAGE dependency DLL unavailable name=");
+            MicantNetbootSerialWrite(missingLibrary);
+            MicantNetbootSerialWrite(" status=");
+            MicantNetbootSerialWriteNumber(static_cast<uint32_t>(dependencyStatus));
+            MicantNetbootSerialWrite("\r\n");
             traceImageInitializationFailure("dependency section", dependencyStatus);
+        }
         if (dependencyStatus == NtStatus::ObjectNameNotFound ||
             dependencyStatus == NtStatus::NoSuchFile)
             return NtStatus::NotSupported;

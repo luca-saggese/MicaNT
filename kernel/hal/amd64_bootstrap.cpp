@@ -5435,6 +5435,12 @@ BootstrapClockStatus initializeBootstrapKuserSharedData() noexcept {
         return BootstrapClockStatus::ClockUnavailable;
     }
     g_kuserSharedMappingReady = true;
+    shared->ntBuildNumber = 26100;
+    shared->ntProductType = 1;
+    shared->productType = 1; // VER_NT_WORKSTATION
+    shared->nativeProcessorArchitecture = 9; // PROCESSOR_ARCHITECTURE_AMD64
+    shared->ntMajorVersion = 10;
+    shared->ntMinorVersion = 0;
     shared->tickCountMultiplier = 0xFA000000u;
     shared->timeZoneBiasHigh1 = 0;
     shared->timeZoneBiasLow = 0;

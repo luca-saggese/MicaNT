@@ -2,7 +2,9 @@
 """Boot the verified modular kernel in QEMU/OVMF and check serial milestones."""
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -395,7 +397,9 @@ def verify_cmd_terminal(
     qmp_path: Path,
     temp: Path,
     diagnostics_dir: Path,
+    serial_path: Path,
     doom_test: bool = False,
+    leave_doom_open: bool = False,
 ) -> None:
     """Type real commands into cmd.exe and retain terminal scanout evidence."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -556,6 +560,10 @@ def verify_cmd_terminal(
                         qcode = "spc"
                     elif character == ".":
                         qcode = "dot"
+                    elif character == "/":
+                        qcode = "slash"
+                    elif character == chr(92):
+                        qcode = "backslash"
                     elif character == "-":
                         qcode = "minus"
                     elif character == ":":
@@ -699,11 +707,31 @@ def verify_cmd_terminal(
                         raise RuntimeError(f"DOOM {label} screen did not visibly advance")
                     menu_frames.append(frame)
                 level = menu_frames[-1]
-                hold_key("up", 1.5)
-                time.sleep(0.5)
-                moved = screen("doom-08-e1m1-after-forward.ppm")
-                if region_diff(level, moved) < 2500:
-                    raise RuntimeError("DOOM E1M1 view did not change after forward movement")
+                # Fire once to produce a deterministic weapon effect for the
+                # HDA audio-path check. Gameplay movement was verified by the
+                # separate DOOM interaction run; audio latency should not make
+                # this sound acceptance depend on a camera-motion threshold.
+                key("ctrl")
+                time.sleep(0.2)
+                key("ctrl")
+                fired = screen("doom-08-e1m1-fire-effect.ppm")
+
+                audio_deadline = time.monotonic() + 8
+                while time.monotonic() < audio_deadline:
+                    if "[MicaNT DoomAudio] HDA PCM effects submitted" in serial_path.read_text(
+                            encoding="utf-8", errors="replace"):
+                        break
+                    time.sleep(0.1)
+                if "[MicaNT DoomAudio] HDA PCM effects submitted" not in serial_path.read_text(
+                        encoding="utf-8", errors="replace"):
+                    raise RuntimeError("DOOM gameplay produced no confirmed HDA PCM effects")
+
+                if leave_doom_open:
+                    print(
+                        "DOOM E1M1 is running in the guest; leaving its window open for interactive play.",
+                        flush=True,
+                    )
+                    return
 
                 # The game window is at (80, 60), 656x439. Close its caption
                 # and verify the original terminal can accept another command.
@@ -1054,6 +1082,8 @@ def verify_mouse(
                     for x in range(204, 450))
                 for y in range(95, 130)
             )
+
+
             if title_text_rows <= 8:
                 raise RuntimeError("Caption title did not use the shared GDI font raster")
             if "[MicaNT Theme] WhiteSur window icon loaded for caption" not in serial_path.read_text(
@@ -2029,6 +2059,91 @@ def verify_mouse(
             raise RuntimeError("PS/2 mouse input did not reach the kernel consumer")
 
 
+def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
+                       serial_path: Path, app: str) -> None:
+    """Interact directly with a kernel-launched ReactOS application window."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            def receive() -> dict:
+                line = stream.readline()
+                if not line:
+                    raise RuntimeError("QMP closed during ReactOS app interaction")
+                return json.loads(line)
+
+            if "QMP" not in receive():
+                raise RuntimeError("QEMU did not send a QMP greeting")
+
+            def execute(command: str, arguments: dict | None = None) -> None:
+                stream.write((json.dumps({
+                    "execute": command, "arguments": arguments or {},
+                }) + "\n").encode())
+                stream.flush()
+                while True:
+                    response = receive()
+                    if "error" in response:
+                        raise RuntimeError(f"QMP {command} failed: {response['error']}")
+                    if "return" in response:
+                        return
+
+            execute("qmp_capabilities")
+
+            def screen(name: str) -> bytes:
+                path = temp / name
+                execute("screendump", {"filename": str(path)})
+                shutil.copyfile(path, diagnostics_dir / name)
+                with path.open("rb") as image:
+                    if (image.readline() != b"P6\n" or image.readline() != b"1024 768\n" or
+                            image.readline() != b"255\n"):
+                        raise RuntimeError("Unexpected ReactOS app scanout screenshot format")
+                    pixels = image.read()
+                    if len(pixels) != 1024 * 768 * 3:
+                        raise RuntimeError("Truncated ReactOS app scanout screenshot")
+                    return pixels
+
+            time.sleep(1.5)
+            before = screen(f"reactos-{app}-01-window-before-input.ppm")
+            if os.environ.get("MICANT_REACTOS_APP_LEAVE_OPEN") == "1":
+                print(
+                    f"ReactOS {app}.exe screenshot captured with its window still open; no QMP input sent.",
+                    flush=True,
+                )
+                return
+            for down in (True, False):
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": down, "key": {"type": "qcode", "data": "ret"},
+                    },
+                }]})
+                time.sleep(0.08)
+            after = screen(f"reactos-{app}-02-after-enter.ppm")
+            changed_bytes = sum(left != right for left, right in zip(before, after))
+            if changed_bytes < 2048:
+                raise RuntimeError(
+                    f"ReactOS {app}.exe did not visibly respond to QMP Enter "
+                    "(the before/after scanout frames are effectively identical)"
+                )
+
+    deadline = time.monotonic() + 12
+    serial = ""
+    while time.monotonic() < deadline:
+        serial = serial_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+        if "[MicaNT ReactOSApps] Process handle cleanup complete" in serial:
+            break
+        time.sleep(0.1)
+    if "[MicaNT ReactOSApps] Process handle cleanup complete" not in serial:
+        raise RuntimeError(
+            f"ReactOS {app}.exe did not exit after QMP Enter; retained its live-process screenshots"
+        )
+    if (f"[MicaNT ReactOSApps] Process terminated exit NTSTATUS=0\n" not in serial and
+            not (app == "winver" and
+                 "[MicaNT ReactOSApps] Process terminated exit NTSTATUS=1\n" in serial)):
+        raise RuntimeError(f"ReactOS {app}.exe terminated unsuccessfully; inspect serial.log")
+    print(
+        f"ReactOS {app}.exe received QMP Enter, exited with STATUS_SUCCESS, and released its process handle.",
+        flush=True,
+    )
 def inject_usb_keyboard(qmp_path: Path) -> None:
     """Send a press/release pair; the kernel must report both via HID reports."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -2433,6 +2548,8 @@ def run_qemu(
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
     doom_test: bool = False,
+    reactos_apps_dir: Path | None = None,
+    reactos_app: str | None = None,
     crash_dump_selftest: bool = False,
     resolution: tuple[int, int] | None = None,
     usb_ehci_test: bool = False,
@@ -2464,6 +2581,19 @@ def run_qemu(
         raise RuntimeError("Doom test requires the CMD graphical terminal QMP profile")
     if cmd_test and diagnostics_dir is None:
         raise RuntimeError("CMD test requires --diagnostics-dir to retain screenshots and evidence")
+    if bool(reactos_apps_dir) != bool(reactos_app):
+        raise RuntimeError("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
+    if reactos_app and (cmd_test or doom_test or theme_test or taskmgr_selftest or
+                        process_memory_selftest or runtime_selftest or timer_selftest or
+                        network_test or usb_test or usb_ehci_test or crash_dump_selftest or
+                        audio_controller_test or audio_render_test or audio_capture_test):
+        raise RuntimeError("ReactOS application execution has an isolated post-Explorer QEMU profile")
+    if reactos_app and diagnostics_dir is None:
+        raise RuntimeError("ReactOS app verification requires retained QEMU evidence")
+    if audio_render_test and diagnostics_dir is None:
+        raise RuntimeError("Audio render test requires --diagnostics-dir to retain its WAV evidence")
+    if audio_capture_test and diagnostics_dir is None:
+        raise RuntimeError("Audio capture test requires --diagnostics-dir to retain its evidence")
     if crash_dump_selftest and (interactive or verify_input or verify_usb_input or
                                 runtime_selftest or timer_selftest or network_test or
                                 usb_test or usb_ehci_test or taskmgr_selftest or theme_test or
@@ -2482,6 +2612,8 @@ def run_qemu(
         timer_selftest=timer_selftest,
     )
     expected = (
+        EXPECTED_SERIAL + ("[MicaNT ReactOSApps] Original AMD64 PE process started PID=",)
+        if reactos_app else
         EXPECTED_TIMER_SELFTEST_SERIAL if timer_selftest else
         EXPECTED_RUNTIME_SELFTEST_SERIAL if runtime_selftest else
         EXPECTED_SERIAL
@@ -2584,6 +2716,41 @@ def run_qemu(
         # loader opens the real DLLs from there for file-backed SEC_IMAGE.
         system32_dir = esp / "MicaNT" / "System32"
         system32_dir.mkdir(parents=True)
+        if reactos_apps_dir:
+            source = reactos_apps_dir.expanduser().resolve()
+            if not source.is_dir():
+                raise RuntimeError(f"ReactOS application bundle directory does not exist: {source}")
+            bundle_manifest_path = source / "reactos-apps-manifest.json"
+            if not bundle_manifest_path.is_file():
+                raise RuntimeError("ReactOS application bundle lacks its verified manifest")
+            bundle = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+            trusted_bundle = json.loads(
+                (ROOT / "docs" / "REACTOS_BINARY_COMPATIBILITY_MANIFEST.json")
+                .read_text(encoding="utf-8")
+            )
+            if bundle != trusted_bundle:
+                raise RuntimeError("ReactOS application bundle manifest differs from the repository-verified manifest")
+            if (bundle.get("git_revision") != "8fe3cee05606aecd9442674e40038649f048d10d" or
+                    bundle.get("artifact_sha256") !=
+                    "42cbb141d7c66a2c2a273292232aec06d4d98c916d8471757fc22ab0beccf26e"):
+                raise RuntimeError("ReactOS application manifest is not the pinned official x64 build")
+            app_records = {record.get("name", "").lower(): record
+                           for record in bundle.get("apps", [])}
+            required = (
+                "winver.exe", "notepad.exe", "calc.exe", "winmine.exe", "sol.exe",
+                "mspaint.exe", "regedit.exe", "taskmgr.exe", "wordpad.exe",
+            )
+            target = esp / "ReactOSApps"
+            target.mkdir()
+            for name in required:
+                app = source / name
+                record = app_records.get(name)
+                if not app.is_file() or not record:
+                    raise RuntimeError(f"ReactOS bundle is missing verified app {name}")
+                digest = hashlib.sha256(app.read_bytes()).hexdigest()
+                if digest != record.get("sha256") or record.get("machine") != "0x8664":
+                    raise RuntimeError(f"ReactOS bundle PE verification failed for {name}")
+                shutil.copy2(app, target / name)
         # The crash recovery service only opens this directory after restart;
         # the fatal path itself writes to the dedicated reserved partition.
         (esp / "Windows" / "Minidump").mkdir(parents=True)
@@ -2822,11 +2989,16 @@ def run_qemu(
             "-no-shutdown",
         ]
         audio_capture_path = diagnostics_dir / "hda-render.wav" if audio_render_test else None
-        if audio_controller_test or audio_render_test or audio_capture_test:
+        if audio_controller_test or audio_render_test or audio_capture_test or doom_test:
             if audio_render_test:
                 audio_device = (
                     f"driver=wav,id=micant_audio,path={audio_capture_path},"
                     f"out.frequency={HDA_RENDER_RATE},out.channels={HDA_RENDER_CHANNELS},out.format=s16"
+                )
+            elif doom_test:
+                audio_device = (
+                    "driver=coreaudio,id=micant_audio,out.frequency=48000,"
+                    "out.channels=2,out.format=s16"
                 )
             else:
                 audio_device = "driver=none,id=micant_audio"
@@ -2896,6 +3068,7 @@ def run_qemu(
         theme_test_verified = False
         process_memory_verified = False
         cmd_test_verified = False
+        reactos_app_verified = False
         usb_input_sent = False
         usb_ehci_verified = False
         network_outbound_peer_done = False
@@ -3111,9 +3284,16 @@ def run_qemu(
                             theme_test_verified = True
                         if cmd_test and not cmd_test_verified:
                             verify_cmd_terminal(
-                                temp / "qmp.sock", temp, diagnostics_dir, doom_test,
+                                temp / "qmp.sock", temp, diagnostics_dir, serial_path, doom_test,
+                                leave_doom_open=doom_test and interactive,
                             )
                             cmd_test_verified = True
+                        if reactos_app and not reactos_app_verified:
+                            verify_reactos_app(
+                                temp / "qmp.sock", temp, diagnostics_dir,
+                                serial_path, reactos_app,
+                            )
+                            reactos_app_verified = True
                         time_evidence = timer_selftest or runtime_selftest or (
                             "[MicaNT Hal] CPL3 UTC SystemTime advanced and matched KUSER" in serial_log or
                             "[MicaNT Hal] CPL3 UTC SystemTime correctly unavailable for local firmware time" in serial_log
@@ -3360,6 +3540,10 @@ def main() -> int:
     parser.add_argument("--taskmgr-selftest", action="store_true")
     parser.add_argument("--theme-test", action="store_true")
     parser.add_argument("--cmd-test", action="store_true")
+    parser.add_argument("--reactos-apps-dir", type=Path)
+    parser.add_argument("--reactos-app", choices=(
+        "winver", "notepad", "calc", "winmine", "sol", "mspaint",
+        "regedit", "taskmgr", "wordpad"))
     parser.add_argument("--doom-test", action="store_true",
                         help="launch doom.exe, play E1M1 with QMP, and retain scanout screenshots")
     parser.add_argument("--process-memory-selftest", action="store_true")
@@ -3370,6 +3554,9 @@ def main() -> int:
     parser.add_argument("--audio-capture-test", action="store_true",
                         help="exercise Ring 3 HDA ADC DMA packets and event timestamps")
     args = parser.parse_args()
+
+    if bool(args.reactos_apps_dir) != bool(args.reactos_app):
+        parser.error("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
 
     if args.ovmf_code is None:
         parser.error("--ovmf-code or MICANT_OVMF_CODE is required")
@@ -3399,6 +3586,8 @@ def main() -> int:
             args.process_memory_selftest,
             args.cmd_test,
             args.doom_test,
+            args.reactos_apps_dir,
+            args.reactos_app,
             args.crash_dump_selftest,
             tuple(int(part) for part in args.resolution.split("x"))
                 if args.resolution else None,

@@ -1121,6 +1121,15 @@ __declspec(dllexport) int32_t InitCommonControlsEx(
     return 1;
 }
 
+// The legacy entry point requests the standard controls set and has no return
+// value in the Windows ABI. Keep registration in the same canonical class
+// initializers used by the Ex variant.
+__declspec(dllexport) void InitCommonControls() noexcept {
+    const InitCommonControlsExArgs args{sizeof(InitCommonControlsExArgs),
+        kIccProgress | kIccTab | kIccTreeView};
+    (void)InitCommonControlsEx(&args);
+}
+
 __declspec(dllexport) void* CreatePropertySheetPageW(const void*) noexcept { return nullptr; }
 __declspec(dllexport) int64_t PropertySheetW(const void*) noexcept { return -1; }
 

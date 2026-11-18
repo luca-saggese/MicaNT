@@ -152,6 +152,7 @@ def write_manifest(
     taskmgr_selftest: bool = False, theme_test: bool = False,
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
+    reactos_app: str | None = None,
     doom_test: bool = False,
     audio_controller_test: bool = False,
     audio_render_test: bool = False,
@@ -201,6 +202,7 @@ def write_manifest(
         "theme_test": theme_test,
         "process_memory_selftest": process_memory_selftest,
         "cmd_test": cmd_test,
+        "reactos_app": reactos_app,
         "doom_test": doom_test,
         "audio_controller_test": audio_controller_test,
         "audio_render_test": audio_render_test,
@@ -313,6 +315,16 @@ def main() -> int:
         help="launch the Ring 3 CMD terminal and exercise it through QMP",
     )
     parser.add_argument(
+        "--reactos-apps-dir", type=Path,
+        help="stage a verified original AMD64 app bundle at C:\\ReactOSApps",
+    )
+    parser.add_argument(
+        "--reactos-app",
+        choices=("winver", "notepad", "calc", "winmine", "sol",
+                 "mspaint", "regedit", "taskmgr", "wordpad"),
+        help="launch one original ReactOS PE after Explorer and interact using QMP",
+    )
+    parser.add_argument(
         "--doom-test", action="store_true",
         help="run real doom.exe in the guest, play E1M1 with QMP, and retain screenshots",
     )
@@ -333,6 +345,10 @@ def main() -> int:
         help="keep the visible CMD-test QEMU session open for manual use after QMP verification",
     )
     parser.add_argument(
+        "--interactive-after-doom-test", action="store_true",
+        help="leave the verified Doom E1M1 session running in the visible QEMU window",
+    )
+    parser.add_argument(
         "--crash-dump-selftest", action="store_true",
         help="fault the kernel, persist a crash dump, reboot, recover it to C:\\Windows\\Minidump and decode it",
     )
@@ -350,6 +366,21 @@ def main() -> int:
         args.memory_mib = 512
         if args.timeout == 90:
             args.timeout = 240
+    if args.reactos_app:
+        args.memory_mib = 512
+        if args.reactos_apps_dir is None:
+            parser.error("--reactos-app requires --reactos-apps-dir")
+        if args.timeout == 90:
+            args.timeout = 180
+    elif args.reactos_apps_dir is not None:
+        parser.error("--reactos-apps-dir requires --reactos-app")
+    if args.reactos_app and (args.cmd_test or args.doom_test or args.taskmgr_selftest or
+                             args.theme_test or args.process_memory_selftest or
+                             args.network_test or args.usb_test or
+                             args.audio_controller_test or args.audio_render_test or args.audio_capture_test or
+                             args.crash_dump_selftest or args.runtime_selftest or
+                             args.timer_selftest):
+        parser.error("--reactos-app has an isolated direct-launch QEMU profile")
     global BUILD_DIR
     if args.cmake_build_dir:
         BUILD_DIR = args.cmake_build_dir.expanduser()
@@ -380,6 +411,8 @@ def main() -> int:
         parser.error("--cmd-test and --doom-test must run with --memory-mib 512")
     if args.interactive_after_cmd_test and (not args.cmd_test or args.headless):
         parser.error("--interactive-after-cmd-test requires visible --cmd-test mode")
+    if args.interactive_after_doom_test and (not args.doom_test or args.headless):
+        parser.error("--interactive-after-doom-test requires visible --doom-test mode")
     if args.crash_dump_selftest and (args.runtime_selftest or args.timer_selftest or
             args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest or
             args.theme_test or args.process_memory_selftest or args.cmd_test):
@@ -435,6 +468,7 @@ def main() -> int:
                 f"-DMICANT_COMPOSITOR_DEBUG_HUD:BOOL={'ON' if args.compositor_debug_hud else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST:BOOL={'ON' if args.process_memory_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CMD_TEST:BOOL={'ON' if args.cmd_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_REACTOS_APP:STRING={args.reactos_app or ''}",
                 f"-DMICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST:BOOL={'ON' if args.crash_dump_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST:BOOL={'ON' if args.audio_controller_test or args.audio_render_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_AUDIO_RENDER_TEST:BOOL={'ON' if args.audio_render_test else 'OFF'}",
@@ -474,6 +508,8 @@ def main() -> int:
                 "network_probe_boot",
                 "https_probe_boot",
                 "file_image_boot",
+                "advapi32_boot",
+                "msvcrt_boot",
                 "shell32_boot",
                 "comctl32_boot",
                 "explorer_runtime_boot",
@@ -502,6 +538,7 @@ def main() -> int:
             theme_test=args.theme_test,
             process_memory_selftest=args.process_memory_selftest,
             cmd_test=args.cmd_test,
+            reactos_app=args.reactos_app,
             doom_test=args.doom_test,
             audio_controller_test=args.audio_controller_test or args.audio_render_test or args.audio_capture_test,
             audio_render_test=args.audio_render_test,
@@ -540,6 +577,10 @@ def main() -> int:
             boot_command.extend(["--resolution", args.resolution])
         if args.diagnostics_dir:
             boot_command.extend(["--diagnostics-dir", str(args.diagnostics_dir.resolve())])
+        elif args.reactos_app:
+            evidence_name = f"reactos-{args.reactos_app}-qemu-evidence-{time.time_ns()}"
+            evidence_dir = ROOT / "build" / evidence_name
+            boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
         elif args.cmd_test:
             evidence_dir = ROOT / "build" / f"cmd-m0-qemu-evidence-{time.time_ns()}"
             boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
@@ -566,8 +607,13 @@ def main() -> int:
             boot_command.append("--cmd-test")
             if args.doom_test:
                 boot_command.append("--doom-test")
-            if args.interactive_after_cmd_test:
+            if args.interactive_after_cmd_test or args.interactive_after_doom_test:
                 boot_command.append("--interactive")
+        if args.reactos_app:
+            boot_command.extend([
+                "--reactos-apps-dir", str(args.reactos_apps_dir.expanduser().resolve()),
+                "--reactos-app", args.reactos_app,
+            ])
         elif args.crash_dump_selftest:
             boot_command.append("--crash-dump-selftest")
         elif args.audio_controller_test:

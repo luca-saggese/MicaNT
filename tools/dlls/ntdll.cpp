@@ -10,6 +10,8 @@
 #include <cstddef>
 #include "micant/shared/context.hpp"
 #include "micant/shared/syscall_numbers.hpp"
+#include "micant/shared/ntdef.hpp"
+#include "micant/um/subsystems/winbase/winnt_ntdll_ws2_iphlpapi_winhttp_abi.hpp"
 
 #define MICANT_STRINGIFY_INNER(value) #value
 #define MICANT_STRINGIFY(value) MICANT_STRINGIFY_INNER(value)
@@ -59,6 +61,28 @@ void* memmove(void* dest, const void* src, size_t n) {
 
 bool DllMain(void*, unsigned long, void*) noexcept {
     return true;
+}
+
+__declspec(dllexport) int32_t RtlGetVersion(
+    micant::um::winnt_ntdll_ws2_iphlpapi_winhttp_abi::WinNtOsVersionInfoExW* version) noexcept {
+    using VersionInfo = micant::um::winnt_ntdll_ws2_iphlpapi_winhttp_abi::WinNtOsVersionInfoExW;
+    constexpr uint32_t baseSize = static_cast<uint32_t>(offsetof(VersionInfo, wServicePackMajor));
+    if (!version || version->dwOSVersionInfoSize < baseSize) return static_cast<int32_t>(0xC000000Du);
+    const auto* shared = reinterpret_cast<const volatile micant::KUserSharedData*>(
+        micant::UserSharedDataAddress);
+    version->dwMajorVersion = shared->ntMajorVersion;
+    version->dwMinorVersion = shared->ntMinorVersion;
+    version->dwBuildNumber = shared->ntBuildNumber;
+    version->dwPlatformId = 2; // VER_PLATFORM_WIN32_NT
+    version->szCSDVersion[0] = L'\0';
+    if (version->dwOSVersionInfoSize >= sizeof(VersionInfo)) {
+        version->wServicePackMajor = 0;
+        version->wServicePackMinor = 0;
+        version->wSuiteMask = 0;
+        version->wProductType = shared->productType;
+        version->wReserved = 0;
+    }
+    return 0; // STATUS_SUCCESS
 }
 
 // ============================================================================
@@ -1874,6 +1898,23 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtClose(void* /*handle*/) n
 #else
     return 0;
 #endif
+}
+
+__attribute__((naked)) __declspec(dllexport) int32_t NtOpenKey(
+    void** /*keyHandle*/, uint32_t /*desiredAccess*/, void* /*objectAttributes*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x12, %eax\n\tsyscall\n\tretq\n");
+}
+
+__attribute__((naked)) __declspec(dllexport) int32_t NtQueryValueKey(
+    void* /*keyHandle*/, void* /*valueName*/, uint32_t /*informationClass*/,
+    void* /*information*/, size_t /*informationLength*/, size_t* /*resultLength*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x16, %eax\n\tsyscall\n\tretq\n");
+}
+
+__attribute__((naked)) __declspec(dllexport) int32_t NtSetValueKey(
+    void* /*keyHandle*/, void* /*valueName*/, uint32_t /*titleIndex*/, uint32_t /*type*/,
+    const void* /*data*/, uint32_t /*dataSize*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x60, %eax\n\tsyscall\n\tretq\n");
 }
 
 

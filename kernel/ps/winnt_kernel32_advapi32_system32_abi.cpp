@@ -10,6 +10,7 @@ static_assert(sizeof(void*) == 8);
 
 extern "C" {
 
+
 __declspec(dllimport) int32_t __stdcall NtQuerySystemTime(int64_t* systemTime) noexcept;
 __declspec(dllimport) int32_t __stdcall NtQueryPerformanceCounter(
     int64_t* performanceCounter, int64_t* performanceFrequency) noexcept;
@@ -795,6 +796,17 @@ __declspec(dllexport) uint64_t __stdcall GetTickCount64() noexcept {
     return *shared;
 }
 
+__declspec(dllexport) uint32_t __stdcall GetTickCount() noexcept {
+    return static_cast<uint32_t>(GetTickCount64());
+}
+
+using UnhandledExceptionFilterFn = long (__stdcall *)(void*);
+static UnhandledExceptionFilterFn g_unhandledExceptionFilter{};
+__declspec(dllexport) UnhandledExceptionFilterFn __stdcall SetUnhandledExceptionFilter(
+    UnhandledExceptionFilterFn filter) noexcept {
+    return __atomic_exchange_n(&g_unhandledExceptionFilter, filter, __ATOMIC_SEQ_CST);
+}
+
 struct UserListEntry64 { uintptr_t next, previous; };
 struct UserUnicodeString64 { uint16_t length, maximumLength; uint32_t padding; const wchar_t* buffer; };
 struct WinCriticalSection64 {
@@ -854,6 +866,48 @@ static uintptr_t FindModule(const wchar_t* name) noexcept {
 
 __declspec(dllexport) void* __stdcall GetModuleHandleW(const wchar_t* name) noexcept {
     return reinterpret_cast<void*>(FindModule(name));
+}
+
+// This bounded loader entrypoint can acquire a reference to an image already
+// present in the process loader list. Image mapping/relocation of new DLLs is
+// not yet implemented; unsupported names fail with the documented Win32 error
+// rather than receiving a fabricated module base.
+__declspec(dllexport) void* __stdcall LoadLibraryW(const wchar_t* name) noexcept {
+    if (!name || !*name) { SetLastError(87); return nullptr; }
+    const uintptr_t module = FindModule(name);
+    if (!module) { SetLastError(126); return nullptr; } // ERROR_MOD_NOT_FOUND
+    return reinterpret_cast<void*>(module);
+}
+
+__declspec(dllexport) void* __stdcall GetModuleHandleA(const char* name) noexcept {
+    if (!name) return reinterpret_cast<void*>(FindModule(nullptr));
+    wchar_t wide[260]{};
+    size_t length{};
+    for (; name[length] && length + 1 < sizeof(wide) / sizeof(wide[0]); ++length) {
+        const uint8_t ch = static_cast<uint8_t>(name[length]);
+        if (ch >= 0x80) { SetLastError(1113); return nullptr; }
+        wide[length] = static_cast<wchar_t>(ch);
+    }
+    if (name[length]) { SetLastError(206); return nullptr; }
+    const uintptr_t module = FindModule(wide);
+    if (!module) SetLastError(126);
+    return reinterpret_cast<void*>(module);
+}
+
+struct StartupInfoW64 {
+    uint32_t cb;
+    wchar_t* reserved, *desktop, *title;
+    uint32_t x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
+    uint16_t showWindow, reserved2Size;
+    uint8_t* reserved2;
+    void* stdInput, *stdOutput, *stdError;
+};
+__declspec(dllexport) void __stdcall GetStartupInfoW(StartupInfoW64* info) noexcept {
+    if (!info) { SetLastError(87); return; }
+    if (info->cb < sizeof(StartupInfoW64)) { SetLastError(87); return; }
+    auto* bytes = reinterpret_cast<uint8_t*>(info);
+    for (size_t i = 0; i < sizeof(StartupInfoW64); ++i) bytes[i] = 0;
+    info->cb = sizeof(StartupInfoW64);
 }
 
 __declspec(dllexport) void* __stdcall GetProcAddress(void* module, const char* name) noexcept {
@@ -1084,6 +1138,24 @@ __declspec(dllexport) [[noreturn]] void __stdcall RtlUnwindEx(
 
 #include "micant/um/subsystems/winbase/winnt_kernel32_advapi32_system32_abi.hpp"
 
+extern "C" int __stdcall DllMainCRTStartup(void*, unsigned long, void*) noexcept {
+    return 1;
+}
+
+extern "C" {
+__declspec(dllimport) int32_t __stdcall NtQueryPerformanceCounter(
+    int64_t* counter, int64_t* frequency) noexcept;
+__declspec(dllimport) int32_t __stdcall NtDelayExecution(
+    uint8_t alertable, const int64_t* interval) noexcept;
+__declspec(dllimport) int32_t __stdcall NtYieldExecution() noexcept;
+__declspec(dllimport) int32_t __stdcall NtOpenKey(
+    void** keyHandle, uint32_t desiredAccess, micant::ObjectAttributes* attributes) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryValueKey(
+    void* keyHandle, micant::UnicodeString* valueName, uint32_t informationClass,
+    void* information, size_t informationLength, size_t* resultLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+}
+
 namespace micant::um::winnt_kernel32_advapi32_abi {
 
 namespace {
@@ -1092,8 +1164,17 @@ uint32_t g_lastError = ERROR_SUCCESS_OFFICIAL;
 WinNtEventHandleObject g_eventPool[32]{};
 uint32_t g_eventPoolNext = 0;
 
-WinNtRegistryKeyObject g_regKeyPool[32]{};
-uint32_t g_regKeyPoolNext = 0;
+struct AdvapiRegistryKey { void* handle{}; wchar_t path[512]{}; bool active{}; };
+AdvapiRegistryKey g_regKeyPool[32]{};
+uint32_t g_regKeyPoolNext{};
+uint32_t g_regKeyLock{};
+struct AdvapiRegistryKeyGuard {
+    AdvapiRegistryKeyGuard() noexcept {
+        while (__atomic_exchange_n(&g_regKeyLock, 1, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("pause");
+    }
+    ~AdvapiRegistryKeyGuard() { __atomic_store_n(&g_regKeyLock, 0, __ATOMIC_RELEASE); }
+};
 
 alignas(64) uint8_t g_virtualAllocArena[256 * 1024]{};
 
@@ -1368,57 +1449,110 @@ int32_t Kernel32_SetThreadDescription(void* /*hThread*/, const wchar_t* /*lpThre
 
 // advapi32.dll implementations
 int32_t Advapi32_RegCreateKeyExW(
-    void* /*hKey*/,
+    void* hKey,
     const wchar_t* lpSubKey,
-    uint32_t /*Reserved*/,
-    wchar_t* /*lpClass*/,
-    uint32_t /*dwOptions*/,
+    uint32_t Reserved,
+    wchar_t* lpClass,
+    uint32_t dwOptions,
     uint32_t samDesired,
-    void* /*lpSecurityAttributes*/,
+    void* lpSecurityAttributes,
     void** phkResult,
     uint32_t* lpdwDisposition) noexcept {
-    if (!phkResult) return 87; // ERROR_INVALID_PARAMETER
-    WinNtRegistryKeyObject* keyObj = &g_regKeyPool[(g_regKeyPoolNext++) & 31U];
-    keyObj->magic          = 0x4D4E545245474B59ULL;
-    keyObj->samDesired     = samDesired;
-    keyObj->lastDwordValue = 1U;
-    if (lpSubKey) {
-        size_t i = 0;
-        while (lpSubKey[i] != L'\0' && i + 1 < 128) {
-            keyObj->subKey[i] = lpSubKey[i];
-            ++i;
+    (void)hKey; (void)lpSubKey; (void)lpClass; (void)samDesired; (void)lpSecurityAttributes;
+    if (!phkResult || Reserved || dwOptions != 0) return 87;
+    *phkResult = nullptr;
+    if (lpdwDisposition) *lpdwDisposition = 0;
+    return 120; // ERROR_CALL_NOT_IMPLEMENTED until NtCreateKey is implemented
+}
+
+int32_t Advapi32_RegOpenKeyExW(void* hKey, const wchar_t* lpSubKey, uint32_t ulOptions, uint32_t samDesired, void** phkResult) noexcept {
+    constexpr uintptr_t HKEY_CURRENT_USER_VALUE = 0x80000001u;
+    constexpr uintptr_t HKEY_LOCAL_MACHINE_VALUE = 0x80000002u;
+    if (!phkResult || !hKey || ulOptions != 0) return 87;
+    *phkResult = nullptr;
+    wchar_t path[512];
+    ByteZero(path, sizeof(path));
+    size_t length{};
+    const wchar_t* parent{};
+    if (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hKey)) == HKEY_LOCAL_MACHINE_VALUE) parent = L"\\Registry\\Machine";
+    else if (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hKey)) == HKEY_CURRENT_USER_VALUE) parent = L"\\Registry\\User";
+    else {
+        AdvapiRegistryKeyGuard guard;
+        for (auto& key : g_regKeyPool) if (hKey == &key && key.active) { parent = key.path; break; }
+        if (!parent) return 6;
+    }
+    for (; parent[length] && length + 1 < 512; ++length) path[length] = parent[length];
+    if (parent[length]) return 206;
+    if (lpSubKey && *lpSubKey) {
+        if (length && path[length - 1] != L'\\') path[length++] = L'\\';
+        for (size_t i = 0; lpSubKey[i]; ++i) {
+            if (length + 1 >= 512) return 206;
+            path[length++] = lpSubKey[i];
         }
-        keyObj->subKey[i] = L'\0';
-    } else {
-        keyObj->subKey[0] = L'\0';
     }
-    *phkResult = keyObj;
-    if (lpdwDisposition) *lpdwDisposition = 1U; // REG_CREATED_NEW_KEY
-    return ERROR_SUCCESS_OFFICIAL;
+    path[length] = L'\0';
+    micant::UnicodeString name(path);
+    micant::ObjectAttributes attributes{};
+    attributes.objectName = &name;
+    attributes.attributes = micant::OBJ_CASE_INSENSITIVE;
+    void* nativeHandle{};
+    const int32_t status = NtOpenKey(&nativeHandle, samDesired, &attributes);
+    if (status < 0) {
+        if (status == static_cast<int32_t>(micant::NtStatus::ObjectNameNotFound)) return 2;
+        if (status == static_cast<int32_t>(micant::NtStatus::AccessDenied)) return 5;
+        if (status == static_cast<int32_t>(micant::NtStatus::InvalidParameter)) return 87;
+        return 31;
+    }
+    {
+        AdvapiRegistryKeyGuard guard;
+        for (uint32_t i = 0; i < 32; ++i) {
+            auto& key = g_regKeyPool[(g_regKeyPoolNext + i) & 31u];
+            if (key.active) continue;
+            key.handle = nativeHandle;
+            for (size_t n = 0; n <= length; ++n) key.path[n] = path[n];
+            key.active = true;
+            g_regKeyPoolNext = (g_regKeyPoolNext + i + 1) & 31u;
+            *phkResult = &key;
+            return ERROR_SUCCESS_OFFICIAL;
+        }
+    }
+    (void)NtClose(nativeHandle);
+    return 8;
 }
 
-int32_t Advapi32_RegOpenKeyExW(void* hKey, const wchar_t* lpSubKey, uint32_t /*ulOptions*/, uint32_t samDesired, void** phkResult) noexcept {
-    return Advapi32_RegCreateKeyExW(hKey, lpSubKey, 0, nullptr, 0, samDesired, nullptr, phkResult, nullptr);
+int32_t Advapi32_RegSetValueExW(void* hKey, const wchar_t* lpValueName, uint32_t reserved, uint32_t /*dwType*/, const uint8_t* /*lpData*/, uint32_t /*cbData*/) noexcept {
+    if (!hKey || !lpValueName || reserved) return 87;
+    return 120; // NtSetValueKey is not yet implemented in the production NTDLL path
 }
 
-int32_t Advapi32_RegSetValueExW(void* hKey, const wchar_t* /*lpValueName*/, uint32_t /*Reserved*/, uint32_t dwType, const uint8_t* lpData, uint32_t cbData) noexcept {
-    if (!hKey || !lpData) return 87;
-    auto* keyObj = static_cast<WinNtRegistryKeyObject*>(hKey);
-    if (keyObj->magic == 0x4D4E545245474B59ULL && dwType == REG_DWORD_OFFICIAL && cbData >= sizeof(uint32_t)) {
-        ByteCopy(&keyObj->lastDwordValue, lpData, sizeof(uint32_t));
+int32_t Advapi32_RegQueryValueExW(void* hKey, const wchar_t* lpValueName, uint32_t* lpReserved, uint32_t* lpType, uint8_t* lpData, uint32_t* lpcbData) noexcept {
+    if (!hKey || lpReserved || !lpcbData) return 87;
+    void* nativeHandle{};
+    {
+        AdvapiRegistryKeyGuard guard;
+        for (auto& key : g_regKeyPool) if (&key == hKey && key.active) { nativeHandle = key.handle; break; }
     }
-    return ERROR_SUCCESS_OFFICIAL;
-}
-
-int32_t Advapi32_RegQueryValueExW(void* hKey, const wchar_t* /*lpValueName*/, uint32_t* /*lpReserved*/, uint32_t* lpType, uint8_t* lpData, uint32_t* lpcbData) noexcept {
-    if (!hKey) return 87;
-    auto* keyObj = static_cast<WinNtRegistryKeyObject*>(hKey);
-    if (lpType) *lpType = REG_DWORD_OFFICIAL;
-    if (lpData && lpcbData && *lpcbData >= sizeof(uint32_t)) {
-        uint32_t val = (keyObj->magic == 0x4D4E545245474B59ULL) ? keyObj->lastDwordValue : 1U;
-        ByteCopy(lpData, &val, sizeof(uint32_t));
+    if (!nativeHandle) return 6;
+    micant::UnicodeString valueName(lpValueName ? lpValueName : L"");
+    struct KeyValuePartialInformation { uint32_t titleIndex, type, dataLength; uint8_t data[1]; };
+    uint8_t information[4096];
+    ByteZero(information, sizeof(information));
+    size_t returned{};
+    const int32_t status = NtQueryValueKey(nativeHandle, &valueName, 2,
+        information, sizeof(information), &returned);
+    if (status < 0) {
+        if (status == static_cast<int32_t>(micant::NtStatus::ObjectNameNotFound)) return 2;
+        if (status == static_cast<int32_t>(micant::NtStatus::BufferTooSmall)) return 122;
+        if (status == static_cast<int32_t>(micant::NtStatus::AccessDenied)) return 5;
+        if (status == static_cast<int32_t>(micant::NtStatus::InvalidHandle)) return 6;
+        return 31;
     }
-    if (lpcbData) *lpcbData = sizeof(uint32_t);
+    const auto* value = reinterpret_cast<const KeyValuePartialInformation*>(information);
+    if (lpType) *lpType = value->type;
+    if (!lpData) { *lpcbData = value->dataLength; return ERROR_SUCCESS_OFFICIAL; }
+    if (*lpcbData < value->dataLength) { *lpcbData = value->dataLength; return 122; }
+    ByteCopy(lpData, value->data, value->dataLength);
+    *lpcbData = value->dataLength;
     return ERROR_SUCCESS_OFFICIAL;
 }
 
@@ -1428,11 +1562,15 @@ int32_t Advapi32_RegGetValueW(void* hkey, const wchar_t* /*lpSubKey*/, const wch
 
 int32_t Advapi32_RegCloseKey(void* hKey) noexcept {
     if (!hKey) return 87;
-    auto* keyObj = static_cast<WinNtRegistryKeyObject*>(hKey);
-    if (keyObj->magic == 0x4D4E545245474B59ULL) {
-        keyObj->magic = 0;
+    void* nativeHandle{};
+    {
+        AdvapiRegistryKeyGuard guard;
+        for (auto& key : g_regKeyPool) {
+            if (&key == hKey && key.active) { nativeHandle = key.handle; key = {}; break; }
+        }
     }
-    return ERROR_SUCCESS_OFFICIAL;
+    if (!nativeHandle) return 6;
+    return NtClose(nativeHandle) >= 0 ? ERROR_SUCCESS_OFFICIAL : 31;
 }
 
 int32_t Advapi32_GetUserNameW(wchar_t* lpBuffer, uint32_t* pcbBuffer) noexcept {

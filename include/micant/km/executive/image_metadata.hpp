@@ -34,6 +34,7 @@ struct UserProcessParameters {
     UserUnicodeString dllPath{};
     UserUnicodeString imagePathName{};
     UserUnicodeString commandLine{};
+    uint64_t environment{};
 };
 
 static_assert(sizeof(UserUnicodeString) == 16);
@@ -43,7 +44,8 @@ static_assert(offsetof(UserProcessParameters, currentDirectory) == 0x38);
 static_assert(offsetof(UserProcessParameters, dllPath) == 0x50);
 static_assert(offsetof(UserProcessParameters, imagePathName) == 0x60);
 static_assert(offsetof(UserProcessParameters, commandLine) == 0x70);
-static_assert(sizeof(UserProcessParameters) == 0x80);
+static_assert(offsetof(UserProcessParameters, environment) == 0x80);
+static_assert(sizeof(UserProcessParameters) == 0x88);
 
 class UserMetadataWriter {
 public:
