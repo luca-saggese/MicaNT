@@ -126,6 +126,8 @@ uint64_t g_physicalAccessPtPhysical{};
 std::atomic_flag g_physicalAccessLock = ATOMIC_FLAG_INIT;
 uint64_t g_physicalAccessSavedFlags{};
 uint64_t g_deviceNext = kDeviceBase + 4096;
+struct DeviceWindowMapping { uint64_t start{}, length{}; bool active{}; };
+DeviceWindowMapping g_deviceWindowMappings[1024]{};
 struct BootstrapProtectedMmio { uint64_t first{}, last{}, owner{}; };
 BootstrapProtectedMmio g_protectedIommuMmio[16]{};
 size_t g_protectedIommuMmioCount{};
@@ -465,6 +467,41 @@ bool pagingContextMatches(void* context) noexcept {
         if (root == context) return (root->pfn << micant::mm::PageShift4KB) == active;
     return false;
 }
+
+class KernelPagingRootScope {
+public:
+    KernelPagingRootScope() noexcept {
+        uint64_t flags{}, cr3{};
+        __asm__ __volatile__("pushfq; popq %0; movq %%cr3, %1"
+                             : "=r"(flags), "=r"(cr3) : : "memory");
+        if (!bootstrapPagingContext()) return;
+        previousRoot_ = cr3 & kPhysicalMask;
+        const uint64_t kernelRoot = reinterpret_cast<uint64_t>(g_pml4);
+        if (previousRoot_ == kernelRoot) { valid_ = true; return; }
+        if (flags & (uint64_t{1} << 9)) return;
+        bool knownProcessRoot = false;
+        for (const auto* root = g_processPagingRoots; root; root = root->next)
+            if ((root->pfn << micant::mm::PageShift4KB) == previousRoot_) {
+                knownProcessRoot = true;
+                break;
+            }
+        if (!knownProcessRoot) return;
+        __asm__ __volatile__("movq %0, %%cr3" : : "r"(kernelRoot) : "memory");
+        micant::ke::g_CurrentCpu.currentCr3 = kernelRoot;
+        switched_ = true;
+        valid_ = true;
+    }
+    ~KernelPagingRootScope() {
+        if (valid_ && switched_) {
+            __asm__ __volatile__("movq %0, %%cr3" : : "r"(previousRoot_) : "memory");
+            micant::ke::g_CurrentCpu.currentCr3 = previousRoot_;
+        }
+    }
+    [[nodiscard]] bool valid() const noexcept { return valid_; }
+private:
+    uint64_t previousRoot_{};
+    bool valid_{}, switched_{};
+};
 
 bool overlapsProtectedKernelImage(uint64_t physical, size_t size) noexcept {
     if (!g_protectedKernelImageEnd || !size || physical > UINT64_MAX - size) return false;
@@ -4210,6 +4247,8 @@ bool protectBootstrapIommuRegisters(uint64_t physical, size_t size,
 void commitBootstrapIommuProtection() noexcept { g_iommuProtectionCommitted = true; }
 
 static void* mapBootstrapPhysicalWindow(uint64_t physical, size_t size, bool device) noexcept {
+    KernelPagingRootScope pagingRoot;
+    if (!pagingRoot.valid()) return nullptr;
     if (!g_addressSpaceReady || size == 0 || size > kDeviceMappingWindowSize ||
         physical > kPhysicalMask || size > kPhysicalMask - physical) {
         return nullptr;
@@ -4219,7 +4258,25 @@ static void* mapBootstrapPhysicalWindow(uint64_t physical, size_t size, bool dev
             g_protectedIommuMmio[i].first <= physical + size - 1) return nullptr;
     const uint64_t offset = physical & 4095;
     const uint64_t length = (size + offset + 4095) & ~uint64_t{4095};
-    const uint64_t start = g_deviceNext;
+    DeviceWindowMapping* record{};
+    for (auto& mapping : g_deviceWindowMappings)
+        if (!mapping.active) { record = &mapping; break; }
+    if (!record) return nullptr;
+    uint64_t start = kDeviceBase + 4096;
+    for (size_t attempt = 0; attempt <= 1024; ++attempt) {
+        if (start < kDeviceBase || start - kDeviceBase > kDeviceMappingWindowSize ||
+            length > kDeviceMappingWindowSize - (start - kDeviceBase)) return nullptr;
+        bool overlaps = false;
+        for (const auto& mapping : g_deviceWindowMappings) {
+            if (!mapping.active || start + length <= mapping.start ||
+                mapping.start + mapping.length <= start) continue;
+            start = mapping.start + mapping.length;
+            overlaps = true;
+            break;
+        }
+        if (!overlaps) break;
+        if (attempt == 1024) return nullptr;
+    }
     if (start < kDeviceBase || start - kDeviceBase > kDeviceMappingWindowSize ||
         length > kDeviceMappingWindowSize - (start - kDeviceBase)) {
         return nullptr;
@@ -4235,7 +4292,8 @@ static void* mapBootstrapPhysicalWindow(uint64_t physical, size_t size, bool dev
             return nullptr;
         }
     }
-    g_deviceNext += length;
+    *record = {start, length, true};
+    if (start + length > g_deviceNext) g_deviceNext = start + length;
     return reinterpret_cast<void*>(start + offset);
 }
 
@@ -4248,19 +4306,33 @@ void* mapBootstrapDmaMemory(uint64_t physical, size_t size) noexcept {
 }
 
 bool releaseBootstrapDeviceMemory(void* mapping, size_t size) noexcept {
+    KernelPagingRootScope pagingRoot;
+    if (!pagingRoot.valid()) return false;
     const uint64_t address = reinterpret_cast<uintptr_t>(mapping);
     if (g_iommuProtectionCommitted)
         for (size_t i = 0; i < g_protectedIommuMmioCount; ++i)
             if (address == g_protectedIommuMmio[i].owner) return false;
-    if (!mapping || !size || size > kDeviceMappingWindowSize || !pagingContextMatches(nullptr) ||
-        address < kDeviceBase || address >= g_deviceNext) return false;
+    if (!mapping || !size || size > kDeviceMappingWindowSize ||
+        !pagingContextMatches(nullptr) || address < kDeviceBase) return false;
     const uint64_t offset = address & 4095;
     const uint64_t start = address & ~uint64_t{4095};
     const uint64_t length = (size + offset + 4095) & ~uint64_t{4095};
-    if (start > UINT64_MAX - length || start + length != g_deviceNext) return false;
-    for (uint64_t page = 0; page < length; page += 4096)
+    if (start > UINT64_MAX - length) return false;
+    DeviceWindowMapping* record{};
+    for (auto& candidate : g_deviceWindowMappings)
+        if (candidate.active && candidate.start == start && candidate.length == length) {
+            record = &candidate;
+            break;
+        }
+    if (!record) return false;
+    for (uint64_t page = 0; page < length; page += 4096) {
         if (!unmapPage(start + page, false)) __builtin_trap();
-    g_deviceNext = start;
+    }
+    *record = {};
+    g_deviceNext = kDeviceBase + 4096;
+    for (const auto& active : g_deviceWindowMappings)
+        if (active.active && active.start + active.length > g_deviceNext)
+            g_deviceNext = active.start + active.length;
     return true;
 }
 

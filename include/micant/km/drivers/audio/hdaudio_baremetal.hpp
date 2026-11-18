@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "micant/shared/ntdef.hpp"
 
 namespace micant::km::audio::hda {
 
@@ -14,5 +15,9 @@ using Log = void (*)(const char*) noexcept;
 // A0.2 checked CORB/RIRB command transport and bounded codec topology census.
 // It does not configure a playback route or publish a usable audio endpoint.
 [[nodiscard]] bool discoverCodecTopology(Log log) noexcept;
+
+// Opens the discovered render endpoint through the canonical Ob-owned file
+// object path. Write access accepts bounded interleaved PCM only.
+[[nodiscard]] NtStatus openAudioDevice(Handle* handle, uint32_t desiredAccess) noexcept;
 
 } // namespace micant::km::audio::hda

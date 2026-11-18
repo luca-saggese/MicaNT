@@ -6,12 +6,12 @@ This is the integration progress record required by
 specification. The compatibility inventory is
 [FREESTANDING_GAP_MATRIX.md](FREESTANDING_GAP_MATRIX.md).
 
-## 2026-11-18 — M18 HDA controller e codec (A0.1–A0.2)
+## 2026-11-18 — M18 HDA render PCM (A0.1–A0.3)
 
-- `kernel/io/hdaudio_baremetal.cpp` is wired into canonical `ntoskrnl_core_baremetal` startup. QEMU discovers Intel HDA by live PCI class, claims and maps the measured BAR, resets the controller, and passes an injected post-reset rollback/reclaim path.
-- CORB/RIRB rings now use canonical DMA ownership. Polled responses acknowledge the RIRB interrupt threshold so subsequent verbs continue; checked GET_PARAMETER and connection-list transactions discover the QEMU codec `1AF4:0022`, one audio function group, two widgets, one pin, and one connection.
-- Verified with `python3 qemu.py --headless --doom-test --audio-controller-test --memory-mib 512 --diagnostics-dir /private/tmp/micant-audio-a02-topology-01`. QEMU reports the bounded topology inventory; Doom E1M1 title/menu/level/movement and clean window exit pass; serial remains stable for the requested five seconds. Evidence: `/private/tmp/micant-audio-a02-topology-01/serial.log`.
-- A0.3 is not implemented: no output route or PCM DMA playback exists, and no audio samples are claimed. Next work is real Ring 3 submitted PCM, codec route configuration, BDL/stream DMA completion, sample capture, and repeated start/stop cleanup.
+- `kernel/io/hdaudio_baremetal.cpp` is wired into canonical `ntoskrnl_core_baremetal` startup. QEMU discovers Intel HDA by live PCI class, claims/maps the measured BAR, resets the controller, and passes an injected post-reset rollback/reclaim path. CORB/RIRB transactions discover codec `1AF4:0012`, its output converter and connected output pin; the route is configured before playback.
+- The shared Ring 3 ABI opens `\Device\HdaAudio0` and submits bounded stereo signed-16 PCM through `NtWriteFile`. The HDA driver copies user PCM into Mm-backed, device-owned DMA pages, submits a BDL to SDO0, waits for BCIS, stops the stream/controller DMA, then releases PCM, BDL, RIRB and CORB in safe order. The HAL device-window allocator now supports releasing non-top mappings and switches to the kernel page-table root around shared device-window map/unmap work.
+- A0.3 verification: `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal audio_probe_boot`; QEMU via `scripts/boot_micant.py --audio-render-test` at `/private/tmp/micant-audio-a03-rollback-verify`. The Ring 3 client injected an expected post-allocation render failure (all DMA resources released), then completed two consecutive real DMA submissions. Captured WAV: 6,439 signed-16 stereo frames at 48 kHz, peak 32,768; QEMU remained stable for five seconds. Serial evidence: `/private/tmp/micant-audio-a03-rollback-verify/serial.log`; audio evidence: `/private/tmp/micant-audio-a03-rollback-verify/hda-render.wav`.
+- A0.1–A0.3 are implemented and QEMU-verified for the QEMU HDA profile. A1 capture is next; no physical hardware or general Windows audio API compatibility is claimed.
 
 ## 2026-11-14 — dynamic memory bootstrap migration (in progress)
 

@@ -3899,6 +3899,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (captureStatus != NtStatus::Success) return status(captureStatus);
         const std::u16string_view pathView(path, name.length / sizeof(char16_t));
         constexpr std::u16string_view afdPath(u"\\Device\\Afd\\Endpoint");
+        constexpr std::u16string_view hdaRenderPath(u"\\Device\\HdaAudio0");
         Handle handle{};
         IoStatusBlock ioStatus{};
         bool provisionalCreated{};
@@ -3917,6 +3918,17 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             if (createStatus != NtStatus::Success) return status(createStatus);
             ioStatus.status = NtStatus::Success;
             ioStatus.information = 1; // FILE_OPENED
+        } else if (pathView == hdaRenderPath) {
+            if (createDisposition != fileOpen || fileAttributes || shareAccess ||
+                createOptions || extra[5] || static_cast<uint32_t>(extra[6]))
+                return status(NtStatus::NotSupported);
+            ioStatus.status = micant::km::audio::hda::openAudioDevice(
+                &handle, static_cast<uint32_t>(second));
+            ioStatus.information = ioStatus.status == NtStatus::Success ? 1 : 0;
+            if (ioStatus.status != NtStatus::Success) {
+                (void)ex::ExSafeCopyToUser(reinterpret_cast<void*>(args.fourth), &ioStatus, sizeof(ioStatus));
+                return status(ioStatus.status);
+            }
         } else if (micant::km::hid::isInputDeviceName(pathView)) {
             if (createDisposition != fileOpen || fileAttributes || extra[5] ||
                 static_cast<uint32_t>(extra[6])) return status(NtStatus::NotSupported);
@@ -5376,6 +5388,16 @@ void pollKeyboardInput() noexcept {
     if (micant::sys::NtClose(themeTestProcessHandle) != micant::NtStatus::Success)
         stopWithError("[MicaNT ThemeTest] Process handle close failed\r\n");
     serialWrite("[MicaNT ThemeTest] Dedicated control test app launched\r\n");
+#endif
+#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
+    serialWrite("[MicaNT Audio] Launching Ring 3 PCM render client\r\n");
+    micant::Handle audioProcessHandle = 0;
+    micant::Handle audioProcessId = 0;
+    if (!launchUserImageProcess(u"audio_probe.exe", audioProcessHandle, audioProcessId))
+        stopWithError("[MicaNT Audio] Ring 3 PCM client launch failed\r\n");
+    if (micant::sys::NtClose(audioProcessHandle) != micant::NtStatus::Success)
+        stopWithError("[MicaNT Audio] PCM client process handle close failed\r\n");
+    serialWrite("[MicaNT Audio] Ring 3 PCM client launched; submission is verified by the client\r\n");
 #endif
 #if defined(MICANT_BOOTSTRAP_CMD_TEST)
     serialWrite("[MicaNT CMD] Launching Ring 3 terminal application\r\n");

@@ -4,9 +4,15 @@
 
 #include "micant/km/executive/arbiter_baremetal.hpp"
 #include "micant/km/executive/dma_baremetal.hpp"
+#include "micant/km/executive/io.hpp"
+#include "micant/km/executive/io_file.hpp"
+#include "micant/km/executive/ob.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
 #include "micant/shared/boot_driver.hpp"
+#include "micant/shared/native_audio_api.hpp"
 #include "micant/shared/ntstatus.hpp"
+#include <cstring>
+#include <new>
 
 namespace micant::km::audio::hda {
 namespace {
@@ -34,14 +40,26 @@ constexpr uint32_t kRirbWritePointer = 0x58;
 constexpr uint32_t kRirbControl = 0x5c;
 constexpr uint32_t kRirbSize = 0x5e;
 constexpr uint32_t kRirbStatus = 0x5d;
+constexpr uint32_t kOutputStreamBase = 0x100; // QEMU SDO0 follows four SDI descriptors.
+constexpr uint32_t kStreamStride = 0x20;
 constexpr uint8_t kRingRun = 1u << 1;
 constexpr uint8_t kRirbResponseInterruptEnable = 1u << 0;
 constexpr uint8_t kRirbResponseInterrupt = 1u << 0;
 constexpr size_t kDmaPageBytes = 4096;
+constexpr size_t kMaximumRenderBytes = micant::shared::audio::MaximumWriteBytes;
+constexpr uint32_t kStreamRun = 1u << 1;
+constexpr uint32_t kStreamReset = 1u << 0;
+constexpr uint32_t kStreamInterruptOnCompletion = 1u << 2;
+constexpr uint8_t kStreamBufferCompletionStatus = 1u << 2;
+constexpr uint32_t kBdlInterruptOnCompletion = 1u;
+
+struct BdlEntry { uint64_t address{}; uint32_t length{}, flags{}; };
+static_assert(sizeof(BdlEntry) == 16);
 
 struct Controller {
     uint16_t bus{}, device{}, function{};
     uint64_t claimToken{}, mappingToken{};
+    uint8_t codecAddress{};
     uint16_t originalCommand{};
     volatile uint8_t* registers{};
     size_t registerLength{};
@@ -55,12 +73,28 @@ struct Controller {
     uint64_t rirbAddress{}, rirbDmaToken{};
     uint32_t rirbEntries{};
     bool ringsRunning{}, busMasterEnabled{}, codecDiscovered{};
+    uint8_t audioFunctionGroup{}, outputDac{}, outputPin{}, outputConnection{};
+    uint16_t outputFormat{0x0011};
+    bool outputRouteReady{};
 };
 
 Controller g_controller{};
 int g_controllerOwner{};
+ob::ObjectType g_audioDeviceType{};
+ob::ObjectHeader* g_audioDeviceReference{};
+io::DeviceObject* g_audioDevice{};
+std::atomic_flag g_renderInProgress = ATOMIC_FLAG_INIT;
+Log g_log{};
+uint64_t g_renderPcmToken{}, g_renderBdlToken{};
+uint64_t g_renderPcmAddress{}, g_renderBdlAddress{};
+void* g_renderPcm{};
+void* g_renderBdl{};
+bool g_renderFaulted{};
 #if defined(MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST)
 bool g_rollbackFailureInjected{};
+#endif
+#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
+bool g_renderFailureInjected{};
 #endif
 
 bool readConfig(uint16_t bus, uint16_t device, uint16_t function,
@@ -181,7 +215,31 @@ bool selectRingSize(volatile uint8_t* registers, uint32_t offset,
     return true;
 }
 
-bool stopCodecRings(Log log) noexcept {
+bool releaseCodecRingDma(Log log) noexcept {
+    if (g_controller.rirbDmaToken) {
+        const auto status = io::dma::release(&g_controllerOwner,
+                                              g_controller.rirbDmaToken, dmaStopped);
+        if (status != NtStatus::Success) {
+            if (log) log("[MicaNT HDA] RIRB DMA release failed; resources retained\r\n");
+            return false;
+        }
+        g_controller.rirbDmaToken = 0;
+        g_controller.rirb = nullptr;
+    }
+    if (g_controller.corbDmaToken) {
+        const auto status = io::dma::release(&g_controllerOwner,
+                                              g_controller.corbDmaToken, dmaStopped);
+        if (status != NtStatus::Success) {
+            if (log) log("[MicaNT HDA] CORB DMA release failed; resources retained\r\n");
+            return false;
+        }
+        g_controller.corbDmaToken = 0;
+        g_controller.corb = nullptr;
+    }
+    return true;
+}
+
+bool stopCodecRings(Log log, bool releaseDma = true) noexcept {
     if (!g_controller.ringsRunning && !g_controller.rirbDmaToken &&
         !g_controller.corbDmaToken) return true;
     g_controller.registers[kCorbControl] = 0;
@@ -204,29 +262,8 @@ bool stopCodecRings(Log log) noexcept {
         return false;
     }
     g_controller.busMasterEnabled = false;
-
-    if (g_controller.rirbDmaToken) {
-        const auto status = io::dma::release(&g_controllerOwner,
-                                              g_controller.rirbDmaToken, dmaStopped);
-        if (status != NtStatus::Success) {
-            if (log) log("[MicaNT HDA] RIRB DMA release failed; resources retained\r\n");
-            return false;
-        }
-        g_controller.rirbDmaToken = 0;
-        g_controller.rirb = nullptr;
-    }
-    if (g_controller.corbDmaToken) {
-        const auto status = io::dma::release(&g_controllerOwner,
-                                              g_controller.corbDmaToken, dmaStopped);
-        if (status != NtStatus::Success) {
-            if (log) log("[MicaNT HDA] CORB DMA release failed; resources retained\r\n");
-            return false;
-        }
-        g_controller.corbDmaToken = 0;
-        g_controller.corb = nullptr;
-    }
     g_controller.ringsRunning = false;
-    return true;
+    return !releaseDma || releaseCodecRingDma(log);
 }
 
 bool startCodecRings(Log log) noexcept {
@@ -356,7 +393,7 @@ bool startCodecRings(Log log) noexcept {
     return false;
 }
 
-bool sendVerb(uint8_t codec, uint8_t node, uint16_t verb, uint8_t payload,
+bool sendVerb(uint8_t codec, uint8_t node, uint16_t verb, uint16_t payload,
               uint32_t& response) noexcept {
     auto& controller = g_controller;
     const uint32_t mask = controller.corbEntries - 1;
@@ -401,7 +438,7 @@ bool getParameter(uint8_t codec, uint8_t node, uint8_t parameter,
 }
 
 bool queryConnections(uint8_t codec, uint8_t node, uint32_t widgetCaps,
-                      uint32_t& observed) noexcept {
+                      uint32_t& observed, uint8_t* firstTarget = nullptr) noexcept {
     if (!(widgetCaps & (1u << 8))) return true;
     uint32_t lengthWord{};
     if (!getParameter(codec, node, 0x0e, lengthWord)) return false;
@@ -413,14 +450,176 @@ bool queryConnections(uint8_t codec, uint8_t node, uint32_t widgetCaps,
         uint32_t entries{};
         if (!sendVerb(codec, node, 0x0f02, static_cast<uint8_t>(index), entries)) return false;
         if (entries == UINT32_MAX) return false;
-        observed += length - index < perVerb ? length - index : perVerb;
+        const uint32_t returned = length - index < perVerb ? length - index : perVerb;
+        const uint32_t fieldBits = longForm ? 16 : 8;
+        const uint32_t fieldMask = longForm ? 0x7fffu : 0x7fu;
+        for (uint32_t field = 0; field < returned; ++field) {
+            const uint32_t target = (entries >> (field * fieldBits)) & fieldMask;
+            const bool range = (entries >> (field * fieldBits + fieldBits - 1)) & 1u;
+            if (target > 127 || range) return false; // no compressed ranges in this bounded path
+            if (firstTarget && index + field == 0) *firstTarget = static_cast<uint8_t>(target);
+        }
+        observed += returned;
     }
     return true;
+}
+
+bool configureOutputRoute(Log log) noexcept {
+    auto& controller = g_controller;
+    if (controller.outputRouteReady) return true;
+    uint32_t ignored{};
+    if (!sendVerb(controller.codecAddress, controller.audioFunctionGroup, 0x0705, 0, ignored) ||
+        !sendVerb(controller.codecAddress, controller.outputPin, 0x0701, 0, ignored) ||
+        !sendVerb(controller.codecAddress, controller.outputPin, 0x0707, 0x40, ignored) ||
+        !sendVerb(controller.codecAddress, controller.outputDac, 0x0706, 0x10, ignored) ||
+        !sendVerb(controller.codecAddress, controller.outputDac, 0x0200,
+                  controller.outputFormat, ignored)) {
+        if (log) log("[MicaNT HDA] Codec output route configuration failed\r\n");
+        return false;
+    }
+    controller.outputRouteReady = true;
+    return true;
+}
+
+bool stopOutputStream(volatile uint8_t* streamRegisters) noexcept {
+    reg32(streamRegisters, 0x00) &= ~uint32_t{kStreamRun};
+    for (uint32_t i = 0; i < 10000000; ++i)
+        if (!(reg32(streamRegisters, 0x00) & kStreamRun)) return true;
+    return false;
+}
+
+NtStatus submitPcm(void*, uint64_t, const void* buffer, size_t length,
+                   size_t* bytesWritten) noexcept {
+    if (!bytesWritten || (!buffer && length)) return NtStatus::InvalidParameter;
+    *bytesWritten = 0;
+    if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidDeviceRequest;
+    if (!length) return NtStatus::Success;
+    if (length > kMaximumRenderBytes ||
+        length % micant::shared::audio::BytesPerFrame != 0)
+        return NtStatus::InvalidParameter;
+    if (!g_controller.ready || !g_controller.codecDiscovered ||
+        !g_controller.outputDac || !g_controller.outputPin)
+        return NtStatus::DeviceNotReady;
+    if (g_renderFaulted) return NtStatus::DeviceNotReady;
+    if (g_renderInProgress.test_and_set(std::memory_order_acquire))
+        return NtStatus::DeviceBusy;
+    struct RenderRelease { ~RenderRelease() { g_renderInProgress.clear(std::memory_order_release); } } renderRelease;
+    const Log log = g_log;
+    if (!startCodecRings(log) || !configureOutputRoute(log)) {
+        g_renderFaulted = true;
+        return NtStatus::DeviceNotReady;
+    }
+
+    const uint64_t highest = (g_controller.gcap & 1u) ? UINT64_MAX : UINT32_MAX;
+    uint64_t bdlAddress{}, pcmAddress{};
+    NtStatus status = NtStatus::Success;
+    if (!g_renderBdlToken && !g_renderPcmToken) {
+        status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
+            kDmaPageBytes, 128, highest, &g_renderBdl, &g_renderBdlAddress,
+            &g_renderBdlToken);
+        if (status != NtStatus::Success) {
+            g_renderFaulted = true;
+            if (log) log("[MicaNT HDA] BDL DMA allocation failed\r\n");
+            return status;
+        }
+        status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
+            kMaximumRenderBytes, kDmaPageBytes, highest, &g_renderPcm,
+            &g_renderPcmAddress, &g_renderPcmToken);
+        if (status != NtStatus::Success) {
+            g_renderFaulted = true; // Retain BDL ownership; HAL mappings release in LIFO order.
+            if (log) log("[MicaNT HDA] PCM DMA allocation failed; BDL retained\r\n");
+            return status;
+        }
+    } else if (!g_renderBdlToken || !g_renderPcmToken) {
+        g_renderFaulted = true;
+        return NtStatus::DeviceNotReady;
+    }
+    pcmAddress = g_renderPcmAddress;
+    bdlAddress = g_renderBdlAddress;
+    std::memcpy(g_renderPcm, buffer, length);
+    auto* bdl = static_cast<BdlEntry*>(g_renderBdl);
+    bdl[0] = {pcmAddress, static_cast<uint32_t>(length), kBdlInterruptOnCompletion};
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    volatile uint8_t* stream = g_controller.registers + kOutputStreamBase;
+#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
+    const bool injectStartFailure = !g_renderFailureInjected;
+    if (injectStartFailure) {
+        g_renderFailureInjected = true;
+        status = NtStatus::DeviceNotReady;
+    }
+#endif
+    if (kOutputStreamBase + kStreamStride > g_controller.registerLength) {
+        status = NtStatus::DeviceNotReady;
+    } else {
+        reg32(stream, 0x00) = kStreamReset;
+        bool resetObserved = false;
+        for (uint32_t i = 0; i < 1000000; ++i) {
+            if (reg32(stream, 0x00) & kStreamReset) { resetObserved = true; break; }
+        }
+        if (!resetObserved) status = NtStatus::DeviceNotReady;
+        else {
+            reg32(stream, 0x00) = 0;
+            bool resetCleared = false;
+            for (uint32_t i = 0; i < 1000000; ++i) {
+                if (!(reg32(stream, 0x00) & kStreamReset)) { resetCleared = true; break; }
+            }
+            if (!resetCleared) status = NtStatus::DeviceNotReady;
+        }
+    }
+    if (status == NtStatus::Success) {
+        reg32(stream, 0x18) = static_cast<uint32_t>(bdlAddress);
+        reg32(stream, 0x1c) = static_cast<uint32_t>(bdlAddress >> 32);
+        reg32(stream, 0x08) = static_cast<uint32_t>(length); // cyclic buffer length
+        reg16(stream, 0x0c) = 0; // one BDL entry, last valid index zero
+        reg16(stream, 0x12) = g_controller.outputFormat;
+        stream[0x03] = 0x1cu; // clear stale BCIS/FIFOE/DESE status
+        reg32(stream, 0x00) = (1u << 20) | kStreamInterruptOnCompletion | kStreamRun;
+        bool completed = false;
+        for (uint32_t i = 0; i < 100000000; ++i) {
+            if (stream[0x03] & kStreamBufferCompletionStatus) { completed = true; break; }
+        }
+        if (!completed) status = NtStatus::IoTimeout;
+        else if (log) log("[MicaNT Audio] PCM stream completion verified\r\n");
+    }
+
+    const bool streamStopped = stopOutputStream(stream);
+    if (!streamStopped) {
+        g_renderFaulted = true;
+        if (log) log("[MicaNT HDA] Output stream stop timed out; DMA pages retained\r\n");
+        return NtStatus::DeviceBusy;
+    }
+    if (log) log("[MicaNT HDA] Output stream stopped\r\n");
+    stream[0x03] = 0x1cu;
+    if (!stopCodecRings(log, false)) { g_renderFaulted = true; return NtStatus::DeviceBusy; }
+    if (g_renderPcmToken) {
+        const auto releaseStatus = io::dma::release(&g_controllerOwner, g_renderPcmToken, dmaStopped);
+        if (releaseStatus != NtStatus::Success) { g_renderFaulted = true; return releaseStatus; }
+        g_renderPcmToken = 0; g_renderPcm = nullptr; g_renderPcmAddress = 0;
+    }
+    if (g_renderBdlToken) {
+        const auto releaseStatus = io::dma::release(&g_controllerOwner, g_renderBdlToken, dmaStopped);
+        if (releaseStatus != NtStatus::Success) { g_renderFaulted = true; return releaseStatus; }
+        g_renderBdlToken = 0; g_renderBdl = nullptr; g_renderBdlAddress = 0;
+    }
+    if (!releaseCodecRingDma(log)) { g_renderFaulted = true; return NtStatus::DeviceBusy; }
+#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
+    if (injectStartFailure && status == NtStatus::DeviceNotReady && log)
+        log("[MicaNT Audio] Injected render failure released all DMA resources\r\n");
+#endif
+    if (status == NtStatus::Success) *bytesWritten = length;
+    return status;
+}
+
+void releaseAudioFile(void* context) noexcept { delete static_cast<uint8_t*>(context); }
+void deleteAudioDevice(ob::ObjectHeader* header) noexcept {
+    header->as<io::DeviceObject>()->~DeviceObject();
 }
 
 } // namespace
 
 bool initializeController(Log log) noexcept {
+    g_log = log;
     if (g_controller.registers) {
         if (log) log("[MicaNT HDA] Controller already initialized\r\n");
         return g_controller.ready;
@@ -586,6 +785,7 @@ bool discoverCodecTopology(Log log) noexcept {
     }
 
     uint32_t codecCount{}, functionGroupCount{}, widgetCount{}, pinCount{}, connectionCount{};
+    bool outputDacFound = false;
     for (uint8_t codec = 0; valid && codec < 15; ++codec) {
         if (!(present & (1u << codec))) continue;
         uint32_t vendorId{}, rootSubnodes{};
@@ -635,6 +835,7 @@ bool discoverCodecTopology(Log log) noexcept {
             break;
         }
         ++codecCount;
+        if (codecCount == 1) g_controller.codecAddress = codec;
         if (log) {
             log("[MicaNT HDA] Codec address=");
             logHex(log, codec);
@@ -655,6 +856,7 @@ bool discoverCodecTopology(Log log) noexcept {
             }
             if ((groupType & 0xffu) != 1u) continue; // audio function group
             ++functionGroupCount;
+            if (!g_controller.audioFunctionGroup) g_controller.audioFunctionGroup = group;
             uint32_t formats{}, subnodes{};
             if (!getParameter(codec, group, 0x0a, formats) || !formats ||
                 !getParameter(codec, group, 0x04, subnodes)) {
@@ -679,6 +881,17 @@ bool discoverCodecTopology(Log log) noexcept {
                 }
                 ++widgetCount;
                 const uint32_t type = (caps >> 20) & 0xfu;
+                if (log) {
+                    log("[MicaNT HDA] Widget NID="); logHex(log, widget);
+                    log(" caps="); logHex(log, caps);
+                    log(" type="); logHex(log, type);
+                    log("\r\n");
+                }
+                if (type == 0u && !outputDacFound) {
+                    g_controller.outputDac = widget;
+                    outputDacFound = true;
+                }
+                uint8_t firstConnection{};
                 if (type == 4u) {
                     uint32_t pinCaps{}, defaultConfig{};
                     if (!getParameter(codec, widget, 0x0c, pinCaps) || !pinCaps ||
@@ -688,21 +901,44 @@ bool discoverCodecTopology(Log log) noexcept {
                         break;
                     }
                     ++pinCount;
+                    if ((pinCaps & (1u << 4)) && !g_controller.outputPin) {
+                        g_controller.outputPin = widget;
+                        if (log) {
+                            log("[MicaNT HDA] Render pin NID="); logHex(log, widget);
+                            log(" caps="); logHex(log, pinCaps);
+                            log(" default="); logHex(log, defaultConfig);
+                            log("\r\n");
+                        }
+                    }
                 }
                 if (caps & (1u << 8)) {
                     const uint32_t previous = connectionCount;
-                    if (!queryConnections(codec, widget, caps, connectionCount)) {
+                    if (!queryConnections(codec, widget, caps, connectionCount,
+                                          type == 4u ? &firstConnection : nullptr)) {
                         if (log) log("[MicaNT HDA] Widget connection list rejected or timed out\r\n");
                         valid = false;
                         break;
                     }
                     if (connectionCount - previous > 32) valid = false;
+                    if (type == 4u && g_controller.outputPin == widget)
+                        g_controller.outputConnection = firstConnection;
                 }
             }
         }
     }
 
     if (!codecCount || !functionGroupCount || !widgetCount || !pinCount) valid = false;
+    if (!g_controller.outputDac || !g_controller.outputPin ||
+        g_controller.outputConnection != g_controller.outputDac) {
+        if (log) {
+            log("[MicaNT HDA] No bounded DAC-to-output-pin route found DAC=");
+            logHex(log, g_controller.outputDac);
+            log(" pin="); logHex(log, g_controller.outputPin);
+            log(" connection="); logHex(log, g_controller.outputConnection);
+            log("\r\n");
+        }
+        valid = false;
+    }
     if (!valid) {
         (void)stopCodecRings(log);
         if (log) log("[MicaNT HDA] Codec topology discovery failed explicitly\r\n");
@@ -723,6 +959,35 @@ bool discoverCodecTopology(Log log) noexcept {
         log("\r\n");
     }
     return true;
+}
+
+NtStatus openAudioDevice(Handle* handle, uint32_t desiredAccess) noexcept {
+    if (!handle) return NtStatus::InvalidParameter;
+    *handle = 0;
+    if (!g_controller.ready || !g_controller.codecDiscovered || g_renderFaulted)
+        return NtStatus::DeviceNotReady;
+    if ((desiredAccess & 0x0003u) != 0x0002u || (desiredAccess & ~0x0012008bu))
+        return NtStatus::AccessDenied;
+    if (!g_audioDevice) {
+        g_audioDeviceType.typeId = ob::ObjectTypeId::Device;
+        g_audioDeviceType.deleteProcedure = deleteAudioDevice;
+        void* body{};
+        const auto status = ob::ObCreateObject(ob::KernelMode, &g_audioDeviceType, nullptr,
+            sizeof(io::DeviceObject), &body, &g_audioDeviceReference);
+        if (status != NtStatus::Success) return status;
+        g_audioDevice = new (body) io::DeviceObject{};
+        g_audioDevice->deviceType = io::DeviceType::Unknown;
+    }
+    auto* fileContext = new (std::nothrow_t{}) uint8_t{};
+    if (!fileContext) return NtStatus::NoMemory;
+    io::FileBackend backend{};
+    backend.context = fileContext;
+    backend.name = u"\\Device\\HdaAudio0";
+    backend.release = releaseAudioFile;
+    backend.stream = true;
+    backend.write = submitPcm;
+    backend.synchronous = true;
+    return io::IoCreateDeviceFile(handle, desiredAccess, g_audioDevice, backend);
 }
 
 } // namespace micant::km::audio::hda
