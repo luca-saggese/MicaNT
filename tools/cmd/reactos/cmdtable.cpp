@@ -110,6 +110,8 @@ COMMAND cmds[] =
 
     {_T("for"), 0, cmd_for},
 
+    {_T("help"), 0, CommandShowCommands},
+
 #ifdef INCLUDE_CMD_FREE
     {_T("free"), 0, CommandFree},
 #endif

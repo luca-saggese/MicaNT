@@ -46,6 +46,11 @@
 #include "stream.h"
 #include "stream_private.h"
 
+#if defined(MICANT_CMD_GUI_TERMINAL)
+extern "C" INT __stdcall LuceCmdConutilsWrite(
+    PCON_STREAM Stream, PCTCH Text, DWORD Length);
+#endif
+
 
 // Also known as: RC_STRING_MAX_SIZE, MAX_BUFFER_SIZE (some programs:
 // wlanconf, shutdown, set it to 5024), OUTPUT_BUFFER_SIZE (name given
@@ -85,6 +90,9 @@ ConWrite(
     IN PCTCH szStr,
     IN DWORD len)
 {
+#if defined(MICANT_CMD_GUI_TERMINAL)
+    return LuceCmdConutilsWrite(Stream, szStr, len);
+#else
 #ifndef USE_CRT
     DWORD TotalLen = len, dwNumBytes = 0;
     LPCVOID p;
@@ -339,11 +347,18 @@ ConWrite(
 #endif
 
 #endif /* defined(USE_CRT) */
+#endif
 }
 
 
 #define CON_STREAM_WRITE_CALL(Stream, Str, Len) \
     (Stream)->WriteFunc((Stream), (Str), (Len))
+
+#if defined(MICANT_CMD_GUI_TERMINAL)
+#undef CON_STREAM_WRITE_CALL
+#define CON_STREAM_WRITE_CALL(Stream, Str, Len) \
+    LuceCmdConutilsWrite((Stream), (Str), (Len))
+#endif
 
 /* Lock the stream only in non-USE_CRT mode (otherwise use the CRT stream lock) */
 #ifndef USE_CRT

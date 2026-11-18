@@ -21,6 +21,9 @@ __declspec(dllimport) int __cdecl fflush(void*) noexcept;
 __declspec(dllimport) void __cdecl _initterm(void (**)(void), void (**)(void)) noexcept;
 __declspec(dllimport) int __cdecl _initterm_e(int (**)(void), int (**)(void)) noexcept;
 __declspec(dllimport) int32_t __stdcall NtTerminateProcess(void*, int32_t) noexcept;
+__declspec(dllimport) int32_t __stdcall SetCurrentDirectoryW(const wchar_t*) noexcept;
+__declspec(dllimport) uint32_t __stdcall GetCurrentDirectoryW(uint32_t, wchar_t*) noexcept;
+__declspec(dllimport) uint32_t __stdcall GetLastError() noexcept;
 
 namespace {
 constexpr size_t MaxCommandLine = 32768;
@@ -678,8 +681,29 @@ __declspec(dllexport) unsigned long __cdecl wcstoul(const wchar_t* s,wchar_t** e
 __declspec(dllexport) long __cdecl wcstol(const wchar_t* s,wchar_t** end,int radix) noexcept { return static_cast<long>(wcstoul(s,end,radix)); }
 __declspec(dllexport) wchar_t* __cdecl _itow(int value,wchar_t* out,int radix) noexcept { if(!out||radix<2||radix>36){*_errno()=ErrInvalid;return nullptr;}bool neg=value<0&&radix==10;unsigned v=neg?0u-static_cast<unsigned>(value):static_cast<unsigned>(value);wchar_t b[34];size_t n=0;do{unsigned d=v%radix;b[n++]=static_cast<wchar_t>(d<10?L'0'+d:L'a'+d-10);v/=radix;}while(v);size_t i=0;if(neg)out[i++]=L'-';while(n)out[i++]=b[--n];out[i]=0;return out; }
 __declspec(dllexport) int __cdecl _getdrive() noexcept { return 3; }
-__declspec(dllexport) int __cdecl _wchdir(const wchar_t*) noexcept { *_errno()=1;return -1; }
-__declspec(dllexport) wchar_t* __cdecl _wgetdcwd(int drive,wchar_t* buffer,int maxLength) noexcept { if(drive!=0&&drive!=3){*_errno()=15;return nullptr;}constexpr wchar_t cwd[]=L"C:\\";if(!buffer){if(maxLength<=0){*_errno()=ErrInvalid;return nullptr;}buffer=static_cast<wchar_t*>(malloc(static_cast<size_t>(maxLength)*sizeof(wchar_t)));if(!buffer)return nullptr;}size_t i=0;while(cwd[i]&&i+1<static_cast<size_t>(maxLength))buffer[i]=cwd[i],++i;if(i+1>=static_cast<size_t>(maxLength)){*_errno()=34;return nullptr;}buffer[i]=0;return buffer; }
+__declspec(dllexport) int __cdecl _wchdir(const wchar_t* path) noexcept {
+    if (!path || !*path) { *_errno() = ErrInvalid; return -1; }
+    if (SetCurrentDirectoryW(path)) return 0;
+    const auto error = GetLastError();
+    *_errno() = error == 2 || error == 3 ? 2 : error == 5 ? 13 : error == 8 ? ErrNoMemory : ErrInvalid;
+    return -1;
+}
+__declspec(dllexport) wchar_t* __cdecl _wgetdcwd(int drive, wchar_t* buffer, int maxLength) noexcept {
+    if (drive != 0 && drive != 3) { *_errno() = 15; return nullptr; }
+    if (maxLength <= 0) { *_errno() = ErrInvalid; return nullptr; }
+    const bool allocated = buffer == nullptr;
+    if (allocated) {
+        buffer = static_cast<wchar_t*>(malloc(static_cast<size_t>(maxLength) * sizeof(wchar_t)));
+        if (!buffer) return nullptr;
+    }
+    const auto length = GetCurrentDirectoryW(static_cast<uint32_t>(maxLength), buffer);
+    if (!length || length >= static_cast<uint32_t>(maxLength)) {
+        if (allocated) free(buffer);
+        *_errno() = length ? 34 : ErrInvalid;
+        return nullptr;
+    }
+    return buffer;
+}
 __declspec(dllexport) void __cdecl qsort(void* base,size_t count,size_t width,int (__cdecl* compare)(const void*,const void*)) noexcept { if((!base&&count)||!width||!compare){*_errno()=ErrInvalid;return;}auto* b=static_cast<unsigned char*>(base);for(size_t i=1;i<count;++i){size_t j=i;while(j&&compare(b+(j-1)*width,b+j*width)>0){for(size_t k=0;k<width;++k){unsigned char x=b[(j-1)*width+k];b[(j-1)*width+k]=b[j*width+k];b[j*width+k]=x;}--j;}} }
 __declspec(dllexport) void __cdecl srand(unsigned seed) noexcept { g_randState=seed; }
 __declspec(dllexport) int __cdecl rand() noexcept { g_randState=g_randState*214013u+2531011u;return static_cast<int>((g_randState>>16)&0x7fff); }

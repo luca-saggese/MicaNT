@@ -40,6 +40,8 @@ namespace micant::um::winnt_user32_gdi32_imm32_abi {
 int32_t Gdi32_GetDeviceCaps(void*, int32_t) noexcept;
 
 #if defined(BUILD_SYSTEM32_USER32_DLL)
+int32_t User32_IsWindowEnabled(void*) noexcept;
+extern "C" __declspec(dllimport) void MicaGdi32ForgetDcState(void*) noexcept;
 extern "C" void MicaUser32MenuWindowDestroyed(void*) noexcept;
 extern "C" void* CreateFontW(int32_t, int32_t, int32_t, int32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
@@ -118,7 +120,13 @@ struct EditState {
     uint16_t length{};
     wchar_t text[512]{};
 };
-struct StaticState { void* hwnd{}; uint32_t style{}; uint16_t length{}; wchar_t text[256]{}; };
+struct StaticState {
+    void* hwnd{};
+    void* parent{};
+    uint32_t style{}, extendedStyle{};
+    uint16_t length{};
+    wchar_t text[256]{};
+};
 struct ScrollInfoW {
     uint32_t cbSize, fMask;
     int32_t nMin, nMax;
@@ -145,11 +153,13 @@ struct WindowScrollState {
     uint32_t hotBar{0xFFFFFFFFu};
     uint32_t hotPart{};
 };
-std::array<ButtonState, 64> g_buttons{};
-std::array<EditState, 64> g_edits{};
-std::array<StaticState, 128> g_statics{};
-std::array<ScrollBarState, 64> g_scrollBars{};
-std::array<WindowScrollState, 64> g_windowScrollBars{};
+// Native dialogs can contain far more than a small demo's handful of
+// controls; leave sufficient room for complete, complex control trees.
+std::array<ButtonState, 256> g_buttons{};
+std::array<EditState, 256> g_edits{};
+std::array<StaticState, 256> g_statics{};
+std::array<ScrollBarState, 128> g_scrollBars{};
+std::array<WindowScrollState, 128> g_windowScrollBars{};
 void* g_hotButton{};
 uint32_t g_nextRadioGroup{1};
 uint64_t g_nextButtonOrder{1};
@@ -159,6 +169,7 @@ constexpr uint32_t kButtonFocused = 0x04;
 constexpr uint32_t kButtonDisabled = 0x08;
 constexpr uint32_t kButtonDefault = 0x10;
 constexpr uint32_t kWsDisabled = 0x08000000u;
+constexpr uint32_t kWsVisible = 0x10000000u;
 constexpr uint32_t kBsTypeMask = 0x0Fu;
 constexpr uint32_t kBsPushButton = 0u;
 constexpr uint32_t kBsDefPushButton = 1u;
@@ -827,7 +838,12 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kGetMessageW);
     MICA_WIN32K_PROC(MicaWin32kGetClientRect);
     MICA_WIN32K_PROC(MicaWin32kGetWindowRect);
+    MICA_WIN32K_PROC(MicaWin32kAdjustWindowRectEx);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+    MICA_WIN32K_PROC(MicaWin32kDebugInputTrace);
+#endif
     MICA_WIN32K_PROC(MicaWin32kEnumWindows);
+    MICA_WIN32K_PROC(MicaWin32kGetDlgItem);
     MICA_WIN32K_PROC(MicaWin32kGetWindowTextW);
     MICA_WIN32K_PROC(MicaWin32kIsWindowVisible);
     MICA_WIN32K_PROC(MicaWin32kIsIconic);
@@ -1913,6 +1929,21 @@ void* User32_CreateWindowExW(
     void* hwnd = fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
 #if defined(BUILD_SYSTEM32_USER32_DLL)
     if (hwnd) {
+        if (isClassName(lpClassName, L"STATIC")) {
+            bool initialized{};
+            {
+                ButtonLockGuard guard(g_buttonLock);
+                for (const auto& entry : g_statics)
+                    if (entry.hwnd == hwnd) { initialized = true; break; }
+            }
+            if (!initialized) {
+                MicaWin32kCreateStruct create{lpParam, hInstance, hMenu,
+                    hWndParent, nHeight, nWidth, Y, X, static_cast<int32_t>(dwStyle),
+                    lpWindowName, lpClassName, dwExStyle};
+                (void)User32_StaticWndProc(hwnd, 0x0081u /* WM_NCCREATE */, 1,
+                    reinterpret_cast<intptr_t>(&create));
+            }
+        }
         constexpr uint32_t kWsCaption = 0x00C00000u;
         if (!hWndParent && (dwStyle & kWsCaption) == kWsCaption)
             (void)publishCaptionTitleSurface(hwnd, lpWindowName);
@@ -1943,14 +1974,45 @@ void* User32_CreateWindowExW(
 
 intptr_t User32_SendMessageW(void* hWnd, uint32_t message, uintptr_t wParam,
                               intptr_t lParam) noexcept;
+int32_t User32_EnumChildWindows(void* parent, void* callback,
+                                intptr_t parameter) noexcept;
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+struct DestroyChildList {
+    void* windows[512]{};
+    size_t count{};
+    bool overflow{};
+};
+
+int32_t collectDestroyChild(void* hwnd, intptr_t parameter) noexcept {
+    auto* list = reinterpret_cast<DestroyChildList*>(parameter);
+    if (!list || list->count == std::size(list->windows)) {
+        if (list) list->overflow = true;
+        return 0;
+    }
+    list->windows[list->count++] = hwnd;
+    return 1;
+}
+#endif
 
 int32_t User32_DestroyWindow(void* hWnd) noexcept {
     using Fn=int32_t (*)(void*); auto fn=Win32kProc<Fn>("MicaWin32kDestroyWindow");
     if (!fn) return 0;
 #if defined(BUILD_SYSTEM32_USER32_DLL)
-    // Window procedures belong to User32 and cannot be invoked from the
-    // privileged Win32k dispatcher. Deliver the documented teardown callback
-    // while the HWND and its WndProc association are still valid.
+    // Win32k owns the HWND tree, but its children have User32 window
+    // procedures and per-control state. Deliver their teardown callbacks in
+    // descendant-first order while every HWND is still valid, so controls
+    // release their Ring 3 state before the tree is removed.
+    DestroyChildList children{};
+    if (!User32_EnumChildWindows(hWnd,
+            reinterpret_cast<void*>(&collectDestroyChild),
+            reinterpret_cast<intptr_t>(&children)) || children.overflow)
+        return 0;
+    while (children.count) {
+        void* child = children.windows[--children.count];
+        (void)User32_SendMessageW(child, 0x0002u, 0, 0); // WM_DESTROY
+        (void)User32_SendMessageW(child, 0x0082u, 0, 0); // WM_NCDESTROY
+    }
     (void)User32_SendMessageW(hWnd, 0x0002u, 0, 0); // WM_DESTROY
     (void)User32_SendMessageW(hWnd, 0x0082u, 0, 0); // WM_NCDESTROY
 #endif
@@ -2091,6 +2153,9 @@ int32_t User32_EndPaint(void* hWnd, const WinNtPaintStruct* paint) noexcept {
 #endif
     const int32_t presented = present ? present(paint->hdc, &dirtyRect) : 0;
     const int32_t released = release ? release(hWnd,paint->hdc) : 0;
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (released) MicaGdi32ForgetDcState(paint->hdc);
+#endif
     return presented && released;
 }
 
@@ -2162,8 +2227,19 @@ void notifyButtonClicked(void* hwnd) noexcept {
     }
     if (copy.parent) {
         const uintptr_t command = (copy.id & 0xFFFFu) | (kBnClicked << 16);
-        (void)User32_SendMessageW(copy.parent, kWmCommand, command,
-                                  reinterpret_cast<intptr_t>(hwnd));
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+        using TraceFn = void (*)(uint32_t, uint32_t, uint32_t);
+        const auto trace = Win32kProc<TraceFn>("MicaWin32kDebugInputTrace");
+        if (trace) trace(3, static_cast<uint32_t>(copy.id), 0);
+#endif
+        const intptr_t result = User32_SendMessageW(copy.parent, kWmCommand,
+            command, reinterpret_cast<intptr_t>(hwnd));
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+        if (trace) trace(4, static_cast<uint32_t>(copy.id),
+                         static_cast<uint32_t>(result));
+#else
+        (void)result;
+#endif
     }
 }
 
@@ -2880,7 +2956,9 @@ bool drawEditFallback(void* dc, const EditState& edit,
 
 void drawButtonFallback(void* dc, int32_t width, int32_t height,
                         const ButtonState& button) noexcept {
-    const uint32_t background = (button.state & kButtonDisabled) ? kColorButtonDisabled :
+    // Disabling a button changes its text treatment, not its layout or
+    // visibility. Preserve the normal face so all controls remain discoverable.
+    const uint32_t background = (button.state & kButtonDisabled) ? kColorButton :
         (button.state & kButtonPressed) ? kColorButtonPressed :
         (button.state & kButtonHot) ? kColorButtonHot : kColorButton;
     (void)fillButtonRect(dc, {0, 0, width, height}, background);
@@ -2993,8 +3071,7 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
         backgroundDrawn = true;
     } else if (!backgroundDrawn && !checkable) drawButtonFallback(memoryDc, width, height, button);
     if (checkable && !backgroundDrawn) {
-        const uint32_t face = (button.state & kButtonDisabled)
-            ? kColorButtonDisabled : 0xFFFFFFFFu;
+        const uint32_t face = 0xFFFFFFFFu;
         (void)fillButtonRect(memoryDc, glyph, face);
         (void)fillButtonRect(memoryDc, {glyph.left, glyph.top, glyph.right, glyph.top + 1}, kColorBorder);
         (void)fillButtonRect(memoryDc, {glyph.left, glyph.bottom - 1, glyph.right, glyph.bottom}, kColorBorder);
@@ -3132,6 +3209,9 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         for (auto& entry : g_buttons) {
             if (entry.hwnd) continue;
             entry = initial;
+            if ((initial.style & (kWsDisabled | kWsVisible)) ==
+                (kWsDisabled | kWsVisible))
+                (void)User32_InvalidateRect(hwnd, nullptr, 1);
             return 1;
         }
         return 0;
@@ -3286,12 +3366,15 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
     bool click = false;
     bool acquireMouse = false;
     bool releaseMouse = false;
+    uint32_t inputTraceFlags{};
+    uint32_t inputTraceId{};
     void* changedRadios[64]{};
     size_t changedRadioCount{};
     const bool pointInside = (message == kWmMouseMove || message == kWmLButtonUp)
         ? buttonPointInside(hwnd, lParam) : true;
     if (message == kWmMouseMove) leaveHotButton(hwnd);
     if (message == kWmSetFocus || message == kWmKillFocus ||
+        message == 0x001Fu /* WM_CANCELMODE */ ||
         message == kWmEnable || message == kWmMouseMove ||
         message == kWmMouseLeave || message == kWmCaptureChanged || message == kWmLButtonDown ||
         message == kWmLButtonUp || message == kWmKeyDown || message == kWmKeyUp ||
@@ -3313,7 +3396,18 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
                 releaseMouse = true;
             }
             break;
+        case 0x001Fu: // WM_CANCELMODE
+            button->state &= ~kButtonPressed;
+            button->spaceArmed = false;
+            if (button->armed) {
+                button->armed = false;
+                releaseMouse = true;
+            }
+            break;
         case kWmEnable:
+            inputTraceId = static_cast<uint32_t>(button->id);
+            inputTraceFlags = (wParam ? 1u : 0u) |
+                ((button->state & kButtonDisabled) ? 2u : 0u);
             if (wParam) button->state &= ~kButtonDisabled;
             else {
                 button->state = (button->state | kButtonDisabled) & ~kButtonPressed;
@@ -3344,9 +3438,16 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             break;
         case kWmCaptureChanged:
             button->armed = false;
+            // ReactOS cancels a pending press when capture moves to another
+            // window. Space activation has its own arm bit, so clear it here
+            // too; otherwise a later WM_KEYUP can click a button after its
+            // press was canceled by another control taking capture.
+            button->spaceArmed = false;
             button->state &= ~kButtonPressed;
             break;
         case kWmLButtonDown:
+            inputTraceId = static_cast<uint32_t>(button->id);
+            inputTraceFlags = (button->state & kButtonDisabled) ? 1u : 0u;
             if (!(button->state & kButtonDisabled)) {
                 button->state |= kButtonHot | kButtonPressed | kButtonFocused;
                 button->armed = true;
@@ -3355,6 +3456,10 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
             }
             break;
         case kWmLButtonUp:
+            inputTraceId = static_cast<uint32_t>(button->id);
+            inputTraceFlags = (button->armed ? 1u : 0u) |
+                (pointInside ? 2u : 0u) |
+                ((button->state & kButtonDisabled) ? 4u : 0u);
             click = button->armed && pointInside &&
                     !(button->state & kButtonDisabled);
             releaseMouse = button->armed;
@@ -3366,6 +3471,10 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
                 !(button->state & kButtonDisabled) && !button->spaceArmed) {
                 button->spaceArmed = true;
                 button->state |= kButtonPressed;
+                // The built-in ReactOS BUTTON procedure captures input while
+                // Space is held, allowing WM_CAPTURECHANGED/WM_CANCELMODE to
+                // cancel the activation consistently with a mouse press.
+                acquireMouse = true;
             }
             break;
         case kWmKeyUp:
@@ -3373,6 +3482,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
                     (button->state & kButtonFocused) &&
                     !(button->state & kButtonDisabled);
             if (wParam == kVkSpace) {
+                releaseMouse = button->spaceArmed;
                 button->spaceArmed = false;
                 if (!button->armed) button->state &= ~kButtonPressed;
             }
@@ -3394,6 +3504,16 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         }
         repaint |= oldState != button->state || oldCheckState != button->checkState;
     }
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+    if (message == kWmLButtonDown || message == kWmLButtonUp ||
+        message == kWmEnable) {
+        using TraceFn = void (*)(uint32_t, uint32_t, uint32_t);
+        const auto trace = Win32kProc<TraceFn>("MicaWin32kDebugInputTrace");
+        if (trace) trace(message == kWmLButtonDown ? 1u :
+                         message == kWmLButtonUp ? 2u : 5u,
+                         inputTraceId, inputTraceFlags | (click ? 8u : 0u));
+    }
+#endif
     if (acquireMouse) (void)User32_SetCapture(hwnd);
     if (releaseMouse) (void)User32_ReleaseCapture();
     for (size_t index = 0; index < changedRadioCount; ++index)
@@ -3478,7 +3598,10 @@ intptr_t User32_StaticWndProc(void* hwnd, uint32_t message,
         const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
         if (!create) return 0;
         StaticState initial{};
-        initial.hwnd = hwnd; initial.style = static_cast<uint32_t>(create->style);
+        initial.hwnd = hwnd;
+        initial.parent = create->parent;
+        initial.style = static_cast<uint32_t>(create->style);
+        initial.extendedStyle = static_cast<uint32_t>(create->exStyle);
         if (create->title) {
             size_t length{};
             while (length < std::size(initial.text) - 1 && create->title[length]) {
@@ -3547,18 +3670,37 @@ intptr_t User32_StaticWndProc(void* hwnd, uint32_t message,
         bool drawn = getRect && getRect(hwnd, &client) && client.right > 0 && client.bottom > 0;
         if (drawn) {
             const uint32_t type = state.style & 0x1fu;
-            const WinNtRect bounds{0, 0, client.right, client.bottom};
-            uint32_t background = 0xFFF0F0F0u;
+            WinNtRect bounds{0, 0, client.right, client.bottom};
+            uint32_t background = 0x00FFFFFFu; // COLOR_WINDOW default.
             if (type == 4) background = 0xFF000000u;
             else if (type == 5 || type == 8) background = 0xFF808080u;
-            else if (type == 6 || type == 9) background = 0xFFFFFFFFu;
-            if (type == 4 || type == 5 || type == 6 || type == 7 || type == 8 || type == 9)
+            else if (type == 6 || type == 9) background = 0x00FFFFFFu;
+
+            // Static controls erase using WM_CTLCOLORSTATIC. This lets the
+            // dialog select its own brush (Calc uses WHITE_BRUSH for the LCD).
+            void* brush = reinterpret_cast<void*>(User32_SendMessageW(
+                state.parent, 0x0138u /* WM_CTLCOLORSTATIC */,
+                reinterpret_cast<uintptr_t>(dc), reinterpret_cast<intptr_t>(hwnd)));
+            const bool filledByParent = brush && FillRect(dc, &bounds, brush) != 0;
+            if (!filledByParent && (type == 4 || type == 5 || type == 6 ||
+                                    type == 7 || type == 8 || type == 9 ||
+                                    type == 0 || type == 1 || type == 2 || type == 3))
                 drawn = fillButtonRect(dc, bounds, background);
-            if ((type == 7 || type == 8 || type == 9) && client.right > 1 && client.bottom > 1) {
-                drawn &= fillButtonRect(dc, {0, 0, client.right, 1}, kColorBorder);
-                drawn &= fillButtonRect(dc, {0, client.bottom - 1, client.right, client.bottom}, kColorBorder);
-                drawn &= fillButtonRect(dc, {0, 0, 1, client.bottom}, kColorBorder);
-                drawn &= fillButtonRect(dc, {client.right - 1, 0, client.right, client.bottom}, kColorBorder);
+
+            constexpr uint32_t kWsExClientEdge = 0x00000200u;
+            if ((state.extendedStyle & kWsExClientEdge) &&
+                client.right > 3 && client.bottom > 3) {
+                // WS_EX_CLIENTEDGE is a recessed two-tone border. Inset the
+                // static text area so its value does not touch the frame.
+                drawn &= fillButtonRect(dc, {0, 0, client.right, 1}, 0x00404040u);
+                drawn &= fillButtonRect(dc, {0, 0, 1, client.bottom}, 0x00404040u);
+                drawn &= fillButtonRect(dc, {1, 1, client.right - 1, 2}, 0x00808080u);
+                drawn &= fillButtonRect(dc, {1, 1, 2, client.bottom - 1}, 0x00808080u);
+                drawn &= fillButtonRect(dc, {0, client.bottom - 1, client.right, client.bottom}, 0x00FFFFFFu);
+                drawn &= fillButtonRect(dc, {client.right - 1, 0, client.right, client.bottom}, 0x00FFFFFFu);
+                drawn &= fillButtonRect(dc, {client.right - 2, 1, client.right - 1, client.bottom - 1}, 0x00E0E0E0u);
+                drawn &= fillButtonRect(dc, {1, client.bottom - 2, client.right - 1, client.bottom - 1}, 0x00E0E0E0u);
+                bounds = {2, 2, client.right - 2, client.bottom - 2};
             }
             if (state.length && type <= 2) {
                 void* font = GetStockObject(kStockDefaultGuiFont);
@@ -3567,11 +3709,14 @@ intptr_t User32_StaticWndProc(void* hwnd, uint32_t message,
                 const int32_t oldMode = SetBkMode(dc, 1);
                 ButtonTextExtent extent{};
                 const bool measured = GetTextExtentPoint32W(dc, state.text, state.length, &extent) != 0;
-                int32_t x = 3;
-                if (measured && type == 1) x = std::max(0, (client.right - extent.cx) / 2);
-                else if (measured && type == 2) x = std::max(0, client.right - extent.cx - 3);
+                int32_t x = bounds.left + 1;
+                if (measured && type == 1)
+                    x = bounds.left + std::max(0, (bounds.right - bounds.left - extent.cx) / 2);
+                else if (measured && type == 2)
+                    x = std::max(bounds.left, bounds.right - extent.cx - 2);
                 const int32_t y = (state.style & 0x00000200u) && measured
-                    ? std::max(0, (client.bottom - extent.cy) / 2) : 0;
+                    ? std::max(bounds.top, bounds.top + (bounds.bottom - bounds.top - extent.cy) / 2)
+                    : bounds.top;
                 drawn &= oldColor != 0xffffffffu && oldMode > 0 &&
                     TextOutW(dc, x, y, state.text, state.length) != 0;
                 if (oldMode > 0) (void)SetBkMode(dc, oldMode);
@@ -4311,6 +4456,22 @@ int32_t User32_PostMessageW(void* hWnd, uint32_t message, uintptr_t wParam, intp
 
 intptr_t User32_SendMessageW(void* hWnd, uint32_t message, uintptr_t wParam, intptr_t lParam) noexcept {
 #if defined(BUILD_SYSTEM32_USER32_DLL)
+    // Built-in STATIC controls are implemented in this DLL. Keep their text
+    // messages in the same user-mode window-procedure path as their painting;
+    // this also preserves WM_SETTEXT's result instead of relying on the
+    // kernel-side default procedure for a system class.
+    if (message == 0x000Cu || message == 0x000Du || message == 0x000Eu ||
+        message == 0x000Fu) {
+        bool isStatic{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            for (const auto& entry : g_statics) {
+                if (entry.hwnd == hWnd) { isStatic = true; break; }
+            }
+        }
+        if (isStatic)
+            return User32_StaticWndProc(hWnd, message, wParam, lParam);
+    }
     using SetIconFn=int32_t (*)(void*,uint32_t,uint64_t,uint64_t*);
     using GetIconFn=uint64_t (*)(void*,uint32_t);
     if (message == WM_SETICON_OFFICIAL) {
@@ -4471,6 +4632,11 @@ int32_t User32_EnableWindow(void* window, int32_t enable) noexcept {
         __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidWindowHandle) : "memory");
         return 0;
     }
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    const bool wasEnabled = User32_IsWindowEnabled(window) != 0;
+    if (!enable && wasEnabled)
+        (void)User32_SendMessageW(window, 0x001Fu /* WM_CANCELMODE */, 0, 0);
+#endif
     using Fn = int32_t (*)(void*, int32_t, int32_t*, int32_t*);
     const auto fn = Win32kProc<Fn>("MicaWin32kEnableWindow");
     int32_t wasDisabled{}, changed{};
@@ -4479,6 +4645,10 @@ int32_t User32_EnableWindow(void* window, int32_t enable) noexcept {
         __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidWindowHandle) : "memory");
         return 0;
     }
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+    if (!enable && changed && User32_GetFocus() == window)
+        (void)User32_SetFocus(nullptr);
+#endif
     if (changed) (void)User32_SendMessageW(window, 0x000Au /* WM_ENABLE */,
                                             enable != 0, 0);
     return wasDisabled;
@@ -4696,8 +4866,13 @@ int32_t User32_ReleaseCapture() noexcept {
     return fn ? fn() : 0;
 }
 
-int32_t User32_AdjustWindowRectEx(WinNtRect* lpRect, uint32_t /*dwStyle*/, int32_t /*bMenu*/, uint32_t /*dwExStyle*/) noexcept {
-    return lpRect ? 1 : 0;
+int32_t User32_AdjustWindowRectEx(WinNtRect* lpRect, uint32_t dwStyle,
+                                  int32_t bMenu, uint32_t dwExStyle) noexcept {
+    if (!lpRect || (bMenu != 0 && bMenu != 1)) return 0;
+    using Fn = int32_t (*)(MicaWin32kRect*, uint32_t, int32_t, uint32_t);
+    const auto fn = Win32kProc<Fn>("MicaWin32kAdjustWindowRectEx");
+    return fn ? fn(reinterpret_cast<MicaWin32kRect*>(lpRect), dwStyle,
+                   bMenu, dwExStyle) : 0;
 }
 
 intptr_t User32_SetWindowLongPtrW(void* hWnd, int32_t nIndex, intptr_t dwNewLong) noexcept {
@@ -4874,6 +5049,14 @@ int32_t Gdi32_DeleteDC(void* hdc) noexcept {
     if (result) for (auto& dc : g_gdiDcs) if (dc.dc == hdc) dc = GdiDcSelection{};
 #endif
     return result;
+}
+
+void Gdi32_ForgetDcState(void* hdc) noexcept {
+#if defined(BUILD_SYSTEM32_GDI32_DLL)
+    if (auto* dc = FindGdiDc(hdc, false)) *dc = GdiDcSelection{};
+#else
+    (void)hdc;
+#endif
 }
 
 int32_t Gdi32_GetDeviceCaps(void* /*hdc*/, int32_t index) noexcept {
@@ -5160,7 +5343,7 @@ int32_t Gdi32_MicaPushClipRect(void* hdc, const MicaWin32kRect* rectangle,
     if (!hdc || !rectangle || !token || rectangle->right < rectangle->left ||
         rectangle->bottom < rectangle->top) return 0;
     GdiDcSelection* dc = FindGdiDc(hdc, false);
-    if (!dc || !FindGdiBitmap(dc->bitmap)) return 0;
+    if (!dc || (dc->bitmap && !FindGdiBitmap(dc->bitmap))) return 0;
     size_t slot = 0;
     while (slot < std::size(dc->clips) && dc->clips[slot].occupied) ++slot;
     if (slot == std::size(dc->clips)) return 0;
@@ -5973,6 +6156,78 @@ __declspec(dllexport) int32_t SetProcessDpiAwarenessContext(void* value) {
 __declspec(dllexport) int32_t MessageBeep(uint32_t type) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_MessageBeep(type);
 }
+
+// APIs below are not implemented as exports by this canonical User32 PE
+// target. Keep the intended ABI visible here so future work can be compared
+// against ReactOS without accidentally registering placeholder success paths.
+// ReactOS dialog.c parses dialog templates, builds child HWNDs, sends
+// WM_INITDIALOG, owns a nested modal queue loop and restores the owner on exit.
+// Failure while parsing/creating children unwinds partial state and returns -1.
+// INT_PTR __stdcall DialogBoxParamW(HINSTANCE instance, LPCWSTR templateName,
+//     HWND owner, DLGPROC dialogProc, LPARAM initParam);
+// The indirect-template variant follows the same modal lifecycle but parses
+// the caller's in-memory DLGTEMPLATE/DLGTEMPLATEEX instead of loading a
+// resource. ReactOS validates the template bounds and unwinds partial controls.
+// INT_PTR __stdcall DialogBoxIndirectParamW(HINSTANCE instance,
+//     LPCDLGTEMPLATEW dialogTemplate, HWND owner, DLGPROC dialogProc,
+//     LPARAM initParam);
+
+// ReactOS messagebox.c creates a real dialog with the requested buttons,
+// default button, icon and modality; it returns the selected button ID. The
+// separate tools/dlls/user32.cpp implementation returning IDOK without UI is
+// not part of this DLL and must not be used to satisfy this export.
+// int __stdcall MessageBoxW(HWND owner, LPCWSTR text, LPCWSTR caption,
+//                           UINT type);
+// ReactOS's A entry point converts caption/text with CP_ACP and then shares
+// the same real modal dialog implementation; allocation/conversion failures
+// must propagate rather than silently presenting an empty successful box.
+// int __stdcall MessageBoxA(HWND owner, LPCSTR text, LPCSTR caption,
+//                           UINT type);
+
+// ReactOS dialog.c routes Tab/arrows/Enter/Escape and mnemonics through the
+// dialog's control order and dialog-code rules, consuming messages when it
+// performs navigation. Returning FALSE unconditionally breaks real dialogs.
+// BOOL __stdcall IsDialogMessageW(HWND dialog, LPMSG message);
+// ANSI form shares the same navigation rules after translating any text-bearing
+// messages using the active code page. ReactOS returns TRUE only when the
+// dialog manager consumed the message.
+// BOOL __stdcall IsDialogMessageA(HWND dialog, LPMSG message);
+
+// ANSI entry points must convert strings using the process code page and then
+// preserve the W implementation's validation, return values and last-error
+// behavior; ASCII-only path/name conversion is not Win32 A/W compatibility.
+// ATOM __stdcall RegisterClassExA(const WNDCLASSEXA* windowClass);
+// HWND __stdcall CreateWindowExA(DWORD exStyle, LPCSTR className,
+//     LPCSTR windowName, DWORD style, int x, int y, int width, int height,
+//     HWND parent, HMENU menu, HINSTANCE instance, LPVOID parameter);
+// int __stdcall GetMessageA(MSG* message, HWND window, UINT minFilter,
+//                           UINT maxFilter);
+// BOOL __stdcall PostMessageA(HWND window, UINT message,
+//                             WPARAM wParam, LPARAM lParam);
+// LRESULT __stdcall SendMessageA(HWND window, UINT message,
+//                                WPARAM wParam, LPARAM lParam);
+
+// ReactOS loads MENU/MENUEX resources recursively, preserving item flags,
+// command IDs, state, text and submenus. The W loader in the menu ABI handles
+// only the standard template subset; the inline A/W loader placeholders return
+// null today and must not be confused with a complete resource implementation.
+// HMENU __stdcall LoadMenuA(HINSTANCE instance, LPCSTR menuName);
+
+// ReactOS's A variant applies MIIM_* selection and command/position lookup,
+// copies ANSI item text with the caller's cch limit, and reports the full
+// required length. The inline catalog currently uses an incorrect generic
+// signature and sentinel result; replace that declaration at its owner before
+// exposing an ABI-compatible export.
+// BOOL __stdcall GetMenuItemInfoA(HMENU menu, UINT item, BOOL byPosition,
+//                                 LPMENUITEMINFOA information);
+
+// ReactOS messagebox/dialog helpers use accelerator tables to match a real
+// key message to a command, send WM_COMMAND/WM_SYSCOMMAND, and return 1 only
+// when consumed. The current inline TranslateAccelerator placeholder always
+// returns zero and has no accelerator resource/table lifetime.
+// int __stdcall TranslateAcceleratorW(HWND window, HACCEL table, LPMSG message);
+// HACCEL __stdcall CreateAcceleratorTableW(LPACCEL entries, int count);
+// BOOL __stdcall DestroyAcceleratorTable(HACCEL table);
 } // extern "C"
 #elif defined(BUILD_SYSTEM32_GDI32_DLL)
 extern "C" {
@@ -6024,6 +6279,9 @@ __declspec(dllexport) void* SelectObject(void* hdc, void* h) {
 }
 __declspec(dllexport) int32_t DeleteObject(void* ho) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_DeleteObject(ho);
+}
+__declspec(dllexport) void MicaGdi32ForgetDcState(void* hdc) {
+    micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_ForgetDcState(hdc);
 }
 __declspec(dllexport) void* CreateFontIndirectW(const micant::um::winnt_user32_gdi32_imm32_abi::GdiLogFontW* logical) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateFontIndirectW(logical);

@@ -178,6 +178,11 @@ VOID __cdecl ConFormatMessage(PCON_STREAM Stream, DWORD MessageId, ...)
 
 BOOL ConPrintfVPaging(PCON_PAGER Pager, BOOL StartPaging, LPWSTR szFormat, va_list arg_ptr)
 {
+#if defined(MICANT_CMD_GUI_TERMINAL)
+    (void)Pager;
+    (void)StartPaging;
+    return szFormat && ConPrintfV(StdOut, szFormat, arg_ptr) >= 0;
+#else
     // INT len;
     WCHAR szOut[OUTPUT_BUFFER_SIZE];
 
@@ -190,6 +195,7 @@ BOOL ConPrintfVPaging(PCON_PAGER Pager, BOOL StartPaging, LPWSTR szFormat, va_li
     // return ConPutsPaging(Pager, PagePrompt, StartPaging, szOut);
     return ConWritePaging(Pager, PagePrompt, StartPaging,
                           szOut, wcslen(szOut));
+#endif
 }
 
 BOOL __cdecl ConOutPrintfPaging(BOOL StartPaging, LPWSTR szFormat, ...)
@@ -205,7 +211,12 @@ BOOL __cdecl ConOutPrintfPaging(BOOL StartPaging, LPWSTR szFormat, ...)
 
 VOID ConOutResPaging(BOOL StartPaging, UINT resID)
 {
+#if defined(MICANT_CMD_GUI_TERMINAL)
+    (void)StartPaging;
+    ConResPuts(StdOut, resID);
+#else
     ConResPaging(&StdOutPager, PagePrompt, StartPaging, resID);
+#endif
 }
 
 

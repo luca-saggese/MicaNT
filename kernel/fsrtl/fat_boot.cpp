@@ -1089,6 +1089,9 @@ NtStatus queryDirectoryEntry(void* opaque, size_t requestedIndex,
     uint32_t cluster = file.directoryCluster;
     const uint32_t maxClusters = file.volume->DataClusterCount + 1;
     size_t index = 0;
+    char longName[256]{};
+    uint8_t lfnExpected{}, lfnChecksum{};
+    bool lfnValid{};
     for (uint32_t traversed = 0; traversed < maxClusters; ++traversed) {
         if (cluster < 2 || cluster - 2 >= file.volume->DataClusterCount) {
             current = nullptr;
@@ -1105,17 +1108,55 @@ NtStatus queryDirectoryEntry(void* opaque, size_t requestedIndex,
         for (size_t i = 0; i < entryCount; ++i) {
             const uint8_t* item = g_clusterBuffer + i * 32;
             if (item[0] == 0) { current = nullptr; return NtStatus::NoMoreFiles; }
-            if (item[0] == 0xE5 || item[11] == 0x0F || (item[11] & 0x08)) continue;
+            if (item[0] == 0xE5) { longName[0] = 0; lfnValid = false; continue; }
+            if (item[11] == 0x0F) {
+                const uint8_t sequence = item[0] & 0x1Fu;
+                if (!sequence || sequence > 19 || (item[0] & 0xA0u) || item[12] ||
+                    loadLe16(item + 26)) { longName[0] = 0; lfnValid = false; continue; }
+                if (item[0] & 0x40u) {
+                    std::memset(longName, 0, sizeof(longName));
+                    lfnExpected = sequence;
+                    lfnChecksum = item[13];
+                    lfnValid = true;
+                }
+                if (!lfnValid || lfnExpected != sequence || item[13] != lfnChecksum) {
+                    longName[0] = 0; lfnValid = false; continue;
+                }
+                static constexpr uint8_t offsets[13] = {1,3,5,7,9,14,16,18,20,22,24,28,30};
+                const size_t base = static_cast<size_t>(sequence - 1) * 13;
+                for (size_t c = 0; c < 13 && base + c + 1 < sizeof(longName); ++c) {
+                    const uint16_t character = loadLe16(item + offsets[c]);
+                    if (!character || character == 0xFFFFu) { longName[base + c] = 0; break; }
+                    if (character > 0x7Fu) { lfnValid = false; break; }
+                    longName[base + c] = static_cast<char>(character);
+                }
+                --lfnExpected;
+                continue;
+            }
+            if (item[11] & 0x08u) { longName[0] = 0; lfnValid = false; continue; }
             FatDirEntry entry{};
             formatShortName(item, entry.ShortName, sizeof(entry.ShortName));
             if (!entry.ShortName[0] || equalAsciiInsensitive(entry.ShortName, ".") ||
                 equalAsciiInsensitive(entry.ShortName, "..")) continue;
-            if (index++ != requestedIndex) continue;
+            uint8_t shortChecksum{};
+            for (unsigned c = 0; c < 11; ++c)
+                shortChecksum = static_cast<uint8_t>(((shortChecksum & 1u) << 7) +
+                    (shortChecksum >> 1) + item[c]);
+            const char* name = lfnValid && !lfnExpected && shortChecksum == lfnChecksum && longName[0]
+                ? longName : entry.ShortName;
+            if (index++ != requestedIndex) {
+                longName[0] = 0;
+                lfnValid = false;
+                continue;
+            }
             *output = {};
-            for (size_t c = 0; entry.ShortName[c] && c < std::size(output->fileName) - 1; ++c)
-                output->fileName[c] = static_cast<wchar_t>(static_cast<uint8_t>(entry.ShortName[c]));
-            size_t nameLength = 0;
-            while (nameLength < std::size(output->fileName) && output->fileName[nameLength]) ++nameLength;
+            size_t nameLength{};
+            while (name[nameLength] && nameLength < std::size(output->fileName) - 1) {
+                output->fileName[nameLength] = static_cast<wchar_t>(static_cast<uint8_t>(name[nameLength]));
+                ++nameLength;
+            }
+            longName[0] = 0;
+            lfnValid = false;
             output->fileNameLength = static_cast<uint32_t>(nameLength * sizeof(wchar_t));
             output->fileAttributes = (item[11] & 0x10u) ? 0x10u : 0x80u;
             output->endOfFile.quadPart = loadLe32(item + 28);

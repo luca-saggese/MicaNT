@@ -41,9 +41,7 @@ INT cmd_cls(LPTSTR param)
     }
 
 #if defined(MICANT_CMD_GUI_TERMINAL)
-    /* Scroll the retained GUI terminal past its current viewport. */
-    for (unsigned row = 0; row < 24; ++row)
-        ConOutChar(_T('\n'));
+    ConOutChar(_T('\f'));
 #else
     ConClearScreen(&StdOutScreen);
 #endif

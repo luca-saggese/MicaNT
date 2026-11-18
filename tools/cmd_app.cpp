@@ -261,6 +261,19 @@ void RememberCommand() noexcept {
 bool IsHighSurrogate(wchar_t value) noexcept;
 bool IsLowSurrogate(wchar_t value) noexcept;
 
+bool IsClearCommand(const wchar_t* input, uint32_t length) noexcept {
+    uint32_t token = 0;
+    while (token < length && (input[token] == L' ' || input[token] == L'\t')) ++token;
+    if (length - token != 3) return false;
+    constexpr wchar_t name[] = L"cls";
+    for (uint32_t index = 0; index < 3; ++index) {
+        wchar_t value = input[token + index];
+        if (value >= L'A' && value <= L'Z') value += L'a' - L'A';
+        if (value != name[index]) return false;
+    }
+    return true;
+}
+
 void LoadHistory(int32_t direction) noexcept {
     if (!s_historyCount) return;
     if (s_historyCursor < 0) {
@@ -305,7 +318,23 @@ bool SubmitInput() noexcept {
         s_lineLength = s_promptLength + count;
     }
     wchar_t commandBuffer[MaxInput]{};
-    for (uint32_t i = 0; i < s_inputLength; ++i) commandBuffer[i] = s_input[i];
+    const uint32_t commandLength = s_inputLength;
+    for (uint32_t i = 0; i < commandLength; ++i) commandBuffer[i] = s_input[i];
+    size_t token{};
+    while (token < commandLength &&
+           (commandBuffer[token] == L' ' || commandBuffer[token] == L'\t')) ++token;
+    constexpr wchar_t exitCommand[] = L"exit";
+    bool explicitExit = commandLength - token >= 4;
+    for (size_t index = 0; explicitExit && index < 4; ++index) {
+        wchar_t value = commandBuffer[token + index];
+        if (value >= L'A' && value <= L'Z') value += L'a' - L'A';
+        explicitExit = value == exitCommand[index];
+    }
+    if (explicitExit) {
+        const size_t end = token + 4;
+        explicitExit = end == commandLength || commandBuffer[end] == L' ' ||
+            commandBuffer[end] == L'\t';
+    }
     s_inputLength = 0;
     s_caret = 0;
     s_input[0] = 0;
@@ -314,17 +343,6 @@ bool SubmitInput() noexcept {
     StartLine();
     if (s_cmdInitialized) {
         (void)LuceCmdExecuteLine(commandBuffer);
-        size_t token{};
-        while (commandBuffer[token] == L' ' || commandBuffer[token] == L'\t') ++token;
-        constexpr wchar_t exitCommand[] = L"exit";
-        bool explicitExit = true;
-        for (size_t index = 0; index < 4; ++index) {
-            wchar_t value = commandBuffer[token + index];
-            if (value >= L'A' && value <= L'Z') value += L'a' - L'A';
-            if (value != exitCommand[index]) { explicitExit = false; break; }
-        }
-        const wchar_t afterExit = commandBuffer[token + 4];
-        explicitExit &= afterExit == 0 || afterExit == L' ' || afterExit == L'\t';
         if (explicitExit) {
             if (s_window) (void)DestroyWindow(s_window);
             return false;
@@ -541,7 +559,20 @@ intptr_t TerminalWindowProc(void* hwnd, uint32_t message,
             Invalidate();
             return 0;
         }
-        if (character == L'\r' || character == L'\n') (void)SubmitInput();
+        if (character == L'\r' || character == L'\n') {
+            if (IsClearCommand(s_input, s_inputLength)) {
+                s_input[0] = 0;
+                s_inputLength = s_caret = 0;
+                s_historyCursor = -1;
+                s_promptLength = 0;
+                StartLine();
+                s_firstRow = s_rowCount - 1;
+                AppendOutput(L"> ");
+                s_promptLength = s_lineLength;
+                return 0;
+            }
+            (void)SubmitInput();
+        }
         else if (character == L'\b') {
             if (s_caret) {
                 uint32_t remove = 1;

@@ -8,6 +8,11 @@
 #include <climits>
 #include <new>
 
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+#endif
+
 namespace micant::win32k::freestanding {
 namespace {
 
@@ -24,6 +29,7 @@ constexpr uint32_t kWmNcCreate = 0x0081;
 constexpr uint32_t kWmActivate = 0x0006;
 constexpr uint32_t kWmSetFocus = 0x0007;
 constexpr uint32_t kWmPaint = 0x000F;
+constexpr int32_t kMenuBarHeight = 26;
 constexpr uint32_t kWmMouseMove = 0x0200;
 constexpr uint32_t kWmMouseHover = 0x02A1;
 constexpr uint32_t kWmMouseLeave = 0x02A3;
@@ -328,6 +334,8 @@ uint64_t g_captionCapture{};
 uint8_t g_pressedCaptionButton{};
 uint64_t g_mouseCaptureWindow{};
 uint64_t g_mouseCaptureOwner{};
+uint64_t g_leftButtonReleaseWindow{};
+uint64_t g_leftButtonReleaseOwner{};
 PointerGesture g_pointerGesture{};
 uint64_t g_cursorHitWindow{};
 int32_t g_cursorHitTest{};
@@ -366,6 +374,24 @@ int32_t captionHeight(const Window& window) noexcept {
     return 28;
 }
 
+bool adjustWindowRect(MicaWin32kRect& rect, uint32_t style, bool hasMenu) noexcept {
+    Window metricsWindow{};
+    metricsWindow.style = style;
+    const int64_t frame = frameInset(metricsWindow);
+    const int64_t caption = captionHeight(metricsWindow);
+    const int64_t menu = hasMenu ? kMenuBarHeight : 0;
+    const int64_t left = static_cast<int64_t>(rect.left) - frame;
+    const int64_t top = static_cast<int64_t>(rect.top) - frame - caption - menu;
+    const int64_t right = static_cast<int64_t>(rect.right) + frame;
+    const int64_t bottom = static_cast<int64_t>(rect.bottom) + frame;
+    if (left < INT32_MIN || top < INT32_MIN || right > INT32_MAX ||
+        bottom > INT32_MAX || right < left || bottom < top)
+        return false;
+    rect = {static_cast<int32_t>(left), static_cast<int32_t>(top),
+            static_cast<int32_t>(right), static_cast<int32_t>(bottom)};
+    return true;
+}
+
 bool windowScreenOrigin(const Window& window, int64_t& screenX,
                         int64_t& screenY) noexcept {
     screenX = 0;
@@ -382,7 +408,8 @@ bool windowScreenOrigin(const Window& window, int64_t& screenX,
         if (!parent || parent->ownerProcessId != current->ownerProcessId)
             return false;
         screenX += frameInset(*parent);
-        screenY += frameInset(*parent) + captionHeight(*parent);
+        screenY += frameInset(*parent) + captionHeight(*parent) +
+            (!parent->parent && parent->menu ? kMenuBarHeight : 0);
         current = parent;
     }
     return false;
@@ -812,6 +839,11 @@ Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
         if (!window.active || !window.visible || window.iconic ||
             !hasVisibleAncestors(window) || localX < 0 ||
             localY < 0 || localX >= window.width || localY >= window.height) continue;
+        // ReactOS co_WinPosSearchChildren does not return a disabled WS_CHILD
+        // from mouse hit testing. Let the parent/sibling underneath receive
+        // the hit instead; a disabled top-level window remains a hit target.
+        if ((window.style & kWsDisabled) &&
+            (window.parent || (window.style & kWsChild))) continue;
         if (!topmost || visibleOrder(window) > visibleOrder(*topmost)) topmost = &window;
     }
     return topmost;
@@ -874,8 +906,18 @@ bool enqueueWindowMessage(const Window& window, uint32_t message,
 }
 
 bool setFocusedWindow(Window* window) noexcept {
-    if (!window || !window->active || !window->visible || window->iconic) return false;
     const uint64_t previousHandle = g_focusedWindow;
+    if (!window) {
+        if (!previousHandle) return true;
+        auto* previous = findWindowAny(previousHandle);
+        if (previous && !enqueueWindowMessage(*previous, 0x0008u, 0, 0))
+            return false;
+        if (previous) markWindowBounds(*previous);
+        g_focusedWindow = 0;
+        g_focusedWindowOwner = 0;
+        return true;
+    }
+    if (!window->active || !window->visible || window->iconic) return false;
     if (previousHandle == window->handle) return true;
     auto* previous = findWindowAny(previousHandle);
     if (previous && !enqueueWindowMessage(*previous, 0x0008u, window->handle, 0))
@@ -1064,19 +1106,27 @@ bool messageMatches(const QueuedMessage& message,
 }
 
 bool dequeue(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
+    QueuedMessage* oldest{};
     for (auto& message : g_messages) {
         if (!message.active || !messageMatches(message, request, ownerProcessId)) continue;
-        request.messageHwnd = message.hwnd;
-        request.messageWParam = message.wParam;
-        request.messageLParam = message.lParam;
-        request.messageId = message.message;
-        request.messageTime = message.time;
-        request.messageX = message.x;
-        request.messageY = message.y;
-        if (request.args[3]) message.active = false;
-        return true;
+        // Queue slots are reused from the start of the fixed array. Slot order
+        // therefore ceases to represent enqueue order after messages are
+        // removed. Select by the monotonically incremented Win32 message time
+        // instead, using signed modular comparison so the uint32_t clock may
+        // wrap while the bounded queue still has an unambiguous ordering.
+        if (!oldest || static_cast<int32_t>(message.time - oldest->time) < 0)
+            oldest = &message;
     }
-    return false;
+    if (!oldest) return false;
+    request.messageHwnd = oldest->hwnd;
+    request.messageWParam = oldest->wParam;
+    request.messageLParam = oldest->lParam;
+    request.messageId = oldest->message;
+    request.messageTime = oldest->time;
+    request.messageX = oldest->x;
+    request.messageY = oldest->y;
+    if (request.args[3]) oldest->active = false;
+    return true;
 }
 
 NtStatus registerClass(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
@@ -1838,10 +1888,12 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (request.operation == MICANT_WIN32K_OP_GET_CLIENT_RECT) {
                 const int32_t frame = frameInset(*window);
                 const int32_t caption = captionHeight(*window);
+                const int32_t menu = (!window->parent && window->menu)
+                    ? kMenuBarHeight : 0;
                 request.rect = {0, 0,
                     window->width > frame * 2 ? window->width - frame * 2 : 1,
-                    window->height > frame * 2 + caption
-                        ? window->height - frame * 2 - caption : 1};
+                    window->height > frame * 2 + caption + menu
+                        ? window->height - frame * 2 - caption - menu : 1};
             } else {
                 int64_t screenX{}, screenY{};
                 if (!windowScreenOrigin(*window, screenX, screenY) ||
@@ -1856,6 +1908,28 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             request.result = 1;
             return NtStatus::Success;
         }
+        case MICANT_WIN32K_OP_ADJUST_WINDOW_RECT: {
+            if (request.args[1] > 1) return NtStatus::InvalidParameter;
+            if (!adjustWindowRect(request.rect,
+                    static_cast<uint32_t>(request.args[0]), request.args[1] != 0))
+                return NtStatus::InvalidParameter;
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_DEBUG_INPUT_TRACE:
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+            MicantNetbootSerialWrite("[MicaNT CalcButton] stage=");
+            MicantNetbootSerialWriteNumber(request.args[0]);
+            MicantNetbootSerialWrite(" id=");
+            MicantNetbootSerialWriteNumber(request.args[1]);
+            MicantNetbootSerialWrite(" flags=");
+            MicantNetbootSerialWriteNumber(request.args[2]);
+            MicantNetbootSerialWrite("\r\n");
+            request.result = 1;
+            return NtStatus::Success;
+#else
+            return NtStatus::NotImplemented;
+#endif
         case MICANT_WIN32K_OP_ENUM_WINDOWS: {
             const size_t first = static_cast<size_t>(request.args[0]);
             const size_t requested = request.args[1]
@@ -1898,13 +1972,18 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             request.result = g_foregroundWindow;
             return NtStatus::Success;
         case MICANT_WIN32K_OP_SET_FOCUS: {
+            const uint64_t previousHandle = g_focusedWindow;
+            if (!request.args[0]) {
+                if (!setFocusedWindow(nullptr)) return NtStatus::InsufficientResources;
+                request.result = previousHandle;
+                return NtStatus::Success;
+            }
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
             if (!window->visible || window->iconic) return NtStatus::InvalidParameter;
             auto* root = rootWindow(window);
             if (!root || root->handle != g_foregroundWindow)
                 return NtStatus::InvalidParameter;
-            const uint64_t previousHandle = g_focusedWindow;
             if (!setFocusedWindow(window)) return NtStatus::InsufficientResources;
             request.result = previousHandle;
             return NtStatus::Success;
@@ -1929,6 +2008,9 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 g_mouseCaptureWindow = window->handle;
                 g_mouseCaptureOwner = ownerProcessId;
             }
+            if (g_leftButtonReleaseWindow &&
+                g_leftButtonReleaseOwner == ownerProcessId)
+                g_leftButtonReleaseWindow = window->handle;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_RELEASE_CAPTURE:
@@ -2154,6 +2236,10 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             g_mouseCaptureWindow = 0;
             g_mouseCaptureOwner = 0;
         }
+        if (g_leftButtonReleaseOwner == ownerProcessId) {
+            g_leftButtonReleaseWindow = 0;
+            g_leftButtonReleaseOwner = 0;
+        }
         for (auto& windowClass : g_classes)
             if (windowClass.active && windowClass.ownerProcessId == ownerProcessId) windowClass = {};
         if (g_cursorClipOwner == ownerProcessId) {
@@ -2357,6 +2443,30 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     }
     if (!routeTarget) return false;
 
+    // Keep each physical left-button release paired with the HWND that
+    // received its press. The app processes the queued WM_LBUTTONDOWN in
+    // Ring 3 and may call SetCapture after the next PS/2 packet was already
+    // sampled; relying only on the asynchronous capture state can otherwise
+    // deliver WM_LBUTTONUP to a different child control.
+    if (leftPressed) {
+        g_leftButtonReleaseWindow = routeTarget->handle;
+        g_leftButtonReleaseOwner = routeTarget->ownerProcessId;
+    } else if (leftReleased && g_leftButtonReleaseWindow) {
+        auto* pressedTarget = findWindow(g_leftButtonReleaseWindow,
+                                         g_leftButtonReleaseOwner);
+        if (pressedTarget && pressedTarget->visible && !pressedTarget->iconic)
+            routeTarget = pressedTarget;
+    }
+
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+    if (leftPressed || leftReleased) {
+        MicantNetbootSerialWrite("[MicaNT CalcInput] event=");
+        MicantNetbootSerialWrite(leftPressed ? "down" : "up");
+        MicantNetbootSerialWrite(" controlId=");
+        MicantNetbootSerialWriteNumber(routeTarget->parent ? routeTarget->menu : 0);
+    }
+#endif
+
     uint32_t keyState = 0;
     if (currentButtons & 0x01u) keyState |= 0x0001u;
     if (currentButtons & 0x02u) keyState |= 0x0002u;
@@ -2373,6 +2483,19 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
     const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+    if (leftPressed || leftReleased) {
+        MicantNetbootSerialWrite(" localX=");
+        MicantNetbootSerialWriteNumber(localX);
+        MicantNetbootSerialWrite(" localY=");
+        MicantNetbootSerialWriteNumber(localY);
+        MicantNetbootSerialWrite(" width=");
+        MicantNetbootSerialWriteNumber(static_cast<uint64_t>(routeTarget->width));
+        MicantNetbootSerialWrite(" height=");
+        MicantNetbootSerialWriteNumber(static_cast<uint64_t>(routeTarget->height));
+        MicantNetbootSerialWrite("\r\n");
+    }
+#endif
     if (moved && !enqueueLatestWindowMessage(*routeTarget, kWmMouseMove,
                                              keyState, packedPoint, x, y))
         return false;
@@ -2387,10 +2510,33 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         const uint32_t mask = buttonMasks[index];
         if ((previousButtons & mask) == (currentButtons & mask)) continue;
         if (currentButtons & mask) {
-            if (!activateWindow(routeTarget)) return false;
+            const bool activated = activateWindow(routeTarget);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+            if (index == 0) {
+                MicantNetbootSerialWrite("[MicaNT CalcButtonRoute] id=");
+                MicantNetbootSerialWriteNumber(routeTarget->parent ? routeTarget->menu : 0);
+                MicantNetbootSerialWrite(" enabled=");
+                MicantNetbootSerialWriteNumber(
+                    (routeTarget->style & kWsDisabled) ? 0u : 1u);
+                MicantNetbootSerialWrite(" activate=");
+                MicantNetbootSerialWriteNumber(activated ? 1u : 0u);
+                MicantNetbootSerialWrite("\r\n");
+            }
+#endif
+            if (!activated) return false;
             routeTarget->zOrder = nextZOrder();
-            if (!enqueueWindowMessage(*routeTarget, downMessages[index], keyState,
-                                      packedPoint, x, y)) return false;
+            const bool queued = enqueueWindowMessage(*routeTarget, downMessages[index],
+                keyState, packedPoint, x, y);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+            if (index == 0) {
+                MicantNetbootSerialWrite("[MicaNT CalcButtonRoute] id=");
+                MicantNetbootSerialWriteNumber(routeTarget->parent ? routeTarget->menu : 0);
+                MicantNetbootSerialWrite(" down-queued=");
+                MicantNetbootSerialWriteNumber(queued ? 1u : 0u);
+                MicantNetbootSerialWrite("\r\n");
+            }
+#endif
+            if (!queued) return false;
             buttonDelivered = true;
         } else if (!enqueueWindowMessage(*routeTarget, upMessages[index], keyState,
                                          packedPoint, x, y)) {
@@ -2398,6 +2544,10 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         } else {
             buttonDelivered = true;
         }
+    }
+    if (leftReleased) {
+        g_leftButtonReleaseWindow = 0;
+        g_leftButtonReleaseOwner = 0;
     }
     return buttonDelivered;
 }
@@ -2425,6 +2575,17 @@ bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
         target = findWindowAny(g_foregroundWindow);
     if (!target || !target->visible || target->iconic || !event.virtualKey) return false;
     const bool down = (event.flags & 0x01u) != 0;
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+    if (event.virtualKey == 0x75u || event.virtualKey == 0x76u) {
+        MicantNetbootSerialWrite("[MicaNT CalcKeyRoute] vk=");
+        MicantNetbootSerialWriteNumber(event.virtualKey);
+        MicantNetbootSerialWrite(" down=");
+        MicantNetbootSerialWriteNumber(down ? 1u : 0u);
+        MicantNetbootSerialWrite(" target=");
+        MicantNetbootSerialWriteNumber(target->handle);
+        MicantNetbootSerialWrite("\r\n");
+    }
+#endif
     const uint64_t lParam = (static_cast<uint64_t>(event.sequence & 0xFFu) << 16) |
                             (down ? 1u : ((1u << 30) | (1u << 31)));
     if (!enqueueWindowMessage(*target, down ? kWmKeyDown : kWmKeyUp,

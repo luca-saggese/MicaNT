@@ -57,6 +57,14 @@ __declspec(dllimport) int32_t __stdcall NtCreateFile(
     micant::LargeInteger* allocationSize, uint32_t fileAttributes,
     uint32_t shareAccess, uint32_t createDisposition, uint32_t createOptions,
     void* eaBuffer, uint32_t eaLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryDirectoryFile(
+    micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
+    void* apcContext, micant::IoStatusBlock* ioStatusBlock,
+    void* fileInformation, uint32_t length,
+    micant::FileInformationClass fileInformationClass, bool returnSingleEntry,
+    micant::UnicodeString* fileName, bool restartScan) noexcept;
+__declspec(dllexport) uint32_t __stdcall GetCurrentDirectoryW(
+    uint32_t capacity, wchar_t* buffer) noexcept;
 __declspec(dllimport) int32_t __stdcall NtReadFile(
     micant::Handle fileHandle, micant::Handle event, void* apcRoutine,
     void* apcContext, micant::IoStatusBlock* ioStatusBlock, void* buffer,
@@ -611,23 +619,18 @@ __declspec(dllexport) int32_t __stdcall WriteConsoleOutputCharacterW(
 }
 
 // These exports are present so native PE import binding succeeds. Until the
-// corresponding filesystem, locale, or job-control service is available, each
-// returns a documented failure instead of reporting synthetic success.
+// corresponding locale or job-control service is available, each returns a
+// documented failure instead of reporting synthetic success.
 #define LUCE_KERNEL32_UNSUPPORTED(name) \
     __declspec(dllexport) uintptr_t __stdcall name(...) noexcept { \
         SetLastError(50); return 0; \
     }
-LUCE_KERNEL32_UNSUPPORTED(FindClose)
-LUCE_KERNEL32_UNSUPPORTED(FindFirstFileW)
-LUCE_KERNEL32_UNSUPPORTED(FindNextFileW)
 LUCE_KERNEL32_UNSUPPORTED(FormatMessageW)
 LUCE_KERNEL32_UNSUPPORTED(GetDateFormatW)
 LUCE_KERNEL32_UNSUPPORTED(GetDiskFreeSpaceW)
-LUCE_KERNEL32_UNSUPPORTED(GetFileAttributesW)
 LUCE_KERNEL32_UNSUPPORTED(GetFileSize)
 LUCE_KERNEL32_UNSUPPORTED(GetFileTime)
 LUCE_KERNEL32_UNSUPPORTED(GetFileType)
-LUCE_KERNEL32_UNSUPPORTED(GetFullPathNameW)
 LUCE_KERNEL32_UNSUPPORTED(GetModuleFileNameW)
 LUCE_KERNEL32_UNSUPPORTED(GetNumaHighestNodeNumber)
 LUCE_KERNEL32_UNSUPPORTED(GetVolumeInformationW)
@@ -730,6 +733,304 @@ struct CurrentDirectoryGuard {
 bool IsPathSeparator(wchar_t value) noexcept {
     return value == L'\\' || value == L'/';
 }
+
+void NormalizeDosPath(wchar_t* path, size_t& length) noexcept {
+    const size_t preserved = length >= 2 && IsPathSeparator(path[0]) &&
+        IsPathSeparator(path[1]) ? 2 : 0;
+    size_t output{};
+    for (size_t input = 0; input < length; ++input) {
+        const wchar_t value = IsPathSeparator(path[input]) ? L'\\' : path[input];
+        if (value == L'\\' && output > 0 && output >= preserved &&
+            path[output - 1] == L'\\')
+            continue;
+        path[output++] = value;
+    }
+    length = output;
+    path[length] = L'\0';
+}
+
+constexpr size_t FindStateCapacity = 32;
+constexpr uint64_t FindHandleTag = 0x4D49434600000000ULL;
+constexpr uint32_t FileListDirectoryAccess = 0x0001u;
+constexpr uint32_t FileReadAttributesAccess = 0x0080u;
+constexpr uint32_t FileSynchronizeAccess = 0x00100000u;
+constexpr uint32_t FileDirectoryOpenOption = 0x0001u;
+constexpr uint32_t FileSynchronousOpenOption = 0x0020u;
+
+struct Win32FileTime { uint32_t low{}, high{}; };
+struct Win32FindDataW {
+    uint32_t attributes{};
+    Win32FileTime creationTime{}, lastAccessTime{}, lastWriteTime{};
+    uint32_t fileSizeHigh{}, fileSizeLow{}, reserved0{}, reserved1{};
+    wchar_t fileName[260]{};
+    wchar_t alternateFileName[14]{};
+};
+static_assert(sizeof(Win32FindDataW) == 592);
+
+struct FindState {
+    micant::Handle directory{};
+    uint32_t generation{};
+    wchar_t pattern[260]{};
+    bool active{};
+};
+FindState g_findStates[FindStateCapacity]{};
+uint32_t g_findGeneration{1};
+
+bool ResolveDosPath(const wchar_t* input, wchar_t* output,
+                    size_t capacity, size_t& outputLength) noexcept {
+    outputLength = 0;
+    if (!input || !*input || !output || capacity < 4) return false;
+    size_t inputLength = wcslen(input);
+    if (inputLength >= capacity) return false;
+    const bool driveAbsolute = inputLength >= 3 && input[1] == L':' &&
+        IsPathSeparator(input[2]);
+    const bool uncAbsolute = inputLength >= 2 && IsPathSeparator(input[0]) &&
+        IsPathSeparator(input[1]);
+    if (driveAbsolute || uncAbsolute) {
+        for (; outputLength < inputLength; ++outputLength)
+            output[outputLength] = IsPathSeparator(input[outputLength])
+                ? L'\\' : input[outputLength];
+        NormalizeDosPath(output, outputLength);
+        return true;
+    }
+
+    CurrentDirectoryGuard guard;
+    auto* parameters = CurrentProcessParameters();
+    if (!parameters) return false;
+    const auto& current = parameters->CurrentDirectoryDosPath;
+    if (!current.Buffer || (current.Length & 1) ||
+        current.Length > current.MaximumLength) return false;
+    const size_t currentLength = current.Length / sizeof(char16_t);
+    if (currentLength < 2 || currentLength + inputLength + 2 >= capacity) return false;
+    for (; outputLength < currentLength; ++outputLength)
+        output[outputLength] = static_cast<wchar_t>(current.Buffer[outputLength]);
+    size_t inputStart = 0;
+    if (IsPathSeparator(input[0])) {
+        outputLength = 2;
+        output[0] = static_cast<wchar_t>(current.Buffer[0]);
+        output[1] = L':';
+        inputStart = 1;
+    } else if (inputLength >= 2 && input[1] == L':') {
+        if (input[0] != output[0]) return false;
+        inputStart = 2;
+    } else if (outputLength && !IsPathSeparator(output[outputLength - 1])) {
+        output[outputLength++] = L'\\';
+    }
+    for (size_t i = inputStart; i < inputLength; ++i)
+        output[outputLength++] = IsPathSeparator(input[i]) ? L'\\' : input[i];
+    NormalizeDosPath(output, outputLength);
+    return true;
+}
+
+FindState* LookupFindState(void* handle) noexcept {
+    const uint64_t token = reinterpret_cast<uint64_t>(handle);
+    if ((token & 0xFFFFFFFF00000000ULL) != FindHandleTag) return nullptr;
+    const uint32_t slot = static_cast<uint32_t>(token & 0xFFu);
+    const uint32_t generation = static_cast<uint32_t>((token >> 8) & 0x00FFFFFFu);
+    if (!slot || slot > FindStateCapacity) return nullptr;
+    auto& state = g_findStates[slot - 1];
+    return state.active && state.generation == generation ? &state : nullptr;
+}
+
+void* FindStateHandle(const FindState& state) noexcept {
+    const uint64_t slot = static_cast<uint64_t>(&state - g_findStates + 1);
+    return reinterpret_cast<void*>(FindHandleTag |
+        (static_cast<uint64_t>(state.generation) << 8) | slot);
+}
+
+bool WildcardMatches(const wchar_t* pattern, const wchar_t* name) noexcept {
+    if (!pattern || !name) return false;
+    if (pattern[0] == L'*' && pattern[1] == L'.' && pattern[2] == L'*' && !pattern[3])
+        return true;
+    const wchar_t* star = nullptr;
+    const wchar_t* retry = nullptr;
+    while (*name) {
+        wchar_t left = *pattern;
+        wchar_t right = *name;
+        if (left >= L'A' && left <= L'Z') left += L'a' - L'A';
+        if (right >= L'A' && right <= L'Z') right += L'a' - L'A';
+        if (left == L'?' || left == right) { ++pattern; ++name; continue; }
+        if (left == L'*') { star = pattern++; retry = name; continue; }
+        if (!star) return false;
+        pattern = star + 1;
+        name = ++retry;
+    }
+    while (*pattern == L'*') ++pattern;
+    return !*pattern;
+}
+
+int32_t FillFindData(const micant::FileBothDirInformation& entry,
+                     Win32FindDataW* output) noexcept {
+    if (!output || entry.fileNameLength > 259u * sizeof(wchar_t)) return 0;
+    RtlZeroMemory(output, sizeof(*output));
+    output->attributes = entry.fileAttributes;
+    output->creationTime.low = static_cast<uint32_t>(entry.creationTime.quadPart);
+    output->creationTime.high = static_cast<uint32_t>(
+        static_cast<uint64_t>(entry.creationTime.quadPart) >> 32);
+    output->lastAccessTime.low = static_cast<uint32_t>(entry.lastAccessTime.quadPart);
+    output->lastAccessTime.high = static_cast<uint32_t>(
+        static_cast<uint64_t>(entry.lastAccessTime.quadPart) >> 32);
+    output->lastWriteTime.low = static_cast<uint32_t>(entry.lastWriteTime.quadPart);
+    output->lastWriteTime.high = static_cast<uint32_t>(
+        static_cast<uint64_t>(entry.lastWriteTime.quadPart) >> 32);
+    const uint64_t fileSize = entry.endOfFile.quadPart > 0
+        ? static_cast<uint64_t>(entry.endOfFile.quadPart) : 0;
+    output->fileSizeLow = static_cast<uint32_t>(fileSize);
+    output->fileSizeHigh = static_cast<uint32_t>(fileSize >> 32);
+    const size_t characters = entry.fileNameLength / sizeof(wchar_t);
+    for (size_t i = 0; i < characters; ++i) output->fileName[i] = entry.fileName[i];
+    output->fileName[characters] = L'\0';
+    return 1;
+}
+
+bool NextMatchingFile(FindState& state, Win32FindDataW* output,
+                      bool restart) noexcept {
+    for (uint32_t attempt = 0; attempt < 4096; ++attempt) {
+        micant::FileBothDirInformation entry{};
+        micant::IoStatusBlock ioStatus{};
+        const int32_t status = NtQueryDirectoryFile(state.directory, micant::Handle{},
+            nullptr, nullptr, &ioStatus, &entry, sizeof(entry),
+            micant::FileInformationClass::FileBothDirectoryInformation,
+            true, nullptr, restart && attempt == 0);
+        if (status < 0) {
+            SetLastError(status == static_cast<int32_t>(0x80000006u) ? 18u
+                : Win32ErrorFromNtStatus(status));
+            return false;
+        }
+        if (WildcardMatches(state.pattern, entry.fileName))
+            return FillFindData(entry, output) != 0;
+    }
+    SetLastError(18);
+    return false;
+}
+}
+
+__declspec(dllexport) uint32_t __stdcall GetFullPathNameW(
+    const wchar_t* fileName, uint32_t capacity, wchar_t* buffer,
+    wchar_t** filePart) noexcept {
+    if (filePart) *filePart = nullptr;
+    if (!fileName || !*fileName || (!buffer && capacity)) {
+        SetLastError(87);
+        return 0;
+    }
+    wchar_t fullPath[32767]{};
+    size_t length{};
+    if (!ResolveDosPath(fileName, fullPath, sizeof(fullPath) / sizeof(fullPath[0]), length)) {
+        SetLastError(87);
+        return 0;
+    }
+    if (filePart) {
+        size_t leaf = length;
+        while (leaf && !IsPathSeparator(fullPath[leaf - 1])) --leaf;
+        if (leaf < length && buffer && capacity > length)
+            *filePart = buffer + leaf;
+    }
+    if (!buffer || capacity <= length) {
+        SetLastError(122);
+        return static_cast<uint32_t>(length + 1);
+    }
+    for (size_t i = 0; i <= length; ++i) buffer[i] = fullPath[i];
+    return static_cast<uint32_t>(length);
+}
+
+__declspec(dllexport) void* __stdcall FindFirstFileW(
+    const wchar_t* fileName, Win32FindDataW* output) noexcept {
+    if (!fileName || !*fileName || !output) {
+        SetLastError(87);
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    wchar_t fullPattern[32767]{};
+    size_t fullLength{};
+    if (!ResolveDosPath(fileName, fullPattern, 32767, fullLength)) {
+        SetLastError(87);
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    size_t separator = fullLength;
+    while (separator && !IsPathSeparator(fullPattern[separator - 1])) --separator;
+    const size_t patternStart = separator;
+    if (patternStart >= fullLength || fullLength - patternStart >= 260) {
+        SetLastError(87);
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    wchar_t directoryPath[32767]{};
+    size_t directoryLength = separator;
+    while (directoryLength > 3 && IsPathSeparator(fullPattern[directoryLength - 1]))
+        --directoryLength;
+    for (size_t i = 0; i < directoryLength; ++i)
+        directoryPath[i] = fullPattern[i];
+    if (directoryLength == 2 && fullPattern[1] == L':')
+        directoryPath[directoryLength++] = L'\\';
+    directoryPath[directoryLength] = L'\0';
+
+    micant::UnicodeString directoryName(directoryPath);
+    micant::ObjectAttributes attributes{};
+    attributes.objectName = &directoryName;
+    attributes.attributes = micant::OBJ_CASE_INSENSITIVE;
+    micant::IoStatusBlock ioStatus{};
+    micant::Handle directory{};
+    const int32_t openStatus = NtCreateFile(&directory,
+        FileListDirectoryAccess | FileReadAttributesAccess | FileSynchronizeAccess,
+        &attributes, &ioStatus, nullptr, 0, 0, 1,
+        FileDirectoryOpenOption | FileSynchronousOpenOption, nullptr, 0);
+    if (openStatus < 0) {
+        SetLastError(Win32ErrorFromNtStatus(openStatus));
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+
+    FindState* state = nullptr;
+    for (auto& candidate : g_findStates) {
+        if (!candidate.active) { state = &candidate; break; }
+    }
+    if (!state) {
+        (void)NtClose(reinterpret_cast<void*>(directory));
+        SetLastError(8);
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    uint32_t generation = g_findGeneration++ & 0x00FFFFFFu;
+    if (!generation) generation = g_findGeneration++ & 0x00FFFFFFu;
+    *state = {};
+    state->directory = directory;
+    state->generation = generation;
+    state->active = true;
+    for (size_t i = patternStart; i < fullLength; ++i)
+        state->pattern[i - patternStart] = fullPattern[i];
+    state->pattern[fullLength - patternStart] = L'\0';
+    if (!NextMatchingFile(*state, output, true)) {
+        (void)NtClose(reinterpret_cast<void*>(state->directory));
+        *state = {};
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    return FindStateHandle(*state);
+}
+
+__declspec(dllexport) int32_t __stdcall FindNextFileW(
+    void* findHandle, Win32FindDataW* output) noexcept {
+    auto* state = LookupFindState(findHandle);
+    if (!state || !output) {
+        SetLastError(state ? 87u : 6u);
+        return 0;
+    }
+    return NextMatchingFile(*state, output, false) ? 1 : 0;
+}
+
+__declspec(dllexport) int32_t __stdcall FindClose(void* findHandle) noexcept {
+    auto* state = LookupFindState(findHandle);
+    if (!state) { SetLastError(6); return 0; }
+    const int32_t status = NtClose(reinterpret_cast<void*>(state->directory));
+    *state = {};
+    if (status < 0) { SetLastError(Win32ErrorFromNtStatus(status)); return 0; }
+    return 1;
+}
+
+__declspec(dllexport) uint32_t __stdcall GetFileAttributesW(
+    const wchar_t* fileName) noexcept {
+    if (!fileName || !*fileName) { SetLastError(87); return UINT32_MAX; }
+    Win32FindDataW data{};
+    void* search = FindFirstFileW(fileName, &data);
+    if (search == reinterpret_cast<void*>(static_cast<intptr_t>(-1)))
+        return UINT32_MAX;
+    (void)FindClose(search);
+    return data.attributes;
 }
 
 __declspec(dllexport) uint32_t __stdcall GetCurrentDirectoryW(
@@ -802,6 +1103,7 @@ __declspec(dllexport) int32_t __stdcall SetCurrentDirectoryW(
             fullPath[length++] = IsPathSeparator(pathName[i]) ? L'\\' : pathName[i];
         }
     }
+    NormalizeDosPath(fullPath, length);
     while (length > 3 && fullPath[length - 1] == L'\\') --length;
     fullPath[length] = L'\0';
 
@@ -960,7 +1262,55 @@ __declspec(dllexport) void* __stdcall CreateFileW(
         SetLastError(50); // The filesystem syscall currently opens existing files only.
         return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
     }
-    micant::UnicodeString name(fileName);
+    wchar_t resolvedPath[32767]{};
+    const size_t inputLength = wcslen(fileName);
+    if (!inputLength || inputLength >= 32767) {
+        SetLastError(206);
+        return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+    }
+    const bool driveAbsolute = inputLength >= 3 && fileName[1] == L':' &&
+        IsPathSeparator(fileName[2]);
+    const bool uncAbsolute = inputLength >= 2 && IsPathSeparator(fileName[0]) &&
+        IsPathSeparator(fileName[1]);
+    size_t resolvedLength{};
+    if (driveAbsolute || uncAbsolute) {
+        for (; resolvedLength < inputLength; ++resolvedLength)
+            resolvedPath[resolvedLength] = IsPathSeparator(fileName[resolvedLength])
+                ? L'\\' : fileName[resolvedLength];
+    } else {
+        CurrentDirectoryGuard guard;
+        auto* parameters = CurrentProcessParameters();
+        if (!parameters) {
+            SetLastError(87);
+            return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+        }
+        const auto& current = parameters->CurrentDirectoryDosPath;
+        if (!current.Buffer || (current.Length & 1) ||
+            current.Length > current.MaximumLength) {
+            SetLastError(87);
+            return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+        }
+        resolvedLength = current.Length / sizeof(char16_t);
+        if (resolvedLength < 2 || resolvedLength + inputLength + 2 >= 32767) {
+            SetLastError(206);
+            return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+        }
+        for (size_t i = 0; i < resolvedLength; ++i)
+            resolvedPath[i] = static_cast<wchar_t>(current.Buffer[i]);
+        if (IsPathSeparator(fileName[0])) {
+            resolvedLength = 2;
+            resolvedPath[0] = static_cast<wchar_t>(current.Buffer[0]);
+            resolvedPath[1] = L':';
+        } else if (resolvedLength && !IsPathSeparator(resolvedPath[resolvedLength - 1])) {
+            resolvedPath[resolvedLength++] = L'\\';
+        }
+        const size_t inputStart = fileName[1] == L':' ? 2u : 0u;
+        for (size_t i = inputStart; i < inputLength; ++i)
+            resolvedPath[resolvedLength++] = IsPathSeparator(fileName[i])
+                ? L'\\' : fileName[i];
+    }
+    resolvedPath[resolvedLength] = L'\0';
+    micant::UnicodeString name(resolvedPath);
     micant::ObjectAttributes attributes{};
     attributes.objectName = &name;
     attributes.attributes = 0x40; // OBJ_CASE_INSENSITIVE
@@ -2044,6 +2394,13 @@ static uintptr_t FindLoadedModuleEntry(uintptr_t moduleBase) noexcept {
 
 __declspec(dllexport) void* __stdcall GetModuleHandleW(const wchar_t* name) noexcept {
     return reinterpret_cast<void*>(FindModule(name));
+}
+
+// The system UI language is currently configured as en-US. Resource callers
+// still pass an explicit LANGID, so FindResourceExW can select other installed
+// resource languages without hard-wiring applications to English.
+__declspec(dllexport) uint16_t __stdcall GetUserDefaultUILanguage() noexcept {
+    return 0x0409;
 }
 
 __declspec(dllexport) int32_t __stdcall GetLocaleInfoW(

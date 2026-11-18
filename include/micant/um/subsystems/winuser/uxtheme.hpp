@@ -417,6 +417,11 @@ inline win32::HRESULT DrawThemeBackground(HTHEME hTheme, void* hdc, int iPartId,
     uint8_t control{};
     if (!detail::controlForPart(*handle, iPartId, control)) return detail::kNotImplemented;
     const auto* style = detail::style(*handle, iStateId, iPartId);
+    // Calc draws disabled owner-draw buttons with DSS_DISABLED text itself.
+    // Keep the surface identical to the enabled face so disabling a control
+    // never makes it disappear or changes its layout.
+    if (handle->control == 0 && iPartId == 1 && iStateId == 4)
+        style = detail::style(*handle, 1, iPartId);
     if (!style || !(style->flags & (MICANT_THEME_HAS_BACKGROUND | MICANT_THEME_HAS_BORDER)))
         return detail::kNotFound;
     const uint32_t radius = (style->flags & MICANT_THEME_HAS_RADIUS)

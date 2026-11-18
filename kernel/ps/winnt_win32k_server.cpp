@@ -265,6 +265,16 @@ void copyMessage(const MicaWin32kRequest& source,
 
 extern "C" {
 
+void MicaWin32kDebugInputTrace(uint32_t stage, uint32_t controlId,
+                              uint32_t flags) {
+    MicaWin32kRequest value{};
+    value.operation = MICANT_WIN32K_OP_DEBUG_INPUT_TRACE;
+    value.args[0] = stage;
+    value.args[1] = controlId;
+    value.args[2] = flags;
+    (void)request(value.operation, value);
+}
+
 int32_t MicaWin32kGetSystemMetrics(int32_t index) {
     if (index != 0 && index != 1) return 0;
     MicaWin32kRequest value{};
@@ -275,6 +285,7 @@ int32_t MicaWin32kGetSystemMetrics(int32_t index) {
 
 void* MicaWin32kGetDlgItem(void* dialog, int32_t controlId) {
     MicaWin32kRequest value{};
+    value.operation = MICANT_WIN32K_OP_GET_DLG_ITEM;
     value.args[0] = reinterpret_cast<uint64_t>(dialog);
     value.args[1] = static_cast<uint32_t>(controlId);
     return request(MICANT_WIN32K_OP_GET_DLG_ITEM, value) && value.result
@@ -550,6 +561,20 @@ int32_t MicaWin32kGetWindowRect(void* hwnd, MicaWin32kRect* output) {
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
     if (!request(MICANT_WIN32K_OP_GET_WINDOW_RECT, value) || !value.result) return 0;
     *output = value.rect;
+    return 1;
+}
+
+int32_t MicaWin32kAdjustWindowRectEx(MicaWin32kRect* rectangle,
+    uint32_t style, int32_t hasMenu, uint32_t exStyle) {
+    (void)exStyle;
+    if (!rectangle || (hasMenu != 0 && hasMenu != 1)) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = style;
+    value.args[1] = static_cast<uint32_t>(hasMenu);
+    value.rect = *rectangle;
+    if (!request(MICANT_WIN32K_OP_ADJUST_WINDOW_RECT, value) || !value.result)
+        return 0;
+    *rectangle = value.rect;
     return 1;
 }
 

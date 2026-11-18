@@ -132,7 +132,9 @@ enum {
     MICANT_WIN32K_OP_ENABLE_WINDOW,
     MICANT_WIN32K_OP_GET_PARENT,
     MICANT_WIN32K_OP_SET_WINDOW_MENU,
-    MICANT_WIN32K_OP_GET_WINDOW_MENU
+    MICANT_WIN32K_OP_GET_WINDOW_MENU,
+    MICANT_WIN32K_OP_ADJUST_WINDOW_RECT,
+    MICANT_WIN32K_OP_DEBUG_INPUT_TRACE
 };
 
 enum {
@@ -207,6 +209,9 @@ MICANT_WIN32K_API int32_t MicaWin32kPeekMessageW(MicaWin32kMessage*, void*, uint
 MICANT_WIN32K_API int32_t MicaWin32kGetMessageW(MicaWin32kMessage*, void*, uint32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kGetClientRect(void*, MicaWin32kRect*);
 MICANT_WIN32K_API int32_t MicaWin32kGetWindowRect(void*, MicaWin32kRect*);
+MICANT_WIN32K_API int32_t MicaWin32kAdjustWindowRectEx(
+    MicaWin32kRect*, uint32_t, int32_t, uint32_t);
+MICANT_WIN32K_API void MicaWin32kDebugInputTrace(uint32_t, uint32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kEnumWindows(void*, intptr_t);
 MICANT_WIN32K_API int32_t MicaWin32kGetWindowTextW(void*, wchar_t*, int32_t);
 MICANT_WIN32K_API int32_t MicaWin32kIsWindowVisible(void*);

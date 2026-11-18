@@ -150,6 +150,7 @@ def run(command: list[str]) -> None:
 def write_manifest(
     cxx: Path, *, runtime_selftest: bool = False, timer_selftest: bool = False,
     taskmgr_selftest: bool = False, theme_test: bool = False,
+    textbox_test: bool = False,
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
     reactos_app: str | None = None,
@@ -200,6 +201,7 @@ def write_manifest(
         "timer_selftest": timer_selftest,
         "taskmgr_selftest": taskmgr_selftest,
         "theme_test": theme_test,
+        "textbox_test": textbox_test,
         "process_memory_selftest": process_memory_selftest,
         "cmd_test": cmd_test,
         "reactos_app": reactos_app,
@@ -299,6 +301,10 @@ def main() -> int:
         help="launch theme_test.exe in QEMU for dedicated Win32 theme verification",
     )
     parser.add_argument(
+        "--textbox-test", action="store_true",
+        help="launch a small Ring 3 STATIC textbox paint probe in QEMU",
+    )
+    parser.add_argument(
         "--compositor-local-stats", action="store_true",
         help="enable aggregated compositor timing, repaint and present counters",
     )
@@ -375,7 +381,7 @@ def main() -> int:
     elif args.reactos_apps_dir is not None:
         parser.error("--reactos-apps-dir requires --reactos-app")
     if args.reactos_app and (args.cmd_test or args.doom_test or args.taskmgr_selftest or
-                             args.theme_test or args.process_memory_selftest or
+                             args.theme_test or args.textbox_test or args.process_memory_selftest or
                              args.network_test or args.usb_test or
                              args.audio_controller_test or args.audio_render_test or args.audio_capture_test or
                              args.crash_dump_selftest or args.runtime_selftest or
@@ -401,11 +407,15 @@ def main() -> int:
         parser.error("--taskmgr-selftest requires the unattended normal desktop boot path")
     if args.theme_test and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest):
         parser.error("--theme-test requires the unattended normal desktop boot path")
+    if args.textbox_test and (args.runtime_selftest or args.timer_selftest or args.usb_test or
+                              args.network_test or args.check_explorer or args.taskmgr_selftest or
+                              args.theme_test or args.cmd_test or args.process_memory_selftest):
+        parser.error("--textbox-test requires its isolated desktop boot path")
     if args.process_memory_selftest and (args.runtime_selftest or args.timer_selftest or args.usb_test or args.network_test or args.check_explorer):
         parser.error("--process-memory-selftest requires the normal desktop boot path")
     if args.cmd_test and (args.runtime_selftest or args.timer_selftest or args.usb_test or
                           args.network_test or args.check_explorer or args.taskmgr_selftest or
-                          args.theme_test or args.process_memory_selftest):
+                          args.theme_test or args.textbox_test or args.process_memory_selftest):
         parser.error("--cmd-test requires its dedicated unattended QMP input profile")
     if args.cmd_test and args.memory_mib != 512:
         parser.error("--cmd-test and --doom-test must run with --memory-mib 512")
@@ -415,7 +425,7 @@ def main() -> int:
         parser.error("--interactive-after-doom-test requires visible --doom-test mode")
     if args.crash_dump_selftest and (args.runtime_selftest or args.timer_selftest or
             args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest or
-            args.theme_test or args.process_memory_selftest or args.cmd_test):
+            args.theme_test or args.textbox_test or args.process_memory_selftest or args.cmd_test):
         parser.error("--crash-dump-selftest has its own two-boot QEMU profile")
     if args.crash_dump_selftest and args.diagnostics_dir is not None and args.diagnostics_dir.exists():
         parser.error("--diagnostics-dir must be a new directory for crash-dump evidence")
@@ -463,6 +473,7 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_NETWORK_SELFTEST:BOOL={'ON' if args.network_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_TASKMGR_SELFTEST:BOOL={'ON' if args.taskmgr_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_THEME_TEST:BOOL={'ON' if args.theme_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_TEXTBOX_TEST:BOOL={'ON' if args.textbox_test else 'OFF'}",
                 f"-DMICANT_COMPOSITOR_LOCAL_STATS:BOOL={'ON' if args.compositor_local_stats else 'OFF'}",
                 f"-DMICANT_KERNEL_PERF_DIAGNOSTICS:BOOL={'ON' if args.kernel_perf_diagnostics else 'OFF'}",
                 f"-DMICANT_COMPOSITOR_DEBUG_HUD:BOOL={'ON' if args.compositor_debug_hud else 'OFF'}",
@@ -518,6 +529,7 @@ def main() -> int:
                 "proctop_boot",
                 "lucecrash_boot",
                 "theme_test_boot",
+                "textbox_probe_boot",
                 "taskmgr_probe_boot",
                 "compositor_boot",
             ]
@@ -536,6 +548,7 @@ def main() -> int:
             timer_selftest=args.timer_selftest,
             taskmgr_selftest=args.taskmgr_selftest,
             theme_test=args.theme_test,
+            textbox_test=args.textbox_test,
             process_memory_selftest=args.process_memory_selftest,
             cmd_test=args.cmd_test,
             reactos_app=args.reactos_app,
@@ -584,6 +597,9 @@ def main() -> int:
         elif args.cmd_test:
             evidence_dir = ROOT / "build" / f"cmd-m0-qemu-evidence-{time.time_ns()}"
             boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
+        elif args.textbox_test:
+            evidence_dir = ROOT / "build" / f"textbox-probe-qemu-evidence-{time.time_ns()}"
+            boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
         elif args.crash_dump_selftest:
             evidence_dir = ROOT / "build" / f"crash-dump-qemu-evidence-{time.time_ns()}"
             boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
@@ -603,6 +619,8 @@ def main() -> int:
             boot_command.append("--theme-test")
             if not args.headless:
                 boot_command.append("--interactive")
+        elif args.textbox_test:
+            boot_command.append("--textbox-test")
         elif args.cmd_test:
             boot_command.append("--cmd-test")
             if args.doom_test:
@@ -614,6 +632,8 @@ def main() -> int:
                 "--reactos-apps-dir", str(args.reactos_apps_dir.expanduser().resolve()),
                 "--reactos-app", args.reactos_app,
             ])
+            if not args.headless:
+                boot_command.append("--interactive")
         elif args.crash_dump_selftest:
             boot_command.append("--crash-dump-selftest")
         elif args.audio_controller_test:

@@ -2410,9 +2410,17 @@ static INT __stdcall LuceCmdStreamWriter(PCON_STREAM stream,
                                          PCTCH text,
                                          DWORD length)
 {
-    if (!g_LuceCmdOutputWriter)
+    if (!g_LuceCmdOutputWriter ||
+        reinterpret_cast<uintptr_t>(g_LuceCmdOutputWriter) < 0x10000u)
         return 0;
     return g_LuceCmdOutputWriter(stream, text, length);
+}
+
+extern "C" INT __stdcall LuceCmdConutilsWrite(PCON_STREAM stream,
+                                                PCTCH text,
+                                                DWORD length)
+{
+    return LuceCmdStreamWriter(stream, text, length);
 }
 
 static VOID LuceCmdRebindStreams()
@@ -2448,6 +2456,8 @@ extern "C" INT32 LuceCmdInitialize(LuceCmdOutputWriter writer)
 
     if (GetCurrentDirectory(ARRAYSIZE(startPath), startPath) != 0)
         _tchdir(startPath);
+    else if (SetCurrentDirectory(_T("C:\\")))
+        _tchdir(_T("C:\\"));
 
     InputCodePage = CP_UTF8;
     OutputCodePage = CP_UTF8;
@@ -2505,7 +2515,13 @@ extern "C" INT32 LuceCmdExecuteLine(TCHAR* line)
     if (!g_LuceCmdInitialized || !line)
         return ERROR_INVALID_PARAMETER;
 #if defined(MICANT_CMD_GUI_TERMINAL)
+    LuceCmdRebindStreams();
     bExit = FALSE;
+    const TCHAR* command = line;
+    while (*command == _T(' ') || *command == _T('\t')) ++command;
+    const BOOL explicitExit =
+        _tcsnicmp(command, _T("exit"), 4) == 0 &&
+        (!command[4] || command[4] == _T(' ') || command[4] == _T('\t'));
 #else
     if (bExit) return ERROR_INVALID_PARAMETER;
 #endif
@@ -2513,11 +2529,7 @@ extern "C" INT32 LuceCmdExecuteLine(TCHAR* line)
 #if defined(MICANT_CMD_GUI_TERMINAL)
     // A failed external-command lookup must return an error to the terminal,
     // not terminate the hosted GUI shell. Keep explicit EXIT behavior.
-    const TCHAR* command = line;
-    while (*command == _T(' ') || *command == _T('\t')) ++command;
-    if (_tcsnicmp(command, _T("exit"), 4) != 0 ||
-        (command[4] && command[4] != _T(' ') && command[4] != _T('\t')))
-        bExit = FALSE;
+    if (!explicitExit) bExit = FALSE;
 #endif
     return result;
 }

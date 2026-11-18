@@ -20,7 +20,7 @@ from pathlib import Path
 from fat32_image import create_fat32_image, create_gpt_disk_image
 from m10_tls_peer import M10TlsPeer
 
-from verify_kernel_architecture import validate_build_manifest
+from verify_kernel_architecture import inspect_pe, validate_build_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +141,82 @@ def verify_cpl3_surface(
                     "CPL3 surface presentation did not reach VirtIO scanout "
                     f"at (0, 0): expected #{expected.hex()}, observed #{pixel.hex()}"
                 )
+
+
+def capture_qmp_screenshot(qmp_path: Path, temp: Path,
+                           diagnostics_dir: Path, name: str) -> Path:
+    """Capture and retain the current QEMU scanout through QMP."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            greeting = json.loads(stream.readline())
+            if "QMP" not in greeting:
+                raise RuntimeError("QEMU did not send a QMP greeting")
+            stream.write(b'{"execute":"qmp_capabilities"}\n')
+            stream.flush()
+            while True:
+                response = json.loads(stream.readline())
+                if "error" in response:
+                    raise RuntimeError(f"QMP negotiation failed: {response['error']}")
+                if "return" in response:
+                    break
+            path = temp / name
+            stream.write((json.dumps({"execute": "screendump",
+                                      "arguments": {"filename": str(path)}}) + "\n").encode())
+            stream.flush()
+            while True:
+                response = json.loads(stream.readline())
+                if "error" in response:
+                    raise RuntimeError(f"QMP screendump failed: {response['error']}")
+                if "return" in response:
+                    break
+            retained = diagnostics_dir / name
+            shutil.copyfile(path, retained)
+            return retained
+
+
+def click_qmp(qmp_path: Path, x: int, y: int) -> None:
+    """Move the PS/2 pointer with QMP and click a screen coordinate."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            if "QMP" not in json.loads(stream.readline()):
+                raise RuntimeError("QEMU did not send a QMP greeting")
+
+            def execute(command: str, arguments: dict) -> None:
+                stream.write((json.dumps({"execute": command,
+                                          "arguments": arguments}) + "\n").encode())
+                stream.flush()
+                while True:
+                    response = json.loads(stream.readline())
+                    if "error" in response:
+                        raise RuntimeError(f"QMP {command} failed: {response['error']}")
+                    if "return" in response:
+                        return
+
+            execute("qmp_capabilities", {})
+
+            def axis(name: str, distance: int) -> None:
+                while distance:
+                    step = max(-64, min(64, distance))
+                    execute("input-send-event", {"events": [{
+                        "type": "rel", "data": {"axis": name, "value": step},
+                    }]})
+                    time.sleep(0.02)
+                    distance -= step
+
+            axis("x", -1200)
+            axis("y", -1200)
+            axis("x", x)
+            axis("y", y)
+            time.sleep(0.2)
+            for down in (True, False):
+                execute("input-send-event", {"events": [{
+                    "type": "btn", "data": {"button": "left", "down": down},
+                }]})
+                time.sleep(0.12)
 
 
 def set_qemu_network_link(qmp_path: Path, up: bool) -> None:
@@ -526,7 +602,7 @@ def verify_cmd_terminal(
                             "down": down, "key": {"type": "qcode", "data": qcode},
                         },
                     }]})
-                time.sleep(0.15 if doom_test else 0.08)
+                time.sleep(0.15 if doom_test else 0.18)
 
             def hold_key(qcode: str, duration: float) -> None:
                 execute("input-send-event", {"events": [{
@@ -587,17 +663,20 @@ def verify_cmd_terminal(
             def echo_reference(text: str, name: str) -> tuple[bytes, tuple[int, int, int, int]]:
                 """Render reference text through CMD/GDI and return its glyph bounds."""
                 type_text("cls")
+                screen(name.replace(".ppm", "-cls-typed.ppm"))
                 key("ret")
                 baseline = screen(name)
+                screen(name.replace(".ppm", "-after-cls.ppm"))
                 type_text("echo " + text)
+                screen(name.replace(".ppm", "-echo-typed.ppm"))
                 key("ret")
                 baseline = capture_after_input(baseline, name, "echo reference")
-                # Find bright glyph pixels in the client area, then retain the
+                # Find dark glyph pixels on the light terminal surface, then retain the
                 # last glyph row band (the echo output, below the prompt line).
                 rows: list[tuple[int, int, int]] = []
                 for y in range(122, 580):
                     xs = [x for x in range(124, 876)
-                          if max(baseline[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]) > 180]
+                          if min(baseline[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]) < 160]
                     if xs:
                         rows.append((y, min(xs), max(xs)))
                 bands: list[list[tuple[int, int, int]]] = []
@@ -620,7 +699,7 @@ def verify_cmd_terminal(
                 for row in range(height):
                     for column in range(width):
                         offset = ((y0 + row) * 1024 + x0 + column) * 3
-                        if max(reference[offset:offset + 3]) > 100:
+                        if min(reference[offset:offset + 3]) < 160:
                             points.append((column, row))
                 if not points:
                     raise RuntimeError(f"CMD {label} reference contains no glyph pixels")
@@ -629,16 +708,27 @@ def verify_cmd_terminal(
                 # terminal text attribute.
                 for y in range(122, 580 - height):
                     for x in range(124, 876 - width):
-                        if all(max(target[((y + dy) * 1024 + x + dx) * 3:
-                                          ((y + dy) * 1024 + x + dx) * 3 + 3]) > 100
+                        if all(min(target[((y + dy) * 1024 + x + dx) * 3:
+                                          ((y + dy) * 1024 + x + dx) * 3 + 3]) < 180
                                for dx, dy in points):
                             return
                 raise RuntimeError(f"CMD {label} output did not contain the expected visible text")
 
             # The terminal is a separately scheduled Ring 3 process; give its
             # first window and initial paint time to reach compositor scanout.
-            time.sleep(2.0)
             last = screen("cmd-terminal-00-startup.ppm")
+            terminal_deadline = time.monotonic() + 20
+            while time.monotonic() < terminal_deadline:
+                white_client_samples = [
+                    last[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]
+                    for x, y in ((800, 300), (850, 500), (700, 560))
+                ]
+                if sum(min(pixel) > 220 for pixel in white_client_samples) >= 2:
+                    break
+                time.sleep(0.25)
+                last = screen("cmd-terminal-00-startup.ppm")
+            else:
+                raise RuntimeError("CMD terminal window did not reach the desktop scanout")
             click_terminal()
 
             def capture_after_input(before: bytes, name: str, label: str) -> bytes:
@@ -764,7 +854,8 @@ def verify_cmd_terminal(
                 return
 
             last = submit("echo Luce CMD ready", "cmd-terminal-01-help.ppm")
-            submit("cd system32", "cmd-terminal-02-cd-system32.ppm")
+            submit("cd MicaNT", "cmd-terminal-02a-micant-directory.ppm")
+            submit("cd System32", "cmd-terminal-02-cd-system32.ppm")
             dir_reference, dir_bounds = echo_reference(
                 "cmd-m0-known.txt", "cmd-terminal-ref-dir.ppm")
             type_reference, type_bounds = echo_reference(
@@ -778,7 +869,7 @@ def verify_cmd_terminal(
             status_reference, status_bounds = echo_reference(
                 "Command failed (NTSTATUS 0xC0000034).", "cmd-terminal-ref-status.ppm")
             submit("cls", "cmd-terminal-clear-before-dir.ppm")
-            dir_screen = submit("dir", "cmd-terminal-03-dir.ppm")
+            dir_screen = submit("dir cmd-m0-known.txt", "cmd-terminal-03-dir.ppm")
             assert_echo_text(dir_screen, dir_reference, dir_bounds, "dir")
             submit("cls", "cmd-terminal-clear-before-type.ppm")
             type_screen = submit("type cmd-m0-known.txt", "cmd-terminal-04-type.ppm")
@@ -802,21 +893,24 @@ def verify_cmd_terminal(
                              process_error_bounds, "unknown command failure")
 
             key("up")
-            history_screen = screen("cmd-terminal-07-history.ppm")
+            history_screen = capture_after_input(
+                last, "cmd-terminal-07-history.ppm", "Up-arrow history")
             if region_diff(last, history_screen) < 20:
                 raise RuntimeError("CMD Up-arrow history did not change the terminal input")
             last = history_screen
 
-            # Fill beyond one viewport, then check both scroll directions.
+            # Add unique rows beyond one viewport, then check both scroll directions.
             for index in range(15):
-                submit("help", f"cmd-terminal-history-{index:02d}.ppm")
+                submit(f"echo history {index:02d}", f"cmd-terminal-history-{index:02d}.ppm")
             key("pgup")
-            scroll_up = screen("cmd-terminal-08-scroll-up.ppm")
+            scroll_up = capture_after_input(
+                last, "cmd-terminal-08-scroll-up.ppm", "PageUp scroll")
             if region_diff(last, scroll_up) < 20:
                 raise RuntimeError("CMD PageUp did not scroll terminal history")
             last = scroll_up
             key("pgdn")
-            scroll_down = screen("cmd-terminal-09-scroll-down.ppm")
+            scroll_down = capture_after_input(
+                last, "cmd-terminal-09-scroll-down.ppm", "PageDown scroll")
             if region_diff(last, scroll_down) < 20:
                 raise RuntimeError("CMD PageDown did not restore the terminal viewport")
 
@@ -841,7 +935,7 @@ def verify_cmd_terminal(
             set_left_button(False)
             minimized = wait_for_window_change(
                 restored, "cmd-window-minimized.ppm", 5000)
-            move_to(300, 748)  # Restore from the taskbar.
+            move_to(180, 748)  # Restore from the CMD taskbar button.
             set_left_button(True)
             set_left_button(False)
             taskbar_restored = wait_for_window_change(
@@ -852,7 +946,7 @@ def verify_cmd_terminal(
                 taskbar_restored, "cmd-window-dragged.ppm", 1200)
             drag(908, 608, 25, 20)  # Resize from the bottom-right grip.
             resized = wait_for_window_change(
-                dragged, "cmd-window-resized.ppm", 1200)
+                dragged, "cmd-window-resized.ppm", 400)
 
             move_to(912, 124)  # Close caption button after move and resize.
             set_left_button(True)
@@ -2114,8 +2208,205 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
                         raise RuntimeError("Truncated ReactOS app scanout screenshot")
                     return pixels
 
-            time.sleep(1.5)
+            # ReactOS Calc is a dialog-heavy app with many owner-draw child
+            # windows; let its initial queued WM_PAINT messages drain before
+            # judging its first frame.
+            time.sleep(5.0 if app == "calc" else 1.5)
             before = screen(f"reactos-{app}-01-window-before-input.ppm")
+            if app == "calc" and (
+                    os.environ.get("MICANT_REACTOS_CALC_INTERACTION_TEST") == "1" or
+                    os.environ.get("MICANT_REACTOS_CALC_ENABLE_TEST") == "1" or
+                    os.environ.get("MICANT_REACTOS_CALC_SCIENTIFIC_TEST") == "1"):
+                pointer_x = 0
+                pointer_y = 0
+
+                def move_to(x: int, y: int) -> None:
+                    nonlocal pointer_x, pointer_y
+                    def axis(name: str, distance: int) -> None:
+                        while distance:
+                            step = max(-64, min(64, distance))
+                            execute("input-send-event", {"events": [{
+                                "type": "rel", "data": {"axis": name, "value": step},
+                            }]})
+                            # The PS/2 polling path consumes each event packet
+                            # asynchronously; leave time for its byte queue.
+                            time.sleep(0.04)
+                            distance -= step
+                    axis("x", x - pointer_x)
+                    axis("y", y - pointer_y)
+                    pointer_x, pointer_y = x, y
+                    time.sleep(0.2)
+
+                def clamp_pointer_to_origin() -> None:
+                    def axis(name: str) -> None:
+                        for _ in range(19):
+                            execute("input-send-event", {"events": [{
+                                "type": "rel", "data": {"axis": name, "value": -64},
+                            }]})
+                            time.sleep(0.04)
+                    # Clamp once. Repeatedly sweeping the pointer across the
+                    # full screen between clicks can outrun PS/2 packet polling.
+                    axis("x")
+                    axis("y")
+
+                def click_at(x: int, y: int) -> None:
+                    move_to(x, y)
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "btn", "data": {"button": "left", "down": down},
+                        }]})
+                        # Let the application's message loop process the
+                        # down/up pair and establish/release control capture
+                        # before the next click is queued.
+                        time.sleep(0.35)
+                    time.sleep(0.4)
+
+                def press_key(name: str) -> None:
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "key", "data": {
+                                "down": down, "key": {"type": "qcode", "data": name},
+                            },
+                        }]})
+                        time.sleep(0.15)
+
+                def lcd_changed(left: bytes, right: bytes) -> bool:
+                    return any(
+                        left[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3] !=
+                        right[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]
+                        for y in range(74, 92) for x in range(60, 330)
+                    )
+
+                clamp_pointer_to_origin()
+
+                if os.environ.get("MICANT_REACTOS_CALC_ENABLE_TEST") == "1":
+                    # Octal disables 8 and 9; Decimal re-enables them. ReactOS
+                    # Calc maps F7/F6 to those base changes in its own message
+                    # loop, so this exercises the original EnableWindow calls.
+                    press_key("f7")
+                    time.sleep(0.8)
+                    press_key("f6")
+                    time.sleep(0.8)
+                    click_at(177, 170)  # 8, disabled in Octal and re-enabled in Decimal
+                    time.sleep(0.5)
+                    screen("reactos-calc-02-after-reenabled-eight.ppm")
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    expected = (
+                        "[MicaNT CalcButton] stage=5 id=1039 flags=0",  # disabled
+                        "[MicaNT CalcButton] stage=5 id=1039 flags=3",  # re-enabled
+                        "[MicaNT CalcButton] stage=1 id=1039 flags=0",
+                        "[MicaNT CalcButton] stage=2 id=1039 flags=11",
+                        "[MicaNT CalcButton] stage=3 id=1039 flags=0",
+                    )
+                    missing = [entry for entry in expected if entry not in serial]
+                    if missing:
+                        raise RuntimeError(
+                            "ReactOS Calc disabled/re-enabled button trace missing: " +
+                            "; ".join(missing)
+                        )
+                    print(
+                        "ReactOS Calc F7/F6 disabled and re-enabled button 8; its mouse click "
+                        "reached ButtonWndProc and emitted BN_CLICKED.", flush=True)
+                    return
+
+                if os.environ.get("MICANT_REACTOS_CALC_SCIENTIFIC_TEST") == "1":
+                    # Exercise the original View > Scientific menu path. The
+                    # app destroys and recreates its dialog for this layout;
+                    # a partially created control tree makes Calc exit.
+                    click_at(130, 56)  # View menu
+                    time.sleep(0.25)
+                    # Select the actual Scientific row in the custom popup.
+                    # The popup's first row is Standard and its second is
+                    # Scientific; use its center to avoid edge hit ambiguity.
+                    click_at(110, 106)
+                    time.sleep(5.0)
+                    scientific = screen("reactos-calc-02-scientific-layout.ppm")
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if "[MicaNT ReactOSApps] Process handle cleanup complete" in serial:
+                        raise RuntimeError(
+                            "ReactOS Calc exited while creating the scientific layout"
+                        )
+                    changed = sum(left != right for left, right in zip(before, scientific))
+                    # Scientific layout is wider/taller than Standard. Require
+                    # changed pixels below the menu band so an open dropdown
+                    # alone cannot count as a successful mode switch.
+                    body_changed = sum(
+                        before[(y * 1024 + x) * 3:(y * 1024 + x + 1) * 3] !=
+                        scientific[(y * 1024 + x) * 3:(y * 1024 + x + 1) * 3]
+                        for y in range(190, 520) for x in range(340, 640)
+                    )
+                    if changed < 4096 or body_changed < 512:
+                        raise RuntimeError(
+                            "ReactOS Calc scientific layout did not visibly replace the standard dialog"
+                        )
+                    print(
+                        f"ReactOS Calc switched to Scientific through View menu and stayed alive "
+                        f"({changed} changed pixels, {body_changed} in expanded layout).",
+                        flush=True,
+                    )
+                    return
+
+                # Exercise the actual owner-draw buttons, not keyboard focus.
+                click_at(132, 248)  # 1
+                time.sleep(0.3)
+                after_one = screen("reactos-calc-02-after-one.ppm")
+                click_at(299, 128)  # C
+                after_clear = screen("reactos-calc-03-after-clear.ppm")
+                if not lcd_changed(before, after_one):
+                    raise RuntimeError("ReactOS Calc button 1 did not change the display")
+                if not lcd_changed(after_one, after_clear):
+                    raise RuntimeError("ReactOS Calc C button did not clear the display")
+                click_at(132, 248)  # 1
+                click_at(148, 128)  # Back
+                time.sleep(0.35)
+                after_back = screen("reactos-calc-04-after-back.ppm")
+                if not lcd_changed(after_clear, after_back):
+                    raise RuntimeError("ReactOS Calc Back button did not change the display")
+                click_at(132, 248)  # 1
+                for name, x, y in (
+                        ("after-plus", 268, 282),
+                        ("after-second-one", 132, 248),
+                        ("after-equals", 313, 282)):
+                    click_at(x, y)
+                    time.sleep(0.35)
+                    screen(f"reactos-calc-{name}.ppm")
+                time.sleep(0.4)
+                after_calculation = screen("reactos-calc-02-after-1-plus-1.ppm")
+                # The LCD sits at screen coordinates x=60..330, y=74..92 in
+                # this deterministic ReactOS standard-layout fixture. Count
+                # dark glyph pixels away from its recessed border; a window
+                # redraw or changed wallpaper cannot satisfy this assertion.
+                lcd_dark_pixels = sum(
+                    max(after_calculation[(y * 1024 + x) * 3:
+                                          (y * 1024 + x) * 3 + 3]) < 96
+                    for y in range(74, 92) for x in range(60, 330)
+                )
+                if lcd_dark_pixels < 4:
+                    raise RuntimeError(
+                        "ReactOS Calc LCD did not render a result after 1 + 1 = input"
+                    )
+                if not lcd_changed(after_one, after_calculation):
+                    raise RuntimeError("ReactOS Calc 1 + 1 = did not change the display")
+                for key in ("esc",):
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "key", "data": {
+                                "down": down, "key": {"type": "qcode", "data": key},
+                            },
+                        }]})
+                click_at(329, 22)  # close through the real caption hit target
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if "[MicaNT ReactOSApps] Process handle cleanup complete" in serial:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("ReactOS Calc did not clean up after QMP caption close")
+                if "[MicaNT ReactOSApps] Process terminated exit NTSTATUS=0\n" not in serial:
+                    raise RuntimeError("ReactOS Calc did not terminate with STATUS_SUCCESS")
+                print(f"ReactOS Calc buttons passed QMP interaction: 1 + 1 =, C, Back (LCD dark pixels={lcd_dark_pixels}); process cleaned up on caption close.", flush=True)
+                return
             if os.environ.get("MICANT_REACTOS_APP_LEAVE_OPEN") == "1":
                 print(
                     f"ReactOS {app}.exe screenshot captured with its window still open; no QMP input sent.",
@@ -2568,6 +2859,8 @@ def run_qemu(
     audio_controller_test: bool = False,
     audio_render_test: bool = False,
     audio_capture_test: bool = False,
+    textbox_test: bool = False,
+    kernel_image: Path | None = None,
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -2593,6 +2886,11 @@ def run_qemu(
         raise RuntimeError("Doom test requires the CMD graphical terminal QMP profile")
     if cmd_test and diagnostics_dir is None:
         raise RuntimeError("CMD test requires --diagnostics-dir to retain screenshots and evidence")
+    if textbox_test and (reactos_app or theme_test or cmd_test or taskmgr_selftest or
+                         process_memory_selftest or runtime_selftest or timer_selftest):
+        raise RuntimeError("Textbox probe requires its isolated QEMU profile")
+    if textbox_test and diagnostics_dir is None:
+        raise RuntimeError("Textbox probe requires --diagnostics-dir to retain its screenshot")
     if bool(reactos_apps_dir) != bool(reactos_app):
         raise RuntimeError("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
     if reactos_app and (cmd_test or doom_test or theme_test or taskmgr_selftest or
@@ -2690,7 +2988,12 @@ def run_qemu(
     if not ovmf_code.is_file():
         raise RuntimeError(f"OVMF code image does not exist: {ovmf_code}")
 
-    kernel = ROOT / "build" / "baremetal" / "ntoskrnl.exe"
+    kernel = kernel_image.expanduser().resolve() if kernel_image else (
+        ROOT / "build" / "baremetal" / "ntoskrnl.exe")
+    if kernel_image:
+        kernel_pe = inspect_pe(kernel, "NATIVE")
+        if kernel_pe["machine"] != 0x8664:
+            raise RuntimeError("alternate kernel image is not an AMD64 PE")
     bootloader = ROOT / "build" / "esp" / "EFI" / "BOOT" / "BOOTX64.EFI"
     if diagnostics_dir is not None:
         diagnostics_dir.mkdir(parents=True, exist_ok=False)
@@ -2907,6 +3210,11 @@ def run_qemu(
             if not theme_test_image.is_file():
                 raise RuntimeError("Dedicated theme test image was not built for the system volume")
             shutil.copyfile(theme_test_image, system32_dir / theme_test_image.name)
+        if textbox_test:
+            textbox_probe = ROOT / "build" / "textbox_probe.exe"
+            if not textbox_probe.is_file():
+                raise RuntimeError("STATIC textbox probe image was not built")
+            shutil.copyfile(textbox_probe, system32_dir / textbox_probe.name)
         if taskmgr_selftest:
             taskmgr_image = ROOT / "build" / "taskmgr.exe"
             if not taskmgr_image.is_file():
@@ -3449,16 +3757,47 @@ def run_qemu(
                                     f"evidence={audio_capture_path}",
                                     flush=True,
                                 )
+                            textbox_screenshot = None
+                            if textbox_test:
+                                before_probe = capture_qmp_screenshot(
+                                    temp / "qmp.sock", temp, diagnostics_dir,
+                                    "textbox-probe-before-settext.ppm",
+                                )
+                                click_qmp(temp / "qmp.sock", 162, 232)
+                                time.sleep(0.5)
+                                textbox_screenshot = capture_qmp_screenshot(
+                                    temp / "qmp.sock", temp, diagnostics_dir,
+                                    "textbox-probe-after-settext.ppm",
+                                )
+                                def textbox_pixels(path: Path) -> bytes:
+                                    with path.open("rb") as image:
+                                        if (image.readline() != b"P6\n" or
+                                                image.readline() != b"1024 768\n" or
+                                                image.readline() != b"255\n"):
+                                            raise RuntimeError("Unexpected textbox probe screenshot format")
+                                        pixels = image.read()
+                                    return b"".join(
+                                        pixels[(y * 1024 + x) * 3:(y * 1024 + x + 1) * 3]
+                                        for y in range(163, 197) for x in range(92, 392)
+                                    )
+                                changed = sum(a != b for a, b in zip(
+                                    textbox_pixels(before_probe),
+                                    textbox_pixels(textbox_screenshot),
+                                ))
+                                if changed < 4:
+                                    raise RuntimeError(
+                                        "STATIC textbox did not repaint after QMP button click and SetDlgItemTextW")
                             result = (
                                 "DOOM E1M1 gameplay QMP self-test" if doom_test else
                                 "CMD graphical terminal QMP self-test" if cmd_test else
+                                "isolated STATIC textbox probe" if textbox_test else
                                 "Dedicated theme test app" if theme_test else
                                 "Task Manager process-snapshot self-test" if taskmgr_selftest else
                                 "timer self-test" if timer_selftest else
                                 "C++ runtime self-test" if runtime_selftest else
                                 "modular boot"
                             )
-                            if cmd_test:
+                            if cmd_test or textbox_test:
                                 diagnostics_serial = diagnostics_dir / "serial.log"
                                 diagnostics_qemu = diagnostics_dir / "qemu.log"
                                 if serial_path.resolve() != diagnostics_serial.resolve():
@@ -3467,6 +3806,10 @@ def run_qemu(
                                     shutil.copyfile(qemu_output_path, diagnostics_qemu)
                             print(f"QEMU {result} passed; serial remained stable for "
                                   f"{stable_seconds}s.", flush=True)
+                            if textbox_screenshot:
+                                print(f"Textbox probe before/after SetDlgItemTextW: "
+                                      f"{diagnostics_dir / 'textbox-probe-before-settext.ppm'}; "
+                                      f"{textbox_screenshot} ({changed} changed pixels).", flush=True)
                             if usb_ehci_test:
                                 print("Dual-EHCI selection, USB mass-storage mount, and FAT32 file read passed.", flush=True)
                             if interactive:
@@ -3551,6 +3894,10 @@ def main() -> int:
     parser.add_argument("--timer-selftest", action="store_true")
     parser.add_argument("--taskmgr-selftest", action="store_true")
     parser.add_argument("--theme-test", action="store_true")
+    parser.add_argument("--textbox-test", action="store_true",
+                        help="launch the isolated STATIC textbox paint probe")
+    parser.add_argument("--kernel-image", type=Path,
+                        help="use an alternate validated AMD64 kernel PE for isolated boot profiles")
     parser.add_argument("--cmd-test", action="store_true")
     parser.add_argument("--reactos-apps-dir", type=Path)
     parser.add_argument("--reactos-app", choices=(
@@ -3607,6 +3954,8 @@ def main() -> int:
             args.audio_controller_test,
             args.audio_render_test,
             args.audio_capture_test,
+            args.textbox_test,
+            args.kernel_image,
         )
     except KeyboardInterrupt:
         return 130

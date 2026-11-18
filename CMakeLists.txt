@@ -7,11 +7,14 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(MICANT_ENABLE_BAREMETAL "Build the AMD64 freestanding PE boot targets" OFF)
+set(MICANT_BAREMETAL_KERNEL_NAME "ntoskrnl" CACHE STRING
+    "Bare-metal kernel output name (keep ntoskrnl for the production profile)")
 option(MICANT_BOOTSTRAP_RUNTIME_SELFTEST "Halt after kernel C++ lifecycle verification" OFF)
 option(MICANT_BOOTSTRAP_TIMER_SELFTEST "Halt after isolated scheduler-clock tick verification" OFF)
 option(MICANT_BOOTSTRAP_NETWORK_SELFTEST "Enable M10 receive-path fault injection" OFF)
 option(MICANT_BOOTSTRAP_TASKMGR_SELFTEST "Launch taskmgr.exe from the mounted System32 image during QEMU verification" OFF)
 option(MICANT_BOOTSTRAP_THEME_TEST "Launch theme_test.exe for QEMU theme verification" OFF)
+option(MICANT_BOOTSTRAP_TEXTBOX_TEST "Launch the isolated STATIC textbox paint probe in QEMU" OFF)
 option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-memory integration self-test" OFF)
 option(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST "Fault, persist, reboot and recover a LuceOS crash dump in QEMU" OFF)
 option(MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST "Exercise HDA PCI/MMIO rollback and reset in QEMU" OFF)
@@ -721,6 +724,7 @@ if (MICANT_ENABLE_BAREMETAL)
     )
     target_link_options(cmd_boot PRIVATE
         -nostdlib -Wl,--subsystem,windows -Wl,-e,_start -Wl,--gc-sections
+        -Xlinker /STACK:1048576,131072
     )
     target_link_libraries(cmd_boot PRIVATE
         cmd_reactos_core user32_boot gdi32_boot win32k_boot ntdll_boot
@@ -785,6 +789,20 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
 
+    add_executable(textbox_probe_boot EXCLUDE_FROM_ALL tools/textbox_probe_app.cpp)
+    target_include_directories(textbox_probe_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_options(textbox_probe_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -O2)
+    target_link_options(textbox_probe_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start)
+    target_link_libraries(textbox_probe_boot PRIVATE
+        kernel32_boot user32_boot gdi32_boot win32k_boot ntdll_boot)
+    set_target_properties(textbox_probe_boot PROPERTIES
+        OUTPUT_NAME "textbox_probe"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+
     # Native process memory report and dump utility. It reaches process and
     # virtual-memory services only through the existing NTDLL syscall ABI.
     add_executable(procdump_boot EXCLUDE_FROM_ALL tools/procdump_app.cpp)
@@ -844,6 +862,9 @@ if (MICANT_ENABLE_BAREMETAL)
     if (MICANT_BOOTSTRAP_THEME_TEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_THEME_TEST)
     endif()
+    if (MICANT_BOOTSTRAP_TEXTBOX_TEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_TEXTBOX_TEST)
+    endif()
     if (MICANT_BOOTSTRAP_CMD_TEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CMD_TEST)
     endif()
@@ -855,6 +876,10 @@ if (MICANT_ENABLE_BAREMETAL)
         string(TOUPPER "${MICANT_BOOTSTRAP_REACTOS_APP}" _micant_reactos_app_upper)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE
             "MICANT_BOOTSTRAP_REACTOS_APP_${_micant_reactos_app_upper}")
+        if (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "calc")
+            target_compile_definitions(user32_boot PRIVATE
+                MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+        endif()
     endif()
     if (MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
@@ -1232,7 +1257,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-emulated-tls
         -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2)
     target_link_options(msvcrt_boot PRIVATE -nostdlib -Wl,--entry,DllMainCRTStartup)
-    target_link_libraries(msvcrt_boot PRIVATE ucrtbase_boot ntdll_boot)
+    target_link_libraries(msvcrt_boot PRIVATE ucrtbase_boot ntdll_boot kernel32_boot)
     set_target_properties(msvcrt_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "msvcrt"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -1394,7 +1419,7 @@ set_target_properties(prismx_3d_cube_app PROPERTIES
 
 if (MICANT_ENABLE_BAREMETAL)
     set_target_properties(ntoskrnl_core_baremetal PROPERTIES
-        OUTPUT_NAME "ntoskrnl"
+        OUTPUT_NAME "${MICANT_BAREMETAL_KERNEL_NAME}"
         SUFFIX ".exe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/baremetal"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/build/baremetal"

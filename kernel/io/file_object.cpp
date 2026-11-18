@@ -373,7 +373,8 @@ NtStatus IoQueryDirectoryFile(Handle fileHandle, bool restartScan,
 
 NtStatus IoOpenBackendFile(Handle* fileHandle, uint32_t desiredAccess,
                            std::u16string_view name, bool openIf,
-                           bool* created, bool deferCreate) noexcept {
+                           bool* created, bool deferCreate,
+                           uint32_t createOptions) noexcept {
     if (created) *created = false;
     if (!fileHandle || name.empty()) return NtStatus::InvalidParameter;
     *fileHandle = 0;
@@ -388,6 +389,21 @@ NtStatus IoOpenBackendFile(Handle* fileHandle, uint32_t desiredAccess,
     const uint32_t mappedAccess = ob::MapGenericAccess(desiredAccess, g_fileType.genericMapping);
     auto status = open(context, name, openIf, mappedAccess, backend);
     if (status != NtStatus::Success) return status;
+    constexpr uint32_t fileDirectoryFile = 0x0001u;
+    constexpr uint32_t fileNonDirectoryFile = 0x0040u;
+    if ((createOptions & fileDirectoryFile) &&
+        (createOptions & fileNonDirectoryFile)) {
+        if (backend.release) backend.release(backend.context);
+        return NtStatus::InvalidParameter;
+    }
+    if ((createOptions & fileDirectoryFile) && !backend.directory) {
+        if (backend.release) backend.release(backend.context);
+        return NtStatus::NotADirectory;
+    }
+    if ((createOptions & fileNonDirectoryFile) && backend.directory) {
+        if (backend.release) backend.release(backend.context);
+        return NtStatus::FileIsADirectory;
+    }
     if (!backend.name.size()) backend.name = name;
     if (!backend.read || !backend.release ||
         (backend.created && !backend.commitCreate)) {

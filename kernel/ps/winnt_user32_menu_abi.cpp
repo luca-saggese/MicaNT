@@ -121,11 +121,15 @@ intptr_t SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t DefWindowProcW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 int32_t PostMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 int32_t IsWindowVisible(void*) noexcept;
+int32_t EnumChildWindows(void*, void*, intptr_t) noexcept;
 intptr_t SetWindowLongPtrW(void*, int32_t, intptr_t) noexcept;
 intptr_t GetWindowLongPtrW(void*, int32_t) noexcept;
 int32_t GetClientRect(void*, MicaWin32kRect*) noexcept;
 int32_t GetWindowRect(void*, MicaWin32kRect*) noexcept;
 int32_t SetWindowPos(void*, void*, int32_t, int32_t, int32_t, int32_t, uint32_t) noexcept;
+int32_t AdjustWindowRectEx(
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect*, uint32_t, int32_t,
+    uint32_t) noexcept;
 void PostQuitMessage(int32_t) noexcept;
 uint16_t RegisterClassExW(const void*) noexcept;
 __declspec(dllexport) int32_t SetMenu(void*, void*) noexcept;
@@ -139,6 +143,7 @@ __declspec(dllimport) void* __stdcall FindResourceExW(void*, const wchar_t*,
 __declspec(dllimport) void* __stdcall LoadResource(void*, void*) noexcept;
 __declspec(dllimport) void* __stdcall LockResource(void*) noexcept;
 __declspec(dllimport) uint32_t __stdcall SizeofResource(void*, void*) noexcept;
+__declspec(dllimport) uint16_t __stdcall GetUserDefaultUILanguage() noexcept;
 }
 
 class LockGuard {
@@ -253,6 +258,10 @@ intptr_t dialogWindowProcedure(void* window, uint32_t message,
     if (message == 0x0082u /* WM_NCDESTROY */)
         (void)SetWindowLongPtrW(window, kDwlpDlgProc, 0);
     return result;
+}
+int32_t repaintDialogChild(void* child, intptr_t) noexcept {
+    if (child && IsWindowVisible(child)) (void)UpdateWindow(child);
+    return 1;
 }
 bool readMenuText(MenuResourceCursor& cursor, wchar_t (&text)[kTextCapacity]) noexcept {
     size_t count = 0;
@@ -373,6 +382,7 @@ uint32_t g_popupClassRegistered{};
 uint32_t g_menuBarClassRegistered{};
 intptr_t MenuPopupWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t MenuBarWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+size_t menuDisplayText(const wchar_t*, wchar_t*, size_t, size_t&) noexcept;
 
 uint32_t rgb(uint8_t red, uint8_t green, uint8_t blue) noexcept {
     return uint32_t(red) | (uint32_t(green) << 8) | (uint32_t(blue) << 16);
@@ -391,7 +401,7 @@ void invalidatePopup() noexcept {
 int32_t selectable(int32_t index) noexcept {
     if (!g_popup.active || index < 0 || index >= static_cast<int32_t>(g_popup.count)) return -1;
     const auto& item = g_popup.items[index];
-    if (item.submenu || (item.type & kSeparator) || (item.state & kDisabled)) return -1;
+    if ((item.type & kSeparator) || (item.state & kDisabled)) return -1;
     return index;
 }
 int32_t nextSelectable(int32_t start, int32_t direction) noexcept {
@@ -466,7 +476,7 @@ intptr_t MenuPopupWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                                 top + kRowHeight / 2 + 1}, rgb(210, 210, 210));
                 continue;
             }
-            const bool disabled = (item.state & kDisabled) != 0 || item.submenu;
+            const bool disabled = (item.state & kDisabled) != 0;
             const bool hot = static_cast<int32_t>(index) == g_popup.selected;
             if (hot || disabled) {
                 const int32_t state = disabled ? 4 : 2;
@@ -479,22 +489,33 @@ intptr_t MenuPopupWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
             }
             const int32_t textState = disabled ? 4 : (hot ? 2 : 1);
             MicaWin32kRect textRect{34, top, g_popup.width - 8, top + kRowHeight};
+            wchar_t display[kTextCapacity]{};
+            size_t hotkey{};
+            const size_t length = menuDisplayText(item.text, display, kTextCapacity, hotkey);
             bool textThemed = g_popup.theme &&
-                DrawThemeText(g_popup.theme, dc, 1, textState, item.text, -1,
+                DrawThemeText(g_popup.theme, dc, 1, textState, display,
+                    static_cast<int32_t>(length),
                     kDtSingleLine | kDtVCenter, 0, &textRect) == 0;
             if (!textThemed) {
                 const uint32_t color = disabled ? rgb(128, 128, 128) : textColor;
                 (void)SetBkMode(dc, 1);
                 (void)SetTextColor(dc, color);
-                size_t length = 0;
-                while (length < kTextCapacity && item.text[length]) ++length;
                 void* clipToken{};
                 if (MicaGdiPushClipRect(dc, &textRect, &clipToken) && clipToken) {
                     (void)TextOutW(dc, textRect.left,
-                        top + (kRowHeight - 14) / 2, item.text,
+                        top + (kRowHeight - 14) / 2, display,
                         static_cast<int32_t>(length));
                     (void)MicaGdiPopClipRect(dc, clipToken);
                 }
+            }
+            if (hotkey < length)
+                (void)fill(dc, {textRect.left + 8 + static_cast<int32_t>(hotkey * 8),
+                    top + (kRowHeight + 2) / 2, textRect.left + 14 + static_cast<int32_t>(hotkey * 8),
+                    top + (kRowHeight + 3) / 2}, disabled ? rgb(128,128,128) : textColor);
+            if (item.submenu) {
+                (void)SetBkMode(dc, 1);
+                (void)SetTextColor(dc, disabled ? rgb(128,128,128) : textColor);
+                (void)TextOutW(dc, g_popup.width - 18, top + (kRowHeight - 14) / 2, L"›", 1);
             }
             if (item.state & kChecked) {
                 (void)SetBkMode(dc, 1);
@@ -530,6 +551,11 @@ intptr_t MenuPopupWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
     }
     if (message == kWmKeyDown) {
         if (wParam == kVkEscape) { finishPopup(false, -1); return 0; }
+        if (wParam == 0x27u && selectable(g_popup.selected) >= 0 &&
+            g_popup.items[g_popup.selected].submenu) {
+            finishPopup(true, g_popup.selected);
+            return 0;
+        }
         if (wParam == kVkDown || wParam == kVkUp) {
             const int32_t next = nextSelectable(g_popup.selected,
                 wParam == kVkDown ? 1 : -1);
@@ -578,7 +604,27 @@ int32_t menuBarItemWidth(const MenuItem& item) noexcept {
     if (item.type & kSeparator) return 12;
     size_t length = 0;
     while (length < kTextCapacity && item.text[length]) ++length;
-    return static_cast<int32_t>(std::min<size_t>(length, 120) * 8u + 24u);
+    size_t shown = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (item.text[i] == L'&') {
+            if (i + 1 < length && item.text[i + 1] == L'&') { ++shown; ++i; }
+        } else ++shown;
+    }
+    return static_cast<int32_t>(std::min<size_t>(shown, 120) * 8u + 24u);
+}
+size_t menuDisplayText(const wchar_t* source, wchar_t* destination,
+                       size_t capacity, size_t& accelerator) noexcept {
+    accelerator = SIZE_MAX;
+    if (!destination || !capacity) return 0;
+    size_t out = 0;
+    for (size_t in = 0; source && in < kTextCapacity - 1 && source[in] && out + 1 < capacity; ++in) {
+        if (source[in] == L'&') {
+            if (source[in + 1] == L'&') { destination[out++] = L'&'; ++in; }
+            else if (source[in + 1]) accelerator = out;
+        } else destination[out++] = source[in];
+    }
+    destination[out] = L'\0';
+    return out;
 }
 bool menuBarSnapshot(void* hwnd, void*& owner, MenuItem* items,
                      uint32_t& count, int32_t& selected, uint32_t& width) noexcept {
@@ -651,21 +697,27 @@ intptr_t MenuBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
             }
             MicaWin32kRect textRect{left + 10, 1, left + itemWidth - 6,
                                      kMenuBarHeight - 1};
+            wchar_t display[kTextCapacity]{};
+            size_t accelerator{};
+            const size_t length = menuDisplayText(item.text, display, kTextCapacity, accelerator);
             const int32_t textState = disabled ? 4 : (hot ? 2 : 1);
             const bool textThemed = theme && DrawThemeText(theme, dc, 1, textState,
-                item.text, -1, kDtSingleLine | kDtVCenter, 0, &textRect) == 0;
+                display, static_cast<int32_t>(length),
+                kDtSingleLine | kDtVCenter, 0, &textRect) == 0;
             if (!textThemed) {
                 (void)SetBkMode(dc, 1);
                 (void)SetTextColor(dc, disabled ? rgb(128, 128, 128) : text);
-                size_t length = 0;
-                while (length < kTextCapacity && item.text[length]) ++length;
                 void* token{};
                 if (MicaGdiPushClipRect(dc, &textRect, &token) && token) {
-                    (void)TextOutW(dc, textRect.left, 6, item.text,
+                    (void)TextOutW(dc, textRect.left, 6, display,
                                    static_cast<int32_t>(length));
                     (void)MicaGdiPopClipRect(dc, token);
                 }
             }
+            if (accelerator < length)
+                (void)fill(dc, {textRect.left + static_cast<int32_t>(accelerator * 8), 20,
+                    textRect.left + static_cast<int32_t>(accelerator * 8) + 6, 21},
+                    disabled ? rgb(128,128,128) : text);
             left += itemWidth;
         }
         (void)EndPaint(hwnd, &paint);
@@ -777,16 +829,14 @@ intptr_t MenuBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
 bool drawMenuBar(void* owner) noexcept {
     if (!owner || !registerMenuBarClass()) return false;
     MicaWin32kRect client{};
-    MicaWin32kRect outer{};
-    if (!GetClientRect(owner, &client) || !GetWindowRect(owner, &outer) ||
+    if (!GetClientRect(owner, &client) ||
         client.right <= client.left ||
         client.bottom <= client.top) return false;
-    // This Win32k build stores child placement in screen coordinates. Keep the
-    // menu immediately below the current WhiteSur caption and inside its frame.
-    constexpr int32_t kFrameInset = 5;
-    constexpr int32_t kCaptionHeight = 40;
-    const int32_t left = outer.left + kFrameInset;
-    const int32_t top = outer.top + kFrameInset + kCaptionHeight;
+    // Menu-band windows use the parent's menu allocation at the top of the
+    // client origin. Their negative local Y places them above the client area;
+    // normal child controls are shifted below the menu by Win32k.
+    constexpr int32_t left = 0;
+    constexpr int32_t top = -kMenuBarHeight;
     void* menu{};
     void* barWindow{};
     MenuBarState* freeSlot = nullptr;
@@ -864,7 +914,7 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
         g_popup.y = y;
         g_popup.height = int32_t(menu->count) * kRowHeight + 2 * kBorder;
         for (uint32_t index = 0; index < menu->count; ++index) {
-            if (menu->items[index].submenu || (menu->items[index].type & (kBitmap | kOwnerDraw)))
+        if (menu->items[index].type & (kBitmap | kOwnerDraw))
                 return false;
             g_popup.items[index] = menu->items[index];
         }
@@ -889,7 +939,8 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
         g_popup.y = std::max(0, screenHeight - g_popup.height);
     g_popup.theme = OpenThemeData(owner, L"MENU");
     auto* window = CreateWindowExW(0, kPopupClassName, L"", kWsPopup,
-        g_popup.x, g_popup.y, g_popup.width, g_popup.height, owner, nullptr, nullptr, nullptr);
+        g_popup.x, g_popup.y, g_popup.width, g_popup.height, nullptr, nullptr,
+        nullptr, nullptr);
     if (!window) {
         if (g_popup.theme) (void)CloseThemeData(g_popup.theme);
         LockGuard guard; g_popup = {};
@@ -917,11 +968,18 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
     }
     const bool chose = g_popup.chose;
     const int32_t selected = g_popup.selected;
+    void* selectedSubmenu = chose && selected >= 0 &&
+        static_cast<uint32_t>(selected) < g_popup.count
+        ? g_popup.items[selected].submenu : nullptr;
     const uint32_t command = chose && selected >= 0
         ? g_popup.items[selected].id : 0u;
+    const int32_t submenuX = g_popup.x + g_popup.width - 2;
+    const int32_t submenuY = g_popup.y + kBorder + std::max(0, selected) * kRowHeight;
     if (g_popup.hwnd) (void)DestroyWindow(g_popup.hwnd);
     if (g_popup.theme) (void)CloseThemeData(g_popup.theme);
     g_popup = {};
+    if (selectedSubmenu)
+        return showPopup(selectedSubmenu, flags, submenuX, submenuY, 0, owner);
     if (!chose || !command) return false;
     (void)SendMessageW(owner, kWmCommand, command, 0);
     return modalCompleted;
@@ -965,7 +1023,8 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
         return nullptr;
     }
     const auto resourceType = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(5));
-    void* resource = FindResourceExW(instance, resourceType, templateName, 0);
+    void* resource = FindResourceExW(instance, resourceType, templateName,
+                                     GetUserDefaultUILanguage());
     void* loaded = resource ? LoadResource(instance, resource) : nullptr;
     const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
     const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;
@@ -1011,8 +1070,19 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
         ? 48 : (static_cast<int32_t>(static_cast<int16_t>(xRaw)) * 7) / 4;
     const int32_t y = static_cast<int16_t>(yRaw) == static_cast<int16_t>(0x8000u)
         ? 48 : (static_cast<int32_t>(static_cast<int16_t>(yRaw)) * 15) / 8;
-    const int32_t width = (static_cast<int32_t>(widthRaw) * 7) / 4;
-    const int32_t height = (static_cast<int32_t>(heightRaw) * 15) / 8;
+    int32_t width = (static_cast<int32_t>(widthRaw) * 7) / 4;
+    int32_t height = (static_cast<int32_t>(heightRaw) * 15) / 8;
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect outerRect{
+        0, 0, width, height};
+    if (!AdjustWindowRectEx(&outerRect, style,
+            (hasMenuOrdinal || menuName[0]) ? 1 : 0, exStyle) ||
+        outerRect.right <= outerRect.left || outerRect.bottom <= outerRect.top) {
+        uint32_t error = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        return nullptr;
+    }
+    width = outerRect.right - outerRect.left;
+    height = outerRect.bottom - outerRect.top;
     void* window = CreateWindowExW(exStyle, kDialogClass, caption, style,
         x, y, width, height, parent, nullptr, instance, nullptr);
     if (!window) return nullptr;
@@ -1084,6 +1154,11 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
     if (style & 0x10000000u /* WS_VISIBLE */) {
         (void)ShowWindow(window, 5);
         (void)UpdateWindow(window);
+        // WM_INITDIALOG may set static/button text after each child has already
+        // received its creation paint. Redraw the visible children once the
+        // dialog callback has completed so its final control state is shown.
+        (void)EnumChildWindows(window,
+            reinterpret_cast<void*>(&repaintDialogChild), 0);
     }
     (void)helpId; (void)classOrdinal; (void)hasClassOrdinal; (void)pointSize;
     return window;
@@ -1096,7 +1171,7 @@ __declspec(dllexport) void* LoadMenuW(void* instance,
         return nullptr;
     }
     const auto type = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(4));
-    void* resource = FindResourceExW(instance, type, name, 0);
+    void* resource = FindResourceExW(instance, type, name, GetUserDefaultUILanguage());
     void* loaded = resource ? LoadResource(instance, resource) : nullptr;
     const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
     const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;

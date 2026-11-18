@@ -342,7 +342,8 @@ NtStatus IoQueryDirectoryFile(Handle fileHandle, bool restartScan,
                               FileBothDirInformation* output) noexcept;
 NtStatus IoOpenBackendFile(Handle* fileHandle, uint32_t desiredAccess,
                            std::u16string_view name, bool openIf = false,
-                           bool* created = nullptr, bool deferCreate = false) noexcept;
+                           bool* created = nullptr, bool deferCreate = false,
+                           uint32_t createOptions = 0) noexcept;
 NtStatus IoCommitCreatedFile(Handle fileHandle) noexcept;
 NtStatus IoCreateBackendFile(Handle* fileHandle, uint32_t desiredAccess,
                              const FileBackend& backend) noexcept;

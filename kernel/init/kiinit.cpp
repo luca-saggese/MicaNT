@@ -3353,6 +3353,21 @@ bool launchExplorerProcess() noexcept {
                                   g_explorerProcessId);
 }
 
+#if defined(MICANT_BOOTSTRAP_TEXTBOX_TEST)
+bool launchTextboxProbeProcess() noexcept {
+    micant::Handle processHandle{};
+    micant::Handle processId{};
+    if (!launchUserImageProcess(u"textbox_probe.exe", processHandle, processId))
+        return false;
+    if (micant::sys::NtClose(processHandle) != micant::NtStatus::Success)
+        return false;
+    serialWrite("[MicaNT TextboxProbe] STATIC textbox probe launched PID=");
+    serialWriteNumber(static_cast<uint32_t>(processId));
+    serialWrite("\r\n");
+    return true;
+}
+#endif
+
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) || \
@@ -3992,7 +4007,9 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         constexpr uint32_t fileOpenIf = 3;
         constexpr uint32_t allowedAttributes = OBJ_INHERIT | OBJ_CASE_INSENSITIVE;
         constexpr uint32_t allowedShareAccess = 0x7;
-        constexpr uint32_t allowedOpenOptions = 0x20 | 0x40;
+        constexpr uint32_t fileDirectoryFile = 0x0001u;
+        constexpr uint32_t fileNonDirectoryFile = 0x0040u;
+        constexpr uint32_t allowedOpenOptions = 0x20 | fileDirectoryFile | fileNonDirectoryFile;
         const auto fileAttributes = static_cast<uint32_t>(extra[1]);
         const auto shareAccess = static_cast<uint32_t>(extra[2]);
         const auto createDisposition = static_cast<uint32_t>(extra[3]);
@@ -4080,7 +4097,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
             if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
             ioStatus.status = io::IoOpenBackendFile(&handle, static_cast<uint32_t>(second),
-                pathView, createDisposition == fileOpenIf, &provisionalCreated, true);
+                pathView, createDisposition == fileOpenIf, &provisionalCreated, true,
+                createOptions);
             if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
             __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
             __asm__ __volatile__("swapgs" : : : "memory");
@@ -5024,6 +5042,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (request.operation == MICANT_WIN32K_OP_PUMP_INPUT) {
             bool keyboardQueued = false;
             static bool explorerMouseClickObserved = false;
+            static bool keyboardShiftDown = false;
             CMD_HID_VALIDATE("win32k pump entry");
             pollKeyboardInput();
             CMD_HID_VALIDATE("PS2 keyboard poll");
@@ -5064,12 +5083,19 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 if (!km::hid::KbdClassPopInputData(packet)) break;
                 uint16_t virtualKey = 0;
                 uint8_t character = 0;
+                const bool keyBreak = (packet.Flags & km::hid::KEY_BREAK) != 0;
+                if (packet.MakeCode == 0x2A || packet.MakeCode == 0x36)
+                    keyboardShiftDown = !keyBreak;
                 if (packet.Flags & km::hid::KEY_E0) {
                     switch (packet.MakeCode) {
                         case 0x48: virtualKey = 0x26; break; // VK_UP
                         case 0x4B: virtualKey = 0x25; break; // VK_LEFT
                         case 0x4D: virtualKey = 0x27; break; // VK_RIGHT
                         case 0x50: virtualKey = 0x28; break; // VK_DOWN
+                        case 0x47: virtualKey = 0x24; break; // VK_HOME
+                        case 0x4F: virtualKey = 0x23; break; // VK_END
+                        case 0x49: virtualKey = 0x21; break; // VK_PRIOR
+                        case 0x51: virtualKey = 0x22; break; // VK_NEXT
                         default: break;
                     }
                 }
@@ -5084,6 +5110,17 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                         case 0x2A: case 0x36: virtualKey = 0x10; break;
                         case 0x38: virtualKey = 0x12; break;
                         case 0x39: virtualKey = 0x20; character = ' '; break;
+                        case 0x0C: virtualKey = 0xBD; character = keyboardShiftDown ? '_' : '-'; break;
+                        case 0x0D: virtualKey = 0xBB; character = keyboardShiftDown ? '+' : '='; break;
+                        case 0x1A: virtualKey = 0xDB; character = keyboardShiftDown ? '{' : '['; break;
+                        case 0x1B: virtualKey = 0xDD; character = keyboardShiftDown ? '}' : ']'; break;
+                        case 0x27: virtualKey = 0xBA; character = keyboardShiftDown ? ':' : ';'; break;
+                        case 0x28: virtualKey = 0xDE; character = keyboardShiftDown ? '"' : '\''; break;
+                        case 0x29: virtualKey = 0xC0; character = keyboardShiftDown ? '~' : '`'; break;
+                        case 0x2B: virtualKey = 0xDC; character = keyboardShiftDown ? '|' : '\\'; break;
+                        case 0x33: virtualKey = 0xBC; character = keyboardShiftDown ? '<' : ','; break;
+                        case 0x34: virtualKey = 0xBE; character = keyboardShiftDown ? '>' : '.'; break;
+                        case 0x35: virtualKey = 0xBF; character = keyboardShiftDown ? '?' : '/'; break;
                         default:
                             if (packet.MakeCode >= 0x10 && packet.MakeCode <= 0x19) {
                                 constexpr char row[] = "qwertyuiop";
@@ -5099,6 +5136,12 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                             } else if (packet.MakeCode == 0x0B) {
                                 character = '0';
                             }
+                            if (keyboardShiftDown && character >= '1' && character <= '9') {
+                                constexpr char shiftedDigits[] = "!@#$%^&*(";
+                                character = static_cast<uint8_t>(shiftedDigits[character - '1']);
+                            } else if (keyboardShiftDown && character == '0') {
+                                character = ')';
+                            }
                             if (character) virtualKey = character >= 'a' && character <= 'z'
                                 ? static_cast<uint16_t>(character - 'a' + 'A') : character;
                             break;
@@ -5107,8 +5150,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 if (!virtualKey) continue;
                 MicaWin32kKeyboardEvent key{};
                 key.virtualKey = virtualKey;
-                key.character = (packet.Flags & km::hid::KEY_BREAK) ? 0 : character;
-                key.flags = (packet.Flags & km::hid::KEY_BREAK) ? 0 : 1;
+                key.character = keyBreak ? 0 : character;
+                key.flags = keyBreak ? 0 : 1;
                 key.sequence = packet.MakeCode;
                 keyboardQueued |= win32k::freestanding::dispatchKeyboardInput(key);
                 request.result = 1;
@@ -5554,6 +5597,11 @@ void pollKeyboardInput() noexcept {
     if (micant::sys::NtClose(themeTestProcessHandle) != micant::NtStatus::Success)
         stopWithError("[MicaNT ThemeTest] Process handle close failed\r\n");
     serialWrite("[MicaNT ThemeTest] Dedicated control test app launched\r\n");
+#endif
+#if defined(MICANT_BOOTSTRAP_TEXTBOX_TEST)
+    serialWrite("[MicaNT TextboxProbe] Launching isolated STATIC textbox paint probe\r\n");
+    if (!launchTextboxProbeProcess())
+        stopWithError("[MicaNT TextboxProbe] Ring 3 process launch failed\r\n");
 #endif
 #if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
     serialWrite("[MicaNT Audio] Launching Ring 3 PCM render client\r\n");
