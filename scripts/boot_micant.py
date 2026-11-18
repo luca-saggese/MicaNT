@@ -526,7 +526,7 @@ def verify_cmd_terminal(
                             "down": down, "key": {"type": "qcode", "data": qcode},
                         },
                     }]})
-                time.sleep(0.075 if doom_test else 0.025)
+                time.sleep(0.15 if doom_test else 0.025)
 
             def hold_key(qcode: str, duration: float) -> None:
                 execute("input-send-event", {"events": [{
