@@ -22,7 +22,6 @@ extern "C" {
 extern "C" {
 int use_libsamplerate{};
 float libsamplerate_scale{0.65f};
-void DG_MixMusic(int32_t* left, int32_t* right, size_t frames) noexcept;
 }
 
 namespace {
@@ -205,7 +204,6 @@ void updateSound() noexcept {
             channel.positionQ32 += channel.stepQ32;
         }
     }
-    DG_MixMusic(g_left, g_right, frames);
     for (size_t frame = 0; frame < frames; ++frame) {
         const size_t index = frame * 2;
         g_pcm[index] = static_cast<int16_t>(g_left[frame] > 32767 ? 32767 :
@@ -268,10 +266,24 @@ void precacheSounds(sfxinfo_t* sounds, int count) noexcept {
     for (int i = 0; i < count; ++i) (void)cacheSound(&sounds[i]);
 }
 
+boolean initializeMusic() noexcept { return false; }
+void noopMusic() noexcept {}
+void setMusicVolume(int) noexcept {}
+void* registerSong(void*, int) noexcept { return nullptr; }
+void unregisterSong(void*) noexcept {}
+void playSong(void*, boolean) noexcept {}
+boolean musicIsPlaying() noexcept { return false; }
+
 snddevice_t g_soundDevices[]{SNDDEVICE_SB};
 } // namespace
 
 extern "C" sound_module_t DG_sound_module{
     g_soundDevices, 1, initializeSound, shutdownSound, getSfxLumpNum,
     updateSound, updateSoundParams, startSound, stopSound, soundIsPlaying, precacheSounds,
+};
+
+extern "C" music_module_t DG_music_module{
+    g_soundDevices, 1, initializeMusic, noopMusic, setMusicVolume,
+    noopMusic, noopMusic, registerSong, unregisterSong, playSong,
+    noopMusic, musicIsPlaying, noopMusic,
 };

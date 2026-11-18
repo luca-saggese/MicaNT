@@ -734,21 +734,10 @@ def verify_cmd_terminal(
                 if not audio_confirmed and not leave_doom_open:
                     raise RuntimeError("DOOM gameplay produced no confirmed HDA PCM audio")
 
-                music_deadline = time.monotonic() + 8
-                while time.monotonic() < music_deadline:
-                    if "[MicaNT DoomMusic] MUS playback started" in serial_path.read_text(
-                            encoding="utf-8", errors="replace"):
-                        break
-                    time.sleep(0.1)
-                music_confirmed = "[MicaNT DoomMusic] MUS playback started" in serial_path.read_text(
-                    encoding="utf-8", errors="replace")
-                if not music_confirmed and not leave_doom_open:
-                    raise RuntimeError("DOOM did not start MUS background music")
-
                 if leave_doom_open:
                     if not audio_confirmed:
                         print(
-                            "The scripted fire key did not confirm an HDA effect; leaving E1M1 open for manual input.",
+                            "HDA PCM was not confirmed; leaving E1M1 open for manual input.",
                             flush=True,
                         )
                     print(
