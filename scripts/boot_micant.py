@@ -2137,6 +2137,15 @@ def validate_hda_render_wav(path: Path) -> tuple[int, int]:
                     f"HDA render WAV frame count outside bounds: {frame_count}"
                 )
 
+            # Three unity-clock source frames begin at -32768. With each
+            # stream at 0.125 gain, their checked mix is -12288 per channel.
+            first_frame = capture.readframes(1)
+            if len(first_frame) != 4 or struct.unpack("<hh", first_frame) != (-12288, -12288):
+                raise RuntimeError(
+                    "HDA render WAV does not begin with the expected three-stream mix"
+                )
+            capture.rewind()
+
             peak = 0
             nonzero_samples = 0
             frames_read = 0
@@ -3040,7 +3049,7 @@ def run_qemu(
                         if audio_render_test and (
                                 serial_log.count("[MicaNT Audio] PCM stream completion verified") < 2 or
                                 "[MicaNT Audio] Injected render failure released all DMA resources" not in serial_log or
-                                "[MicaNT Audio] Ring 3 PCM submission verified" not in serial_log):
+                                "[MicaNT Audio] Three-stream converted mix submitted to HDA" not in serial_log):
                             complete_since = None
                             time.sleep(0.1)
                             continue

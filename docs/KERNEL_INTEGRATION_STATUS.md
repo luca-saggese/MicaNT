@@ -19,6 +19,12 @@ specification. The compatibility inventory is
 - Verification: `cmake --build build/qemu-cmake-mingw --target ntoskrnl_core_baremetal audio_capture_probe_boot`; QEMU via `scripts/boot_micant.py --audio-capture-test` at `/private/tmp/micant-audio-a1-failure-cleanup-24`. The client observed an injected setup failure, all capture DMA allocations were released, then two reads completed with contiguous frame indices and increasing timestamps. Boot remained stable for three seconds.
 - This is DMA/interrupt/ABI plumbing evidence only. QEMU was configured with `driver=none`; it supplied no meaningful input samples, and the client did not assert sample contents. Host inspection found no available audio input device. A1 remains unaccepted until configured-source samples are verified and overrun/device-removal lifecycle cases are exercised. No physical microphone capture is claimed.
 
+## 2026-11-18 — M18 A2 shared mixer foundation (partial)
+
+- Added an allocation-free, bounded Ring 3 PCM mixer supporting mono/stereo signed-16 input, linear rate conversion, stream/session/master gain and mute controls, stereo pan, and final clipping. The HDA render probe feeds three distinct streams (48 kHz stereo, 44.1 kHz mono, 32 kHz stereo) through it before the existing real DMA endpoint.
+- A2 is not accepted: the probe is still one process and the mixer runs synchronously in that process. There is no shared persistent engine, concurrent client queue, worker scheduling, lifecycle/underrun policy, or client termination/device invalidation coverage yet.
+- QEMU build succeeded. The first elevated QEMU run reached the client and completed two DMA writes. Its 10,990-frame WAV passed the new sample assertion with first stereo frame `-12288/-12288` and peak 12,288. That run timed out waiting for stable idle because the harness still expected the old client marker. After updating the marker, two reruns stopped during bootstrap while attempting an optional ReactOS PE even though the audio manifest records `reactos_app: null`; those runs did not reach the audio client. The audio evidence is therefore an executed client/DMA/WAV result, while a stable end-to-end rerun remains pending.
+
 ## 2026-11-14 — dynamic memory bootstrap migration (in progress)
 
 - UEFI memory-map retrieval now retries with `AllocatePool` when the current
