@@ -1,4 +1,6 @@
 #include "micant/km/win32k/freestanding.hpp"
+#include "micant/km/core/ke.hpp"
+#include "micant/km/executive/ps.hpp"
 #include "micant/shared/compositor_surface.h"
 #include "micant/km/core/sync_baremetal.hpp"
 #include <algorithm>
@@ -55,6 +57,7 @@ bool g_pendingFullRedraw{true};
 bool g_damageChangedSinceLastPublish{true};
 CreateCompositorSurface g_createCompositorSurface{};
 ReleaseCompositorSurface g_releaseCompositorSurface{};
+ps::EProcess* g_compositorProcess{};
 CompositorSurfaceStorage g_surfaceMetadataStorage{};
 CompositorSurfaceStorage g_dirtyMetadataStorage{};
 size_t g_surfaceMetadataCapacity{};
@@ -277,7 +280,8 @@ constexpr uint16_t kDefaultArrowRows[16]{
     0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
     0xFF80,0xFCC0,0xCCC0,0x86C0,0x06C0,0x0360,0x0360,0x0000};
 
-void resetCursorImage(bool ownerAddressValid = false) noexcept {
+void resetCursorImage(bool ownerAddressValid = false,
+                      bool createReplacement = true) noexcept {
     if (g_activeCursorStorage.sectionReference && g_releaseCompositorSurface)
         (void)g_releaseCompositorSurface(g_activeCursorStorage, ownerAddressValid);
     g_activeCursorStorage = {};
@@ -285,7 +289,7 @@ void resetCursorImage(bool ownerAddressValid = false) noexcept {
     g_activeCursorOwner = 0;
     g_activeCursorWidth = g_activeCursorHeight = g_activeCursorPitch = 16;
     g_activeCursorHotX = g_activeCursorHotY = 0;
-    if (!g_createCompositorSurface ||
+    if (!createReplacement || !g_createCompositorSurface ||
         g_createCompositorSurface(16, 16, g_activeCursorStorage) != NtStatus::Success) {
         g_activeCursorWidth = g_activeCursorHeight = g_activeCursorPitch = 0;
         return;
@@ -1828,6 +1832,17 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
 
 void releaseProcess(uint64_t ownerProcessId) noexcept {
     if (!ownerProcessId) return;
+    auto* compositor = g_compositorProcess;
+    const bool compositorIsBeingReleased = compositor &&
+        compositor->processId() == ownerProcessId;
+    ke::KAPC_STATE attachState{};
+    bool attachAttempted = false;
+    bool compositorContext = !compositor || ke::KeGetCurrentProcess() == compositor;
+    if (compositor && !compositorIsBeingReleased && !compositorContext) {
+        attachAttempted = true;
+        ke::KeStackAttachProcess(compositor, &attachState);
+        compositorContext = ke::KeGetCurrentProcess() == compositor;
+    }
     auto publish = g_compositorPublishCallback;
     {
         StateLockGuard lock;
@@ -1891,11 +1906,16 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         }
         if (g_activeCursorOwner == ownerProcessId) {
             if (g_mousePositionValid) markCursorChanged();
-            resetCursorImage();
+            // The old owner's view was removed with its address space. The
+            // replacement view belongs to whichever process is current, so
+            // only build it after attaching to the compositor address space.
+            resetCursorImage(false, compositorContext && !compositorIsBeingReleased);
             if (g_mousePositionValid) markCursorChanged();
         }
     }
-    if (publish) publish();
+    if (publish && compositorContext && !compositorIsBeingReleased) publish();
+    if (attachAttempted && compositorContext)
+        ke::KeUnstackDetachProcess(&attachState);
 }
 
 bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
@@ -2140,6 +2160,7 @@ void bindCompositorStore(MicaCompositorMetadataStore* store,
                          CreateCompositorSurface createSurface,
                          ReleaseCompositorSurface releaseSurface) noexcept {
     StateLockGuard lock;
+    g_compositorProcess = ke::KeGetCurrentProcess();
     g_createCompositorSurface = createSurface;
     g_releaseCompositorSurface = releaseSurface;
     if (!g_defaultCursorInitialized) {

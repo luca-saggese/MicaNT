@@ -2624,6 +2624,11 @@ def run_qemu(
         usb_proof = system32_dir / "micant-usb-proof.txt"
         usb_proof.write_bytes(b"MicaNT USB mass-storage FAT32 post-EBS proof v1\n")
         tls_peer = M10TlsPeer(esp).start() if network_test else None
+        if doom_test:
+            # Retain the complete UEFI source volume with Doom evidence so a
+            # second real boot can run the guest crash recovery service on
+            # the same persistent AHCI image.
+            shutil.copytree(esp, diagnostics_dir / "esp")
         fat_volume = temp / "ahci-fat32-volume.img"
         ahci_image = temp / "ahci-gpt-fat32.img"
         create_fat32_image(esp, fat_volume)
@@ -3057,8 +3062,12 @@ def run_qemu(
                                 "modular boot"
                             )
                             if cmd_test:
-                                shutil.copyfile(serial_path, diagnostics_dir / "serial.log")
-                                shutil.copyfile(qemu_output_path, diagnostics_dir / "qemu.log")
+                                diagnostics_serial = diagnostics_dir / "serial.log"
+                                diagnostics_qemu = diagnostics_dir / "qemu.log"
+                                if serial_path.resolve() != diagnostics_serial.resolve():
+                                    shutil.copyfile(serial_path, diagnostics_serial)
+                                if qemu_output_path.resolve() != diagnostics_qemu.resolve():
+                                    shutil.copyfile(qemu_output_path, diagnostics_qemu)
                             print(f"QEMU {result} passed; serial remained stable for "
                                   f"{stable_seconds}s.", flush=True)
                             if usb_ehci_test:
