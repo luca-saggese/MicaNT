@@ -7,6 +7,7 @@
 #include "micant/km/executive/io.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/km/executive/ob.hpp"
+#include "micant/km/core/sync_baremetal.hpp"
 #include "micant/km/hal/amd64_bootstrap.hpp"
 #include "micant/shared/boot_driver.hpp"
 #include "micant/shared/native_audio_api.hpp"
@@ -28,6 +29,8 @@ constexpr uint32_t kGctlControllerReset = 1;
 constexpr uint32_t kGcap = 0x00;
 constexpr uint32_t kVersion = 0x02;
 constexpr uint32_t kStateStatus = 0x0e;
+constexpr uint32_t kInterruptControl = 0x20;
+constexpr uint32_t kInterruptStatus = 0x24;
 constexpr uint32_t kCorbBaseLow = 0x40;
 constexpr uint32_t kCorbBaseHigh = 0x44;
 constexpr uint32_t kCorbWritePointer = 0x48;
@@ -41,6 +44,7 @@ constexpr uint32_t kRirbControl = 0x5c;
 constexpr uint32_t kRirbSize = 0x5e;
 constexpr uint32_t kRirbStatus = 0x5d;
 constexpr uint32_t kOutputStreamBase = 0x100; // QEMU SDO0 follows four SDI descriptors.
+constexpr uint32_t kInputStreamBase = 0x80; // QEMU SDI0.
 constexpr uint32_t kStreamStride = 0x20;
 constexpr uint8_t kRingRun = 1u << 1;
 constexpr uint8_t kRirbResponseInterruptEnable = 1u << 0;
@@ -50,8 +54,13 @@ constexpr size_t kMaximumRenderBytes = micant::shared::audio::MaximumWriteBytes;
 constexpr uint32_t kStreamRun = 1u << 1;
 constexpr uint32_t kStreamReset = 1u << 0;
 constexpr uint32_t kStreamInterruptOnCompletion = 1u << 2;
+constexpr uint32_t kStreamInterruptOnFifoError = 1u << 3;
+constexpr uint32_t kStreamInterruptOnDescriptorError = 1u << 4;
 constexpr uint8_t kStreamBufferCompletionStatus = 1u << 2;
 constexpr uint32_t kBdlInterruptOnCompletion = 1u;
+constexpr uint32_t kWidgetInputAmpPresent = 1u << 1;
+constexpr uint32_t kAmpCapabilityStepsMask = 0x7fu << 8;
+constexpr uint32_t kAmpCapabilityMute = 1u << 31;
 
 struct BdlEntry { uint64_t address{}; uint32_t length{}, flags{}; };
 static_assert(sizeof(BdlEntry) == 16);
@@ -61,6 +70,11 @@ struct Controller {
     uint64_t claimToken{}, mappingToken{};
     uint8_t codecAddress{};
     uint16_t originalCommand{};
+    uint8_t msiCapability{};
+    uint16_t msiOriginalControl{};
+    uint32_t msiOriginalAddressLow{}, msiOriginalAddressHigh{}, msiOriginalData{};
+    uint64_t msiToken{};
+    bool msi64Bit{};
     volatile uint8_t* registers{};
     size_t registerLength{};
     uint32_t gcap{};
@@ -74,8 +88,10 @@ struct Controller {
     uint32_t rirbEntries{};
     bool ringsRunning{}, busMasterEnabled{}, codecDiscovered{};
     uint8_t audioFunctionGroup{}, outputDac{}, outputPin{}, outputConnection{};
+    uint8_t inputAdc{}, inputPin{}, inputConnection{};
+    uint32_t inputAmpCaps{};
     uint16_t outputFormat{0x0011};
-    bool outputRouteReady{};
+    bool outputRouteReady{}, inputRouteReady{};
 };
 
 Controller g_controller{};
@@ -90,6 +106,21 @@ uint64_t g_renderPcmAddress{}, g_renderBdlAddress{};
 void* g_renderPcm{};
 void* g_renderBdl{};
 bool g_renderFaulted{};
+std::atomic_flag g_captureInProgress = ATOMIC_FLAG_INIT;
+sync::detail::BootstrapEvent g_captureReady{true, false};
+ke::KDPC g_captureDpc{};
+std::atomic<uint32_t> g_captureInterruptStatus{};
+std::atomic<bool> g_captureInterruptEnabled{};
+std::atomic<uint32_t> g_captureIsrActive{};
+uint64_t g_capturePcmToken{}, g_captureBdlToken{};
+uint64_t g_capturePcmAddress{}, g_captureBdlAddress{};
+void* g_capturePcm{};
+void* g_captureBdl{};
+bool g_captureFaulted{};
+uint64_t g_captureFrameIndex{};
+#if defined(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST)
+bool g_captureFailureInjected{};
+#endif
 #if defined(MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST)
 bool g_rollbackFailureInjected{};
 #endif
@@ -107,6 +138,125 @@ bool writeConfig(uint16_t bus, uint16_t device, uint16_t function,
                  uint16_t offset, uint32_t value) noexcept {
     return hal::amd64::writePciConfig32(bus, device, function, offset, value) ==
         hal::amd64::PciConfigAccessResult::Success;
+}
+
+void captureDpcRoutine(ke::KDPC*, void*, void*, void*) {
+    (void)g_captureReady.set();
+}
+
+void captureMsiRoutine(void* context) noexcept {
+    auto* controller = static_cast<Controller*>(context);
+    if (!controller) return;
+    g_captureIsrActive.fetch_add(1, std::memory_order_acq_rel);
+    if (g_captureInterruptEnabled.load(std::memory_order_acquire)) {
+        const auto* stream = controller->registers + kInputStreamBase;
+        const uint8_t status = stream[0x03];
+        if (status & (kStreamBufferCompletionStatus | (1u << 3) | (1u << 4))) {
+            const_cast<volatile uint8_t*>(stream)[0x03] = status & 0x1cu;
+            g_captureInterruptStatus.fetch_or(status, std::memory_order_acq_rel);
+            (void)ke::KeInsertQueueDpc(&g_captureDpc);
+        }
+    }
+    g_captureIsrActive.fetch_sub(1, std::memory_order_release);
+}
+
+bool enableCaptureMsi(Log log) noexcept {
+    auto& controller = g_controller;
+    if (controller.msiToken) {
+        g_captureInterruptStatus.store(0, std::memory_order_release);
+        g_captureInterruptEnabled.store(true, std::memory_order_release);
+        return true;
+    }
+    uint32_t statusCommand{}, pointerWord{};
+    if (!readConfig(controller.bus, controller.device, controller.function, 4, statusCommand) ||
+        !(statusCommand & (1u << 20)) ||
+        !readConfig(controller.bus, controller.device, controller.function, 0x34, pointerWord)) {
+        if (log) log("[MicaNT Audio] PCI MSI capability list unavailable\r\n");
+        return false;
+    }
+    uint8_t capability = static_cast<uint8_t>(pointerWord & 0xfcu);
+    uint32_t capabilityWord{};
+    bool found = false;
+    for (uint32_t index = 0; capability && index < 48; ++index) {
+        if (capability < 0x40 || capability > 0xfc || (capability & 3u) ||
+            !readConfig(controller.bus, controller.device, controller.function,
+                        capability, capabilityWord)) {
+            if (log) log("[MicaNT Audio] PCI capability chain invalid during MSI search\r\n");
+            return false;
+        }
+        if ((capabilityWord & 0xffu) == 0x05u) { found = true; break; }
+        capability = static_cast<uint8_t>((capabilityWord >> 8) & 0xfcu);
+    }
+    if (!found) {
+        if (log) log("[MicaNT Audio] PCI function has no MSI capability\r\n");
+        return false;
+    }
+    const uint16_t control = static_cast<uint16_t>(capabilityWord >> 16);
+    if (control & 1u) {
+        if (log) log("[MicaNT Audio] PCI MSI is already enabled by another owner\r\n");
+        return false; // Never replace an MSI route owned by firmware.
+    }
+    const bool address64 = (control & (1u << 7)) != 0;
+    uint32_t addressLow{}, addressHigh{}, messageData{};
+    if (!readConfig(controller.bus, controller.device, controller.function, capability + 4, addressLow))
+        return false;
+    if (address64) {
+        if (!readConfig(controller.bus, controller.device, controller.function, capability + 8, addressHigh) ||
+            !readConfig(controller.bus, controller.device, controller.function, capability + 12, messageData))
+            return false;
+    } else if (!readConfig(controller.bus, controller.device, controller.function, capability + 8, messageData)) {
+        return false;
+    }
+    hal::amd64::BootstrapMsiMessage message{};
+    if (!hal::amd64::connectBootstrapMsiInterrupt(captureMsiRoutine, &controller, message)) {
+        if (log) log("[MicaNT Audio] HAL MSI vector reservation failed\r\n");
+        return false;
+    }
+    controller.msiCapability = capability;
+    controller.msiOriginalControl = control;
+    controller.msiOriginalAddressLow = addressLow;
+    controller.msiOriginalAddressHigh = addressHigh;
+    controller.msiOriginalData = messageData;
+    controller.msi64Bit = address64;
+    controller.msiToken = message.token;
+    const bool programmed = writeConfig(controller.bus, controller.device, controller.function,
+            capability + 4, static_cast<uint32_t>(message.address)) &&
+        (!address64 || writeConfig(controller.bus, controller.device, controller.function,
+            capability + 8, static_cast<uint32_t>(message.address >> 32))) &&
+        writeConfig(controller.bus, controller.device, controller.function,
+            capability + (address64 ? 12 : 8), message.data & 0xffffu) &&
+        writeConfig(controller.bus, controller.device, controller.function, capability,
+            (capabilityWord & 0x0000ffffu) |
+            (uint32_t{static_cast<uint16_t>((control & ~uint16_t{0x0070u}) | 1u)} << 16));
+    if (!programmed) {
+        (void)writeConfig(controller.bus, controller.device, controller.function,
+                           capability + 4, addressLow);
+        if (address64) (void)writeConfig(controller.bus, controller.device, controller.function,
+                                         capability + 8, addressHigh);
+        (void)writeConfig(controller.bus, controller.device, controller.function,
+                           capability + (address64 ? 12 : 8), messageData);
+        (void)hal::amd64::disconnectBootstrapMsiInterrupt(message.token);
+        controller.msiToken = 0;
+        if (log) log("[MicaNT Audio] PCI MSI message programming failed\r\n");
+        return false;
+    }
+    g_captureInterruptStatus.store(0, std::memory_order_release);
+    g_captureInterruptEnabled.store(true, std::memory_order_release);
+    if (log) log("[MicaNT Audio] Capture MSI route enabled\r\n");
+    return true;
+}
+
+bool disableCaptureMsi() noexcept {
+    auto& controller = g_controller;
+    if (!controller.msiToken) return true;
+    g_captureInterruptEnabled.store(false, std::memory_order_release);
+    for (uint32_t wait = 0; wait < 1000000; ++wait)
+        if (g_captureIsrActive.load(std::memory_order_acquire) == 0) break;
+    if (g_captureIsrActive.load(std::memory_order_acquire) != 0) return false;
+    // Keep the HAL vector and its controller context installed for the whole
+    // controller lifetime. INTCTL and the ISR gate are quiesced per request;
+    // disconnecting here could leave a pending MSI targeting an empty IDT slot.
+    return true;
 }
 
 void logHex(Log log, uint64_t value) noexcept {
@@ -481,6 +631,27 @@ bool configureOutputRoute(Log log) noexcept {
     return true;
 }
 
+bool configureInputRoute(Log log) noexcept {
+    auto& controller = g_controller;
+    if (controller.inputRouteReady) return true;
+    if (!controller.inputAdc || !controller.inputPin ||
+        controller.inputConnection != controller.inputPin) return false;
+    uint32_t ignored{};
+    if (!sendVerb(controller.codecAddress, controller.audioFunctionGroup,
+                  0x0705, 0, ignored) ||
+        !sendVerb(controller.codecAddress, controller.inputPin, 0x0701, 0, ignored) ||
+        !sendVerb(controller.codecAddress, controller.inputPin, 0x0707, 0x20, ignored) ||
+        !sendVerb(controller.codecAddress, controller.inputAdc, 0x0706, 0x10, ignored) ||
+        !sendVerb(controller.codecAddress, controller.inputAdc, 0x0200,
+                  controller.outputFormat, ignored)) {
+        if (log) log("[MicaNT HDA] Codec input route configuration failed\r\n");
+        return false;
+    }
+    controller.inputRouteReady = true;
+    if (log) log("[MicaNT HDA] Codec ADC/pin input route configured\r\n");
+    return true;
+}
+
 bool stopOutputStream(volatile uint8_t* streamRegisters) noexcept {
     reg32(streamRegisters, 0x00) &= ~uint32_t{kStreamRun};
     for (uint32_t i = 0; i < 10000000; ++i)
@@ -611,6 +782,184 @@ NtStatus submitPcm(void*, uint64_t, const void* buffer, size_t length,
     return status;
 }
 
+NtStatus capturePcm(void*, uint64_t, void* buffer, size_t length,
+                    size_t* bytesRead) noexcept {
+    if (!bytesRead || (!buffer && length)) return NtStatus::InvalidParameter;
+    *bytesRead = 0;
+    if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL) return NtStatus::InvalidDeviceRequest;
+    if (length < sizeof(micant::shared::audio::CapturePacketHeader) + micant::shared::audio::BytesPerFrame ||
+        length > micant::shared::audio::MaximumReadBytes ||
+        (length - sizeof(micant::shared::audio::CapturePacketHeader)) % micant::shared::audio::BytesPerFrame)
+        return NtStatus::InvalidParameter;
+    if (!g_controller.ready || !g_controller.codecDiscovered ||
+        !g_controller.inputAdc || !g_controller.inputPin)
+        return NtStatus::DeviceNotReady;
+    if (g_captureFaulted) return NtStatus::DeviceNotReady;
+    if (g_captureInProgress.test_and_set(std::memory_order_acquire)) return NtStatus::DeviceBusy;
+    struct CaptureRelease { ~CaptureRelease() { g_captureInProgress.clear(std::memory_order_release); } } guard;
+    const Log log = g_log;
+    if (!startCodecRings(log)) {
+        g_captureFaulted = true;
+        return NtStatus::DeviceNotReady;
+    }
+    if (!configureInputRoute(log)) {
+        (void)stopCodecRings(log);
+        g_captureFaulted = true;
+        return NtStatus::DeviceNotReady;
+    }
+    const size_t pcmBytes = length - sizeof(micant::shared::audio::CapturePacketHeader);
+    const size_t allocationBytes = (pcmBytes + kDmaPageBytes - 1) & ~(kDmaPageBytes - 1);
+    const uint64_t highest = (g_controller.gcap & 1u) ? UINT64_MAX : UINT32_MAX;
+    NtStatus status = NtStatus::Success;
+    bool injectedFailureThisRead = false;
+    if (!g_captureBdlToken && !g_capturePcmToken) {
+        status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
+            kDmaPageBytes, 128, highest, &g_captureBdl, &g_captureBdlAddress,
+            &g_captureBdlToken);
+        if (status != NtStatus::Success) {
+            (void)stopCodecRings(log);
+            return status;
+        }
+        status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
+            allocationBytes, kDmaPageBytes, highest, &g_capturePcm,
+            &g_capturePcmAddress, &g_capturePcmToken);
+        if (status != NtStatus::Success) {
+            if (!stopCodecRings(log) ||
+                io::dma::release(&g_controllerOwner, g_captureBdlToken, dmaStopped) != NtStatus::Success) {
+                g_captureFaulted = true;
+                return NtStatus::DeviceBusy;
+            }
+            g_captureBdlToken = 0; g_captureBdl = nullptr; g_captureBdlAddress = 0;
+            return status;
+        }
+    } else if (!g_captureBdlToken || !g_capturePcmToken) {
+        g_captureFaulted = true;
+        return NtStatus::DeviceNotReady;
+    }
+    if (log) log("[MicaNT Audio] Capture DMA ring and PCM buffer allocated\r\n");
+
+    std::memset(g_capturePcm, 0, allocationBytes);
+    auto* bdl = static_cast<BdlEntry*>(g_captureBdl);
+    bdl[0] = {g_capturePcmAddress, static_cast<uint32_t>(pcmBytes), kBdlInterruptOnCompletion};
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    volatile uint8_t* stream = g_controller.registers + kInputStreamBase;
+    bool streamStopped = false;
+    bool resetObserved = false, resetCleared = false;
+    if (log) log("[MicaNT Audio] Resetting input stream descriptor\r\n");
+    if (kInputStreamBase + kStreamStride > g_controller.registerLength ||
+        ((g_controller.gcap >> 8) & 0x0fu) == 0) {
+        status = NtStatus::DeviceNotReady;
+    } else {
+        // SDnCTL is only three bytes wide; byte writes keep SDnSTS at +3
+        // out of the reset handshake (it is a separate W1C register).
+        stream[0] = static_cast<uint8_t>(kStreamReset);
+        for (uint32_t i = 0; i < 1000000; ++i)
+            if (stream[0] & kStreamReset) { resetObserved = true; break; }
+        if (!resetObserved) status = NtStatus::DeviceNotReady;
+        else {
+            stream[0] = 0;
+            for (uint32_t i = 0; i < 1000000; ++i)
+                if (!(stream[0] & kStreamReset)) { resetCleared = true; break; }
+            if (!resetCleared) status = NtStatus::DeviceNotReady;
+        }
+    }
+    if (log) log("[MicaNT Audio] Input stream descriptor reset handshake finished\r\n");
+    if (log) {
+        log("[MicaNT Audio] Input stream setup status=");
+        logHex(log, static_cast<uint32_t>(status));
+        log(" reset-set="); logHex(log, resetObserved);
+        log(" reset-clear="); logHex(log, resetCleared);
+        log(" ctl="); logHex(log, static_cast<uint32_t>(stream[0]));
+        log(" sts="); logHex(log, static_cast<uint32_t>(stream[3]));
+        log(" gcap="); logHex(log, g_controller.gcap);
+        log(" bar-bytes="); logHex(log, g_controller.registerLength);
+        log("\r\n");
+    }
+    if (status == NtStatus::Success) {
+#if defined(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST)
+        if (!g_captureFailureInjected) {
+            g_captureFailureInjected = true;
+            injectedFailureThisRead = true;
+            status = NtStatus::DeviceNotReady;
+        }
+#endif
+    }
+    if (status == NtStatus::Success) {
+        if (log) log("[MicaNT Audio] Reserving capture completion event and MSI\r\n");
+        ke::KeInitializeDpc(&g_captureDpc, captureDpcRoutine, nullptr);
+        (void)g_captureReady.reset();
+        if (!enableCaptureMsi(log))
+            status = NtStatus::NotSupported;
+    }
+    if (status == NtStatus::Success) {
+        reg32(stream, 0x18) = static_cast<uint32_t>(g_captureBdlAddress);
+        reg32(stream, 0x1c) = static_cast<uint32_t>(g_captureBdlAddress >> 32);
+        reg32(stream, 0x08) = static_cast<uint32_t>(pcmBytes);
+        reg16(stream, 0x0c) = 0;
+        reg16(stream, 0x12) = g_controller.outputFormat;
+        stream[0x03] = 0x1cu;
+        reg32(g_controller.registers, kInterruptControl) = 0xc0000001u;
+        reg32(stream, 0x00) = (1u << 20) | kStreamInterruptOnCompletion |
+            kStreamInterruptOnFifoError | kStreamInterruptOnDescriptorError | kStreamRun;
+        if (log) log("[MicaNT Audio] Capture SDI0 DMA started; waiting for completion event\r\n");
+        status = g_captureReady.wait(false, false, 10'000'000);
+        if (log) log("[MicaNT Audio] Capture completion wait returned\r\n");
+        if (status == NtStatus::Success) {
+            const uint32_t interruptStatus = g_captureInterruptStatus.exchange(0, std::memory_order_acq_rel);
+            if (interruptStatus & (1u << 3 | 1u << 4)) status = NtStatus::DeviceDataError;
+            else if (!(interruptStatus & kStreamBufferCompletionStatus)) status = NtStatus::DeviceNotReady;
+            else status = NtStatus::Success;
+        } else if (status == NtStatus::Timeout) status = NtStatus::IoTimeout;
+    }
+    streamStopped = stopOutputStream(stream);
+    if (!streamStopped) {
+        g_captureFaulted = true;
+        if (log) log("[MicaNT HDA] Input stream stop timed out; capture DMA retained\r\n");
+        return NtStatus::DeviceBusy;
+    }
+    stream[0x03] = 0x1cu;
+    reg32(g_controller.registers, kInterruptControl) = 0;
+    if (!disableCaptureMsi()) { g_captureFaulted = true; return NtStatus::DeviceBusy; }
+    if (!stopCodecRings(log, false)) { g_captureFaulted = true; return NtStatus::DeviceBusy; }
+    micant::shared::audio::CapturePacketHeader packet{};
+    if (status == NtStatus::Success) {
+        uint64_t frequency{};
+        if (!ke::KeQueryPerformanceCounterValue(packet.firstFramePerformanceCounter, frequency) || !frequency) {
+            status = NtStatus::DeviceNotReady;
+        } else {
+            packet.firstFrame = g_captureFrameIndex;
+            packet.pcmBytes = static_cast<uint32_t>(pcmBytes);
+            if ((g_controller.inputAmpCaps & kAmpCapabilityStepsMask) != 0)
+                packet.flags |= micant::shared::audio::CaptureFlagInputGainControl;
+            if (g_controller.inputAmpCaps & kAmpCapabilityMute)
+                packet.flags |= micant::shared::audio::CaptureFlagInputMuteControl;
+            const uint64_t capturedFrames = pcmBytes / micant::shared::audio::BytesPerFrame;
+            const uint64_t duration = capturedFrames * frequency / micant::shared::audio::SampleRate;
+            if (packet.firstFramePerformanceCounter < duration) status = NtStatus::DeviceNotReady;
+            else {
+                packet.firstFramePerformanceCounter -= duration;
+                std::memcpy(buffer, &packet, sizeof(packet));
+                std::memcpy(static_cast<uint8_t*>(buffer) + sizeof(packet), g_capturePcm, pcmBytes);
+            }
+        }
+    }
+    const auto pcmRelease = io::dma::release(&g_controllerOwner, g_capturePcmToken, dmaStopped);
+    if (pcmRelease != NtStatus::Success) { g_captureFaulted = true; return pcmRelease; }
+    g_capturePcmToken = 0; g_capturePcm = nullptr; g_capturePcmAddress = 0;
+    const auto bdlRelease = io::dma::release(&g_controllerOwner, g_captureBdlToken, dmaStopped);
+    if (bdlRelease != NtStatus::Success) { g_captureFaulted = true; return bdlRelease; }
+    g_captureBdlToken = 0; g_captureBdl = nullptr; g_captureBdlAddress = 0;
+    if (!releaseCodecRingDma(log)) { g_captureFaulted = true; return NtStatus::DeviceBusy; }
+#if defined(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST)
+    if (injectedFailureThisRead && status == NtStatus::DeviceNotReady && log)
+        log("[MicaNT Audio] Injected capture setup failure released all DMA resources\r\n");
+#endif
+    if (status != NtStatus::Success) return status;
+    g_captureFrameIndex += pcmBytes / micant::shared::audio::BytesPerFrame;
+    *bytesRead = sizeof(packet) + pcmBytes;
+    return NtStatus::Success;
+}
+
 void releaseAudioFile(void* context) noexcept { delete static_cast<uint8_t*>(context); }
 void deleteAudioDevice(ob::ObjectHeader* header) noexcept {
     header->as<io::DeviceObject>()->~DeviceObject();
@@ -708,6 +1057,7 @@ bool initializeController(Log log) noexcept {
     }
 
     const uint32_t gcap = *reinterpret_cast<volatile uint16_t*>(candidate.registers + kGcap);
+    candidate.gcap = gcap;
     const uint8_t major = candidate.registers[kVersion + 1];
     const uint8_t minor = candidate.registers[kVersion];
     const uint32_t streamCount = ((gcap >> 12) & 0xfu) + ((gcap >> 8) & 0xfu) +
@@ -785,7 +1135,7 @@ bool discoverCodecTopology(Log log) noexcept {
     }
 
     uint32_t codecCount{}, functionGroupCount{}, widgetCount{}, pinCount{}, connectionCount{};
-    bool outputDacFound = false;
+    bool outputDacFound = false, inputAdcFound = false;
     for (uint8_t codec = 0; valid && codec < 15; ++codec) {
         if (!(present & (1u << codec))) continue;
         uint32_t vendorId{}, rootSubnodes{};
@@ -891,6 +1241,22 @@ bool discoverCodecTopology(Log log) noexcept {
                     g_controller.outputDac = widget;
                     outputDacFound = true;
                 }
+                if (type == 1u && !inputAdcFound) {
+                    g_controller.inputAdc = widget;
+                    inputAdcFound = true;
+                    if (caps & kWidgetInputAmpPresent) {
+                        if (!getParameter(codec, widget, 0x0d, g_controller.inputAmpCaps)) {
+                            if (log) log("[MicaNT HDA] ADC amplifier capability query failed\r\n");
+                            valid = false;
+                            break;
+                        }
+                        if (log) {
+                            log("[MicaNT HDA] ADC input amplifier capabilities=");
+                            logHex(log, g_controller.inputAmpCaps);
+                            log("\r\n");
+                        }
+                    }
+                }
                 uint8_t firstConnection{};
                 if (type == 4u) {
                     uint32_t pinCaps{}, defaultConfig{};
@@ -901,6 +1267,15 @@ bool discoverCodecTopology(Log log) noexcept {
                         break;
                     }
                     ++pinCount;
+                    if ((pinCaps & (1u << 5)) && !g_controller.inputPin) {
+                        g_controller.inputPin = widget;
+                        if (log) {
+                            log("[MicaNT HDA] Capture pin NID="); logHex(log, widget);
+                            log(" caps="); logHex(log, pinCaps);
+                            log(" default="); logHex(log, defaultConfig);
+                            log("\r\n");
+                        }
+                    }
                     if ((pinCaps & (1u << 4)) && !g_controller.outputPin) {
                         g_controller.outputPin = widget;
                         if (log) {
@@ -914,7 +1289,7 @@ bool discoverCodecTopology(Log log) noexcept {
                 if (caps & (1u << 8)) {
                     const uint32_t previous = connectionCount;
                     if (!queryConnections(codec, widget, caps, connectionCount,
-                                          type == 4u ? &firstConnection : nullptr)) {
+                                          (type == 4u || type == 1u) ? &firstConnection : nullptr)) {
                         if (log) log("[MicaNT HDA] Widget connection list rejected or timed out\r\n");
                         valid = false;
                         break;
@@ -922,19 +1297,27 @@ bool discoverCodecTopology(Log log) noexcept {
                     if (connectionCount - previous > 32) valid = false;
                     if (type == 4u && g_controller.outputPin == widget)
                         g_controller.outputConnection = firstConnection;
+                    if (type == 1u && g_controller.inputAdc == widget)
+                        g_controller.inputConnection = firstConnection;
                 }
             }
         }
     }
 
     if (!codecCount || !functionGroupCount || !widgetCount || !pinCount) valid = false;
-    if (!g_controller.outputDac || !g_controller.outputPin ||
-        g_controller.outputConnection != g_controller.outputDac) {
+    const bool outputRoute = g_controller.outputDac && g_controller.outputPin &&
+        g_controller.outputConnection == g_controller.outputDac;
+    const bool inputRoute = g_controller.inputAdc && g_controller.inputPin &&
+        g_controller.inputConnection == g_controller.inputPin;
+    if (!outputRoute && !inputRoute) {
         if (log) {
-            log("[MicaNT HDA] No bounded DAC-to-output-pin route found DAC=");
+            log("[MicaNT HDA] No bounded render or capture codec route found DAC=");
             logHex(log, g_controller.outputDac);
             log(" pin="); logHex(log, g_controller.outputPin);
             log(" connection="); logHex(log, g_controller.outputConnection);
+            log(" ADC="); logHex(log, g_controller.inputAdc);
+            log(" input-pin="); logHex(log, g_controller.inputPin);
+            log(" input-connection="); logHex(log, g_controller.inputConnection);
             log("\r\n");
         }
         valid = false;
@@ -986,6 +1369,36 @@ NtStatus openAudioDevice(Handle* handle, uint32_t desiredAccess) noexcept {
     backend.release = releaseAudioFile;
     backend.stream = true;
     backend.write = submitPcm;
+    backend.synchronous = true;
+    return io::IoCreateDeviceFile(handle, desiredAccess, g_audioDevice, backend);
+}
+
+NtStatus openCaptureDevice(Handle* handle, uint32_t desiredAccess) noexcept {
+    if (!handle) return NtStatus::InvalidParameter;
+    *handle = 0;
+    if (!g_controller.ready || !g_controller.codecDiscovered ||
+        !g_controller.inputAdc || !g_controller.inputPin || g_captureFaulted)
+        return NtStatus::DeviceNotReady;
+    if ((desiredAccess & 0x0001u) == 0 || (desiredAccess & ~0x00120089u))
+        return NtStatus::AccessDenied;
+    if (!g_audioDevice) {
+        g_audioDeviceType.typeId = ob::ObjectTypeId::Device;
+        g_audioDeviceType.deleteProcedure = deleteAudioDevice;
+        void* body{};
+        const auto status = ob::ObCreateObject(ob::KernelMode, &g_audioDeviceType, nullptr,
+            sizeof(io::DeviceObject), &body, &g_audioDeviceReference);
+        if (status != NtStatus::Success) return status;
+        g_audioDevice = new (body) io::DeviceObject{};
+        g_audioDevice->deviceType = io::DeviceType::Unknown;
+    }
+    auto* fileContext = new (std::nothrow_t{}) uint8_t{};
+    if (!fileContext) return NtStatus::NoMemory;
+    io::FileBackend backend{};
+    backend.context = fileContext;
+    backend.name = micant::shared::audio::HdaCaptureDeviceName;
+    backend.read = capturePcm;
+    backend.release = releaseAudioFile;
+    backend.stream = true;
     backend.synchronous = true;
     return io::IoCreateDeviceFile(handle, desiredAccess, g_audioDevice, backend);
 }

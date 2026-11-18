@@ -7,10 +7,12 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import wave
 from pathlib import Path
 
 from fat32_image import create_fat32_image, create_gpt_disk_image
@@ -20,6 +22,10 @@ from verify_kernel_architecture import validate_build_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HDA_RENDER_RATE = 48000
+HDA_RENDER_CHANNELS = 2
+HDA_RENDER_SAMPLE_WIDTH = 2
+HDA_RENDER_MAX_SECONDS = 30
 EXPECTED_BOOTSTRAP_SERIAL = (
     "[MicaNT COM1] EfiMain reached on physical x86_64 silicon!",
     "[MicaNT Boot] Probing FAT32 volume for \\EFI\\MicaNT\\ntoskrnl.exe...",
@@ -2088,6 +2094,101 @@ def detach_usb_device(qmp_path: Path, device_id: str) -> None:
                     return
 
 
+def validate_hda_render_wav(path: Path) -> tuple[int, int]:
+    """Require a bounded RIFF PCM capture with nonzero signed-16 stereo samples."""
+    if not path.is_file():
+        raise RuntimeError(f"HDA render capture was not created: {path}")
+    maximum_frames = HDA_RENDER_RATE * HDA_RENDER_MAX_SECONDS
+    maximum_bytes = maximum_frames * HDA_RENDER_CHANNELS * HDA_RENDER_SAMPLE_WIDTH + (1 << 20)
+    file_size = path.stat().st_size
+    if file_size < 44 or file_size > maximum_bytes:
+        raise RuntimeError(
+            f"HDA render WAV size outside bounds ({file_size} bytes; "
+            f"expected 44..{maximum_bytes})"
+        )
+
+    # QEMU's wav audiodev emits the canonical PCM chunks but leaves the two
+    # size fields at zero on a normal QMP quit. Once QEMU has closed the file,
+    # fill those container lengths from the bounded file size; do not touch PCM.
+    with path.open("r+b") as capture:
+        header = capture.read(44)
+        if (header[:4] == b"RIFF" and header[8:16] == b"WAVEfmt " and
+                header[36:40] == b"data" and header[4:8] == b"\0" * 4 and
+                header[40:44] == b"\0" * 4):
+            capture.seek(4)
+            capture.write(struct.pack("<I", file_size - 8))
+            capture.seek(40)
+            capture.write(struct.pack("<I", file_size - 44))
+
+    try:
+        with wave.open(str(path), "rb") as capture:
+            if (capture.getcomptype() != "NONE" or
+                    capture.getnchannels() != HDA_RENDER_CHANNELS or
+                    capture.getsampwidth() != HDA_RENDER_SAMPLE_WIDTH or
+                    capture.getframerate() != HDA_RENDER_RATE):
+                raise RuntimeError(
+                    "HDA render WAV must be uncompressed signed 16-bit stereo at 48 kHz "
+                    f"(got {capture.getcomptype()}, {capture.getnchannels()}ch, "
+                    f"{capture.getsampwidth() * 8}bit, {capture.getframerate()}Hz)"
+                )
+            frame_count = capture.getnframes()
+            if frame_count <= 0 or frame_count > maximum_frames:
+                raise RuntimeError(
+                    f"HDA render WAV frame count outside bounds: {frame_count}"
+                )
+
+            peak = 0
+            nonzero_samples = 0
+            frames_read = 0
+            while frames_read < frame_count:
+                request = min(8192, frame_count - frames_read)
+                data = capture.readframes(request)
+                expected_bytes = request * HDA_RENDER_CHANNELS * HDA_RENDER_SAMPLE_WIDTH
+                if len(data) != expected_bytes:
+                    raise RuntimeError("HDA render WAV data chunk is truncated")
+                for (sample,) in struct.iter_unpack("<h", data):
+                    magnitude = abs(sample)
+                    if magnitude:
+                        nonzero_samples += 1
+                        peak = max(peak, magnitude)
+                frames_read += request
+    except (wave.Error, EOFError) as error:
+        raise RuntimeError(f"HDA render capture is not a valid RIFF/WAVE file: {error}") from error
+
+    if nonzero_samples == 0:
+        raise RuntimeError("HDA render WAV contains only silent PCM samples")
+    return frame_count, peak
+
+
+def stop_qemu_cleanly(qmp_path: Path, process: subprocess.Popen) -> None:
+    """Ask QEMU to quit so audio backends finalize their container headers."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(str(qmp_path))
+            with connection.makefile("rwb") as stream:
+                stream.readline()  # QMP greeting.
+                stream.write(b'{"execute":"qmp_capabilities"}\n')
+                stream.flush()
+                while True:
+                    response = json.loads(stream.readline())
+                    if "error" in response:
+                        raise RuntimeError(f"QMP negotiation failed: {response['error']}")
+                    if "return" in response:
+                        break
+                stream.write(b'{"execute":"quit"}\n')
+                stream.flush()
+        process.wait(timeout=10)
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def serial_progress(serial_log: str, expected: tuple[str, ...] = EXPECTED_SERIAL) -> int:
     """Return how many expected messages occur, in order, in the serial log."""
     cursor = 0
@@ -2306,6 +2407,8 @@ def run_qemu(
     resolution: tuple[int, int] | None = None,
     usb_ehci_test: bool = False,
     audio_controller_test: bool = False,
+    audio_render_test: bool = False,
+    audio_capture_test: bool = False,
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -2542,6 +2645,16 @@ def run_qemu(
             fixture = system32_dir / "cmd-m0-known.txt"
             fixture.write_bytes("luceos cmd m0 real fat file fixture\r\n".encode("utf-8"))
             shutil.copyfile(fixture, diagnostics_dir / fixture.name)
+        if audio_render_test:
+            audio_probe = ROOT / "build" / "audio_probe.exe"
+            if not audio_probe.is_file():
+                raise RuntimeError("Ring 3 audio render probe is missing from the system volume")
+            shutil.copyfile(audio_probe, system32_dir / audio_probe.name)
+        if audio_capture_test:
+            audio_probe = ROOT / "build" / "audio_capture_probe.exe"
+            if not audio_probe.is_file():
+                raise RuntimeError("Ring 3 audio capture probe is missing from the system volume")
+            shutil.copyfile(audio_probe, system32_dir / audio_probe.name)
         if doom_test:
             doom_image = ROOT / "build" / "doom.exe"
             if not doom_image.is_file():
@@ -2678,11 +2791,20 @@ def run_qemu(
             "-no-reboot",
             "-no-shutdown",
         ]
-        if audio_controller_test:
+        audio_capture_path = diagnostics_dir / "hda-render.wav" if audio_render_test else None
+        if audio_controller_test or audio_render_test or audio_capture_test:
+            if audio_render_test:
+                audio_device = (
+                    f"driver=wav,id=micant_audio,path={audio_capture_path},"
+                    f"out.frequency={HDA_RENDER_RATE},out.channels={HDA_RENDER_CHANNELS},out.format=s16"
+                )
+            else:
+                audio_device = "driver=none,id=micant_audio"
+            codec_model = "hda-duplex" if audio_capture_test else "hda-output"
             command.extend([
-                "-audiodev", "driver=none,id=micant_audio",
+                "-audiodev", audio_device,
                 "-device", "ich9-intel-hda,id=micant_hda",
-                "-device", "hda-duplex,bus=micant_hda.0,audiodev=micant_audio",
+                "-device", f"{codec_model},bus=micant_hda.0,audiodev=micant_audio",
             ])
         network_peer = None
         network_inbound_port = None
@@ -2915,18 +3037,37 @@ def run_qemu(
                             complete_since = None
                             time.sleep(0.1)
                             continue
-                        if audio_controller_test and (
+                        if audio_render_test and (
+                                serial_log.count("[MicaNT Audio] PCM stream completion verified") < 2 or
+                                "[MicaNT Audio] Injected render failure released all DMA resources" not in serial_log or
+                                "[MicaNT Audio] Ring 3 PCM submission verified" not in serial_log):
+                            complete_since = None
+                            time.sleep(0.1)
+                            continue
+                        if audio_capture_test and (
+                                serial_log.count("[MicaNT Audio] Capture MSI route enabled") < 1 or
+                                "[MicaNT Audio] Injected capture setup failure released all DMA resources" not in serial_log or
+                                "[MicaNT Audio] Ring 3 observed the injected capture setup failure" not in serial_log or
+                                serial_log.count("[MicaNT Audio] Ring 3 ADC DMA packets and timestamps received; input gain control=") < 1):
+                            if "[MicaNT Audio] Ring 3 ADC capture test failed NTSTATUS=" in serial_log:
+                                raise RuntimeError(
+                                    "Ring 3 HDA ADC DMA capture test failed:\n" + serial_log[-8000:]
+                                )
+                            complete_since = None
+                            time.sleep(0.1)
+                            continue
+                        if (audio_controller_test or audio_render_test) and (
                                 "[MicaNT HDA] PCI 04/03 controller claimed, BAR0 mapped, reset complete"
                                 not in serial_log):
                             raise RuntimeError(
                                 "QEMU HDA controller did not complete canonical PCI claim, BAR mapping, and reset:\n"
                                 f"{serial_log[-8000:]}"
                             )
-                        if audio_controller_test and (
+                        if (audio_controller_test or audio_render_test) and (
                                 "[MicaNT HDA] Injected post-reset failure rolled back BAR mapping, Bus Master, and PCI claim"
                                 not in serial_log):
                             raise RuntimeError("QEMU HDA rollback fault injection was not observed")
-                        if audio_controller_test and (
+                        if (audio_controller_test or audio_render_test) and (
                                 "[MicaNT HDA] CORB/RIRB codec topology verified" not in serial_log):
                             raise RuntimeError(
                                 "QEMU HDA did not complete bounded CORB/RIRB codec discovery:\n"
@@ -3076,6 +3217,16 @@ def run_qemu(
                                     temp / "qmp.sock", temp, serial_path, diagnostics_dir,
                                 )
                                 print("Explorer input, window cleanup and Light-to-Dark theme switch passed.", flush=True)
+                            if audio_render_test:
+                                if process.poll() is None:
+                                    stop_qemu_cleanly(temp / "qmp.sock", process)
+                                frame_count, peak = validate_hda_render_wav(audio_capture_path)
+                                print(
+                                    "QEMU HDA PCM capture passed: "
+                                    f"{frame_count} signed-16 stereo frames at 48 kHz, peak={peak}; "
+                                    f"evidence={audio_capture_path}",
+                                    flush=True,
+                                )
                             result = (
                                 "DOOM E1M1 gameplay QMP self-test" if doom_test else
                                 "CMD graphical terminal QMP self-test" if cmd_test else
@@ -3184,6 +3335,10 @@ def main() -> int:
     parser.add_argument("--process-memory-selftest", action="store_true")
     parser.add_argument("--crash-dump-selftest", action="store_true")
     parser.add_argument("--audio-controller-test", action="store_true")
+    parser.add_argument("--audio-render-test", action="store_true",
+                        help="capture and validate real Ring 3 HDA PCM output as WAV")
+    parser.add_argument("--audio-capture-test", action="store_true",
+                        help="exercise Ring 3 HDA ADC DMA packets and event timestamps")
     args = parser.parse_args()
 
     if args.ovmf_code is None:
@@ -3219,6 +3374,8 @@ def main() -> int:
                 if args.resolution else None,
             args.usb_ehci_test,
             args.audio_controller_test,
+            args.audio_render_test,
+            args.audio_capture_test,
         )
     except KeyboardInterrupt:
         return 130

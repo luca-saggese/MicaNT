@@ -3900,6 +3900,7 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const std::u16string_view pathView(path, name.length / sizeof(char16_t));
         constexpr std::u16string_view afdPath(u"\\Device\\Afd\\Endpoint");
         constexpr std::u16string_view hdaRenderPath(u"\\Device\\HdaAudio0");
+        constexpr std::u16string_view hdaCapturePath(u"\\Device\\HdaCapture0");
         Handle handle{};
         IoStatusBlock ioStatus{};
         bool provisionalCreated{};
@@ -3923,6 +3924,17 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 createOptions || extra[5] || static_cast<uint32_t>(extra[6]))
                 return status(NtStatus::NotSupported);
             ioStatus.status = micant::km::audio::hda::openAudioDevice(
+                &handle, static_cast<uint32_t>(second));
+            ioStatus.information = ioStatus.status == NtStatus::Success ? 1 : 0;
+            if (ioStatus.status != NtStatus::Success) {
+                (void)ex::ExSafeCopyToUser(reinterpret_cast<void*>(args.fourth), &ioStatus, sizeof(ioStatus));
+                return status(ioStatus.status);
+            }
+        } else if (pathView == hdaCapturePath) {
+            if (createDisposition != fileOpen || fileAttributes || shareAccess ||
+                createOptions || extra[5] || static_cast<uint32_t>(extra[6]))
+                return status(NtStatus::NotSupported);
+            ioStatus.status = micant::km::audio::hda::openCaptureDevice(
                 &handle, static_cast<uint32_t>(second));
             ioStatus.information = ioStatus.status == NtStatus::Success ? 1 : 0;
             if (ioStatus.status != NtStatus::Success) {
@@ -5398,6 +5410,29 @@ void pollKeyboardInput() noexcept {
     if (micant::sys::NtClose(audioProcessHandle) != micant::NtStatus::Success)
         stopWithError("[MicaNT Audio] PCM client process handle close failed\r\n");
     serialWrite("[MicaNT Audio] Ring 3 PCM client launched; submission is verified by the client\r\n");
+#endif
+#if defined(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST)
+    serialWrite("[MicaNT Audio] Launching Ring 3 ADC capture client\r\n");
+    micant::Handle captureProcessHandle = 0;
+    micant::Handle captureProcessId = 0;
+    if (!launchUserImageProcess(u"audio_capture_probe.exe", captureProcessHandle, captureProcessId))
+        stopWithError("[MicaNT Audio] Ring 3 ADC client launch failed\r\n");
+    const auto captureWait = micant::sys::NtWaitForSingleObject(captureProcessHandle, false, nullptr);
+    micant::ProcessBasicInformation captureExit{};
+    uint32_t captureExitBytes{};
+    const auto captureQuery = micant::sys::NtQueryInformationProcess(
+        captureProcessHandle, micant::ProcessInformationClass::ProcessBasicInformation,
+        &captureExit, sizeof(captureExit), &captureExitBytes);
+    const auto captureClose = micant::sys::NtClose(captureProcessHandle);
+    if (captureWait != micant::NtStatus::Success || captureQuery != micant::NtStatus::Success ||
+        captureExitBytes != sizeof(captureExit) || captureClose != micant::NtStatus::Success ||
+        captureExit.exitStatus != micant::NtStatus::Success) {
+        serialWrite("[MicaNT Audio] Ring 3 ADC capture test failed NTSTATUS=");
+        serialWriteNumber(static_cast<uint32_t>(captureExit.exitStatus));
+        serialWrite("\r\n");
+    } else {
+        serialWrite("[MicaNT Audio] Ring 3 ADC client process exit status=0\r\n");
+    }
 #endif
 #if defined(MICANT_BOOTSTRAP_CMD_TEST)
     serialWrite("[MicaNT CMD] Launching Ring 3 terminal application\r\n");

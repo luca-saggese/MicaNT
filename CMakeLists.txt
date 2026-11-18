@@ -16,6 +16,7 @@ option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-mem
 option(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST "Fault, persist, reboot and recover a LuceOS crash dump in QEMU" OFF)
 option(MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST "Exercise HDA PCI/MMIO rollback and reset in QEMU" OFF)
 option(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST "Launch a Ring 3 client and verify real HDA PCM DMA in QEMU" OFF)
+option(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST "Launch a Ring 3 client and verify HDA ADC DMA in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
 option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
 option(MICANT_KERNEL_PERF_DIAGNOSTICS "Emit aggregated 5-second Ke scheduler/accounting diagnostics" OFF)
@@ -389,6 +390,9 @@ if (MICANT_ENABLE_BAREMETAL)
     if (MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
     endif()
+    if (MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST)
+    endif()
     target_compile_options(ntoskrnl_core_baremetal PRIVATE -fno-builtin)
 
     add_executable(bootx64_efi
@@ -709,6 +713,23 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_libraries(audio_probe_boot PRIVATE ntdll_boot)
     set_target_properties(audio_probe_boot PROPERTIES
         OUTPUT_NAME "audio_probe"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+
+    add_executable(audio_capture_probe_boot EXCLUDE_FROM_ALL tools/audio_capture_probe_app.cpp)
+    target_include_directories(audio_capture_probe_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(audio_capture_probe_boot PRIVATE MICANT_NATIVE_USERMODE)
+    target_compile_options(audio_capture_probe_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(audio_capture_probe_boot PRIVATE
+        -nostdlib -Wl,--subsystem,console -Wl,-e,_start
+    )
+    target_link_libraries(audio_capture_probe_boot PRIVATE ntdll_boot)
+    set_target_properties(audio_capture_probe_boot PROPERTIES
+        OUTPUT_NAME "audio_capture_probe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
 

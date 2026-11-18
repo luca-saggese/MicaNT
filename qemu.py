@@ -154,6 +154,8 @@ def write_manifest(
     cmd_test: bool = False,
     doom_test: bool = False,
     audio_controller_test: bool = False,
+    audio_render_test: bool = False,
+    audio_capture_test: bool = False,
     crash_dump_selftest: bool = False,
 ) -> None:
     if not all(path.is_file() for path in (KERNEL, BOOTLOADER, DISPLAY_DRIVER)):
@@ -201,6 +203,8 @@ def write_manifest(
         "cmd_test": cmd_test,
         "doom_test": doom_test,
         "audio_controller_test": audio_controller_test,
+        "audio_render_test": audio_render_test,
+        "audio_capture_test": audio_capture_test,
         "crash_dump_selftest": crash_dump_selftest,
         "target": "ntoskrnl_core_baremetal",
         "architecture": "AMD64",
@@ -317,6 +321,14 @@ def main() -> int:
         help="attach QEMU Intel HDA and verify canonical PCI BAR mapping and controller reset",
     )
     parser.add_argument(
+        "--audio-render-test", action="store_true",
+        help="verify Ring 3 PCM submission, HDA DMA completion, and captured QEMU WAV samples",
+    )
+    parser.add_argument(
+        "--audio-capture-test", action="store_true",
+        help="exercise Ring 3 HDA ADC DMA packets and event timestamps",
+    )
+    parser.add_argument(
         "--interactive-after-cmd-test", action="store_true",
         help="keep the visible CMD-test QEMU session open for manual use after QMP verification",
     )
@@ -424,7 +436,9 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST:BOOL={'ON' if args.process_memory_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CMD_TEST:BOOL={'ON' if args.cmd_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST:BOOL={'ON' if args.crash_dump_selftest else 'OFF'}",
-                f"-DMICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST:BOOL={'ON' if args.audio_controller_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST:BOOL={'ON' if args.audio_controller_test or args.audio_render_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_AUDIO_RENDER_TEST:BOOL={'ON' if args.audio_render_test else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST:BOOL={'ON' if args.audio_capture_test else 'OFF'}",
             ]
         )
         if args.check_explorer:
@@ -476,6 +490,10 @@ def main() -> int:
             run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "cmd_boot"])
         if args.doom_test:
             run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "doom_boot"])
+        if args.audio_render_test:
+            run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "audio_probe_boot"])
+        if args.audio_capture_test:
+            run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "audio_capture_probe_boot"])
         write_manifest(
             cxx,
             runtime_selftest=args.runtime_selftest,
@@ -485,7 +503,9 @@ def main() -> int:
             process_memory_selftest=args.process_memory_selftest,
             cmd_test=args.cmd_test,
             doom_test=args.doom_test,
-            audio_controller_test=args.audio_controller_test,
+            audio_controller_test=args.audio_controller_test or args.audio_render_test or args.audio_capture_test,
+            audio_render_test=args.audio_render_test,
+            audio_capture_test=args.audio_capture_test,
             crash_dump_selftest=args.crash_dump_selftest,
         )
         validate_build_manifest(
@@ -526,6 +546,12 @@ def main() -> int:
         elif args.crash_dump_selftest:
             evidence_dir = ROOT / "build" / f"crash-dump-qemu-evidence-{time.time_ns()}"
             boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
+        elif args.audio_render_test:
+            evidence_dir = ROOT / "build" / f"audio-render-qemu-evidence-{time.time_ns()}"
+            boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
+        elif args.audio_capture_test:
+            evidence_dir = ROOT / "build" / f"audio-capture-qemu-evidence-{time.time_ns()}"
+            boot_command.extend(["--diagnostics-dir", str(evidence_dir)])
         if args.runtime_selftest:
             boot_command.append("--runtime-selftest")
         elif args.timer_selftest:
@@ -546,6 +572,10 @@ def main() -> int:
             boot_command.append("--crash-dump-selftest")
         elif args.audio_controller_test:
             pass  # HDA A0.1 has a serial acceptance check; skip unrelated input automation.
+        elif args.audio_render_test:
+            pass  # The Ring 3 render client is exercised by the boot profile itself.
+        elif args.audio_capture_test:
+            pass  # The Ring 3 audio client is exercised by the boot profile itself.
         elif not args.headless:
             boot_command.append("--interactive")
         elif args.usb_test:
@@ -560,6 +590,10 @@ def main() -> int:
             boot_command.append("--network-test")
         if args.audio_controller_test:
             boot_command.append("--audio-controller-test")
+        if args.audio_render_test:
+            boot_command.append("--audio-render-test")
+        if args.audio_capture_test:
+            boot_command.append("--audio-capture-test")
         run(boot_command)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
         operation = "Explorer runtime check" if args.check_explorer else "QEMU launch"

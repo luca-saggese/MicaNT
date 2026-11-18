@@ -20,4 +20,8 @@ using Log = void (*)(const char*) noexcept;
 // object path. Write access accepts bounded interleaved PCM only.
 [[nodiscard]] NtStatus openAudioDevice(Handle* handle, uint32_t desiredAccess) noexcept;
 
+// Opens the discovered capture endpoint through the canonical Ob-owned file
+// object path. Reads return the bounded capture packet described by the shared ABI.
+[[nodiscard]] NtStatus openCaptureDevice(Handle* handle, uint32_t desiredAccess) noexcept;
+
 } // namespace micant::km::audio::hda
