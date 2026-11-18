@@ -477,13 +477,12 @@ void markWindowBounds(const Window& window) noexcept {
                    top + window.height + shadow);
 }
 
-void markCursorBounds(int32_t x, int32_t y) noexcept {
-    if (!g_mousePositionValid || g_cursorDisplayCount < 0 ||
-        !g_activeCursorWidth || !g_activeCursorHeight) return;
-    const int64_t left = static_cast<int64_t>(x) - g_activeCursorHotX;
-    const int64_t top = static_cast<int64_t>(y) - g_activeCursorHotY;
-    markDamageRect(left, top, left + g_activeCursorWidth,
-                   top + g_activeCursorHeight);
+void markCursorChanged() noexcept {
+    if (!g_mousePositionValid) return;
+    // Cursor motion is presented as a scanout overlay. Wake the compositor
+    // with a new metadata generation without invalidating or recomposing scene
+    // pixels beneath the cursor.
+    g_damageChangedSinceLastPublish = true;
 }
 
 void markCaptionButtonBounds(const Window& window, uint8_t button) noexcept {
@@ -1740,20 +1739,20 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             const int32_t newX = std::clamp(requestedX, left, right - 1);
             const int32_t newY = std::clamp(requestedY, top, bottom - 1);
             const bool moved = !g_mousePositionValid || newX != g_mouseX || newY != g_mouseY;
-            if (moved && g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+            if (moved && g_mousePositionValid) markCursorChanged();
             g_mouseX = newX;
             g_mouseY = newY;
             g_mousePositionValid = true;
-            if (moved) markCursorBounds(newX, newY);
+            if (moved) markCursorChanged();
             request.result = 1;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_CURSOR_CLIP: {
             if (request.args[0] == 0) {
-                if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+                if (g_mousePositionValid) markCursorChanged();
                 g_cursorClip = {0, 0, g_screenWidth, g_screenHeight};
                 g_cursorClipOwner = 0;
-                if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+                if (g_mousePositionValid) markCursorChanged();
                 request.result = 1;
                 return NtStatus::Success;
             }
@@ -1761,12 +1760,12 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (rect.left < 0 || rect.top < 0 || rect.right > g_screenWidth ||
                 rect.bottom > g_screenHeight || rect.right <= rect.left || rect.bottom <= rect.top)
                 return NtStatus::InvalidParameter;
-            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+            if (g_mousePositionValid) markCursorChanged();
             g_cursorClip = rect;
             g_cursorClipOwner = ownerProcessId;
             g_mouseX = std::clamp(g_mouseX, rect.left, rect.right - 1);
             g_mouseY = std::clamp(g_mouseY, rect.top, rect.bottom - 1);
-            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+            if (g_mousePositionValid) markCursorChanged();
             request.result = 1;
             return NtStatus::Success;
         }
@@ -1780,9 +1779,9 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             g_cursorDisplayCount += delta;
             const bool isVisible = g_cursorDisplayCount >= 0;
             if (wasVisible && !isVisible)
-                markCursorBounds(g_mouseX, g_mouseY);
+                markCursorChanged();
             if (!wasVisible && isVisible)
-                markCursorBounds(g_mouseX, g_mouseY);
+                markCursorChanged();
             request.result = static_cast<uint64_t>(static_cast<int64_t>(g_cursorDisplayCount));
             return NtStatus::Success;
         }
@@ -1891,9 +1890,9 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
             g_cursorClipOwner = 0;
         }
         if (g_activeCursorOwner == ownerProcessId) {
-            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+            if (g_mousePositionValid) markCursorChanged();
             resetCursorImage();
-            if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+            if (g_mousePositionValid) markCursorChanged();
         }
     }
     if (publish) publish();
@@ -1914,11 +1913,11 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const uint32_t previousButtons = g_mouseButtons;
     const uint32_t currentButtons = event.buttons & 0x07u;
     const bool moved = x != g_mouseX || y != g_mouseY;
-    if (moved && oldMouseValid) markCursorBounds(oldMouseX, oldMouseY);
+    if (moved && oldMouseValid) markCursorChanged();
     g_mouseButtons = currentButtons;
     g_mouseX = x;
     g_mouseY = y;
-    if (moved || !oldMouseValid) markCursorBounds(x, y);
+    if (moved || !oldMouseValid) markCursorChanged();
     auto* target = topmostVisibleWindow(x, y);
     const int32_t hitTest = target ? hitTestWindow(*target, x, y) : 0;
     const uint64_t oldCursorHitWindow = g_cursorHitWindow;
@@ -2109,12 +2108,12 @@ void initializeCursorPosition(int32_t x, int32_t y) noexcept {
     const int32_t bottom = std::min(g_screenHeight, g_cursorClip.bottom);
     x = std::clamp(x, left, std::max(left, right - 1));
     y = std::clamp(y, top, std::max(top, bottom - 1));
-    if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+    if (g_mousePositionValid) markCursorChanged();
     g_mouseX = x;
     g_mouseY = y;
     g_mouseButtons = 0;
     g_mousePositionValid = true;
-    markCursorBounds(g_mouseX, g_mouseY);
+    markCursorChanged();
 }
 
 bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
@@ -2459,7 +2458,7 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
     }
     if (!image.cursorHandle) {
         StateLockGuard lock;
-        if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+        if (g_mousePositionValid) markCursorChanged();
         if (g_activeCursorStorage.sectionReference) {
             const auto releaseStatus = g_releaseCompositorSurface
                 ? g_releaseCompositorSurface(g_activeCursorStorage,
@@ -2471,7 +2470,7 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
         g_activeCursorHandle = 0;
         g_activeCursorOwner = 0;
         resetCursorImage(false);
-        if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+        if (g_mousePositionValid) markCursorChanged();
         return g_activeCursorStorage.sectionReference
             ? NtStatus::Success : NtStatus::InsufficientResources;
     }
@@ -2511,7 +2510,7 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
             return releaseStatus;
         }
     }
-    if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+    if (g_mousePositionValid) markCursorChanged();
     g_activeCursorHandle = image.cursorHandle;
     g_activeCursorOwner = image.cursorHandle ? ownerProcessId : 0;
     if (image.cursorHandle) {
@@ -2522,7 +2521,7 @@ micant::NtStatus setCursorImage(const MicaWin32kCursorImage& image,
         g_activeCursorHotY = image.hotY;
         g_activeCursorStorage = replacement;
     }
-    if (g_mousePositionValid) markCursorBounds(g_mouseX, g_mouseY);
+    if (g_mousePositionValid) markCursorChanged();
     return NtStatus::Success;
 }
 
