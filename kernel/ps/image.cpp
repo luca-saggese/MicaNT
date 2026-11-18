@@ -1391,7 +1391,11 @@ void EProcess::captureProcessImageName(std::string_view name) noexcept {
 NtStatus EProcess::setNativeProcessParameters(std::u16string_view imagePath,
                                                std::u16string_view commandLine,
                                                std::u16string_view currentDirectory) noexcept {
-    if (!active(*this) || terminating_ || imagesFinalized_) return NtStatus::InvalidParameter;
+    // Process parameters are owned metadata captured by the creator before
+    // the unpublished child is attached for image mapping. This setter does
+    // not touch the child's address space, so requiring its CR3 here rejects
+    // every normal NtCreateUserProcess caller running in the parent.
+    if (terminating_ || imagesFinalized_) return NtStatus::InvalidParameter;
     const size_t capacity = mm::PageSize4KB - sizeof(detail::UserProcessParameters);
     const auto bytes = [](std::u16string_view text) noexcept {
         return text.empty() ? size_t{0} : (text.size() + 1) * sizeof(char16_t);

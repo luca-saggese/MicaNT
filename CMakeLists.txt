@@ -613,6 +613,53 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
 
+    # DOOM is built from the upstream doomgeneric core with a small LuceOS
+    # Win32 platform backend. Keep the upstream GPL sources and notice intact;
+    # the platform path uses the native User32/GDI32/Kernel32 DLLs.
+    file(STRINGS "${CMAKE_SOURCE_DIR}/third_party/doomgeneric/doomgeneric/Makefile.win"
+         _doomgeneric_manifest REGEX "^SRC_DOOM = ")
+    string(REGEX REPLACE "^SRC_DOOM = " "" _doomgeneric_manifest "${_doomgeneric_manifest}")
+    string(REPLACE ".o" ".c" _doomgeneric_manifest "${_doomgeneric_manifest}")
+    string(REPLACE " " ";" _doomgeneric_sources "${_doomgeneric_manifest}")
+    set(_doomgeneric_engine_sources)
+    foreach(_doomgeneric_source IN LISTS _doomgeneric_sources)
+        if (_doomgeneric_source AND
+            NOT _doomgeneric_source STREQUAL "doomgeneric_win.c" AND
+            NOT _doomgeneric_source STREQUAL "w_file_stdc.c")
+            list(APPEND _doomgeneric_engine_sources
+                "${CMAKE_SOURCE_DIR}/third_party/doomgeneric/doomgeneric/${_doomgeneric_source}")
+        endif()
+    endforeach()
+    add_executable(doom_boot EXCLUDE_FROM_ALL
+        ${_doomgeneric_engine_sources}
+        tools/doom_platform.cpp
+        tools/doom_crt.cpp
+        tools/doom_wad_file.cpp
+    )
+    target_include_directories(doom_boot PRIVATE
+        "${CMAKE_SOURCE_DIR}/third_party/doomgeneric/doomgeneric"
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_compile_definitions(doom_boot PRIVATE
+        _WIN32 WIN32_LEAN_AND_MEAN DOOMGENERIC_RESX=640 DOOMGENERIC_RESY=400
+        MICANT_NATIVE_USERMODE MICANT_GDI32_IMPORTS
+    )
+    target_compile_options(doom_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -O2
+    )
+    target_link_options(doom_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+    )
+    target_link_libraries(doom_boot PRIVATE
+        user32_boot gdi32_boot kernel32_boot ucrtbase_boot ntdll_boot m
+    )
+    set_target_properties(doom_boot PROPERTIES
+        OUTPUT_NAME "doom"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+    )
+
     # CMD is a separate Ring 3 PE. Its graphical frontend reaches Win32k and
     # GDI through the native client DLLs; its command engine uses NTDLL file
     # syscalls rather than kernel Executive headers.

@@ -389,6 +389,7 @@ def verify_cmd_terminal(
     qmp_path: Path,
     temp: Path,
     diagnostics_dir: Path,
+    doom_test: bool = False,
 ) -> None:
     """Type real commands into cmd.exe and retain terminal scanout evidence."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -515,7 +516,20 @@ def verify_cmd_terminal(
                             "down": down, "key": {"type": "qcode", "data": qcode},
                         },
                     }]})
-                time.sleep(0.025)
+                time.sleep(0.075 if doom_test else 0.025)
+
+            def hold_key(qcode: str, duration: float) -> None:
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": True, "key": {"type": "qcode", "data": qcode},
+                    },
+                }]})
+                time.sleep(duration)
+                execute("input-send-event", {"events": [{
+                    "type": "key", "data": {
+                        "down": False, "key": {"type": "qcode", "data": qcode},
+                    },
+                }]})
 
             def shifted_key(qcode: str) -> None:
                 execute("input-send-event", {"events": [{
@@ -639,6 +653,65 @@ def verify_cmd_terminal(
                 key("ret")
                 last = capture_after_input(last, name, command)
                 return last
+
+            if doom_test:
+                shell_before = screen("doom-01-before-launch.ppm")
+                # CMD resolves the executable extension from the current
+                # System32 directory; omitting the period also avoids QMP's
+                # layout-dependent punctuation key mapping.
+                # Use the launch echo as the baseline. Comparing with the
+                # pre-command terminal would mistake "Started process" text
+                # for a game window.
+                launch_output = submit("doom", "doom-02-launched.ppm")
+                deadline = time.monotonic() + 60
+                title = launch_output
+                while time.monotonic() < deadline:
+                    title = screen("doom-03-title.ppm")
+                    if region_diff(launch_output, title) > 10000:
+                        break
+                    time.sleep(0.2)
+                if region_diff(launch_output, title) <= 10000:
+                    click_terminal()
+                    try:
+                        submit("echo doom process probe", "doom-03-process-state.ppm")
+                    except RuntimeError:
+                        screen("doom-03-process-state.ppm")
+                    raise RuntimeError("doom.exe did not present its title screen in the guest")
+
+                menu_frames = [title]
+                for index, label in enumerate(("main-menu", "episode", "skill", "e1m1"), 1):
+                    key("ret")
+                    frame_name = f"doom-0{index + 3}-{label}.ppm"
+                    deadline = time.monotonic() + (20 if label == "e1m1" else 5)
+                    frame = menu_frames[-1]
+                    while time.monotonic() < deadline:
+                        frame = screen(frame_name)
+                        if region_diff(menu_frames[-1], frame) >= 1500:
+                            break
+                        time.sleep(0.25)
+                    if region_diff(menu_frames[-1], frame) < 1500:
+                        raise RuntimeError(f"DOOM {label} screen did not visibly advance")
+                    menu_frames.append(frame)
+                level = menu_frames[-1]
+                hold_key("up", 1.5)
+                time.sleep(0.5)
+                moved = screen("doom-08-e1m1-after-forward.ppm")
+                if region_diff(level, moved) < 2500:
+                    raise RuntimeError("DOOM E1M1 view did not change after forward movement")
+
+                # The game window is at (80, 60), 656x439. Close its caption
+                # and verify the original terminal can accept another command.
+                move_to(718, 70)
+                set_left_button(True)
+                set_left_button(False)
+                time.sleep(1.0)
+                returned = screen("doom-09-returned-to-cmd.ppm")
+                if region_diff(moved, returned) < 1000:
+                    raise RuntimeError("closing DOOM did not return visibly to the CMD desktop")
+                submit("echo doom closed", "doom-10-clean-exit.ppm")
+                screen("doom-11-shell-after-game.ppm")
+                print("DOOM E1M1 title/menu/level/movement and clean window exit passed.", flush=True)
+                return
 
             # Backspace corrects the mistyped suffix before Enter reaches CMD.
             type_text("helpz")
@@ -2228,6 +2301,7 @@ def run_qemu(
     theme_test: bool = False,
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
+    doom_test: bool = False,
     crash_dump_selftest: bool = False,
     resolution: tuple[int, int] | None = None,
     usb_ehci_test: bool = False,
@@ -2246,12 +2320,14 @@ def run_qemu(
         raise RuntimeError("Theme test cannot be combined with unrelated automated desktop runners")
     if process_memory_selftest and (interactive or verify_input or runtime_selftest or timer_selftest or network_test or usb_test or usb_ehci_test):
         raise RuntimeError("Process-memory self-test requires the unattended desktop boot path")
-    if cmd_test and (interactive or verify_input or runtime_selftest or timer_selftest or
+    if cmd_test and (verify_input or runtime_selftest or timer_selftest or
                      network_test or usb_test or usb_ehci_test or taskmgr_selftest or theme_test or
                      process_memory_selftest or verify_usb_input):
-        raise RuntimeError("CMD test requires its dedicated unattended QMP input path")
+        raise RuntimeError("CMD test requires its dedicated QMP input path")
     if cmd_test and memory_mib != 512:
         raise RuntimeError("CMD test must run within its 500 MiB profile: set --memory-mib 512")
+    if doom_test and not cmd_test:
+        raise RuntimeError("Doom test requires the CMD graphical terminal QMP profile")
     if cmd_test and diagnostics_dir is None:
         raise RuntimeError("CMD test requires --diagnostics-dir to retain screenshots and evidence")
     if crash_dump_selftest and (interactive or verify_input or verify_usb_input or
@@ -2465,6 +2541,22 @@ def run_qemu(
             fixture = system32_dir / "cmd-m0-known.txt"
             fixture.write_bytes("luceos cmd m0 real fat file fixture\r\n".encode("utf-8"))
             shutil.copyfile(fixture, diagnostics_dir / fixture.name)
+        if doom_test:
+            doom_image = ROOT / "build" / "doom.exe"
+            if not doom_image.is_file():
+                raise RuntimeError("DOOM image was not built for the system volume")
+            shutil.copyfile(doom_image, system32_dir / "doom.exe")
+            # CMD starts in C:\MicaNT. Stage the same PE there for the QMP
+            # launch so the test does not depend on guest keyboard casing.
+            shutil.copyfile(doom_image, esp / "MicaNT" / "doom.exe")
+            (system32_dir / "doom.log").write_bytes(b"doom startup\r\n")
+            wad_source = ROOT / "System" / "Games" / "Freedoom"
+            wad_target = esp / "MicaNT" / "System" / "Games" / "Freedoom"
+            for name in ("freedoom1.wad", "COPYING.txt", "ATTRIBUTION.md"):
+                source = wad_source / name
+                if not source.is_file():
+                    raise RuntimeError(f"Freedoom package is incomplete: {source}")
+            shutil.copytree(wad_source, wad_target)
         for source in sorted((ROOT / "build" / "system32").glob("*.dll")):
             shutil.copyfile(source, system32_dir / source.name)
         explorer_image = ROOT / "build" / "explorer.exe"
@@ -2819,7 +2911,7 @@ def run_qemu(
                             theme_test_verified = True
                         if cmd_test and not cmd_test_verified:
                             verify_cmd_terminal(
-                                temp / "qmp.sock", temp, diagnostics_dir,
+                                temp / "qmp.sock", temp, diagnostics_dir, doom_test,
                             )
                             cmd_test_verified = True
                         time_evidence = timer_selftest or runtime_selftest or (
@@ -2956,6 +3048,7 @@ def run_qemu(
                                 )
                                 print("Explorer input, window cleanup and Light-to-Dark theme switch passed.", flush=True)
                             result = (
+                                "DOOM E1M1 gameplay QMP self-test" if doom_test else
                                 "CMD graphical terminal QMP self-test" if cmd_test else
                                 "Dedicated theme test app" if theme_test else
                                 "Task Manager process-snapshot self-test" if taskmgr_selftest else
@@ -3013,6 +3106,8 @@ def run_qemu(
                     if diagnostics_dir is not None:
                         shutil.copyfile(ahci_image,
                             diagnostics_dir / "process-memory-dump-disk.img")
+                if doom_test and diagnostics_dir is not None and ahci_image.is_file():
+                    shutil.copyfile(ahci_image, diagnostics_dir / "doom-qemu-disk.img")
                 if network_peer is not None:
                     network_peer.close()
                 if tls_peer is not None:
@@ -3051,6 +3146,8 @@ def main() -> int:
     parser.add_argument("--taskmgr-selftest", action="store_true")
     parser.add_argument("--theme-test", action="store_true")
     parser.add_argument("--cmd-test", action="store_true")
+    parser.add_argument("--doom-test", action="store_true",
+                        help="launch doom.exe, play E1M1 with QMP, and retain scanout screenshots")
     parser.add_argument("--process-memory-selftest", action="store_true")
     parser.add_argument("--crash-dump-selftest", action="store_true")
     args = parser.parse_args()
@@ -3082,6 +3179,7 @@ def main() -> int:
             args.theme_test,
             args.process_memory_selftest,
             args.cmd_test,
+            args.doom_test,
             args.crash_dump_selftest,
             tuple(int(part) for part in args.resolution.split("x"))
                 if args.resolution else None,

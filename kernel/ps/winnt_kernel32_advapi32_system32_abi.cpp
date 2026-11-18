@@ -539,6 +539,17 @@ __declspec(dllexport) int32_t __stdcall CreateProcessW(
     return 1;
 }
 
+// Keep ExitProcess available to native PE imports through the production
+// Kernel32 DLL. Terminating the current process is a native process service;
+// callers must not fall through into application code if it unexpectedly
+// returns.
+__declspec(dllexport) [[noreturn]] void __stdcall ExitProcess(uint32_t exitCode) noexcept {
+    (void)NtTerminateProcess(reinterpret_cast<void*>(static_cast<intptr_t>(-1)),
+                             static_cast<int32_t>(exitCode));
+    constexpr int64_t retryDelay100ns = -1'000'000;
+    for (;;) (void)NtDelayExecution(0, &retryDelay100ns);
+}
+
 __declspec(dllexport) int32_t __stdcall ReadFile(
     void* file, void* buffer, uint32_t bytesToRead, uint32_t* bytesRead,
     void* overlapped) noexcept {

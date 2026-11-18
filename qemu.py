@@ -152,6 +152,7 @@ def write_manifest(
     taskmgr_selftest: bool = False, theme_test: bool = False,
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
+    doom_test: bool = False,
     crash_dump_selftest: bool = False,
 ) -> None:
     if not all(path.is_file() for path in (KERNEL, BOOTLOADER, DISPLAY_DRIVER)):
@@ -197,6 +198,7 @@ def write_manifest(
         "theme_test": theme_test,
         "process_memory_selftest": process_memory_selftest,
         "cmd_test": cmd_test,
+        "doom_test": doom_test,
         "crash_dump_selftest": crash_dump_selftest,
         "target": "ntoskrnl_core_baremetal",
         "architecture": "AMD64",
@@ -305,6 +307,14 @@ def main() -> int:
         help="launch the Ring 3 CMD terminal and exercise it through QMP",
     )
     parser.add_argument(
+        "--doom-test", action="store_true",
+        help="run real doom.exe in the guest, play E1M1 with QMP, and retain screenshots",
+    )
+    parser.add_argument(
+        "--interactive-after-cmd-test", action="store_true",
+        help="keep the visible CMD-test QEMU session open for manual use after QMP verification",
+    )
+    parser.add_argument(
         "--crash-dump-selftest", action="store_true",
         help="fault the kernel, persist a crash dump, reboot, recover it to C:\\Windows\\Minidump and decode it",
     )
@@ -317,6 +327,11 @@ def main() -> int:
         help="verify Ring 3 DHCP, DNS, TCP and certificate-validated HTTPS over QEMU virtio-net",
     )
     args = parser.parse_args()
+    if args.doom_test:
+        args.cmd_test = True
+        args.memory_mib = 512
+        if args.timeout == 90:
+            args.timeout = 240
     global BUILD_DIR
     if args.cmake_build_dir:
         BUILD_DIR = args.cmake_build_dir.expanduser()
@@ -344,7 +359,9 @@ def main() -> int:
                           args.theme_test or args.process_memory_selftest):
         parser.error("--cmd-test requires its dedicated unattended QMP input profile")
     if args.cmd_test and args.memory_mib != 512:
-        parser.error("--cmd-test must run with --memory-mib 512")
+        parser.error("--cmd-test and --doom-test must run with --memory-mib 512")
+    if args.interactive_after_cmd_test and (not args.cmd_test or args.headless):
+        parser.error("--interactive-after-cmd-test requires visible --cmd-test mode")
     if args.crash_dump_selftest and (args.runtime_selftest or args.timer_selftest or
             args.usb_test or args.network_test or args.check_explorer or args.taskmgr_selftest or
             args.theme_test or args.process_memory_selftest or args.cmd_test):
@@ -450,6 +467,8 @@ def main() -> int:
         )
         if args.cmd_test:
             run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "cmd_boot"])
+        if args.doom_test:
+            run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "doom_boot"])
         write_manifest(
             cxx,
             runtime_selftest=args.runtime_selftest,
@@ -458,6 +477,7 @@ def main() -> int:
             theme_test=args.theme_test,
             process_memory_selftest=args.process_memory_selftest,
             cmd_test=args.cmd_test,
+            doom_test=args.doom_test,
             crash_dump_selftest=args.crash_dump_selftest,
         )
         validate_build_manifest(
@@ -510,6 +530,10 @@ def main() -> int:
                 boot_command.append("--interactive")
         elif args.cmd_test:
             boot_command.append("--cmd-test")
+            if args.doom_test:
+                boot_command.append("--doom-test")
+            if args.interactive_after_cmd_test:
+                boot_command.append("--interactive")
         elif args.crash_dump_selftest:
             boot_command.append("--crash-dump-selftest")
         elif not args.headless:
