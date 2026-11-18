@@ -124,7 +124,15 @@ enum {
     MICANT_WIN32K_OP_RELEASE_CAPTURE,
     MICANT_WIN32K_OP_GET_FOCUS,
     MICANT_WIN32K_OP_SET_LIQUID_GLASS,
-    MICANT_WIN32K_OP_GET_SYSTEM_METRICS
+    MICANT_WIN32K_OP_GET_SYSTEM_METRICS,
+    MICANT_WIN32K_OP_GET_DLG_ITEM,
+    MICANT_WIN32K_OP_TRACK_MOUSE_EVENT,
+    MICANT_WIN32K_OP_GET_CLASS_NAME,
+    MICANT_WIN32K_OP_ENUM_CHILD_WINDOWS,
+    MICANT_WIN32K_OP_ENABLE_WINDOW,
+    MICANT_WIN32K_OP_GET_PARENT,
+    MICANT_WIN32K_OP_SET_WINDOW_MENU,
+    MICANT_WIN32K_OP_GET_WINDOW_MENU
 };
 
 enum {
@@ -171,7 +179,7 @@ MICANT_WIN32K_API int32_t MicaWin32kSetWindowPos(void*, void*, int32_t, int32_t,
 MICANT_WIN32K_API int32_t MicaWin32kPostMessageW(void*, uint32_t, uintptr_t, intptr_t);
 MICANT_WIN32K_API intptr_t MicaWin32kSendMessageW(void*, uint32_t, uintptr_t, intptr_t);
 MICANT_WIN32K_API void MicaWin32kPostQuitMessage(int32_t);
-MICANT_WIN32K_API uint16_t MicaWin32kRegisterClassW(const wchar_t*, void*);
+MICANT_WIN32K_API uint16_t MicaWin32kRegisterClassW(const wchar_t*, void*, int32_t);
 MICANT_WIN32K_API intptr_t MicaWin32kDispatchMessageW(const MicaWin32kMessage*);
 MICANT_WIN32K_API intptr_t MicaWin32kSetWindowLongPtrW(void*, int32_t, intptr_t);
 MICANT_WIN32K_API intptr_t MicaWin32kGetWindowLongPtrW(void*, int32_t);
@@ -249,6 +257,17 @@ MICANT_WIN32K_API int32_t MicaWin32kSetTaskbarButtonBounds(
 MICANT_WIN32K_API int32_t MicaWin32kFillRect(void*, const MicaWin32kRect*, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kBlendRect(void*, const MicaWin32kRect*, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kGetSystemMetrics(int32_t);
+MICANT_WIN32K_API void* MicaWin32kGetDlgItem(void*, int32_t);
+MICANT_WIN32K_API int32_t MicaWin32kTrackMouseEvent(
+    void*, uint32_t, uint32_t, uint32_t*, uint32_t*);
+MICANT_WIN32K_API int32_t MicaWin32kGetClassNameW(void*, wchar_t*, int32_t);
+MICANT_WIN32K_API int32_t MicaWin32kEnumChildWindows(
+    void*, void*, intptr_t);
+MICANT_WIN32K_API int32_t MicaWin32kEnableWindow(void*, int32_t,
+    int32_t*, int32_t*);
+MICANT_WIN32K_API void* MicaWin32kGetParent(void*);
+MICANT_WIN32K_API int32_t MicaWin32kSetWindowMenu(void*, void*);
+MICANT_WIN32K_API void* MicaWin32kGetWindowMenu(void*);
 
 #ifdef __cplusplus
 }

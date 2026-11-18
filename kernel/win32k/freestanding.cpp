@@ -11,7 +11,10 @@
 namespace micant::win32k::freestanding {
 namespace {
 
-constexpr size_t kClassCapacity = 32;
+// Boot-time theme and control probes register process-owned classes before
+// the desktop shell starts. Keep the table bounded while leaving room for
+// the independently started Ring 3 terminal and later applications.
+constexpr size_t kClassCapacity = 1024;
 constexpr size_t kMessageCapacity = 256;
 constexpr uint64_t kHandleTag = 0x4D4E570000000000ULL;
 constexpr uint32_t kWmQuit = 0x0012;
@@ -22,6 +25,15 @@ constexpr uint32_t kWmActivate = 0x0006;
 constexpr uint32_t kWmSetFocus = 0x0007;
 constexpr uint32_t kWmPaint = 0x000F;
 constexpr uint32_t kWmMouseMove = 0x0200;
+constexpr uint32_t kWmMouseHover = 0x02A1;
+constexpr uint32_t kWmMouseLeave = 0x02A3;
+constexpr uint32_t kWmNcMouseHover = 0x02A0;
+constexpr uint32_t kWmNcMouseLeave = 0x02A2;
+constexpr uint32_t kTmeHover = 0x00000001u;
+constexpr uint32_t kTmeLeave = 0x00000002u;
+constexpr uint32_t kTmeNonClient = 0x00000010u;
+constexpr uint32_t kTmeCancel = 0x80000000u;
+constexpr uint32_t kTmeQuery = 0x40000000u;
 constexpr uint32_t kWmLButtonDown = 0x0201;
 constexpr uint32_t kWmLButtonUp = 0x0202;
 constexpr uint32_t kWmRButtonDown = 0x0204;
@@ -42,6 +54,7 @@ constexpr int32_t kGwlpWndProc = -4;
 constexpr int32_t kGwlStyle = -16;
 constexpr int32_t kGwlpUserData = -21;
 constexpr uint32_t kWsChild = 0x40000000u;
+constexpr uint32_t kWsDisabled = 0x08000000u;
 constexpr uint32_t kWsBorder = 0x00800000u;
 constexpr uint32_t kWsDlgFrame = 0x00400000u;
 constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
@@ -154,6 +167,7 @@ struct WindowClass {
     uint16_t atom{};
     uint64_t windowProcedure{};
     uint64_t ownerProcessId{};
+    uint32_t windowExtraBytes{};
     bool active{};
 };
 
@@ -176,9 +190,15 @@ struct Window {
     uint64_t windowProcedure{};
     uint64_t icons[3]{};
     intptr_t userData{};
+    uint32_t windowExtraBytes{};
+    alignas(uintptr_t) uintptr_t windowExtra[8]{};
     int32_t x{}, y{}, width{}, height{};
     int32_t restoreX{}, restoreY{}, restoreWidth{}, restoreHeight{};
     uint32_t style{}, extendedStyle{};
+    uint32_t mouseTrackingFlags{}, mouseHoverTime{};
+    uint64_t mouseHoverStartCounter{};
+    int32_t mouseHoverX{}, mouseHoverY{};
+    bool mouseHoverStarted{}, mouseHoverFired{};
     MicaLiquidGlassDescriptor liquidGlass{};
     uint32_t animationFlags{};
     uint32_t compositorSlot{UINT32_MAX};
@@ -641,7 +661,13 @@ void (*g_compositorPublishCallback)() noexcept{};
 
 bool equalText(const uint16_t* first, const uint16_t* second) noexcept {
     for (size_t index = 0; index < MICANT_WIN32K_TEXT_CAPACITY; ++index) {
-        if (first[index] != second[index]) return false;
+        const auto foldAscii = [](uint16_t character) noexcept {
+            return character >= static_cast<uint16_t>(L'a') &&
+                    character <= static_cast<uint16_t>(L'z')
+                ? static_cast<uint16_t>(character - (L'a' - L'A'))
+                : character;
+        };
+        if (foldAscii(first[index]) != foldAscii(second[index])) return false;
         if (first[index] == 0) return true;
     }
     return false;
@@ -1065,6 +1091,7 @@ NtStatus registerClass(MicaWin32kRequest& request, uint64_t ownerProcessId) noex
         if (g_nextAtom == 0) g_nextAtom = 1;
         windowClass.windowProcedure = request.args[0];
         windowClass.ownerProcessId = ownerProcessId;
+        windowClass.windowExtraBytes = static_cast<uint32_t>(request.args[1]);
         copyText(windowClass.name, request.className);
         request.result = windowClass.atom;
         return NtStatus::Success;
@@ -1103,6 +1130,7 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         window.menu = request.args[7];
         window.extendedStyle = static_cast<uint32_t>(request.args[0]);
         window.style = static_cast<uint32_t>(request.args[1]);
+        window.windowExtraBytes = windowClass->windowExtraBytes;
         window.x = static_cast<int32_t>(x);
         window.y = static_cast<int32_t>(y);
         window.width = static_cast<int32_t>(width);
@@ -1124,6 +1152,10 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
                 window = {};
                 return NtStatus::InsufficientResources;
             }
+        } else if (window.visible &&
+                   !enqueueWindowMessage(window, kWmPaint, 0, 0)) {
+            window = {};
+            return NtStatus::InsufficientResources;
         }
         request.result = window.handle;
         markWindowBounds(window);
@@ -1231,6 +1263,203 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             else if (request.args[0] == 1) request.result = static_cast<uint32_t>(g_screenHeight);
             else return NtStatus::NotSupported;
             return NtStatus::Success;
+        case MICANT_WIN32K_OP_GET_DLG_ITEM: {
+            const auto* parent = findWindow(request.args[0], ownerProcessId);
+            if (!parent) return NtStatus::InvalidHandle;
+            const uint32_t controlId = static_cast<uint32_t>(request.args[1]);
+            for (const auto& window : g_windows) {
+                if (window.active && window.ownerProcessId == ownerProcessId &&
+                    window.parent == parent->handle &&
+                    static_cast<uint32_t>(window.menu) == controlId) {
+                    request.result = window.handle;
+                    return NtStatus::Success;
+                }
+            }
+            return NtStatus::ObjectNameNotFound;
+        }
+        case MICANT_WIN32K_OP_GET_CLASS_NAME: {
+            const auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            const uint32_t capacity = static_cast<uint32_t>(request.args[1]);
+            if (!capacity) return NtStatus::InvalidParameter;
+            const WindowClass* windowClass{};
+            for (const auto& candidate : g_classes) {
+                if (candidate.active && candidate.ownerProcessId == ownerProcessId &&
+                    candidate.atom == window->classAtom) {
+                    windowClass = &candidate;
+                    break;
+                }
+            }
+            if (!windowClass) return NtStatus::ObjectNameNotFound;
+            size_t length = 0;
+            while (length < MICANT_WIN32K_TEXT_CAPACITY && windowClass->name[length]) ++length;
+            const size_t copied = std::min<size_t>(length, capacity - 1);
+            for (size_t index = 0; index < copied; ++index)
+                request.text[index] = windowClass->name[index];
+            request.text[copied] = 0;
+            request.result = copied;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_ENUM_CHILD_WINDOWS: {
+            const auto* parent = findWindow(request.args[0], ownerProcessId);
+            if (!parent) return NtStatus::InvalidHandle;
+            const uint64_t first = request.args[1];
+            const size_t capacity = std::min<uint64_t>(request.args[2],
+                MICANT_WIN32K_ENUM_BATCH_CAPACITY);
+            if (!capacity) return NtStatus::InvalidParameter;
+            uint64_t matchingIndex = 0;
+            size_t returned = 0;
+            for (const auto& candidate : g_windows) {
+                if (!candidate.active || candidate.ownerProcessId != ownerProcessId ||
+                    candidate.handle == parent->handle) continue;
+                uint64_t ancestor = candidate.parent;
+                bool descendant = false;
+                for (size_t depth = 0; ancestor && depth < g_windows.capacity(); ++depth) {
+                    if (ancestor == parent->handle) { descendant = true; break; }
+                    const auto* ancestorWindow = findWindow(ancestor, ownerProcessId);
+                    if (!ancestorWindow) break;
+                    ancestor = ancestorWindow->parent;
+                }
+                if (!descendant) continue;
+                if (matchingIndex++ < first) continue;
+                request.windowHandles[returned++] = candidate.handle;
+                if (returned == capacity) break;
+            }
+            request.result = returned;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_ENABLE_WINDOW: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            const bool wasDisabled = (window->style & kWsDisabled) != 0;
+            const bool requestedDisabled = request.args[1] == 0;
+            if (requestedDisabled) window->style |= kWsDisabled;
+            else window->style &= ~kWsDisabled;
+            request.result = wasDisabled ? 1u : 0u;
+            request.args[2] = wasDisabled != requestedDisabled ? 1u : 0u;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_GET_PARENT: {
+            const auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            request.result = window->parent;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_SET_WINDOW_MENU: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            window->menu = request.args[1];
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_GET_WINDOW_MENU: {
+            const auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            request.result = window->menu;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_TRACK_MOUSE_EVENT: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            const uint32_t flags = static_cast<uint32_t>(request.args[1]);
+            constexpr uint32_t supported = kTmeHover | kTmeLeave | kTmeNonClient |
+                                           kTmeCancel | kTmeQuery;
+            if (flags & ~supported) return NtStatus::InvalidParameter;
+            if (flags & kTmeQuery) {
+                if (flags != kTmeQuery) return NtStatus::InvalidParameter;
+                request.result = window->mouseTrackingFlags;
+                request.args[3] = window->mouseHoverTime;
+                return NtStatus::Success;
+            }
+            if (flags & kTmeCancel) {
+                if (flags & ~(kTmeCancel | kTmeHover | kTmeLeave | kTmeNonClient))
+                    return NtStatus::InvalidParameter;
+                const uint32_t cancel = flags & (kTmeHover | kTmeLeave);
+                window->mouseTrackingFlags &= ~(cancel ? cancel : (kTmeHover | kTmeLeave));
+                if (!(window->mouseTrackingFlags & kTmeHover)) {
+                    window->mouseHoverStarted = false;
+                    window->mouseHoverFired = false;
+                }
+                if (!(window->mouseTrackingFlags & (kTmeHover | kTmeLeave)))
+                    window->mouseTrackingFlags = 0;
+                request.result = 1;
+                return NtStatus::Success;
+            }
+            const uint32_t tracking = flags & (kTmeHover | kTmeLeave | kTmeNonClient);
+            if (!(tracking & (kTmeHover | kTmeLeave)) ||
+                ((tracking & kTmeNonClient) && !(tracking & (kTmeHover | kTmeLeave))))
+                return NtStatus::InvalidParameter;
+            window->mouseTrackingFlags |= tracking;
+            if (tracking & kTmeHover) {
+                uint32_t hoverTime = static_cast<uint32_t>(request.args[2]);
+                if (!hoverTime || hoverTime == UINT32_MAX) hoverTime = 400;
+                window->mouseHoverTime = hoverTime;
+                window->mouseHoverStarted = false;
+                window->mouseHoverFired = false;
+                if (g_mousePositionValid && g_cursorHitWindow == window->handle) {
+                    uint64_t counter{}, frequency{};
+                    if (!ke::KeQueryPerformanceCounterValue(counter, frequency) || !frequency)
+                        return NtStatus::DeviceNotReady;
+                    window->mouseHoverStartCounter = counter;
+                    window->mouseHoverX = g_mouseX;
+                    window->mouseHoverY = g_mouseY;
+                    window->mouseHoverStarted = true;
+                }
+            }
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_PUMP_INPUT: {
+            uint64_t counter{}, frequency{};
+            if (!ke::KeQueryPerformanceCounterValue(counter, frequency) || !frequency)
+                return NtStatus::DeviceNotReady;
+            for (auto& window : g_windows) {
+                if (!window.active || !window.mouseHoverStarted || window.mouseHoverFired ||
+                    !(window.mouseTrackingFlags & kTmeHover) ||
+                    g_cursorHitWindow != window.handle || !g_mousePositionValid)
+                    continue;
+                if (window.mouseHoverX != g_mouseX || window.mouseHoverY != g_mouseY) {
+                    window.mouseHoverX = g_mouseX;
+                    window.mouseHoverY = g_mouseY;
+                    window.mouseHoverStartCounter = counter;
+                    continue;
+                }
+                if (counter < window.mouseHoverStartCounter) {
+                    window.mouseHoverStartCounter = counter;
+                    continue;
+                }
+                const uint64_t elapsed = counter - window.mouseHoverStartCounter;
+                const uint64_t delayMs = window.mouseHoverTime;
+                const uint64_t whole = frequency / 1000;
+                const uint64_t remainder = frequency % 1000;
+                if (delayMs && whole > UINT64_MAX / delayMs) continue;
+                const uint64_t delay = whole * delayMs + (remainder * delayMs) / 1000;
+                if (elapsed < delay) continue;
+                int64_t originX{}, originY{};
+                if (!windowScreenOrigin(window, originX, originY)) continue;
+                const int32_t localX = g_mouseX - static_cast<int32_t>(originX) - frameInset(window);
+                const int32_t localY = g_mouseY - static_cast<int32_t>(originY) -
+                    frameInset(window) - captionHeight(window);
+                const bool nonClient = (window.mouseTrackingFlags & kTmeNonClient) != 0;
+                const uint32_t message = nonClient ? kWmNcMouseHover : kWmMouseHover;
+                const int64_t position = nonClient
+                    ? static_cast<int64_t>((static_cast<uint32_t>(g_mouseY) << 16) |
+                                           (static_cast<uint32_t>(g_mouseX) & 0xFFFFu))
+                    : static_cast<int64_t>((static_cast<uint32_t>(localY) << 16) |
+                                           (static_cast<uint32_t>(localX) & 0xFFFFu));
+                const uintptr_t hitTest = nonClient
+                    ? static_cast<uintptr_t>(hitTestWindow(window, g_mouseX, g_mouseY)) : 0;
+                if (!enqueueWindowMessage(window, message, hitTest, position,
+                                          g_mouseX, g_mouseY))
+                    return NtStatus::InsufficientResources;
+                window.mouseHoverFired = true;
+                window.mouseHoverStarted = false;
+                window.mouseTrackingFlags &= ~kTmeHover;
+                if (!(window.mouseTrackingFlags & kTmeLeave)) window.mouseTrackingFlags = 0;
+            }
+            request.result = 1;
+            return NtStatus::Success;
+        }
         case MICANT_WIN32K_OP_CREATE_WINDOW:
             return createWindow(request, ownerProcessId);
         case MICANT_WIN32K_OP_GET_WINDOW_SURFACE: {
@@ -1815,6 +2044,12 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             } else if (index == kGwlpWndProc) {
                 request.result = window->windowProcedure;
                 window->windowProcedure = request.args[2];
+            } else if (index >= 0 && index % static_cast<int32_t>(sizeof(uintptr_t)) == 0 &&
+                       static_cast<uint32_t>(index) <= window->windowExtraBytes &&
+                       sizeof(uintptr_t) <= window->windowExtraBytes - static_cast<uint32_t>(index)) {
+                const size_t slot = static_cast<uint32_t>(index) / sizeof(uintptr_t);
+                request.result = window->windowExtra[slot];
+                window->windowExtra[slot] = static_cast<uintptr_t>(request.args[2]);
             } else {
                 return NtStatus::InvalidParameter;
             }
@@ -1828,6 +2063,11 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 request.result = static_cast<uint64_t>(window->userData);
             } else if (index == kGwlpWndProc) {
                 request.result = window->windowProcedure;
+            } else if (index >= 0 && index % static_cast<int32_t>(sizeof(uintptr_t)) == 0 &&
+                       static_cast<uint32_t>(index) <= window->windowExtraBytes &&
+                       sizeof(uintptr_t) <= window->windowExtraBytes - static_cast<uint32_t>(index)) {
+                const size_t slot = static_cast<uint32_t>(index) / sizeof(uintptr_t);
+                request.result = window->windowExtra[slot];
             } else if (index == kGwlStyle) {
                 request.result = window->style;
             } else {
@@ -1959,6 +2199,22 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     const uint64_t oldCursorHitWindow = g_cursorHitWindow;
     const int32_t oldCursorHitTest = g_cursorHitTest;
     auto* oldHover = findWindowAny(oldCursorHitWindow);
+    if (oldHover && oldCursorHitWindow != (target ? target->handle : 0) &&
+        (oldHover->mouseTrackingFlags & kTmeLeave)) {
+        const bool nonClient = (oldHover->mouseTrackingFlags & kTmeNonClient) != 0;
+        const uintptr_t hitTest = nonClient
+            ? static_cast<uintptr_t>(hitTestWindow(*oldHover, oldMouseX, oldMouseY)) : 0;
+        const int64_t screenPoint = static_cast<int64_t>(
+            (static_cast<uint32_t>(oldMouseY) << 16) |
+            (static_cast<uint32_t>(oldMouseX) & 0xFFFFu));
+        if (!enqueueWindowMessage(*oldHover,
+                nonClient ? kWmNcMouseLeave : kWmMouseLeave,
+                hitTest, nonClient ? screenPoint : 0, oldMouseX, oldMouseY))
+            return false;
+        oldHover->mouseTrackingFlags &= ~kTmeLeave;
+        if (!(oldHover->mouseTrackingFlags & kTmeHover))
+            oldHover->mouseTrackingFlags = 0;
+    }
     int64_t oldHoverX{}, oldHoverY{}, targetX{}, targetY{};
     const bool oldHoverOrigin = oldHover &&
         windowScreenOrigin(*oldHover, oldHoverX, oldHoverY);
@@ -1986,6 +2242,16 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
                                   setCursorLParam, x, y)) return false;
         g_cursorHitWindow = target->handle;
         g_cursorHitTest = hitTest;
+    }
+    if (target && (target->mouseTrackingFlags & kTmeHover) &&
+        !target->mouseHoverStarted && !target->mouseHoverFired) {
+        uint64_t counter{}, frequency{};
+        if (ke::KeQueryPerformanceCounterValue(counter, frequency) && frequency) {
+            target->mouseHoverStartCounter = counter;
+            target->mouseHoverX = x;
+            target->mouseHoverY = y;
+            target->mouseHoverStarted = true;
+        }
     }
     const bool leftPressed = !(previousButtons & 0x01u) && (currentButtons & 0x01u);
     const bool leftReleased = (previousButtons & 0x01u) && !(currentButtons & 0x01u);

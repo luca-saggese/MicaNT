@@ -13,7 +13,7 @@ namespace {
 constexpr size_t kMenuCapacity = 32;
 constexpr size_t kItemCapacity = 32;
 constexpr size_t kTextCapacity = 128;
-constexpr size_t kAttachmentCapacity = 64;
+constexpr size_t kMenuBarCapacity = 64;
 constexpr uintptr_t kMenuTag = sizeof(uintptr_t) == 8
     ? uintptr_t{0x4D4E550000000000ull} : uintptr_t{0x4D4E0000u};
 constexpr uintptr_t kMenuIndexMask = ~kMenuTag;
@@ -65,7 +65,6 @@ struct Menu {
     bool active{};
     MenuItem items[kItemCapacity]{};
 };
-struct Attachment { void* hwnd{}; void* menu{}; };
 struct PopupSession {
     void* hwnd{};
     void* owner{};
@@ -88,11 +87,20 @@ struct MenuBarState {
     bool active{};
 };
 Menu g_menus[kMenuCapacity]{};
-Attachment g_attachments[kAttachmentCapacity]{};
 PopupSession g_popup{};
-MenuBarState g_menuBars[kAttachmentCapacity]{};
+MenuBarState g_menuBars[kMenuBarCapacity]{};
 uintptr_t g_nextHandle{1};
 uint32_t g_menuLock{};
+struct ClipboardState {
+    uint32_t ownerThread{};
+    uint32_t ownerWindow{};
+    void* ansi{};
+    void* unicode{};
+    bool open{};
+} g_clipboard{};
+using DialogProcedure = intptr_t (*)(void*, uint32_t, uintptr_t, intptr_t);
+constexpr int32_t kDwlpDlgProc = static_cast<int32_t>(sizeof(uintptr_t));
+constexpr int32_t kDialogWindowExtra = 30;
 void finishPopup(bool chose, int32_t index, bool postClose) noexcept;
 
 extern "C" {
@@ -113,12 +121,24 @@ intptr_t SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t DefWindowProcW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 int32_t PostMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 int32_t IsWindowVisible(void*) noexcept;
+intptr_t SetWindowLongPtrW(void*, int32_t, intptr_t) noexcept;
+intptr_t GetWindowLongPtrW(void*, int32_t) noexcept;
 int32_t GetClientRect(void*, MicaWin32kRect*) noexcept;
 int32_t GetWindowRect(void*, MicaWin32kRect*) noexcept;
 int32_t SetWindowPos(void*, void*, int32_t, int32_t, int32_t, int32_t, uint32_t) noexcept;
 void PostQuitMessage(int32_t) noexcept;
+uint16_t RegisterClassExW(const void*) noexcept;
+__declspec(dllexport) int32_t SetMenu(void*, void*) noexcept;
+__declspec(dllexport) int32_t DrawMenuBar(void*) noexcept;
+__declspec(dllexport) void* LoadMenuW(void*, const wchar_t*) noexcept;
+__declspec(dllexport) int32_t DestroyMenu(void*) noexcept;
 __declspec(dllexport) int32_t TrackPopupMenu(void*, uint32_t, int32_t, int32_t,
     int32_t, void*, const void*) noexcept;
+__declspec(dllimport) void* __stdcall FindResourceExW(void*, const wchar_t*,
+    const wchar_t*, uint16_t) noexcept;
+__declspec(dllimport) void* __stdcall LoadResource(void*, void*) noexcept;
+__declspec(dllimport) void* __stdcall LockResource(void*) noexcept;
+__declspec(dllimport) uint32_t __stdcall SizeofResource(void*, void*) noexcept;
 }
 
 class LockGuard {
@@ -172,6 +192,104 @@ int findItem(Menu& menu, uint32_t item, bool byPosition) noexcept {
     for (size_t index = 0; index < menu.count; ++index)
         if (menu.items[index].id == item) return static_cast<int>(index);
     return -1;
+}
+bool setItem(Menu&, size_t, uint32_t, uintptr_t, const wchar_t*) noexcept;
+bool destroyTree(void*, size_t) noexcept;
+struct MenuResourceCursor { const uint8_t* current{}; const uint8_t* end{}; };
+bool readMenuWord(MenuResourceCursor& cursor, uint16_t& value) noexcept {
+    if (!cursor.current || cursor.current > cursor.end ||
+        static_cast<size_t>(cursor.end - cursor.current) < sizeof(value)) return false;
+    value = static_cast<uint16_t>(cursor.current[0] |
+        (static_cast<uint16_t>(cursor.current[1]) << 8));
+    cursor.current += sizeof(value);
+    return true;
+}
+bool readDialogByte(MenuResourceCursor& cursor, uint8_t& value) noexcept {
+    if (!cursor.current || cursor.current >= cursor.end) return false;
+    value = *cursor.current++;
+    return true;
+}
+bool readDialogDword(MenuResourceCursor& cursor, uint32_t& value) noexcept {
+    uint16_t lo{}, hi{};
+    if (!readMenuWord(cursor, lo) || !readMenuWord(cursor, hi)) return false;
+    value = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+    return true;
+}
+bool readDialogField(MenuResourceCursor& cursor, wchar_t (&text)[kTextCapacity],
+                     uintptr_t& ordinal, bool& isOrdinal) noexcept {
+    uint16_t first{};
+    if (!readMenuWord(cursor, first)) return false;
+    ordinal = 0; isOrdinal = false; text[0] = L'\0';
+    if (!first) return true;
+    if (first == 0xFFFFu) {
+        uint16_t value{};
+        if (!readMenuWord(cursor, value)) return false;
+        ordinal = value; isOrdinal = true; return true;
+    }
+    size_t count = 0;
+    for (;;) {
+        if (count + 1 >= kTextCapacity) return false;
+        text[count++] = static_cast<wchar_t>(first);
+        uint16_t value{};
+        if (!readMenuWord(cursor, value)) return false;
+        if (!value) { text[count] = L'\0'; return true; }
+        first = value;
+    }
+}
+void alignDialogDword(MenuResourceCursor& cursor) noexcept {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(cursor.current);
+    cursor.current = reinterpret_cast<const uint8_t*>((address + 3u) & ~uintptr_t{3u});
+}
+intptr_t dialogWindowProcedure(void* window, uint32_t message,
+    uintptr_t wParam, intptr_t lParam) noexcept {
+    const auto procedure = reinterpret_cast<DialogProcedure>(
+        GetWindowLongPtrW(window, kDwlpDlgProc));
+    if (message == 0x0081u /* WM_NCCREATE */) return 1;
+    if (procedure) {
+        const intptr_t result = procedure(window, message, wParam, lParam);
+        if (result) return result;
+    }
+    const intptr_t result = DefWindowProcW(window, message, wParam, lParam);
+    if (message == 0x0082u /* WM_NCDESTROY */)
+        (void)SetWindowLongPtrW(window, kDwlpDlgProc, 0);
+    return result;
+}
+bool readMenuText(MenuResourceCursor& cursor, wchar_t (&text)[kTextCapacity]) noexcept {
+    size_t count = 0;
+    for (;;) {
+        uint16_t value{};
+        if (!readMenuWord(cursor, value)) return false;
+        if (!value) { text[count] = L'\0'; return true; }
+        if (count + 1 >= kTextCapacity) return false;
+        text[count++] = static_cast<wchar_t>(value);
+    }
+}
+bool parseMenuLevel(Menu& menu, MenuResourceCursor& cursor, size_t depth) noexcept {
+    if (depth >= 16) return false;
+    for (;;) {
+        uint16_t flags{}, id{};
+        if (menu.count >= kItemCapacity || !readMenuWord(cursor, flags)) return false;
+        const bool popup = (flags & 0x0010u) != 0;
+        if (!popup && !readMenuWord(cursor, id)) return false;
+        wchar_t text[kTextCapacity]{};
+        if (!readMenuText(cursor, text)) return false;
+        void* childHandle = nullptr;
+        if (popup) {
+            auto* child = createMenu();
+            if (!child) return false;
+            childHandle = reinterpret_cast<void*>(child->handle);
+        }
+        if (!setItem(menu, menu.count, flags, popup
+                ? reinterpret_cast<uintptr_t>(childHandle) : id, text)) {
+            if (childHandle) (void)destroyTree(childHandle, 0);
+            return false;
+        }
+        if (popup) {
+            auto* child = findMenu(childHandle);
+            if (!child || !parseMenuLevel(*child, cursor, depth + 1)) return false;
+        }
+        if (flags & 0x0080u) return true; // MF_END
+    }
 }
 bool setItem(Menu& menu, size_t index, uint32_t flags, uintptr_t idOrMenu,
              const wchar_t* text) noexcept {
@@ -229,8 +347,6 @@ bool destroyTree(void* handle, size_t depth) noexcept {
         for (size_t index = 0; index < parent.count; ++index)
             if (parent.items[index].submenu == handle) parent.items[index].submenu = nullptr;
     }
-    for (auto& attachment : g_attachments)
-        if (attachment.menu == handle) attachment.menu = nullptr;
     *menu = {};
     return true;
 }
@@ -472,15 +588,11 @@ bool menuBarSnapshot(void* hwnd, void*& owner, MenuItem* items,
         owner = bar.owner;
         selected = bar.selected;
         width = bar.width;
-        for (const auto& attachment : g_attachments) {
-            if (attachment.hwnd != owner) continue;
-            const auto* menu = findMenu(attachment.menu);
-            if (!menu) return false;
-            count = menu->count;
-            for (uint32_t index = 0; index < count; ++index) items[index] = menu->items[index];
-            return true;
-        }
-        return false;
+        const auto* menu = findMenu(MicaWin32kGetWindowMenu(owner));
+        if (!menu) return false;
+        count = menu->count;
+        for (uint32_t index = 0; index < count; ++index) items[index] = menu->items[index];
+        return true;
     }
     return false;
 }
@@ -681,12 +793,8 @@ bool drawMenuBar(void* owner) noexcept {
     bool attached = false;
     {
         LockGuard guard;
-        for (const auto& attachment : g_attachments)
-            if (attachment.hwnd == owner) {
-                attached = true;
-                menu = attachment.menu;
-                break;
-            }
+        menu = MicaWin32kGetWindowMenu(owner);
+        attached = menu != nullptr;
         if (menu && !findMenu(menu)) return false;
         for (auto& bar : g_menuBars) {
             if (bar.active && bar.owner == owner) { barWindow = bar.hwnd; break; }
@@ -825,8 +933,6 @@ extern "C" void MicaUser32MenuWindowDestroyed(void* hwnd) noexcept {
     void* barWindow = nullptr;
     {
         LockGuard guard;
-        for (auto& attachment : g_attachments)
-            if (attachment.hwnd == hwnd) attachment = {};
         for (auto& bar : g_menuBars) {
             if (bar.active && bar.owner == hwnd) {
                 barWindow = bar.hwnd;
@@ -850,6 +956,170 @@ __declspec(dllexport) void* CreateMenu() noexcept {
     return menu ? reinterpret_cast<void*>(menu->handle) : nullptr;
 }
 __declspec(dllexport) void* CreatePopupMenu() noexcept { return CreateMenu(); }
+__declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
+    const wchar_t* templateName, void* parent, void* dialogProc,
+    intptr_t initParam) noexcept {
+    if (!instance || !templateName || !dialogProc) {
+        uint32_t error = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        return nullptr;
+    }
+    const auto resourceType = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(5));
+    void* resource = FindResourceExW(instance, resourceType, templateName, 0);
+    void* loaded = resource ? LoadResource(instance, resource) : nullptr;
+    const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+    const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;
+    if (!data || size < 24) return nullptr;
+    MenuResourceCursor cursor{data, data + size};
+    uint16_t version{}, signature{}, itemCount{}, xRaw{}, yRaw{}, widthRaw{}, heightRaw{};
+    uint32_t helpId{}, exStyle{}, style{};
+    if (!readMenuWord(cursor, version) || !readMenuWord(cursor, signature) ||
+        version != 1 || signature != 0xFFFFu || !readDialogDword(cursor, helpId) ||
+        !readDialogDword(cursor, exStyle) || !readDialogDword(cursor, style) ||
+        !readMenuWord(cursor, itemCount) || !readMenuWord(cursor, xRaw) ||
+        !readMenuWord(cursor, yRaw) || !readMenuWord(cursor, widthRaw) ||
+        !readMenuWord(cursor, heightRaw) || itemCount > 256) {
+        uint32_t error = 13;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        return nullptr;
+    }
+    wchar_t menuName[kTextCapacity]{}, className[kTextCapacity]{}, caption[kTextCapacity]{};
+    uintptr_t menuOrdinal{}, classOrdinal{};
+    bool hasMenuOrdinal{}, hasClassOrdinal{};
+    if (!readDialogField(cursor, menuName, menuOrdinal, hasMenuOrdinal) ||
+        !readDialogField(cursor, className, classOrdinal, hasClassOrdinal) ||
+        !readMenuText(cursor, caption)) return nullptr;
+    uint16_t pointSize{};
+    if (style & 0x00000040u /* DS_SETFONT */) {
+        uint16_t weight{}; uint8_t italic{}, charset{};
+        wchar_t face[kTextCapacity]{}; uintptr_t ignoredOrdinal{}; bool ignoredIsOrdinal{};
+        if (!readMenuWord(cursor, pointSize) || !readMenuWord(cursor, weight) ||
+            !readDialogByte(cursor, italic) || !readDialogByte(cursor, charset) ||
+            !readDialogField(cursor, face, ignoredOrdinal, ignoredIsOrdinal)) return nullptr;
+        (void)weight; (void)italic; (void)charset;
+    }
+    alignDialogDword(cursor);
+    static constexpr wchar_t kDialogClass[] = L"#32770";
+    MicaWin32kWindowClassEx dialogClass{};
+    dialogClass.cbSize = sizeof(dialogClass);
+    dialogClass.wndProc = reinterpret_cast<void*>(dialogWindowProcedure);
+    dialogClass.windowExtra = kDialogWindowExtra;
+    dialogClass.className = kDialogClass;
+    (void)RegisterClassExW(&dialogClass);
+    DialogProcedure callback = reinterpret_cast<DialogProcedure>(dialogProc);
+    const int32_t x = static_cast<int16_t>(xRaw) == static_cast<int16_t>(0x8000u)
+        ? 48 : (static_cast<int32_t>(static_cast<int16_t>(xRaw)) * 7) / 4;
+    const int32_t y = static_cast<int16_t>(yRaw) == static_cast<int16_t>(0x8000u)
+        ? 48 : (static_cast<int32_t>(static_cast<int16_t>(yRaw)) * 15) / 8;
+    const int32_t width = (static_cast<int32_t>(widthRaw) * 7) / 4;
+    const int32_t height = (static_cast<int32_t>(heightRaw) * 15) / 8;
+    void* window = CreateWindowExW(exStyle, kDialogClass, caption, style,
+        x, y, width, height, parent, nullptr, instance, nullptr);
+    if (!window) return nullptr;
+    (void)SetWindowLongPtrW(window, kDwlpDlgProc,
+        reinterpret_cast<intptr_t>(callback));
+    void* firstFocus = nullptr;
+    for (uint32_t itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+        alignDialogDword(cursor);
+        uint32_t itemHelp{}, itemExStyle{}, itemStyle{}, controlId{};
+        uint16_t itemX{}, itemY{}, itemWidth{}, itemHeight{};
+        if (!readDialogDword(cursor, itemHelp) || !readDialogDword(cursor, itemExStyle) ||
+            !readDialogDword(cursor, itemStyle) || !readMenuWord(cursor, itemX) ||
+            !readMenuWord(cursor, itemY) || !readMenuWord(cursor, itemWidth) ||
+            !readMenuWord(cursor, itemHeight) || !readDialogDword(cursor, controlId)) {
+            (void)DestroyWindow(window); return nullptr;
+        }
+        wchar_t controlClass[kTextCapacity]{}, text[kTextCapacity]{};
+        uintptr_t classId{}, textId{}; bool classIsOrdinal{}, textIsOrdinal{};
+        if (!readDialogField(cursor, controlClass, classId, classIsOrdinal) ||
+            !readDialogField(cursor, text, textId, textIsOrdinal)) {
+            (void)DestroyWindow(window); return nullptr;
+        }
+        uint16_t extraBytes{};
+        if (!readMenuWord(cursor, extraBytes) || cursor.current > cursor.end ||
+            static_cast<size_t>(cursor.end - cursor.current) < extraBytes) {
+            (void)DestroyWindow(window); return nullptr;
+        }
+        cursor.current += extraBytes;
+        const wchar_t* classPointer = controlClass;
+        if (classIsOrdinal) {
+            switch (classId) {
+                case 0x80: classPointer = L"Button"; break;
+                case 0x81: classPointer = L"Edit"; break;
+                case 0x82: classPointer = L"Static"; break;
+                case 0x83: classPointer = L"ListBox"; break;
+                case 0x84: classPointer = L"ScrollBar"; break;
+                case 0x85: classPointer = L"ComboBox"; break;
+                default: (void)DestroyWindow(window); return nullptr;
+            }
+        }
+        const wchar_t* controlText = textIsOrdinal
+            ? reinterpret_cast<const wchar_t*>(textId) : text;
+        void* control = CreateWindowExW(itemExStyle, classPointer, controlText,
+            itemStyle, (static_cast<int32_t>(static_cast<int16_t>(itemX)) * 7) / 4,
+            (static_cast<int32_t>(static_cast<int16_t>(itemY)) * 15) / 8,
+            (static_cast<int32_t>(itemWidth) * 7) / 4,
+            (static_cast<int32_t>(itemHeight) * 15) / 8,
+            window, reinterpret_cast<void*>(static_cast<uintptr_t>(controlId)),
+            instance, nullptr);
+        if (!control) { (void)DestroyWindow(window); return nullptr; }
+        if (!firstFocus && (itemStyle & 0x00010000u) /* WS_TABSTOP */ &&
+            !(itemStyle & 0x08000000u /* WS_DISABLED */)) firstFocus = control;
+        (void)itemHelp;
+    }
+    void* menu = nullptr;
+    if (hasMenuOrdinal) {
+        menu = LoadMenuW(instance, reinterpret_cast<const wchar_t*>(menuOrdinal));
+    } else if (menuName[0]) {
+        menu = LoadMenuW(instance, menuName);
+    }
+    if ((hasMenuOrdinal || menuName[0]) && (!menu || !SetMenu(window, menu))) {
+        (void)DestroyWindow(window);
+        if (menu) (void)DestroyMenu(menu);
+        return nullptr;
+    }
+    if (menu) (void)DrawMenuBar(window);
+    (void)callback(window, 0x0110u /* WM_INITDIALOG */,
+        reinterpret_cast<uintptr_t>(firstFocus), initParam);
+    if (style & 0x10000000u /* WS_VISIBLE */) {
+        (void)ShowWindow(window, 5);
+        (void)UpdateWindow(window);
+    }
+    (void)helpId; (void)classOrdinal; (void)hasClassOrdinal; (void)pointSize;
+    return window;
+}
+__declspec(dllexport) void* LoadMenuW(void* instance,
+    const wchar_t* name) noexcept {
+    if (!instance || !name) {
+        uint32_t error = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        return nullptr;
+    }
+    const auto type = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(4));
+    void* resource = FindResourceExW(instance, type, name, 0);
+    void* loaded = resource ? LoadResource(instance, resource) : nullptr;
+    const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+    const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;
+    if (!data || size < 4) return nullptr;
+    MenuResourceCursor cursor{data, data + size};
+    uint16_t version{}, offset{};
+    if (!readMenuWord(cursor, version) || !readMenuWord(cursor, offset) ||
+        version != 0 || offset > static_cast<size_t>(cursor.end - cursor.current)) {
+        uint32_t error = version == 1 ? 13u : 1813u;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        return nullptr;
+    }
+    cursor.current += offset;
+    LockGuard guard;
+    auto* menu = createMenu();
+    if (!menu || !parseMenuLevel(*menu, cursor, 0)) {
+        if (menu) (void)destroyTree(reinterpret_cast<void*>(menu->handle), 0);
+        uint32_t error = 13;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        return nullptr;
+    }
+    return reinterpret_cast<void*>(menu->handle);
+}
 __declspec(dllexport) int32_t DestroyMenu(void* handle) noexcept {
     LockGuard guard;
     return destroyTree(handle, 0);
@@ -944,6 +1214,97 @@ __declspec(dllexport) uint32_t GetMenuItemID(void* handle, int position) noexcep
         menu->items[position].submenu) return UINT32_MAX;
     return menu->items[position].id;
 }
+__declspec(dllexport) uint32_t EnableMenuItem(void* handle, uint32_t item,
+                                             uint32_t enable) noexcept {
+    constexpr uint32_t byPosition = 0x0400u;
+    constexpr uint32_t disabled = 0x0003u;
+    LockGuard guard;
+    auto* menu = findMenu(handle);
+    if (!menu) return UINT32_MAX;
+    const int index = findItem(*menu, item, (enable & byPosition) != 0);
+    if (index < 0) return UINT32_MAX;
+    auto& state = menu->items[index].state;
+    const uint32_t previous = state & disabled;
+    state = (state & ~disabled) | (enable & disabled);
+    for (const auto& bar : g_menuBars)
+        if (bar.active && MicaWin32kGetWindowMenu(bar.owner) == handle)
+            (void)InvalidateRect(bar.hwnd, nullptr, 1);
+    return previous;
+}
+__declspec(dllexport) uint32_t CheckMenuItem(void* handle, uint32_t item,
+                                            uint32_t check) noexcept {
+    constexpr uint32_t byPosition = 0x0400u;
+    constexpr uint32_t checked = 0x0008u;
+    LockGuard guard;
+    auto* menu = findMenu(handle);
+    if (!menu) return UINT32_MAX;
+    const int index = findItem(*menu, item, (check & byPosition) != 0);
+    if (index < 0) return UINT32_MAX;
+    auto& state = menu->items[index].state;
+    const uint32_t previous = state & checked;
+    state = (state & ~checked) | (check & checked);
+    return previous;
+}
+__declspec(dllexport) void* GetSubMenu(void* handle, int position) noexcept {
+    LockGuard guard;
+    auto* menu = findMenu(handle);
+    if (!menu || position < 0 || static_cast<size_t>(position) >= menu->count) return nullptr;
+    return menu->items[position].submenu;
+}
+__declspec(dllexport) int32_t OpenClipboard(void* owner) noexcept {
+    (void)owner;
+    uint32_t threadId{};
+    __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(threadId));
+    LockGuard guard;
+    if (!threadId || g_clipboard.open) return 0;
+    g_clipboard.open = true;
+    g_clipboard.ownerThread = threadId;
+    return 1;
+}
+__declspec(dllexport) int32_t CloseClipboard() noexcept {
+    uint32_t threadId{};
+    __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(threadId));
+    LockGuard guard;
+    if (!g_clipboard.open || g_clipboard.ownerThread != threadId) return 0;
+    g_clipboard.open = false;
+    g_clipboard.ownerThread = 0;
+    return 1;
+}
+__declspec(dllexport) int32_t EmptyClipboard() noexcept {
+    uint32_t threadId{};
+    __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(threadId));
+    LockGuard guard;
+    if (!g_clipboard.open || g_clipboard.ownerThread != threadId) return 0;
+    g_clipboard.ansi = nullptr;
+    g_clipboard.unicode = nullptr;
+    g_clipboard.ownerWindow = 0;
+    return 1;
+}
+__declspec(dllexport) void* SetClipboardData(uint32_t format, void* memory) noexcept {
+    uint32_t threadId{};
+    __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(threadId));
+    LockGuard guard;
+    if (!g_clipboard.open || g_clipboard.ownerThread != threadId || !memory) return nullptr;
+    if (format == 1u) g_clipboard.ansi = memory;
+    else if (format == 13u) g_clipboard.unicode = memory;
+    else return nullptr;
+    return memory;
+}
+__declspec(dllexport) void* GetClipboardData(uint32_t format) noexcept {
+    uint32_t threadId{};
+    __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(threadId));
+    LockGuard guard;
+    if (!g_clipboard.open || g_clipboard.ownerThread != threadId) return nullptr;
+    if (format == 1u) return g_clipboard.ansi;
+    if (format == 13u) return g_clipboard.unicode;
+    return nullptr;
+}
+__declspec(dllexport) int32_t IsClipboardFormatAvailable(uint32_t format) noexcept {
+    LockGuard guard;
+    if (format == 1u) return g_clipboard.ansi != nullptr;
+    if (format == 13u) return g_clipboard.unicode != nullptr;
+    return 0;
+}
 __declspec(dllexport) int GetMenuStringW(void* handle, uint32_t item, wchar_t* output,
                                         int capacity, uint32_t flags) noexcept {
     LockGuard guard;
@@ -1004,31 +1365,15 @@ __declspec(dllexport) int32_t GetMenuItemInfoW(void* handle, uint32_t item, int3
 }
 __declspec(dllexport) void* GetMenu(void* hwnd) noexcept {
     if (!hwnd) return nullptr;
-    LockGuard guard;
-    for (const auto& item : g_attachments) if (item.hwnd == hwnd) return item.menu;
-    return nullptr;
+    return MicaWin32kGetWindowMenu(hwnd);
 }
 __declspec(dllexport) int32_t SetMenu(void* hwnd, void* handle) noexcept {
     if (!hwnd) return false;
     {
         LockGuard guard;
         if (handle && !findMenu(handle)) return false;
-        Attachment* freeSlot = nullptr;
-        for (auto& item : g_attachments) {
-            if (item.hwnd == hwnd) {
-                item.menu = handle;
-                if (!handle) item = {};
-                break;
-            }
-            if (!item.hwnd && !freeSlot) freeSlot = &item;
-        }
-        bool attached = false;
-        for (const auto& item : g_attachments) if (item.hwnd == hwnd) attached = true;
-        if (!attached && handle) {
-            if (!freeSlot) return false;
-            *freeSlot = {hwnd, handle};
-        }
     }
+    if (!MicaWin32kSetWindowMenu(hwnd, handle)) return false;
     void* barWindow = nullptr;
     {
         LockGuard guard;

@@ -321,7 +321,7 @@ def main() -> int:
     parser.add_argument(
         "--reactos-app",
         choices=("winver", "notepad", "calc", "winmine", "sol",
-                 "mspaint", "regedit", "taskmgr", "wordpad"),
+                 "mspaint", "regedit", "taskmgr", "wordpad", "cmd"),
         help="launch one original ReactOS PE after Explorer and interact using QMP",
     )
     parser.add_argument(
@@ -626,7 +626,8 @@ def main() -> int:
             boot_command.append("--interactive")
         elif args.usb_test:
             boot_command.append("--verify-usb-input")
-        elif not args.process_memory_selftest and not args.resolution:
+        elif (not args.process_memory_selftest and not args.resolution and
+              not args.cmd_test and not args.doom_test):
             boot_command.append("--verify-input")
         if args.process_memory_selftest:
             boot_command.append("--process-memory-selftest")

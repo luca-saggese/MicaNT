@@ -40,3 +40,4 @@ extern "C" int memcmp(const void* first, const void* second, size_t count) {
     }
     return 0;
 }
+

@@ -273,6 +273,100 @@ int32_t MicaWin32kGetSystemMetrics(int32_t index) {
     return request(value.operation, value) ? static_cast<int32_t>(value.result) : 0;
 }
 
+void* MicaWin32kGetDlgItem(void* dialog, int32_t controlId) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(dialog);
+    value.args[1] = static_cast<uint32_t>(controlId);
+    return request(MICANT_WIN32K_OP_GET_DLG_ITEM, value) && value.result
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
+int32_t MicaWin32kTrackMouseEvent(void* window, uint32_t flags,
+    uint32_t hoverTime, uint32_t* currentFlags, uint32_t* currentHoverTime) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(window);
+    value.args[1] = flags;
+    value.args[2] = hoverTime;
+    if (!request(MICANT_WIN32K_OP_TRACK_MOUSE_EVENT, value)) return 0;
+    if (currentFlags) *currentFlags = static_cast<uint32_t>(value.result);
+    if (currentHoverTime) *currentHoverTime = static_cast<uint32_t>(value.args[3]);
+    return 1;
+}
+
+int32_t MicaWin32kGetClassNameW(void* window, wchar_t* output, int32_t capacity) {
+    if (!output || capacity <= 0) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(window);
+    value.args[1] = static_cast<uint32_t>(capacity);
+    if (!request(MICANT_WIN32K_OP_GET_CLASS_NAME, value)) {
+        output[0] = L'\0';
+        return 0;
+    }
+    const size_t count = static_cast<size_t>(value.result);
+    if (count >= static_cast<size_t>(capacity)) {
+        output[0] = L'\0';
+        return 0;
+    }
+    for (size_t index = 0; index < count; ++index)
+        output[index] = static_cast<wchar_t>(value.text[index]);
+    output[count] = L'\0';
+    return static_cast<int32_t>(count);
+}
+
+int32_t MicaWin32kEnumChildWindows(void* parent, void* callback,
+    intptr_t parameter) {
+    if (!parent || !callback) return 0;
+    using Callback = int32_t (*)(void*, intptr_t);
+    const auto enumerate = reinterpret_cast<Callback>(callback);
+    uint64_t first = 0;
+    for (;;) {
+        MicaWin32kRequest value{};
+        value.args[0] = reinterpret_cast<uint64_t>(parent);
+        value.args[1] = first;
+        value.args[2] = MICANT_WIN32K_ENUM_BATCH_CAPACITY;
+        if (!request(MICANT_WIN32K_OP_ENUM_CHILD_WINDOWS, value)) return 0;
+        for (uint64_t index = 0; index < value.result; ++index) {
+            if (!enumerate(reinterpret_cast<void*>(value.windowHandles[index]), parameter))
+                return 0;
+        }
+        if (value.result < MICANT_WIN32K_ENUM_BATCH_CAPACITY) return 1;
+        if (first > UINT64_MAX - value.result) return 0;
+        first += value.result;
+    }
+}
+
+int32_t MicaWin32kEnableWindow(void* window, int32_t enable,
+    int32_t* wasDisabled, int32_t* changed) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(window);
+    value.args[1] = enable != 0;
+    if (!request(MICANT_WIN32K_OP_ENABLE_WINDOW, value)) return 0;
+    if (wasDisabled) *wasDisabled = static_cast<int32_t>(value.result);
+    if (changed) *changed = static_cast<int32_t>(value.args[2]);
+    return 1;
+}
+
+void* MicaWin32kGetParent(void* window) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(window);
+    if (!request(MICANT_WIN32K_OP_GET_PARENT, value)) return nullptr;
+    return reinterpret_cast<void*>(value.result);
+}
+
+int32_t MicaWin32kSetWindowMenu(void* hwnd, void* menu) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    value.args[1] = reinterpret_cast<uint64_t>(menu);
+    return request(MICANT_WIN32K_OP_SET_WINDOW_MENU, value) ? 1 : 0;
+}
+
+void* MicaWin32kGetWindowMenu(void* hwnd) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(hwnd);
+    return request(MICANT_WIN32K_OP_GET_WINDOW_MENU, value)
+        ? reinterpret_cast<void*>(value.result) : nullptr;
+}
+
 void* MicaWin32kCreateWindowExW(uint32_t exStyle, const wchar_t* className,
     const wchar_t* title, uint32_t style, int32_t x, int32_t y, int32_t width,
     int32_t height, void* parent, void* menu, void* instance, void* parameter) {
@@ -365,10 +459,12 @@ void MicaWin32kPostQuitMessage(int32_t exitCode) {
     request(MICANT_WIN32K_OP_POST_QUIT, value);
 }
 
-uint16_t MicaWin32kRegisterClassW(const wchar_t* className, void* procedure) {
+uint16_t MicaWin32kRegisterClassW(const wchar_t* className, void* procedure,
+                                  int32_t windowExtra) {
     MicaWin32kRequest value{};
-    if (!copyText(value.className, className)) return 0;
+    if (!copyText(value.className, className) || windowExtra < 0 || windowExtra > 64) return 0;
     value.args[0] = reinterpret_cast<uint64_t>(procedure);
+    value.args[1] = static_cast<uint32_t>(windowExtra);
     return request(MICANT_WIN32K_OP_REGISTER_CLASS, value)
         ? static_cast<uint16_t>(value.result) : 0;
 }

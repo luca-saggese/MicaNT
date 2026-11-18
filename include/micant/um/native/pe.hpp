@@ -211,6 +211,17 @@ struct ImageImportDescriptor {
     uint32_t firstThunk; // RVA to Import Address Table (IAT)
 };
 
+struct ImageDelayImportDescriptor {
+    uint32_t attributes;
+    uint32_t name;
+    uint32_t moduleHandle;
+    uint32_t delayIat;
+    uint32_t delayInt;
+    uint32_t boundIat;
+    uint32_t unloadIat;
+    uint32_t timeDateStamp;
+};
+
 struct ImageImportByName {
     uint16_t hint;
     char name[1]; // Null-terminated ASCII symbol name
@@ -856,6 +867,89 @@ public:
             const NtStatus status = visitor(library);
             if (status != NtStatus::Success) return status;
             cursor += sizeof(ImageImportDescriptor);
+        }
+        return NtStatus::InvalidImageFormat;
+    }
+
+    template <typename Visitor>
+    NtStatus forEachDelayImportLibrary(std::span<const uint8_t> image,
+                                       Visitor&& visitor) const noexcept {
+        const auto imports = directory(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT);
+        if (!imports.virtualAddress && !imports.size) return NtStatus::Success;
+        if (!imports.virtualAddress || imports.size < sizeof(ImageDelayImportDescriptor) ||
+            !mappedRange(imports.virtualAddress, imports.size) ||
+            imports.virtualAddress > SIZE_MAX - imports.size)
+            return NtStatus::InvalidImageFormat;
+        const size_t end = static_cast<size_t>(imports.virtualAddress) + imports.size;
+        size_t cursor = imports.virtualAddress;
+        while (fits(end, cursor, sizeof(ImageDelayImportDescriptor))) {
+            ImageDelayImportDescriptor descriptor{};
+            if (!read(image, cursor, descriptor)) return NtStatus::InvalidImageFormat;
+            if (!(descriptor.attributes | descriptor.name | descriptor.moduleHandle |
+                  descriptor.delayIat | descriptor.delayInt | descriptor.boundIat |
+                  descriptor.unloadIat | descriptor.timeDateStamp)) return NtStatus::Success;
+            if (!(descriptor.attributes & 1) || !descriptor.name ||
+                !descriptor.delayIat || !descriptor.delayInt)
+                return NtStatus::NotSupported; // VA-form delay descriptors require relocations.
+            std::string_view library;
+            if (!stringAt(image, descriptor.name, library) || library.empty())
+                return NtStatus::InvalidImageFormat;
+            const auto status = visitor(library);
+            if (status != NtStatus::Success) return status;
+            cursor += sizeof(descriptor);
+        }
+        return NtStatus::InvalidImageFormat;
+    }
+
+    template <typename Resolver>
+    NtStatus bindDelayImports(std::span<uint8_t> image, Resolver&& resolve,
+                              bool writeBindings = true,
+                              std::span<const uint8_t> immutableLookup = {}) const {
+        const std::span<const uint8_t> input = immutableLookup.empty()
+            ? std::span<const uint8_t>{image.data(), image.size()} : immutableLookup;
+        const auto imports = directory(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT);
+        if (!imports.virtualAddress && !imports.size) return NtStatus::Success;
+        if (input.size() < headers_.optionalHeader.sizeOfImage ||
+            !mappedRange(imports.virtualAddress, imports.size)) return NtStatus::InvalidImageFormat;
+        const size_t end = static_cast<size_t>(imports.virtualAddress) + imports.size;
+        size_t cursor = imports.virtualAddress;
+        while (fits(end, cursor, sizeof(ImageDelayImportDescriptor))) {
+            ImageDelayImportDescriptor descriptor{};
+            if (!read(input, cursor, descriptor)) return NtStatus::InvalidImageFormat;
+            if (!(descriptor.attributes | descriptor.name | descriptor.moduleHandle |
+                  descriptor.delayIat | descriptor.delayInt | descriptor.boundIat |
+                  descriptor.unloadIat | descriptor.timeDateStamp)) return NtStatus::Success;
+            if (!(descriptor.attributes & 1) || !descriptor.name || !descriptor.moduleHandle ||
+                !descriptor.delayIat || !descriptor.delayInt) return NtStatus::NotSupported;
+            std::string_view library;
+            if (!stringAt(input, descriptor.name, library) || library.empty())
+                return NtStatus::InvalidImageFormat;
+            size_t lookup = descriptor.delayInt, slot = descriptor.delayIat;
+            for (;;) {
+                uint64_t entry{};
+                if (lookup > UINT32_MAX || slot > UINT32_MAX ||
+                    !mappedRange(static_cast<uint32_t>(lookup), sizeof(entry)) ||
+                    !mappedRange(static_cast<uint32_t>(slot), sizeof(entry)) ||
+                    !read(input, lookup, entry)) return NtStatus::InvalidImageFormat;
+                if (!entry) break;
+                uint16_t ordinal{};
+                std::string_view name;
+                if (entry & IMAGE_ORDINAL_FLAG64) ordinal = static_cast<uint16_t>(entry);
+                else if (entry <= UINT32_MAX - 2 && mappedRange(static_cast<uint32_t>(entry), 3) &&
+                         stringAt(input, static_cast<uint32_t>(entry) + 2, name) && !name.empty()) {}
+                else return NtStatus::InvalidImageFormat;
+                uint64_t address{};
+                uint64_t moduleBase{};
+                const auto status = resolve(library, name, ordinal, address, moduleBase);
+                if (status != NtStatus::Success) return status;
+                if (!address) return NtStatus::ProcedureNotFound;
+                if (writeBindings) {
+                    copy(image.data() + slot, &address, sizeof(address));
+                    copy(image.data() + descriptor.moduleHandle, &moduleBase, sizeof(moduleBase));
+                }
+                lookup += sizeof(entry); slot += sizeof(entry);
+            }
+            cursor += sizeof(descriptor);
         }
         return NtStatus::InvalidImageFormat;
     }

@@ -888,12 +888,6 @@ NtStatus EProcess::replaceMainImageFromSection(section::SectionObject& image,
             !dependencyView.executableRva(
                 dependencyView.headers().optionalHeader.addressOfEntryPoint))
             return NtStatus::InvalidImageFormat;
-        if (dependencyView.headers().optionalHeader.numberOfRvaAndSizes >
-            pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT) {
-            const auto delay = dependencyView.headers().optionalHeader.dataDirectory[
-                pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-            if (delay.virtualAddress || delay.size) return NtStatus::NotSupported;
-        }
         std::memcpy(nameCopy.get(), library.data(), library.size());
         std::memcpy(pathCopy.get(), dependencyPath.data(), dependencyPath.size() * sizeof(char16_t));
         uintptr_t dependencyBase{};
@@ -926,6 +920,11 @@ NtStatus EProcess::replaceMainImageFromSection(section::SectionObject& image,
                 [&](std::string_view library) noexcept -> NtStatus {
                     return appendDependency(library, module->name);
                 });
+            if (status == NtStatus::Success)
+                status = module->view.forEachDelayImportLibrary(module->immutableImage(),
+                    [&](std::string_view library) noexcept -> NtStatus {
+                        return appendDependency(library, module->name);
+                    });
             if (status != NtStatus::Success) break;
         }
         if (status != NtStatus::Success) break;
@@ -1727,10 +1726,6 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
         if (status != NtStatus::Success) return status;
         const auto& optional = view.headers().optionalHeader;
         const uint16_t characteristics = view.headers().fileHeader.characteristics;
-        if (optional.numberOfRvaAndSizes > pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT) {
-            const auto delayImports = optional.dataDirectory[pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-            if (delayImports.virtualAddress || delayImports.size) return NtStatus::NotSupported;
-        }
         if (optional.imageBase != sectionImage.getImageBase() ||
             optional.sizeOfImage != sectionImage.getSize() ||
             !(characteristics & pe::IMAGE_FILE_EXECUTABLE_IMAGE) ||
@@ -1876,6 +1871,11 @@ NtStatus EProcess::initializeMainImageFromSection(section::SectionObject& image,
             [&](std::string_view library) noexcept -> NtStatus {
                 return appendSystemDependency(library, module->name);
             });
+        if (status == NtStatus::Success)
+            status = module->view.forEachDelayImportLibrary(module->immutableImage(),
+                [&](std::string_view library) noexcept -> NtStatus {
+                    return appendSystemDependency(library, module->name);
+                });
         if (status != NtStatus::Success) {
             traceImageInitializationFailure("dependency loading", status);
             return status;

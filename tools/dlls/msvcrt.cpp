@@ -39,6 +39,7 @@ int (*g_exitInt[MaxExitHandlers])(){};
 uint8_t g_exitKind[MaxExitHandlers]{};
 size_t g_exitCount{};
 uint32_t g_exitLock{};
+uint32_t g_randState{1};
 bool g_exitDispatching{};
 int g_applicationType{};
 void (*g_userMathError)(void*){};
@@ -352,5 +353,402 @@ __declspec(dllexport) int __cdecl _vsnwprintf(wchar_t* output, size_t count,
     const int result = formatWide(output, count, format, copy);
     va_end(copy);
     return result;
+}
+
+__declspec(dllexport) void* __cdecl bsearch(const void* key, const void* base,
+    size_t count, size_t width, int (__cdecl* compare)(const void*, const void*)) noexcept {
+    if (!key || (!base && count) || !width || !compare) { *_errno() = ErrInvalid; return nullptr; }
+    const auto* bytes = static_cast<const unsigned char*>(base);
+    size_t first = 0, last = count;
+    while (first < last) {
+        const size_t middle = first + (last - first) / 2;
+        const int order = compare(key, bytes + middle * width);
+        if (!order) return const_cast<unsigned char*>(bytes + middle * width);
+        if (order < 0) last = middle; else first = middle + 1;
+    }
+    return nullptr;
+}
+
+__declspec(dllexport) void* __cdecl memchr(const void* memory, int value, size_t count) noexcept {
+    if (!memory && count) { *_errno() = ErrInvalid; return nullptr; }
+    const auto* bytes = static_cast<const unsigned char*>(memory);
+    for (size_t i = 0; i < count; ++i) if (bytes[i] == static_cast<unsigned char>(value))
+        return const_cast<unsigned char*>(bytes + i);
+    return nullptr;
+}
+
+__declspec(dllexport) int __cdecl memcmp(const void* left, const void* right, size_t count) noexcept {
+    const auto* a = static_cast<const unsigned char*>(left);
+    const auto* b = static_cast<const unsigned char*>(right);
+    if ((!a || !b) && count) { *_errno() = ErrInvalid; return 0; }
+    for (size_t i = 0; i < count; ++i) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+__declspec(dllexport) void* __cdecl memmove(void* destination, const void* source, size_t count) noexcept {
+    if ((!destination || !source) && count) { *_errno() = ErrInvalid; return destination; }
+    auto* out = static_cast<unsigned char*>(destination);
+    const auto* in = static_cast<const unsigned char*>(source);
+    if (out < in) for (size_t i = 0; i < count; ++i) out[i] = in[i];
+    else if (out > in) for (size_t i = count; i; --i) out[i - 1] = in[i - 1];
+    return destination;
+}
+
+__declspec(dllexport) size_t __cdecl strlen(const char* s) noexcept { if (!s) { *_errno() = ErrInvalid; return 0; } size_t n=0; while(s[n]) ++n; return n; }
+__declspec(dllexport) int __cdecl strcmp(const char* a,const char* b) noexcept { if(!a||!b){*_errno()=ErrInvalid;return a?1:b?-1:0;} while(*a&&*a==*b){++a;++b;} return (unsigned char)*a-(unsigned char)*b; }
+__declspec(dllexport) char* __cdecl strcpy(char* d,const char* s) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;} char* r=d; do{*d++=*s;}while(*s++); return r; }
+__declspec(dllexport) const char* __cdecl strchr(const char* s,int c) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;} do{if((unsigned char)*s==(unsigned char)c)return s;}while(*s++);return nullptr; }
+__declspec(dllexport) size_t __cdecl strcspn(const char* s,const char* reject) noexcept { if(!s||!reject){*_errno()=ErrInvalid;return 0;} size_t n=0;for(;s[n];++n)if(strchr(reject,(unsigned char)s[n]))break;return n; }
+__declspec(dllexport) int __cdecl strncmp(const char* a,const char* b,size_t n) noexcept { if(!a||!b){*_errno()=ErrInvalid;return a?1:b?-1:0;}for(size_t i=0;i<n;++i){unsigned char x=a[i],y=b[i];if(x!=y)return x-y;if(!x)break;}return 0; }
+__declspec(dllexport) char* __cdecl strncpy(char* d,const char* s,size_t n) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;}char* r=d;size_t i=0;for(;i<n&&s[i];++i)d[i]=s[i];for(;i<n;++i)d[i]=0;return r; }
+__declspec(dllexport) char* __cdecl strcat(char* d,const char* s) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;}char* r=d;while(*d)++d;while((*d++=*s++));return r; }
+__declspec(dllexport) wchar_t* __cdecl wcscpy(wchar_t* d,const wchar_t* s) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;}wchar_t* r=d;do{*d++=*s;}while(*s++);return r; }
+__declspec(dllexport) wchar_t* __cdecl wcscat(wchar_t* d,const wchar_t* s) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;}wchar_t* r=d;while(*d)++d;while((*d++=*s++));return r; }
+__declspec(dllexport) int __cdecl wcscmp(const wchar_t* a,const wchar_t* b) noexcept { if(!a||!b){*_errno()=ErrInvalid;return a?1:b?-1:0;}while(*a&&*a==*b){++a;++b;}return *a<*b?-1:*a>*b?1:0; }
+__declspec(dllexport) size_t __cdecl wcslen(const wchar_t* s) noexcept { if(!s){*_errno()=ErrInvalid;return 0;}size_t n=0;while(s[n])++n;return n; }
+__declspec(dllexport) const wchar_t* __cdecl wcschr(const wchar_t* s,wchar_t c) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;}do{if(*s==c)return s;}while(*s++);return nullptr; }
+__declspec(dllexport) wchar_t* __cdecl wcsncat(wchar_t* d,const wchar_t* s,size_t n) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;}wchar_t* r=d;while(*d)++d;while(n--&&*s)*d++=*s++;*d=0;return r; }
+__declspec(dllexport) int __cdecl wcsncmp(const wchar_t* a,const wchar_t* b,size_t n) noexcept { if(!a||!b){*_errno()=ErrInvalid;return a?1:b?-1:0;}for(size_t i=0;i<n;++i){if(a[i]!=b[i])return a[i]<b[i]?-1:1;if(!a[i])break;}return 0; }
+__declspec(dllexport) wchar_t* __cdecl wcsncpy(wchar_t* d,const wchar_t* s,size_t n) noexcept { if(!d||!s){*_errno()=ErrInvalid;return d;}wchar_t* r=d;size_t i=0;for(;i<n&&s[i];++i)d[i]=s[i];for(;i<n;++i)d[i]=0;return r; }
+__declspec(dllexport) size_t __cdecl wcscspn(const wchar_t* s,const wchar_t* reject) noexcept { if(!s||!reject){*_errno()=ErrInvalid;return 0;}size_t n=0;for(;s[n];++n)if(wcschr(reject,s[n]))break;return n; }
+__declspec(dllexport) const wchar_t* __cdecl wcsrchr(const wchar_t* s,wchar_t c) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;}const wchar_t* found=nullptr;do{if(*s==c)found=s;}while(*s++);return found; }
+__declspec(dllexport) size_t __cdecl wcsspn(const wchar_t* s,const wchar_t* accept) noexcept { if(!s||!accept){*_errno()=ErrInvalid;return 0;}size_t n=0;while(s[n]&&wcschr(accept,s[n]))++n;return n; }
+__declspec(dllexport) const wchar_t* __cdecl wcspbrk(const wchar_t* s,const wchar_t* accept) noexcept { if(!s||!accept){*_errno()=ErrInvalid;return nullptr;}for(;*s;++s)if(wcschr(accept,*s))return s;return nullptr; }
+__declspec(dllexport) const wchar_t* __cdecl wcsstr(const wchar_t* s,const wchar_t* sub) noexcept { if(!s||!sub){*_errno()=ErrInvalid;return nullptr;}if(!*sub)return s;for(;*s;++s){size_t i=0;while(sub[i]&&s[i]==sub[i])++i;if(!sub[i])return s;}return nullptr; }
+__declspec(dllexport) wchar_t* __cdecl wcstok(wchar_t* s,const wchar_t* delim,wchar_t** context) noexcept { if(!delim||!context){*_errno()=ErrInvalid;return nullptr;}if(!s)s=*context;if(!s)return nullptr;while(*s&&wcschr(delim,*s))++s;if(!*s){*context=nullptr;return nullptr;}wchar_t* token=s;while(*s&&!wcschr(delim,*s))++s;if(*s)*s++=0;*context=s;return token; }
+
+// With no SEH scope-table ABI in the current runtime, this handler correctly
+// declines dispatch so the native exception dispatcher can continue searching.
+// It never claims an exception was handled or resumed.
+__declspec(dllexport) int __cdecl __C_specific_handler(void*, void*, void*, void*) noexcept { return 0; }
+
+__declspec(dllexport) int __cdecl _vsnprintf(char* output, size_t capacity,
+    const char* format, va_list arguments) noexcept {
+    if ((!output && capacity) || !format) { *_errno() = ErrInvalid; return -1; }
+    size_t written = 0; bool overflow = false;
+    auto put = [&](char c) { if (written < capacity) output[written] = c; else overflow = true; ++written; };
+    va_list args; va_copy(args, arguments);
+    for (const char* p = format; *p; ++p) {
+        if (*p != '%') { put(*p); continue; }
+        ++p; if (*p == '%') { put('%'); continue; }
+        if (*p == 's') { const char* s = va_arg(args, const char*); if (!s) s = "(null)"; while (*s) put(*s++); }
+        else if (*p == 'c') put(static_cast<char>(va_arg(args, int)));
+        else if (*p == 'd' || *p == 'i') { int v = va_arg(args, int); unsigned u = v < 0 ? 0u - static_cast<unsigned>(v) : static_cast<unsigned>(v); if (v < 0) put('-'); char b[16]; size_t n=0; do{b[n++]=static_cast<char>('0'+u%10);u/=10;}while(u);while(n)put(b[--n]); }
+        else if (*p == 'u' || *p == 'x' || *p == 'X') { unsigned v=va_arg(args,unsigned); unsigned radix=*p=='u'?10:16; char b[16];size_t n=0;do{unsigned d=v%radix;b[n++]=static_cast<char>(d<10?'0'+d:(*p=='X'?'A':'a')+d-10);v/=radix;}while(v);while(n)put(b[--n]); }
+        else { va_end(args); *_errno() = ErrInvalid; return -1; }
+    }
+    va_end(args);
+    if (capacity && written < capacity) output[written] = 0;
+    if (overflow || written > INT_MAX) return -1;
+    return static_cast<int>(written);
+}
+__declspec(dllexport) int __cdecl _snprintf(char* output, size_t capacity,
+    const char* format, ...) noexcept {
+    va_list args; va_start(args, format); const int result = _vsnprintf(output, capacity, format, args); va_end(args); return result;
+}
+__declspec(dllexport) int __cdecl sprintf(char* output,const char* format,...) noexcept {
+    if(!output){*_errno()=ErrInvalid;return -1;}
+    va_list args;va_start(args,format);const int result=_vsnprintf(output,SIZE_MAX,format,args);va_end(args);return result;
+}
+__declspec(dllexport) int __cdecl _snwprintf(wchar_t* output, size_t capacity,
+    const wchar_t* format, ...) noexcept {
+    va_list args; va_start(args, format); const int result = formatWide(output, capacity, format, args); va_end(args); return result;
+}
+__declspec(dllexport) int __cdecl vswprintf(wchar_t* output, size_t capacity,
+    const wchar_t* format, va_list args) noexcept { return _vsnwprintf(output, capacity, format, args); }
+__declspec(dllexport) int __cdecl swprintf(wchar_t* output, const wchar_t* format, ...) noexcept {
+    va_list args; va_start(args, format); const int result = formatWide(output, SIZE_MAX, format, args); va_end(args); return result;
+}
+__declspec(dllexport) int __cdecl _swprintf(wchar_t* output, const wchar_t* format, ...) noexcept {
+    va_list args; va_start(args, format); const int result = formatWide(output, SIZE_MAX, format, args); va_end(args); return result;
+}
+__declspec(dllexport) int __cdecl _vswprintf(wchar_t* output, const wchar_t* format, va_list args) noexcept {
+    return formatWide(output, SIZE_MAX, format, args);
+}
+
+__declspec(dllexport) int __cdecl isalpha(int c) noexcept { unsigned char x=static_cast<unsigned char>(c); return (x>='A'&&x<='Z')||(x>='a'&&x<='z'); }
+__declspec(dllexport) int __cdecl isalnum(int c) noexcept { unsigned char x=static_cast<unsigned char>(c); return isalpha(x)||(x>='0'&&x<='9'); }
+__declspec(dllexport) wchar_t __cdecl towlower(wchar_t c) noexcept { return c>=L'A'&&c<=L'Z'?c+(L'a'-L'A'):c; }
+__declspec(dllexport) wchar_t __cdecl towupper(wchar_t c) noexcept { return c>=L'a'&&c<=L'z'?c-(L'a'-L'A'):c; }
+__declspec(dllexport) int __cdecl iswctype(wchar_t c,unsigned short type) noexcept {
+    constexpr unsigned short upper=1,lower=2,digit=4,space=8,punct=16,control=32,blank=64,xdigit=128,alpha=256;
+    const bool u=c>=L'A'&&c<=L'Z',l=c>=L'a'&&c<=L'z',d=c>=L'0'&&c<=L'9';
+    const bool ws=c==L' '||c==L'\t'||c==L'\n'||c==L'\r'||c==L'\v'||c==L'\f';
+    const bool ctl=c<32||(c>=127&&c<=159),pun=!u&&!l&&!d&&!ws&&!ctl;
+    return ((type&upper)&&u)||((type&lower)&&l)||((type&digit)&&d)||((type&space)&&ws)||((type&blank)&&(c==L' '||c==L'\t'))||((type&control)&&ctl)||((type&punct)&&pun)||((type&alpha)&&(u||l))||((type&xdigit)&&(d||(c>=L'a'&&c<=L'f')||(c>=L'A'&&c<=L'F')));
+}
+__declspec(dllexport) int __cdecl iswalpha(wchar_t c) noexcept {
+    return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z');
+}
+__declspec(dllexport) int __cdecl iswdigit(wchar_t c) noexcept {
+    return c >= L'0' && c <= L'9';
+}
+__declspec(dllexport) int __cdecl iswspace(wchar_t c) noexcept {
+    return c == L' ' || (c >= L'\t' && c <= L'\r');
+}
+__declspec(dllexport) int __cdecl iswcntrl(wchar_t c) noexcept {
+    return c < 0x20 || (c >= 0x7f && c <= 0x9f);
+}
+__declspec(dllexport) int __cdecl iswprint(wchar_t c) noexcept {
+    return c >= 0x20 && !(c >= 0x7f && c <= 0x9f);
+}
+__declspec(dllexport) int __cdecl __iscsymf(int c) noexcept {
+    return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+__declspec(dllexport) int __cdecl __iscsym(int c) noexcept {
+    return __iscsymf(c) || (c >= '0' && c <= '9');
+}
+__declspec(dllexport) wchar_t* __cdecl _wcstok(wchar_t* text, const wchar_t* delimiters) noexcept {
+    static wchar_t* next{};
+    return wcstok(text, delimiters, &next);
+}
+__declspec(dllexport) int __cdecl _wcsicmp(const wchar_t* a,const wchar_t* b) noexcept { if(!a||!b){*_errno()=ErrInvalid;return a?1:b?-1:0;}for(;;++a,++b){wchar_t x=towlower(*a),y=towlower(*b);if(x!=y)return x<y?-1:1;if(!x)return 0;} }
+__declspec(dllexport) int __cdecl _wcsnicmp(const wchar_t* a,const wchar_t* b,size_t n) noexcept { if(!a||!b){*_errno()=ErrInvalid;return a?1:b?-1:0;}for(size_t i=0;i<n;++i){wchar_t x=towlower(a[i]),y=towlower(b[i]);if(x!=y)return x<y?-1:1;if(!x)return 0;}return 0; }
+__declspec(dllexport) wchar_t* __cdecl _wcsupr(wchar_t* s) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;}for(auto* p=s;*p;++p)*p=towupper(*p);return s; }
+__declspec(dllexport) wchar_t* __cdecl _wcslwr(wchar_t* s) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;}for(auto* p=s;*p;++p)*p=towlower(*p);return s; }
+__declspec(dllexport) char* __cdecl _strupr(char* s) noexcept {
+    if (!s) { *_errno() = ErrInvalid; return nullptr; }
+    for (auto* p = reinterpret_cast<unsigned char*>(s); *p; ++p)
+        if (*p >= 'a' && *p <= 'z') *p = static_cast<unsigned char>(*p - ('a' - 'A'));
+    return s;
+}
+__declspec(dllexport) char* __cdecl _strdup(const char* s) noexcept {
+    if (!s) { *_errno() = ErrInvalid; return nullptr; }
+    size_t length = 0;
+    while (s[length]) {
+        if (length == SIZE_MAX - 1) { *_errno() = ErrNoMemory; return nullptr; }
+        ++length;
+    }
+    auto* copy = static_cast<char*>(malloc(length + 1));
+    if (!copy) return nullptr;
+    for (size_t i = 0; i <= length; ++i) copy[i] = s[i];
+    return copy;
+}
+__declspec(dllexport) int __cdecl swscanf(const wchar_t* input,
+    const wchar_t* format, ...) noexcept {
+    if (!input || !format) { *_errno() = ErrInvalid; return -1; }
+    auto white = [](wchar_t c) noexcept {
+        return c == L' ' || c == L'\t' || c == L'\n' || c == L'\r' ||
+               c == L'\v' || c == L'\f';
+    };
+    va_list args;
+    va_start(args, format);
+    int assigned = 0;
+    const wchar_t* in = input;
+    const wchar_t* f = format;
+    bool inputFailure = false;
+    while (*f) {
+        if (white(*f)) {
+            while (white(*f)) ++f;
+            while (white(*in)) ++in;
+            continue;
+        }
+        if (*f != L'%') {
+            if (*in != *f) { inputFailure = *in == 0; break; }
+            ++in; ++f; continue;
+        }
+        ++f;
+        if (*f == L'%') {
+            if (*in != L'%') { inputFailure = *in == 0; break; }
+            ++in; ++f; continue;
+        }
+        bool suppress = false;
+        if (*f == L'*') { suppress = true; ++f; }
+        size_t width = SIZE_MAX;
+        if (*f >= L'0' && *f <= L'9') {
+            width = 0;
+            while (*f >= L'0' && *f <= L'9') {
+                const unsigned digit = static_cast<unsigned>(*f++ - L'0');
+                if (width > (SIZE_MAX - digit) / 10) width = SIZE_MAX;
+                else width = width * 10 + digit;
+            }
+            if (!width) { *_errno() = ErrInvalid; break; }
+        }
+        enum class Length { None, Short, Long, LongLong, DoubleLong } length{};
+        if (f[0] == L'I' && f[1] == L'6' && f[2] == L'4') {
+            length = Length::LongLong; f += 3;
+        } else if (*f == L'h') { length = Length::Short; ++f; if (*f == L'h') ++f; }
+        else if (*f == L'l') { length = Length::Long; ++f; if (*f == L'l') length = Length::LongLong, ++f; }
+        else if (*f == L'L') { length = Length::DoubleLong; ++f; }
+        const wchar_t spec = *f++;
+        if (spec != L'c' && spec != L'[' && spec != L'n')
+            while (white(*in)) ++in;
+        size_t consumed = 0;
+        if (spec == L'd' || spec == L'i' || spec == L'u' || spec == L'o' ||
+            spec == L'x' || spec == L'X') {
+            const wchar_t* p = in;
+            bool negative = false;
+            if (consumed < width && (*p == L'+' || *p == L'-')) {
+                negative = *p == L'-'; ++p; ++consumed;
+            }
+            unsigned base = spec == L'o' ? 8u :
+                (spec == L'x' || spec == L'X') ? 16u : spec == L'i' ? 0u : 10u;
+            if (consumed + 2 < width && p[0] == L'0' &&
+                (p[1] == L'x' || p[1] == L'X')) { if (!base) base = 16; p += 2; consumed += 2; }
+            if (!base) base = *p == L'0' ? 8u : 10u;
+            uint64_t value = 0; size_t digits = 0;
+            while (consumed < width) {
+                const wchar_t c = *p;
+                const unsigned d = c >= L'0' && c <= L'9' ? static_cast<unsigned>(c - L'0') :
+                    c >= L'a' && c <= L'z' ? static_cast<unsigned>(c - L'a' + 10) :
+                    c >= L'A' && c <= L'Z' ? static_cast<unsigned>(c - L'A' + 10) : UINT_MAX;
+                if (d >= base) break;
+                value = value * base + d; ++p; ++consumed; ++digits;
+            }
+            if (!digits) { inputFailure = *in == 0; break; }
+            if (!suppress) {
+                void* destination = va_arg(args, void*);
+                if (!destination) { *_errno() = ErrInvalid; break; }
+                const bool signedValue = spec == L'd' || spec == L'i';
+                if (length == Length::LongLong) {
+                    if (signedValue) *static_cast<int64_t*>(destination) = negative
+                        ? static_cast<int64_t>(0u - value) : static_cast<int64_t>(value);
+                    else *static_cast<uint64_t*>(destination) = negative ? 0u - value : value;
+                } else if (length == Length::Long) {
+                    if (signedValue) *static_cast<int32_t*>(destination) = negative
+                        ? static_cast<int32_t>(0u - value) : static_cast<int32_t>(value);
+                    else *static_cast<uint32_t*>(destination) = negative ? 0u - value : value;
+                } else if (length == Length::Short) {
+                    if (signedValue) *static_cast<int16_t*>(destination) = negative
+                        ? static_cast<int16_t>(0u - value) : static_cast<int16_t>(value);
+                    else *static_cast<uint16_t*>(destination) = static_cast<uint16_t>(negative ? 0u - value : value);
+                } else {
+                    if (signedValue) *static_cast<int*>(destination) = negative
+                        ? static_cast<int>(0u - value) : static_cast<int>(value);
+                    else *static_cast<unsigned*>(destination) = static_cast<unsigned>(negative ? 0u - value : value);
+                }
+                ++assigned;
+            }
+            in = p;
+        } else if (spec == L'f' || spec == L'e' || spec == L'E' || spec == L'g' || spec == L'G' || spec == L'a' || spec == L'A') {
+            const wchar_t* p = in; bool negative = false;
+            if (consumed < width && (*p == L'+' || *p == L'-')) { negative = *p == L'-'; ++p; ++consumed; }
+            double value = 0.0; bool any = false;
+            while (consumed < width && *p >= L'0' && *p <= L'9') { value = value * 10.0 + (*p++ - L'0'); ++consumed; any = true; }
+            if (consumed < width && *p == L'.') {
+                ++p; ++consumed; double place = 0.1;
+                while (consumed < width && *p >= L'0' && *p <= L'9') { value += (*p++ - L'0') * place; place *= 0.1; ++consumed; any = true; }
+            }
+            int exponent = 0; bool exponentNegative = false;
+            if (any && consumed < width && (*p == L'e' || *p == L'E')) {
+                const wchar_t* expStart = p; const size_t expConsumed = consumed;
+                ++p; ++consumed;
+                if (consumed < width && (*p == L'+' || *p == L'-')) { exponentNegative = *p == L'-'; ++p; ++consumed; }
+                bool expDigits = false;
+                while (consumed < width && *p >= L'0' && *p <= L'9') { if (exponent < 400) exponent = exponent * 10 + (*p - L'0'); ++p; ++consumed; expDigits = true; }
+                if (!expDigits) { p = expStart; consumed = expConsumed; }
+            }
+            if (!any) { inputFailure = *in == 0; break; }
+            for (int i = 0; i < exponent && i < 400; ++i) value = exponentNegative ? value / 10.0 : value * 10.0;
+            if (negative) value = -value;
+            if (!suppress) {
+                void* destination = va_arg(args, void*);
+                if (!destination) { *_errno() = ErrInvalid; break; }
+                if (length == Length::Long || length == Length::LongLong || length == Length::DoubleLong)
+                    *static_cast<double*>(destination) = value;
+                else *static_cast<float*>(destination) = static_cast<float>(value);
+                ++assigned;
+            }
+            in = p;
+        } else if (spec == L'c' || spec == L's') {
+            if (width == SIZE_MAX) width = spec == L'c' ? 1 : SIZE_MAX;
+            wchar_t* destination = suppress ? nullptr : va_arg(args, wchar_t*);
+            if (!suppress && !destination) { *_errno() = ErrInvalid; break; }
+            while (consumed < width && *in && (spec == L'c' || !white(*in))) {
+                if (destination) destination[consumed] = *in;
+                ++in; ++consumed;
+            }
+            if (!consumed) { inputFailure = *in == 0; break; }
+            if (destination) { if (spec == L's') destination[consumed] = 0; ++assigned; }
+        } else if (spec == L'n') {
+            if (!suppress) *va_arg(args, int*) = static_cast<int>(in - input);
+        } else {
+            *_errno() = ErrInvalid;
+            break;
+        }
+    }
+    va_end(args);
+    return assigned ? assigned : inputFailure ? -1 : 0;
+}
+__declspec(dllexport) wchar_t* __cdecl _wcsnset(wchar_t* s,wchar_t c,size_t n) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;}size_t i=0;for(;i<n&&s[i];++i)s[i]=c;return s; }
+__declspec(dllexport) wchar_t* __cdecl _wcsdup(const wchar_t* s) noexcept { if(!s){*_errno()=ErrInvalid;return nullptr;}size_t n=wcslen(s);if(n>(SIZE_MAX/sizeof(wchar_t))-1){*_errno()=ErrNoMemory;return nullptr;}auto* p=static_cast<wchar_t*>(malloc((n+1)*sizeof(wchar_t)));if(!p)return nullptr;for(size_t i=0;i<=n;++i)p[i]=s[i];return p; }
+__declspec(dllexport) int __cdecl _wtoi(const wchar_t* s) noexcept { if(!s){*_errno()=ErrInvalid;return 0;}while(*s==L' '||*s==L'\t')++s;bool neg=*s==L'-';if(*s==L'-'||*s==L'+')++s;int v=0;while(*s>=L'0'&&*s<=L'9'){if(v>(INT_MAX-9)/10){*_errno()=34;return neg?INT_MIN:INT_MAX;}v=v*10+(*s++-L'0');}return neg?-v:v; }
+__declspec(dllexport) long __cdecl _wtol(const wchar_t* s) noexcept { return static_cast<long>(_wtoi(s)); }
+__declspec(dllexport) unsigned long __cdecl wcstoul(const wchar_t* s,wchar_t** end,int radix) noexcept { if(!s||radix<0||radix==1||radix>36){*_errno()=ErrInvalid;return 0;}while(*s==L' '||*s==L'\t')++s;bool neg=*s==L'-';if(*s==L'-'||*s==L'+')++s;if(!radix)radix=10;if(radix==16&&s[0]==L'0'&&(s[1]==L'x'||s[1]==L'X'))s+=2;unsigned long v=0;const wchar_t* start=s;for(;;++s){int d=*s>=L'0'&&*s<=L'9'?*s-L'0':*s>=L'a'&&*s<=L'z'?*s-L'a'+10:*s>=L'A'&&*s<=L'Z'?*s-L'A'+10:-1;if(d<0||d>=radix)break;v=v*radix+static_cast<unsigned>(d);}if(end)*end=const_cast<wchar_t*>(s);if(s==start)return 0;return neg?0ul-v:v; }
+__declspec(dllexport) long __cdecl wcstol(const wchar_t* s,wchar_t** end,int radix) noexcept { return static_cast<long>(wcstoul(s,end,radix)); }
+__declspec(dllexport) wchar_t* __cdecl _itow(int value,wchar_t* out,int radix) noexcept { if(!out||radix<2||radix>36){*_errno()=ErrInvalid;return nullptr;}bool neg=value<0&&radix==10;unsigned v=neg?0u-static_cast<unsigned>(value):static_cast<unsigned>(value);wchar_t b[34];size_t n=0;do{unsigned d=v%radix;b[n++]=static_cast<wchar_t>(d<10?L'0'+d:L'a'+d-10);v/=radix;}while(v);size_t i=0;if(neg)out[i++]=L'-';while(n)out[i++]=b[--n];out[i]=0;return out; }
+__declspec(dllexport) int __cdecl _getdrive() noexcept { return 3; }
+__declspec(dllexport) int __cdecl _wchdir(const wchar_t*) noexcept { *_errno()=1;return -1; }
+__declspec(dllexport) wchar_t* __cdecl _wgetdcwd(int drive,wchar_t* buffer,int maxLength) noexcept { if(drive!=0&&drive!=3){*_errno()=15;return nullptr;}constexpr wchar_t cwd[]=L"C:\\";if(!buffer){if(maxLength<=0){*_errno()=ErrInvalid;return nullptr;}buffer=static_cast<wchar_t*>(malloc(static_cast<size_t>(maxLength)*sizeof(wchar_t)));if(!buffer)return nullptr;}size_t i=0;while(cwd[i]&&i+1<static_cast<size_t>(maxLength))buffer[i]=cwd[i],++i;if(i+1>=static_cast<size_t>(maxLength)){*_errno()=34;return nullptr;}buffer[i]=0;return buffer; }
+__declspec(dllexport) void __cdecl qsort(void* base,size_t count,size_t width,int (__cdecl* compare)(const void*,const void*)) noexcept { if((!base&&count)||!width||!compare){*_errno()=ErrInvalid;return;}auto* b=static_cast<unsigned char*>(base);for(size_t i=1;i<count;++i){size_t j=i;while(j&&compare(b+(j-1)*width,b+j*width)>0){for(size_t k=0;k<width;++k){unsigned char x=b[(j-1)*width+k];b[(j-1)*width+k]=b[j*width+k];b[j*width+k]=x;}--j;}} }
+__declspec(dllexport) void __cdecl srand(unsigned seed) noexcept { g_randState=seed; }
+__declspec(dllexport) int __cdecl rand() noexcept { g_randState=g_randState*214013u+2531011u;return static_cast<int>((g_randState>>16)&0x7fff); }
+// MSVCRT FILE layout/locking and the CRT pipe-to-child lifecycle are not yet
+// backed by the native I/O/process contracts. Fail these operations explicitly
+// instead of manufacturing a FILE* or reporting successful close/pipe creation.
+struct MsvcrtFile;
+__declspec(dllexport) MsvcrtFile* __cdecl _wfopen(const wchar_t*,const wchar_t*) noexcept { *_errno()=38;return nullptr; }
+__declspec(dllexport) wchar_t* __cdecl fgetws(wchar_t*,int,MsvcrtFile*) noexcept { *_errno()=38;return nullptr; }
+__declspec(dllexport) int __cdecl fclose(MsvcrtFile*) noexcept { *_errno()=38;return -1; }
+__declspec(dllexport) MsvcrtFile* __cdecl _wpopen(const wchar_t*,const wchar_t*) noexcept { *_errno()=38;return nullptr; }
+__declspec(dllexport) int __cdecl _pclose(MsvcrtFile*) noexcept { *_errno()=38;return -1; }
+
+namespace {
+uint64_t doubleBits(double value) noexcept { uint64_t bits; __builtin_memcpy(&bits, &value, sizeof(bits)); return bits; }
+double fromBits(uint64_t bits) noexcept { double value; __builtin_memcpy(&value, &bits, sizeof(value)); return value; }
+bool isNanValue(double value) noexcept { const uint64_t b=doubleBits(value); return (b&0x7ff0000000000000ULL)==0x7ff0000000000000ULL && (b&0xfffffffffffffULL)!=0; }
+bool isFiniteValue(double value) noexcept { return (doubleBits(value)&0x7ff0000000000000ULL)!=0x7ff0000000000000ULL; }
+double x87Atan(double x) noexcept { double r; __asm__ __volatile__("fldl %1; fld1; fpatan; fstpl %0":"=m"(r):"m"(x):"st"); return r; }
+double x87Atan2(double y,double x) noexcept { double r; __asm__ __volatile__("fldl %1; fldl %2; fpatan; fstpl %0":"=m"(r):"m"(x),"m"(y):"st"); return r; }
+double x87Sqrt(double x) noexcept { double r; __asm__ __volatile__("fldl %1; fsqrt; fstpl %0":"=m"(r):"m"(x):"st"); return r; }
+double x87Sin(double x) noexcept { double r; __asm__ __volatile__("fldl %1; fsin; fstpl %0":"=m"(r):"m"(x):"st"); return r; }
+double x87Cos(double x) noexcept { double r; __asm__ __volatile__("fldl %1; fcos; fstpl %0":"=m"(r):"m"(x):"st"); return r; }
+double x87Exp(double x) noexcept {
+    if (x > 709.782712893384) return fromBits(0x7ff0000000000000ULL);
+    if (x < -745.133219101941) return 0.0;
+    double r;
+    __asm__ __volatile__("fldl %1; fldl2e; fmulp %%st, %%st(1); fld %%st(0); frndint; fxch %%st(1); fsub %%st(1), %%st(0); f2xm1; fld1; faddp; fscale; fstp %%st(1); fstpl %0":"=m"(r):"m"(x):"st");
+    return r;
+}
+double x87Log(double x) noexcept { double r; __asm__ __volatile__("fldln2; fldl %1; fyl2x; fstpl %0":"=m"(r):"m"(x):"st"); return r; }
+double x87Fmod(double x,double y) noexcept {
+    if (!isFiniteValue(x) || !isFiniteValue(y) || y==0.0) return fromBits(0x7ff8000000000000ULL);
+    double r;
+    __asm__ __volatile__("fldl %1; fldl %2; 1: fprem; fnstsw %%ax; test $0x0400, %%ah; jnz 1b; fstp %%st(1); fstpl %0":"=m"(r):"m"(y),"m"(x):"ax","st");
+    return r;
+}
+double x87Modf(double x,double* integral) noexcept {
+    if (!isFiniteValue(x)) { if(integral)*integral=x; return fromBits(doubleBits(x)&0x8000000000000000ULL); }
+    uint64_t bits=doubleBits(x); unsigned e=static_cast<unsigned>((bits>>52)&0x7ff);
+    if(e<1023) { if(integral)*integral=fromBits(bits&0x8000000000000000ULL); return x; }
+    if(e>=1075) { if(integral)*integral=x; return fromBits(bits&0x8000000000000000ULL); }
+    const unsigned fractional=1075-e; const uint64_t mask=(uint64_t{1}<<fractional)-1;
+    const double whole=fromBits(bits&~mask); if(integral)*integral=whole; return x-whole;
+}
+}
+__declspec(dllexport) int __cdecl _isnan(double x) noexcept { return isNanValue(x)?1:0; }
+__declspec(dllexport) int __cdecl _finite(double x) noexcept { return isFiniteValue(x)?1:0; }
+__declspec(dllexport) double __cdecl atan(double x) noexcept { return x87Atan(x); }
+__declspec(dllexport) double __cdecl asin(double x) noexcept { if(x>1.0||x< -1.0){*_errno()=33;return fromBits(0x7ff8000000000000ULL);} return x87Atan(x/x87Sqrt((1.0-x)*(1.0+x))); }
+__declspec(dllexport) double __cdecl acos(double x) noexcept { if(x>1.0||x< -1.0){*_errno()=33;return fromBits(0x7ff8000000000000ULL);} return x87Atan2(x87Sqrt((1.0-x)*(1.0+x)),x); }
+__declspec(dllexport) double __cdecl modf(double x,double* integral) noexcept { return x87Modf(x,integral); }
+__declspec(dllexport) double __cdecl ceil(double x) noexcept { double i; const double f=x87Modf(x,&i); return f>0.0?i+1.0:i; }
+__declspec(dllexport) double __cdecl fabs(double x) noexcept { return fromBits(doubleBits(x)&0x7fffffffffffffffULL); }
+__declspec(dllexport) double __cdecl fmod(double x,double y) noexcept { if(y==0.0||!isFiniteValue(x)){*_errno()=33;return fromBits(0x7ff8000000000000ULL);} return x87Fmod(x,y); }
+__declspec(dllexport) double __cdecl exp(double x) noexcept { return x87Exp(x); }
+__declspec(dllexport) double __cdecl log(double x) noexcept { if(x<0.0){*_errno()=33;return fromBits(0x7ff8000000000000ULL);} if(x==0.0){*_errno()=34;return fromBits(0xfff0000000000000ULL);} return x87Log(x); }
+__declspec(dllexport) double __cdecl log10(double x) noexcept { return log(x)*0.43429448190325182765; }
+__declspec(dllexport) double __cdecl tan(double x) noexcept { return x87Sin(x)/x87Cos(x); }
+__declspec(dllexport) double __cdecl cosh(double x) noexcept { const double a=x87Exp(x),b=x87Exp(-x);return (a+b)*0.5; }
+__declspec(dllexport) double __cdecl sinh(double x) noexcept { const double a=x87Exp(x),b=x87Exp(-x);return (a-b)*0.5; }
+__declspec(dllexport) double __cdecl tanh(double x) noexcept { if(x>20.0)return 1.0;if(x< -20.0)return -1.0;const double a=x87Exp(2.0*x);return (a-1.0)/(a+1.0); }
+__declspec(dllexport) double __cdecl sin(double x) noexcept { return x87Sin(x); }
+__declspec(dllexport) double __cdecl cos(double x) noexcept { return x87Cos(x); }
+__declspec(dllexport) double __cdecl sqrt(double x) noexcept { if(x<0.0){*_errno()=33;return fromBits(0x7ff8000000000000ULL);}return x87Sqrt(x); }
+__declspec(dllexport) double __cdecl pow(double x,double y) noexcept {
+    if(y==0.0)return 1.0;
+    if(x==0.0)return y>0.0?x:fromBits(0x7ff0000000000000ULL);
+    if(x<0.0){const double yi=x87Modf(y,nullptr);if(yi!=y){*_errno()=33;return fromBits(0x7ff8000000000000ULL);}const double magnitude=x87Exp(y*x87Log(-x));return (static_cast<int64_t>(y)&1)?-magnitude:magnitude;}
+    return x87Exp(y*x87Log(x));
 }
 }

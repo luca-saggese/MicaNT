@@ -3361,7 +3361,8 @@ bool launchExplorerProcess() noexcept {
     defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) || \
-    defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD)
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD)
 bool launchReactosAppProcess() noexcept {
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER)
     constexpr auto imageName = u"winver.exe";
@@ -3379,6 +3380,8 @@ bool launchReactosAppProcess() noexcept {
     constexpr auto imageName = u"regedit.exe";
 #elif defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
     constexpr auto imageName = u"taskmgr.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD)
+    constexpr auto imageName = u"cmd.exe";
 #else
     constexpr auto imageName = u"wordpad.exe";
 #endif
@@ -5073,9 +5076,9 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
                 if (!virtualKey) {
                     switch (packet.MakeCode) {
                         case 0x01: virtualKey = 0x1B; break;
-                        case 0x0E: virtualKey = 0x08; break;
+                        case 0x0E: virtualKey = 0x08; character = '\b'; break;
                         case 0x0F: virtualKey = 0x09; break;
-                        case 0x1C: virtualKey = 0x0D; break;
+                        case 0x1C: virtualKey = 0x0D; character = '\r'; break;
                         case 0x3D: virtualKey = 0x72; break;
                         case 0x1D: virtualKey = 0x11; break;
                         case 0x2A: case 0x36: virtualKey = 0x10; break;
@@ -5514,7 +5517,8 @@ void pollKeyboardInput() noexcept {
     defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) || \
-    defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD)
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD)
     serialWrite("[MicaNT ReactOSApps] Launching original AMD64 PE after Explorer\r\n");
     if (!launchReactosAppProcess())
         stopWithError("[MicaNT ReactOSApps] Original AMD64 PE launch failed\r\n");

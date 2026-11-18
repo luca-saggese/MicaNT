@@ -1636,6 +1636,19 @@ public:
                         return result;
                     }, pass == 1, current.immutableImage());
                 if (status != NtStatus::Success) return status;
+                const NtStatus delayStatus = current.view.bindDelayImports(current.image,
+                    [&](std::string_view library, std::string_view name,
+                        uint16_t ordinal, uint64_t& address, uint64_t& moduleBase) {
+                        const NtStatus result = resolve(library, name, ordinal, address,
+                                                        nullptr, current.name);
+                        if (result == NtStatus::Success) {
+                            const size_t moduleIndex = findModule(library);
+                            if (moduleIndex == count_) return NtStatus::NoSuchFile;
+                            moduleBase = modules_[moduleIndex].base;
+                        } else failure_ = {library, name, current.name, ordinal};
+                        return result;
+                    }, pass == 1, current.immutableImage());
+                if (delayStatus != NtStatus::Success) return delayStatus;
             }
         }
         bound_ = true;

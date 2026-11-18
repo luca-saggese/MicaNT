@@ -6,880 +6,6 @@
   "artifact_sha256": "42cbb141d7c66a2c2a273292232aec06d4d98c916d8471757fc22ab0beccf26e",
   "apps": [
     {
-      "name": "winver.exe",
-      "sha256": "c77eec6d92fac38511bf0b31017809c5fbd7e34a818239699890970ddfec327e",
-      "size": 14336,
-      "machine": "0x8664",
-      "subsystem": 2,
-      "import_count": 39,
-      "import_dlls": {
-        "advapi32.dll": 3,
-        "comctl32.dll": 1,
-        "kernel32.dll": 17,
-        "msvcrt.dll": 16,
-        "shell32.dll": 1,
-        "user32.dll": 1
-      },
-      "imports": [
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegOpenKeyExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegQueryValueExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegCloseKey"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadStringW"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "ShellAboutW"
-        },
-        {
-          "dll": "comctl32.dll",
-          "symbol": "InitCommonControlsEx"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_wcmdln"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "signal"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__winitenv"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__lconv_init"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_initterm"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_fpreset"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_cexit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "exit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__set_app_type"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__wgetmainargs"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_amsg_exit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__setusermatherr"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "malloc"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memset"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memcpy"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_vsnwprintf"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetLastError"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "TlsGetValue"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LeaveCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "InitializeCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "EnterCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "DeleteCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LoadLibraryW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetModuleHandleA"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "QueryPerformanceCounter"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetTickCount"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetSystemTimeAsFileTime"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetCurrentThreadId"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetCurrentProcessId"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "Sleep"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "SetUnhandledExceptionFilter"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetStartupInfoW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetProcAddress"
-        }
-      ]
-    },
-    {
-      "name": "notepad.exe",
-      "sha256": "c0c54e44450191dff24e8e9c64958eb8f9ddf409ef973a04c1010eb43812ee2a",
-      "size": 299008,
-      "machine": "0x8664",
-      "subsystem": 2,
-      "import_count": 170,
-      "import_dlls": {
-        "advapi32.dll": 6,
-        "comctl32.dll": 1,
-        "comdlg32.dll": 8,
-        "gdi32.dll": 16,
-        "kernel32.dll": 49,
-        "msvcrt.dll": 27,
-        "shell32.dll": 6,
-        "user32.dll": 57
-      },
-      "imports": [
-        {
-          "dll": "user32.dll",
-          "symbol": "DestroyWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ReleaseDC"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDC"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetDlgItemTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "InflateRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDlgItemTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EnableWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DrawTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "UpdateWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "TranslateMessage"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "TranslateAcceleratorW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetWindowPlacement"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetProcessDefaultLayout"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "RegisterWindowMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "RegisterClassExW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PostQuitMessage"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MoveWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadImageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadAcceleratorsW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "IsDialogMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "IsClipboardFormatAvailable"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "InvalidateRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowPlacement"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetSystemMetrics"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMenu"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DispatchMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DestroyAcceleratorTable"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DefWindowProcW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CheckMenuItem"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CallWindowProcW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "wsprintfW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "WinHelpW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ShowWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetWindowTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetWindowLongPtrW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetFocus"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetDlgItemInt"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetCursor"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SendMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SendDlgItemMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PostMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MessageBoxW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadStringW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadIconW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadCursorW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowTextLengthW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDlgItemInt"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDlgItem"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetClientRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EndDialog"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EnableMenuItem"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DialogBoxParamW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CreateWindowExW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "EndDoc"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "DeleteDC"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "AbortDoc"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "DeleteObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateFontIndirectW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "EndPage"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetTextExtentPoint32W"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetTextMetricsW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetStockObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "Rectangle"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SelectObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SetMapMode"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "StartDocW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "StartPage"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "TextOutW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetDeviceCaps"
-        },
-        {
-          "dll": "comctl32.dll",
-          "symbol": "CreateStatusWindowW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "GetSaveFileNameW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "ReplaceTextW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "GetOpenFileNameW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "FindTextW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "ChooseFontW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "PrintDlgW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "PageSetupDlgW"
-        },
-        {
-          "dll": "comdlg32.dll",
-          "symbol": "GetFileTitleW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegCreateKeyExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "IsTextUnicode"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegSetValueExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegQueryValueExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegOpenKeyW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegCloseKey"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "DragFinish"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "DragAcceptFiles"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "ShellExecuteW"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "ShellAboutW"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "DragQueryFileW"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "SHAddToRecentDocs"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__setusermatherr"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_amsg_exit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__wgetmainargs"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__set_app_type"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "exit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_cexit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_fpreset"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_initterm"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__lconv_init"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__winitenv"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memset"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcscat"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcscmp"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcscpy"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcsrchr"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "malloc"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_assert"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "iswctype"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcslen"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcsncmp"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcsncpy"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_wcsnicmp"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "towupper"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memcpy"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_wcmdln"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "signal"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_vsnwprintf"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "CloseHandle"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "CreateFileW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "FormatMessageW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "WideCharToMultiByte"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "MultiByteToWideChar"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "WriteFile"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetFileAttributesW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "SetLastError"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "MapViewOfFile"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetFileSize"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "CreateFileMappingW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "__chkstk"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetUserDefaultLangID"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "MulDiv"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LocalAlloc"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "CreateThread"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetUserDefaultUILanguage"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "lstrlenW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GlobalFree"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetFullPathNameW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetTimeFormatW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetDateFormatW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "SetEndOfFile"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetLastError"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetLocalTime"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetModuleFileNameW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetProcessHeap"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "HeapAlloc"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "TlsGetValue"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "HeapFree"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LocalFree"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetProcAddress"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetStartupInfoW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "SetUnhandledExceptionFilter"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "Sleep"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetCurrentProcessId"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetCurrentThreadId"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetSystemTimeAsFileTime"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetTickCount"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LocalUnlock"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "QueryPerformanceCounter"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetModuleHandleA"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LoadLibraryW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "DeleteCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "EnterCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "InitializeCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LeaveCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "UnmapViewOfFile"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LocalLock"
-        }
-      ]
-    },
-    {
       "name": "calc.exe",
       "sha256": "aff7ce9f226e1d7561b62fabb95b09ccd22334535efc27eeab6d76dea7a70623",
       "size": 483840,
@@ -1459,1143 +585,887 @@
       ]
     },
     {
-      "name": "winmine.exe",
-      "sha256": "c060ad10843eb3718c5e18b9ebde773fa0742521a358313eaec6408e25bfda6c",
-      "size": 1125376,
+      "name": "cmd.exe",
+      "sha256": "bccc6bc1ba6013384f22809a627f14c368d2e636508db8a46a507e53c89e06e9",
+      "size": 1207296,
       "machine": "0x8664",
-      "subsystem": 2,
-      "import_count": 109,
+      "subsystem": 3,
+      "import_count": 216,
       "import_dlls": {
-        "advapi32.dll": 5,
-        "gdi32.dll": 5,
-        "kernel32.dll": 25,
-        "msvcrt.dll": 28,
-        "ntdll.dll": 1,
-        "shell32.dll": 1,
-        "user32.dll": 43,
-        "winmm.dll": 1
+        "advapi32.dll": 8,
+        "msvcrt.dll": 74,
+        "kernel32.dll": 130,
+        "ntdll.dll": 3,
+        "user32.dll": 1
       },
       "imports": [
         {
-          "dll": "user32.dll",
-          "symbol": "CheckMenuItem"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "BeginPaint"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetDlgItemInt"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDlgItemTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDlgItemInt"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EndDialog"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "wsprintfW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetDlgItemTextW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "RedrawWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "UpdateWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "TranslateMessage"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "TranslateAcceleratorW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ShowWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetTimer"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetCapture"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SendMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ReleaseDC"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ReleaseCapture"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "RegisterClassExW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "AdjustWindowRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PtInRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PostQuitMessage"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MoveWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MonitorFromRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadStringW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadImageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadIconW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadCursorW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadBitmapW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadAcceleratorsW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "IntersectRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMonitorInfoW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetSystemMetrics"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetSysColorBrush"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMenu"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDC"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EndPaint"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DispatchMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DialogBoxParamW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DefWindowProcW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CreateWindowExW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "DeleteObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "DeleteDC"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "BitBlt"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SelectObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateCompatibleDC"
+          "dll": "advapi32.dll",
+          "symbol": "RegCloseKey (461)"
         },
         {
           "dll": "advapi32.dll",
-          "symbol": "RegSetValueExW"
+          "symbol": "RegCreateKeyExW (468)"
         },
         {
           "dll": "advapi32.dll",
-          "symbol": "RegQueryValueExW"
+          "symbol": "RegDeleteKeyW (473)"
         },
         {
           "dll": "advapi32.dll",
-          "symbol": "RegOpenKeyExW"
+          "symbol": "RegEnumKeyExW (481)"
         },
         {
           "dll": "advapi32.dll",
-          "symbol": "RegCloseKey"
+          "symbol": "RegOpenKeyExW (495)"
         },
         {
           "dll": "advapi32.dll",
-          "symbol": "RegCreateKeyExW"
+          "symbol": "RegQueryInfoKeyW (500)"
         },
         {
-          "dll": "shell32.dll",
-          "symbol": "ShellAboutW"
+          "dll": "advapi32.dll",
+          "symbol": "RegQueryValueExW (506)"
         },
         {
-          "dll": "winmm.dll",
-          "symbol": "PlaySoundW"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memset"
+          "dll": "advapi32.dll",
+          "symbol": "RegSetValueExW (519)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "malloc"
+          "symbol": "bsearch (591)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "__setusermatherr"
+          "symbol": "strcspn (729)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "_amsg_exit"
+          "symbol": "strchr (725)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "__wgetmainargs"
+          "symbol": "strlen (732)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "__set_app_type"
+          "symbol": "strcmp (726)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "exit"
+          "symbol": "strcpy (728)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "_fpreset"
+          "symbol": "memcmp (686)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "_initterm"
+          "symbol": "__C_specific_handler (57)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "__winitenv"
+          "symbol": "wcstok (783)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "_wcmdln"
+          "symbol": "_vsnprintf (480)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "signal"
+          "symbol": "_getdrive (233)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "__lconv_init"
+          "symbol": "isalnum (646)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "_cexit"
+          "symbol": "isalpha (647)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "sprintf"
+          "symbol": "_errno (168)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "time"
+          "symbol": "_snwprintf (420)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "rand"
+          "symbol": "_wcsupr (502)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "srand"
+          "symbol": "_wgetdcwd (530)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "memcmp"
+          "symbol": "_wpopen (541)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "memcpy"
+          "symbol": "_wfopen (525)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "strcpy"
+          "symbol": "fgetws (616)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "strcmp"
+          "symbol": "_pclose (382)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "strlen"
+          "symbol": "fclose (608)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "memmove"
+          "symbol": "qsort (702)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "strchr"
+          "symbol": "memmove (688)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "strcspn"
+          "symbol": "_wcslwr (492)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "bsearch"
+          "symbol": "sprintf (719)"
         },
         {
           "dll": "msvcrt.dll",
-          "symbol": "_snprintf"
+          "symbol": "realloc (705)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "vswprintf (765)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsstr (781)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcsnset (496)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcspbrk (778)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsncat (775)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscpy (771)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscmp (769)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wchdir (484)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "towupper (758)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wtol (570)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcstoul (786)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcstol (784)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_itow (290)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "rand (704)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_vsnwprintf (481)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "swprintf (745)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcsnicmp (494)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wtoi (568)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memcpy (687)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcsicmp (490)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsrchr (779)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsncpy (777)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscat (767)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcslen (774)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memset (689)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memchr (685)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "free (628)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "malloc (681)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "towlower (757)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "iswctype (661)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__setusermatherr (100)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_amsg_exit (121)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__wgetmainargs (110)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__set_app_type (98)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "exit (604)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_cexit (132)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_fpreset (208)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_initterm (254)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__winitenv (111)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcmdln (486)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "signal (714)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__lconv_init (92)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsspn (780)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsncmp (776)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscspn (772)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcschr (768)"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcsdup (488)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "Sleep"
+          "symbol": "GetModuleHandleA (382)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "SetUnhandledExceptionFilter"
+          "symbol": "QueryPerformanceCounter (669)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetCurrentThreadId"
+          "symbol": "GetSystemTimeAsFileTime (458)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetProcAddress"
+          "symbol": "GetCurrentThreadId (326)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "lstrcpynW"
+          "symbol": "GetCurrentProcessId (323)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "lstrlenW"
+          "symbol": "SetUnhandledExceptionFilter (847)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetSystemTimeAsFileTime"
+          "symbol": "GetStartupInfoW (440)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetTickCount"
+          "symbol": "RaiseException (673)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "QueryPerformanceCounter"
+          "symbol": "LoadLibraryA (588)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetModuleHandleA"
+          "symbol": "LocalReAlloc (601)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "LoadLibraryW"
+          "symbol": "LocalAlloc (594)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "DeleteCriticalSection"
+          "symbol": "GetEnvironmentVariableA (344)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetCurrentProcessId"
+          "symbol": "HeapReAlloc (538)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "EnterCriticalSection"
+          "symbol": "LockResource (607)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "InitializeCriticalSection"
+          "symbol": "LoadResource (593)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "LeaveCriticalSection"
+          "symbol": "FindResourceExW (229)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetStartupInfoW"
+          "symbol": "FlushFileBuffers (238)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "ExitProcess"
+          "symbol": "WideCharToMultiByte (921)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "TlsGetValue"
+          "symbol": "WriteConsoleW (936)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetEnvironmentVariableA"
+          "symbol": "HeapFree (534)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "GetLastError"
+          "symbol": "HeapAlloc (528)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "LocalAlloc"
+          "symbol": "GetProcessHeap (419)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "LocalFree"
+          "symbol": "GetVersionExW (490)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "LocalReAlloc"
+          "symbol": "GetFileType (358)"
         },
         {
           "dll": "kernel32.dll",
-          "symbol": "SetLastError"
+          "symbol": "lstrlenA (980)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetProcessAffinityMask (823)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "ResumeThread (716)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetEnvironmentStringsW (343)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FreeEnvironmentStringsW (247)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "MoveFileW (619)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WriteConsoleOutputCharacterW (934)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FillConsoleOutputCharacterW (200)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "MoveFileExW (618)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CopyFileW (71)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeviceIoControl (138)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GlobalMemoryStatus (516)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLocaleInfoW (372)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetDateFormatW (328)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "RemoveDirectoryW (703)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateDirectoryW (79)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrcmpW (969)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrcmpiW (972)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalFree (598)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FormatMessageW (244)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetVolumePathNameW (496)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetVolumeInformationW (492)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetDiskFreeSpaceW (336)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "Sleep (859)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetLocalTime (816)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLocalTime (370)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FreeConsole (245)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "AllocConsole (10)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentProcess (322)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DuplicateHandle (147)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WriteFile (937)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "VirtualFree (904)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "VirtualAlloc (902)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SystemTimeToFileTime (864)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetFileTime (805)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetFileAttributesW (799)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetSystemTime (456)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFileTime (357)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFileAttributesW (353)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrlenW (981)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "AddConsoleAliasW (4)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleAliasW (285)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleAliasesW (289)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleAliasesLengthW (288)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CloseHandle (52)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateFileW (87)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFileSize (355)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFullPathNameW (362)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "ReadFile (687)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetFilePointer (801)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetLastError (813)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "MultiByteToWideChar (623)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "Beep (31)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetStdHandle (441)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetTickCount (479)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WaitForSingleObject (917)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "ReadConsoleInputW (679)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreatePipe (102)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateProcessW (106)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeleteCriticalSection (129)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "EnterCriticalSection (152)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "ExitProcess (185)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FileTimeToLocalFileTime (196)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FileTimeToSystemTime (197)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FindClose (206)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FindFirstFileW (213)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FreeLibrary (248)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCommandLineW (273)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentDirectoryW (321)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetEnvironmentVariableW (345)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetExitCodeProcess (346)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLastError (368)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleFileNameW (381)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleHandleW (385)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcAddress (416)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "InitializeCriticalSection (547)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LeaveCriticalSection (587)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LoadLibraryW (591)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SearchPathW (737)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetCurrentDirectoryW (784)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetEnvironmentVariableW (793)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetFileApisToOEM (797)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetHandleInformation (810)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetStdHandle (828)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TerminateProcess (867)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TryEnterCriticalSection (879)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WaitForMultipleObjects (915)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleCP (290)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleOutputCP (309)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleTitleW (314)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetConsoleCtrlHandler (755)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetConsoleMode (770)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WriteConsoleInputW (930)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "__chkstk (954)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleScreenBufferInfo (311)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FillConsoleOutputAttribute (198)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FlushConsoleInputBuffer (237)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetConsoleMode (307)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetConsoleCursorInfo (757)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetConsoleCursorPosition (759)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetConsoleTextAttribute (778)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetConsoleTitleW (780)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CopyFileExW (70)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeleteFileW (132)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FindNextFileW (221)"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TlsGetValue (874)"
         },
         {
           "dll": "ntdll.dll",
-          "symbol": "vDbgPrintExWithPrefix"
+          "symbol": "RtlIsDosDeviceName_U (723)"
+        },
+        {
+          "dll": "ntdll.dll",
+          "symbol": "RtlAssert (465)"
+        },
+        {
+          "dll": "ntdll.dll",
+          "symbol": "vDbgPrintExWithPrefix (1354)"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MessageBeep (482)"
         }
-      ]
-    },
-    {
-      "name": "sol.exe",
-      "sha256": "aa388694e7fa826a29b1f8c7c85c1cf718d1af7eda1dbebac78762c55a7aee4d",
-      "size": 156672,
-      "machine": "0x8664",
-      "subsystem": 2,
-      "import_count": 166,
-      "import_dlls": {
-        "advapi32.dll": 4,
-        "comctl32.dll": 2,
-        "gdi32.dll": 33,
-        "kernel32.dll": 32,
-        "msvcrt.dll": 29,
-        "shell32.dll": 1,
-        "user32.dll": 65
-      },
-      "imports": [
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegCreateKeyExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegQueryValueExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegSetValueExW"
-        },
-        {
-          "dll": "advapi32.dll",
-          "symbol": "RegCloseKey"
-        },
-        {
-          "dll": "comctl32.dll",
-          "symbol": "CreateStatusWindowW"
-        },
-        {
-          "dll": "comctl32.dll",
-          "symbol": "InitCommonControlsEx"
-        },
-        {
-          "dll": "shell32.dll",
-          "symbol": "ShellAboutW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "BeginPaint"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CallWindowProcW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MessageBoxW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "KillTimer"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CheckRadioButton"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CreateWindowExW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DefWindowProcW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DestroyWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CheckDlgButton"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DialogBoxParamW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DispatchMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EnableMenuItem"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EnableWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EndDialog"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "EndPaint"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetClientRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDlgItem"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMenu"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetSubMenu"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetSysColor"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetSystemMetrics"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowLongPtrW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "InvalidateRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "IsDlgButtonChecked"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadAcceleratorsW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadCursorW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadIconW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadStringW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MoveWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PostQuitMessage"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CopyRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "MessageBoxA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadBitmapA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "InflateRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SendMessageA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "OffsetRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetParent"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DrawIconEx"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetCapture"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ReleaseCapture"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetWindowLongPtrA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "RegisterClassExA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PtInRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "LoadCursorA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetWindowLongPtrA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "DefWindowProcA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "CreateWindowExA"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "FillRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ReleaseDC"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "IntersectRect"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "GetDC"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "WinHelpW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "UpdateWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "TranslateMessage"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "TranslateAcceleratorW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "ShowWindow"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetWindowPos"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetWindowLongPtrW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SetTimer"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "SendMessageW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "RegisterClassW"
-        },
-        {
-          "dll": "user32.dll",
-          "symbol": "PostMessageW"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SetBrushOrgEx"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "PatBlt"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreatePatternBrush"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreatePalette"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateBitmap"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SetTextColor"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "MoveToEx"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "LineTo"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetTextExtentPoint32A"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SelectPalette"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SelectClipRgn"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "RealizePalette"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetObjectA"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetClipRgn"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "FillRgn"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateSolidBrush"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateRectRgn"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CombineRgn"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SetPixel"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetPixel"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "ExcludeClipRect"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "DeleteObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "DeleteDC"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateCompatibleDC"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreateCompatibleBitmap"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "BitBlt"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SetBkColor"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "ExtTextOutA"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "StretchBlt"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "SelectObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "Rectangle"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "GetStockObject"
-        },
-        {
-          "dll": "gdi32.dll",
-          "symbol": "CreatePen"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__wgetmainargs"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memcpy"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "??3@YAXPEAX@Z"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__setusermatherr"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_amsg_exit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__set_app_type"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "exit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_cexit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_fpreset"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_initterm"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__winitenv"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_wcmdln"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "calloc"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_lock"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_unlock"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__dllonexit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "_onexit"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "signal"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "__lconv_init"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "swprintf"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "sqrt"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "fabs"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "abs"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "??2@YAPEAX_K@Z"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "rand"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "wcscat"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "memset"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "malloc"
-        },
-        {
-          "dll": "msvcrt.dll",
-          "symbol": "srand"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LeaveCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "InitializeCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetLastError"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "EnterCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "DeleteCriticalSection"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LoadLibraryW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "QueryPerformanceCounter"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetSystemTimeAsFileTime"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetCurrentThreadId"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetCurrentProcessId"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "SetUnhandledExceptionFilter"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetStartupInfoW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetProcAddress"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "__chkstk"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetModuleFileNameW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetModuleHandleW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetProcessHeap"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetTickCount"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "HeapAlloc"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "HeapFree"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "lstrcpyW"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "CloseHandle"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "CreateMutexA"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "ReleaseMutex"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "WaitForSingleObject"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetModuleHandleA"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "Sleep"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "lstrlenA"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "FreeLibrary"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "GetVersion"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "LoadLibraryA"
-        },
-        {
-          "dll": "kernel32.dll",
-          "symbol": "TlsGetValue"
-        }
-      ]
+      ],
+      "source_archive_url": "https://iso.reactos.org/livecd/reactos-livecd-0.4.17-dev-1343-g8fe3cee-x64-msvc-win-dbg.7z",
+      "source_archive_sha256": "25cb95449ab80ae6c483a6546ebcdf050a9a7ec78045bf9b14de132c297b7ac7"
     },
     {
       "name": "mspaint.exe",
@@ -3912,6 +2782,706 @@
       ]
     },
     {
+      "name": "notepad.exe",
+      "sha256": "c0c54e44450191dff24e8e9c64958eb8f9ddf409ef973a04c1010eb43812ee2a",
+      "size": 299008,
+      "machine": "0x8664",
+      "subsystem": 2,
+      "import_count": 170,
+      "import_dlls": {
+        "advapi32.dll": 6,
+        "comctl32.dll": 1,
+        "comdlg32.dll": 8,
+        "gdi32.dll": 16,
+        "kernel32.dll": 49,
+        "msvcrt.dll": 27,
+        "shell32.dll": 6,
+        "user32.dll": 57
+      },
+      "imports": [
+        {
+          "dll": "user32.dll",
+          "symbol": "DestroyWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ReleaseDC"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDC"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetDlgItemTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "InflateRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDlgItemTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EnableWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DrawTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "UpdateWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "TranslateMessage"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "TranslateAcceleratorW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetWindowPlacement"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetProcessDefaultLayout"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "RegisterWindowMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "RegisterClassExW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PostQuitMessage"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MoveWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadImageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadAcceleratorsW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "IsDialogMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "IsClipboardFormatAvailable"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "InvalidateRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowPlacement"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetSystemMetrics"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMenu"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DispatchMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DestroyAcceleratorTable"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DefWindowProcW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CheckMenuItem"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CallWindowProcW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "wsprintfW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "WinHelpW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ShowWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetWindowTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetWindowLongPtrW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetFocus"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetDlgItemInt"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetCursor"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SendMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SendDlgItemMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PostMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MessageBoxW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadStringW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadIconW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadCursorW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowTextLengthW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDlgItemInt"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDlgItem"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetClientRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EndDialog"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EnableMenuItem"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DialogBoxParamW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CreateWindowExW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "EndDoc"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "DeleteDC"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "AbortDoc"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "DeleteObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateFontIndirectW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "EndPage"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetTextExtentPoint32W"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetTextMetricsW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetStockObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "Rectangle"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SelectObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SetMapMode"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "StartDocW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "StartPage"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "TextOutW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetDeviceCaps"
+        },
+        {
+          "dll": "comctl32.dll",
+          "symbol": "CreateStatusWindowW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "GetSaveFileNameW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "ReplaceTextW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "GetOpenFileNameW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "FindTextW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "ChooseFontW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "PrintDlgW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "PageSetupDlgW"
+        },
+        {
+          "dll": "comdlg32.dll",
+          "symbol": "GetFileTitleW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCreateKeyExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "IsTextUnicode"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegSetValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegQueryValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegOpenKeyW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCloseKey"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "DragFinish"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "DragAcceptFiles"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "ShellExecuteW"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "ShellAboutW"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "DragQueryFileW"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "SHAddToRecentDocs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__setusermatherr"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_amsg_exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__wgetmainargs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__set_app_type"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_cexit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_fpreset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_initterm"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__lconv_init"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__winitenv"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscat"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscmp"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsrchr"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "malloc"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_assert"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "iswctype"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcslen"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsncmp"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcsncpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcsnicmp"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "towupper"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memcpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcmdln"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "signal"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_vsnwprintf"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CloseHandle"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateFileW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FormatMessageW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WideCharToMultiByte"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "MultiByteToWideChar"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WriteFile"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFileAttributesW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetLastError"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "MapViewOfFile"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFileSize"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateFileMappingW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "__chkstk"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetUserDefaultLangID"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "MulDiv"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalAlloc"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateThread"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetUserDefaultUILanguage"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrlenW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GlobalFree"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetFullPathNameW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetTimeFormatW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetDateFormatW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetEndOfFile"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLastError"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLocalTime"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleFileNameW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcessHeap"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "HeapAlloc"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TlsGetValue"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "HeapFree"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalFree"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcAddress"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetStartupInfoW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetUnhandledExceptionFilter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "Sleep"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentProcessId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentThreadId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetSystemTimeAsFileTime"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetTickCount"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalUnlock"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "QueryPerformanceCounter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleHandleA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LoadLibraryW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeleteCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "EnterCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "InitializeCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LeaveCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "UnmapViewOfFile"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalLock"
+        }
+      ]
+    },
+    {
       "name": "regedit.exe",
       "sha256": "2bf73883d66fe2dcfae2d92d6fd3d124033c9bb3f78d818b514fee7fa9ae0423",
       "size": 931840,
@@ -5131,6 +4701,689 @@
       ]
     },
     {
+      "name": "sol.exe",
+      "sha256": "aa388694e7fa826a29b1f8c7c85c1cf718d1af7eda1dbebac78762c55a7aee4d",
+      "size": 156672,
+      "machine": "0x8664",
+      "subsystem": 2,
+      "import_count": 166,
+      "import_dlls": {
+        "advapi32.dll": 4,
+        "comctl32.dll": 2,
+        "gdi32.dll": 33,
+        "kernel32.dll": 32,
+        "msvcrt.dll": 29,
+        "shell32.dll": 1,
+        "user32.dll": 65
+      },
+      "imports": [
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCreateKeyExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegQueryValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegSetValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCloseKey"
+        },
+        {
+          "dll": "comctl32.dll",
+          "symbol": "CreateStatusWindowW"
+        },
+        {
+          "dll": "comctl32.dll",
+          "symbol": "InitCommonControlsEx"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "ShellAboutW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "BeginPaint"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CallWindowProcW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MessageBoxW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "KillTimer"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CheckRadioButton"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CreateWindowExW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DefWindowProcW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DestroyWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CheckDlgButton"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DialogBoxParamW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DispatchMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EnableMenuItem"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EnableWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EndDialog"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EndPaint"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetClientRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDlgItem"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMenu"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetSubMenu"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetSysColor"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetSystemMetrics"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowLongPtrW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "InvalidateRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "IsDlgButtonChecked"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadAcceleratorsW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadCursorW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadIconW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadStringW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MoveWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PostQuitMessage"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CopyRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MessageBoxA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadBitmapA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "InflateRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SendMessageA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "OffsetRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetParent"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DrawIconEx"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetCapture"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ReleaseCapture"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetWindowLongPtrA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "RegisterClassExA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PtInRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadCursorA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetWindowLongPtrA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DefWindowProcA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CreateWindowExA"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "FillRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ReleaseDC"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "IntersectRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDC"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "WinHelpW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "UpdateWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "TranslateMessage"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "TranslateAcceleratorW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ShowWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetWindowPos"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetWindowLongPtrW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetTimer"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SendMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "RegisterClassW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PostMessageW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SetBrushOrgEx"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "PatBlt"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreatePatternBrush"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreatePalette"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateBitmap"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SetTextColor"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "MoveToEx"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "LineTo"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetTextExtentPoint32A"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SelectPalette"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SelectClipRgn"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "RealizePalette"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetObjectA"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetClipRgn"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "FillRgn"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateSolidBrush"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateRectRgn"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CombineRgn"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SetPixel"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetPixel"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "ExcludeClipRect"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "DeleteObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "DeleteDC"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateCompatibleDC"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateCompatibleBitmap"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "BitBlt"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SetBkColor"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "ExtTextOutA"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "StretchBlt"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SelectObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "Rectangle"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "GetStockObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreatePen"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__wgetmainargs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memcpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "??3@YAXPEAX@Z"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__setusermatherr"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_amsg_exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__set_app_type"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_cexit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_fpreset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_initterm"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__winitenv"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcmdln"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "calloc"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_lock"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_unlock"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__dllonexit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_onexit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "signal"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__lconv_init"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "swprintf"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "sqrt"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "fabs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "abs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "??2@YAPEAX_K@Z"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "rand"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "wcscat"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "malloc"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "srand"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LeaveCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "InitializeCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLastError"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "EnterCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeleteCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LoadLibraryW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "QueryPerformanceCounter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetSystemTimeAsFileTime"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentThreadId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentProcessId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetUnhandledExceptionFilter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetStartupInfoW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcAddress"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "__chkstk"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleFileNameW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleHandleW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcessHeap"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetTickCount"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "HeapAlloc"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "HeapFree"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrcpyW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CloseHandle"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "CreateMutexA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "ReleaseMutex"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "WaitForSingleObject"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleHandleA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "Sleep"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrlenA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "FreeLibrary"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetVersion"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LoadLibraryA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TlsGetValue"
+        }
+      ]
+    },
+    {
       "name": "taskmgr.exe",
       "sha256": "f3f055dda5ce2c9e511f2ea353c5bb93182b21ffae77a05de822b3268aa8f41b",
       "size": 582656,
@@ -6044,6 +6297,636 @@
         {
           "dll": "ntdll.dll",
           "symbol": "NtQueryInformationProcess"
+        }
+      ]
+    },
+    {
+      "name": "winmine.exe",
+      "sha256": "c060ad10843eb3718c5e18b9ebde773fa0742521a358313eaec6408e25bfda6c",
+      "size": 1125376,
+      "machine": "0x8664",
+      "subsystem": 2,
+      "import_count": 109,
+      "import_dlls": {
+        "advapi32.dll": 5,
+        "gdi32.dll": 5,
+        "kernel32.dll": 25,
+        "msvcrt.dll": 28,
+        "ntdll.dll": 1,
+        "shell32.dll": 1,
+        "user32.dll": 43,
+        "winmm.dll": 1
+      },
+      "imports": [
+        {
+          "dll": "user32.dll",
+          "symbol": "CheckMenuItem"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "BeginPaint"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetDlgItemInt"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDlgItemTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDlgItemInt"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EndDialog"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "wsprintfW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetDlgItemTextW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "RedrawWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "UpdateWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "TranslateMessage"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "TranslateAcceleratorW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ShowWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetTimer"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SetCapture"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "SendMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ReleaseDC"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "ReleaseCapture"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "RegisterClassExW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "AdjustWindowRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PtInRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "PostQuitMessage"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MoveWindow"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "MonitorFromRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadStringW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadImageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadIconW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadCursorW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadBitmapW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadAcceleratorsW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "IntersectRect"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMonitorInfoW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetSystemMetrics"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetSysColorBrush"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetMenu"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "GetDC"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "EndPaint"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DispatchMessageW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DialogBoxParamW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "DefWindowProcW"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "CreateWindowExW"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "DeleteObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "DeleteDC"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "BitBlt"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "SelectObject"
+        },
+        {
+          "dll": "gdi32.dll",
+          "symbol": "CreateCompatibleDC"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegSetValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegQueryValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegOpenKeyExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCloseKey"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCreateKeyExW"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "ShellAboutW"
+        },
+        {
+          "dll": "winmm.dll",
+          "symbol": "PlaySoundW"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "malloc"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__setusermatherr"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_amsg_exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__wgetmainargs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__set_app_type"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_fpreset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_initterm"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__winitenv"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcmdln"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "signal"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__lconv_init"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_cexit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "sprintf"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "time"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "rand"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "srand"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memcmp"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memcpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "strcpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "strcmp"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "strlen"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memmove"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "strchr"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "strcspn"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "bsearch"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_snprintf"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "Sleep"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetUnhandledExceptionFilter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentThreadId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcAddress"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrcpynW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "lstrlenW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetSystemTimeAsFileTime"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetTickCount"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "QueryPerformanceCounter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleHandleA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LoadLibraryW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeleteCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentProcessId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "EnterCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "InitializeCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LeaveCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetStartupInfoW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "ExitProcess"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TlsGetValue"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetEnvironmentVariableA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLastError"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalAlloc"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalFree"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LocalReAlloc"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetLastError"
+        },
+        {
+          "dll": "ntdll.dll",
+          "symbol": "vDbgPrintExWithPrefix"
+        }
+      ]
+    },
+    {
+      "name": "winver.exe",
+      "sha256": "c77eec6d92fac38511bf0b31017809c5fbd7e34a818239699890970ddfec327e",
+      "size": 14336,
+      "machine": "0x8664",
+      "subsystem": 2,
+      "import_count": 39,
+      "import_dlls": {
+        "advapi32.dll": 3,
+        "comctl32.dll": 1,
+        "kernel32.dll": 17,
+        "msvcrt.dll": 16,
+        "shell32.dll": 1,
+        "user32.dll": 1
+      },
+      "imports": [
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegOpenKeyExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegQueryValueExW"
+        },
+        {
+          "dll": "advapi32.dll",
+          "symbol": "RegCloseKey"
+        },
+        {
+          "dll": "user32.dll",
+          "symbol": "LoadStringW"
+        },
+        {
+          "dll": "shell32.dll",
+          "symbol": "ShellAboutW"
+        },
+        {
+          "dll": "comctl32.dll",
+          "symbol": "InitCommonControlsEx"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_wcmdln"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "signal"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__winitenv"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__lconv_init"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_initterm"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_fpreset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_cexit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__set_app_type"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__wgetmainargs"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_amsg_exit"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "__setusermatherr"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "malloc"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memset"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "memcpy"
+        },
+        {
+          "dll": "msvcrt.dll",
+          "symbol": "_vsnwprintf"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetLastError"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "TlsGetValue"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LeaveCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "InitializeCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "EnterCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "DeleteCriticalSection"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "LoadLibraryW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetModuleHandleA"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "QueryPerformanceCounter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetTickCount"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetSystemTimeAsFileTime"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentThreadId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetCurrentProcessId"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "Sleep"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "SetUnhandledExceptionFilter"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetStartupInfoW"
+        },
+        {
+          "dll": "kernel32.dll",
+          "symbol": "GetProcAddress"
         }
       ]
     },

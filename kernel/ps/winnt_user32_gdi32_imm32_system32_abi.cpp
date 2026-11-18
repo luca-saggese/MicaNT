@@ -26,6 +26,11 @@
 #include <algorithm>
 #include <array>
 
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+extern "C" __declspec(dllimport) int32_t __stdcall Beep(
+    uint32_t frequency, uint32_t duration) noexcept;
+#endif
+
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 #endif
@@ -40,6 +45,7 @@ extern "C" void* CreateFontW(int32_t, int32_t, int32_t, int32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, const wchar_t*) noexcept;
 intptr_t User32_ButtonWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+intptr_t User32_StaticWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t User32_EditWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 intptr_t User32_ScrollBarWndProc(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 void* User32_BeginPaint(void*, WinNtPaintStruct*) noexcept;
@@ -48,6 +54,7 @@ void drawAttachedWindowScrollBars(void*, void*) noexcept;
 intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 void* User32_SetFocus(void*) noexcept;
 void* User32_GetFocus() noexcept;
+intptr_t User32_GetWindowLongPtrW(void*, int32_t) noexcept;
 void* User32_SetCapture(void*) noexcept;
 int32_t User32_ReleaseCapture() noexcept;
 intptr_t User32_DefWindowProcW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
@@ -111,6 +118,7 @@ struct EditState {
     uint16_t length{};
     wchar_t text[512]{};
 };
+struct StaticState { void* hwnd{}; uint32_t style{}; uint16_t length{}; wchar_t text[256]{}; };
 struct ScrollInfoW {
     uint32_t cbSize, fMask;
     int32_t nMin, nMax;
@@ -139,14 +147,12 @@ struct WindowScrollState {
 };
 std::array<ButtonState, 64> g_buttons{};
 std::array<EditState, 64> g_edits{};
+std::array<StaticState, 128> g_statics{};
 std::array<ScrollBarState, 64> g_scrollBars{};
 std::array<WindowScrollState, 64> g_windowScrollBars{};
 void* g_hotButton{};
 uint32_t g_nextRadioGroup{1};
 uint64_t g_nextButtonOrder{1};
-uint32_t g_buttonClassState{};
-uint32_t g_editClassState{};
-uint32_t g_scrollBarClassState{};
 constexpr uint32_t kButtonHot = 0x01;
 constexpr uint32_t kButtonPressed = 0x02;
 constexpr uint32_t kButtonFocused = 0x04;
@@ -161,7 +167,9 @@ constexpr uint32_t kBsAutoCheckBox = 3u;
 constexpr uint32_t kBsRadioButton = 4u;
 constexpr uint32_t kBs3State = 5u;
 constexpr uint32_t kBsAuto3State = 6u;
+constexpr uint32_t kBsGroupBox = 7u;
 constexpr uint32_t kBsAutoRadioButton = 9u;
+constexpr uint32_t kBsOwnerDraw = 11u;
 constexpr uint32_t kWsGroup = 0x00020000u;
 constexpr uint32_t kEsPassword = 0x00000020u;
 constexpr uint32_t kEsReadOnly = 0x00000800u;
@@ -224,6 +232,7 @@ constexpr uint32_t kSbEndScroll = 8u;
 constexpr uint32_t kMkLButton = 0x0001u;
 constexpr uint32_t kVkSpace = 0x20u;
 constexpr uint32_t kDtCenter = 0x00000001u;
+constexpr uint32_t kDtLeft = 0x00000000u;
 constexpr uint32_t kDtVCenter = 0x00000004u;
 constexpr uint32_t kDtSingleLine = 0x00000020u;
 constexpr uint32_t kDtNoPrefix = 0x00000800u;
@@ -236,7 +245,7 @@ constexpr uint32_t kColorButtonPressed = 0xFFD7E4F2u;
 constexpr uint32_t kColorButtonDisabled = 0xFFE8E8E8u;
 constexpr uint32_t kColorBorder = 0xFF8A8A8Au;
 bool isSupportedButtonType(uint32_t type) noexcept {
-    return type <= kBsAuto3State || type == kBsAutoRadioButton;
+    return type <= kBsGroupBox || type == kBsAutoRadioButton || type == kBsOwnerDraw;
 }
 bool isCheckableButtonType(uint32_t type) noexcept {
     return type == kBsCheckBox || type == kBsAutoCheckBox ||
@@ -1114,6 +1123,7 @@ GdiDcSelection g_gdiDcs[GdiDcCapacity]{};
 GdiBrushObject g_gdiBrushes[GdiBrushCapacity]{};
 uint32_t g_gdiBrushGeneration{1};
 uint32_t g_gdiBrushLock{};
+GdiFontObject* GetSystemGdiFont() noexcept;
 struct GdiBrushGuard {
     GdiBrushGuard() noexcept {
         while (__atomic_exchange_n(&g_gdiBrushLock, 1u, __ATOMIC_ACQUIRE))
@@ -1152,6 +1162,14 @@ GdiDcSelection* FindGdiDc(void* handle, bool create) noexcept {
     if (!create || !freeSlot) return nullptr;
     *freeSlot = GdiDcSelection{};
     freeSlot->dc = handle;
+    // A newly acquired Windows DC starts with its stock system font selected.
+    // Keep that default in the GDI32-owned per-DC state, including HDCs that
+    // User32 created for BeginPaint and passed across the DLL boundary.
+    freeSlot->font = GetSystemGdiFont();
+    if (!freeSlot->font) {
+        *freeSlot = {};
+        return nullptr;
+    }
     return freeSlot;
 }
 
@@ -1809,9 +1827,9 @@ uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
         (wc->cursor && !winuser::ProcessIconHandles().acquireCursor(wc->cursor, classCursorLease)))
         return 0;
 #endif
-    using Fn=uint16_t (*)(const wchar_t*,void*);
+    using Fn=uint16_t (*)(const wchar_t*,void*,int32_t);
     auto fn=Win32kProc<Fn>("MicaWin32kRegisterClassW");
-    const uint16_t atom = fn ? fn(wc->className,wc->wndProc) : 0;
+    const uint16_t atom = fn ? fn(wc->className,wc->wndProc,wc->windowExtra) : 0;
 #if defined(BUILD_SYSTEM32_USER32_DLL)
     if (atom && wc->className) {
         for (size_t i = 0; i < classNameLength; ++i) iconSlot->name[i] = wc->className[i];
@@ -1841,24 +1859,14 @@ bool isClassName(const wchar_t* candidate, const wchar_t* expected) noexcept {
     return candidate[index] == L'\0';
 }
 
-bool ensureBuiltinClass(const wchar_t* name, void* wndProc,
-                        uint32_t& registrationState) noexcept {
-    uint32_t expected = 0;
-    if (__atomic_compare_exchange_n(&registrationState, &expected, 1u,
-                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        using RegisterFn = uint16_t (*)(const wchar_t*, void*);
-        const auto registerClass = Win32kProc<RegisterFn>("MicaWin32kRegisterClassW");
-        const uint16_t atom = registerClass ? registerClass(name, wndProc) : 0;
-        __atomic_store_n(&registrationState, atom ? 2u : 0u, __ATOMIC_RELEASE);
-        return atom != 0;
-    }
-    for (uint32_t spins = 0; spins < 1000000; ++spins) {
-        const uint32_t state = __atomic_load_n(&registrationState, __ATOMIC_ACQUIRE);
-        if (state == 2) return true;
-        if (state == 0) return false;
-        __asm__ __volatile__("pause" ::: "memory");
-    }
-    return false;
+void registerBuiltinClass(const wchar_t* name, void* wndProc) noexcept {
+    using RegisterFn = uint16_t (*)(const wchar_t*, void*, int32_t);
+    const auto registerClass = Win32kProc<RegisterFn>("MicaWin32kRegisterClassW");
+    // Win32k owns class lifetime per process. Attempt registration in that
+    // namespace on every CreateWindowExW path instead of caching a DLL-global
+    // success bit that can belong to a different process. A duplicate is
+    // harmless here: CreateWindowExW below validates the process-owned class.
+    if (registerClass) (void)registerClass(name, wndProc, 0);
 }
 #endif
 
@@ -1882,27 +1890,22 @@ void* User32_CreateWindowExW(
             setThreadLastError(87); // ERROR_INVALID_PARAMETER: unsupported BS_* type.
             return nullptr;
         }
-        if (!ensureBuiltinClass(L"BUTTON",
-                reinterpret_cast<void*>(&User32_ButtonWndProc), g_buttonClassState))
-            return nullptr;
+        registerBuiltinClass(L"BUTTON", reinterpret_cast<void*>(&User32_ButtonWndProc));
+    } else if (isClassName(lpClassName, L"STATIC")) {
+        registerBuiltinClass(L"STATIC", reinterpret_cast<void*>(&User32_StaticWndProc));
     } else if (isClassName(lpClassName, L"EDIT")) {
         const uint32_t editStyles = dwStyle & kEsControlMask;
         if (editStyles & kEsUnsupportedMask) {
             setThreadLastError(87); // Unsupported ES_* styles fail explicitly.
             return nullptr;
         }
-        if (!ensureBuiltinClass(L"EDIT",
-                reinterpret_cast<void*>(&User32_EditWndProc), g_editClassState))
-            return nullptr;
+        registerBuiltinClass(L"EDIT", reinterpret_cast<void*>(&User32_EditWndProc));
     } else if (isClassName(lpClassName, L"SCROLLBAR")) {
         if (dwStyle & kSbsUnsupported) {
             setThreadLastError(87); // SBS_SIZEBOX/SBS_SIZEGRIP are not implemented.
             return nullptr;
         }
-        if (!ensureBuiltinClass(L"SCROLLBAR",
-                reinterpret_cast<void*>(&User32_ScrollBarWndProc),
-                g_scrollBarClassState))
-            return nullptr;
+        registerBuiltinClass(L"SCROLLBAR", reinterpret_cast<void*>(&User32_ScrollBarWndProc));
     }
 #endif
     using Fn = void* (*)(uint32_t,const wchar_t*,const wchar_t*,uint32_t,int32_t,int32_t,int32_t,int32_t,void*,void*,void*,void*);
@@ -2195,6 +2198,14 @@ struct ButtonDibInfo {
     uint32_t colorsUsed{}, colorsImportant{}, colorTable{};
 };
 struct ButtonTextExtent { int32_t cx{}, cy{}; };
+struct Win32DrawItemStruct64 {
+    uint32_t controlType{}, controlId{}, itemId{}, action{}, state{}, padding{};
+    void* window{};
+    void* dc{};
+    WinNtRect rect{};
+    uintptr_t itemData{};
+};
+static_assert(sizeof(Win32DrawItemStruct64) == 64);
 
 bool fillButtonRect(void* dc, const WinNtRect& rect, uint32_t color) noexcept {
     if (auto* brush = CreateSolidBrush(colorRef(color))) {
@@ -2939,9 +2950,10 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
     }
 
     const uint32_t type = button.style & kBsTypeMask;
+    const bool groupBox = type == kBsGroupBox;
     const bool radio = isRadioButtonType(type);
     const bool checkable = isCheckableButtonType(type);
-    const int32_t part = checkable ? (radio ? 2 : 3) : 1;
+    const int32_t part = groupBox ? 4 : checkable ? (radio ? 2 : 3) : 1;
     const int32_t baseState = (button.state & kButtonDisabled) ? 4 :
         (button.state & kButtonPressed) ? 3 :
         (button.state & kButtonHot) ? 2 :
@@ -2964,7 +2976,22 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
         backgroundDrawn = DrawThemeBackground(theme, memoryDc, part, 1,
                                                 &bounds, nullptr) == 0;
 
-    if (!backgroundDrawn && !checkable) drawButtonFallback(memoryDc, width, height, button);
+    if (!backgroundDrawn && groupBox) {
+        const int32_t textStart = 8;
+        ButtonTextExtent extent{};
+        size_t textLength{};
+        while (textLength < std::size(button.text) && button.text[textLength]) ++textLength;
+        if (textLength) (void)GetTextExtentPoint32W(memoryDc, button.text,
+            static_cast<int32_t>(textLength), &extent);
+        (void)fillButtonRect(memoryDc, {0, 0, width, height}, 0xFFF0F0F0u);
+        (void)fillButtonRect(memoryDc, {0, 6, textLength ? textStart : width, 7}, kColorBorder);
+        if (textLength) (void)fillButtonRect(memoryDc,
+            {textStart + extent.cx + 4, 6, width, 7}, kColorBorder);
+        (void)fillButtonRect(memoryDc, {0, 6, 1, height}, kColorBorder);
+        (void)fillButtonRect(memoryDc, {width - 1, 6, width, height}, kColorBorder);
+        (void)fillButtonRect(memoryDc, {0, height - 1, width, height}, kColorBorder);
+        backgroundDrawn = true;
+    } else if (!backgroundDrawn && !checkable) drawButtonFallback(memoryDc, width, height, button);
     if (checkable && !backgroundDrawn) {
         const uint32_t face = (button.state & kButtonDisabled)
             ? kColorButtonDisabled : 0xFFFFFFFFu;
@@ -3005,11 +3032,13 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
         }
     }
     const WinNtRect textBounds = checkable
-        ? WinNtRect{glyph.right + 5, 0, width, height} : bounds;
+        ? WinNtRect{glyph.right + 5, 0, width, height} :
+          groupBox ? WinNtRect{8, 0, width, height} : bounds;
 
     bool textDrawn = theme &&
         DrawThemeText(theme, memoryDc, part, themeState, button.text, -1,
-            (checkable ? 0u : kDtCenter) | kDtVCenter | kDtSingleLine | kDtNoPrefix,
+            (checkable || groupBox ? kDtLeft : kDtCenter) |
+                kDtVCenter | kDtSingleLine | kDtNoPrefix,
             0, &textBounds) == 0;
 
     if (!textDrawn && button.text[0]) {
@@ -3024,7 +3053,8 @@ bool renderButton(void* hwnd, const ButtonState& button, void* targetDc,
             (void)SetBkMode(memoryDc, 1);
             (void)SetTextColor(memoryDc, colorRef(textColor));
             const int32_t textWidth = textBounds.right - textBounds.left;
-            const int32_t x = textBounds.left + (checkable ? 0 : std::max(0, (textWidth - extent.cx) / 2));
+            const int32_t x = textBounds.left +
+                ((checkable || groupBox) ? 0 : std::max(0, (textWidth - extent.cx) / 2));
             const int32_t y = std::max(0, (height - extent.cy) / 2);
             (void)TextOutW(memoryDc, x, y, button.text,
                            static_cast<int32_t>(textLength));
@@ -3395,6 +3425,31 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
         const bool hasRect = getRect && getRect(hwnd, &client);
 
+        if ((button.style & kBsTypeMask) == kBsOwnerDraw) {
+            bool handled{};
+            if (hasRect && button.parent) {
+                uint32_t itemState{};
+                if (button.state & kButtonPressed) itemState |= 0x0001u; // ODS_SELECTED
+                if (button.state & kButtonDisabled) itemState |= 0x0004u; // ODS_DISABLED
+                if (button.state & kButtonFocused) itemState |= 0x0010u; // ODS_FOCUS
+                if (button.state & kButtonDefault) itemState |= 0x0020u; // ODS_DEFAULT
+                if (button.state & kButtonHot) itemState |= 0x0040u; // ODS_HOTLIGHT
+                Win32DrawItemStruct64 item{};
+                item.controlType = 4; // ODT_BUTTON
+                item.controlId = static_cast<uint32_t>(button.id);
+                item.itemId = static_cast<uint32_t>(button.id);
+                item.action = 1; // ODA_DRAWENTIRE
+                item.state = itemState;
+                item.window = hwnd;
+                item.dc = targetDc;
+                item.rect = {0, 0, client.right, client.bottom};
+                handled = User32_SendMessageW(button.parent, 0x002Bu /* WM_DRAWITEM */,
+                    button.id, reinterpret_cast<intptr_t>(&item)) != 0;
+            }
+            (void)User32_EndPaint(hwnd, &paint);
+            return handled ? 1 : 0;
+        }
+
         bool drawn = false;
         if (hasRect && client.right > 0 && client.bottom > 0) {
 
@@ -3411,6 +3466,122 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         return hasRect && client.right > 0 && client.bottom > 0;
     }
     if (click) notifyButtonClicked(hwnd);
+    return User32_DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+intptr_t User32_StaticWndProc(void* hwnd, uint32_t message,
+                              uintptr_t wParam, intptr_t lParam) noexcept {
+    constexpr uint32_t wmNcCreate = 0x0081, wmNcDestroy = 0x0082;
+    constexpr uint32_t wmSetText = 0x000c, wmGetText = 0x000d, wmGetTextLength = 0x000e;
+    constexpr uint32_t wmPaint = 0x000f;
+    if (message == wmNcCreate) {
+        const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
+        if (!create) return 0;
+        StaticState initial{};
+        initial.hwnd = hwnd; initial.style = static_cast<uint32_t>(create->style);
+        if (create->title) {
+            size_t length{};
+            while (length < std::size(initial.text) - 1 && create->title[length]) {
+                initial.text[length] = create->title[length]; ++length;
+            }
+            if (create->title[length]) return 0;
+            initial.length = static_cast<uint16_t>(length);
+        }
+        ButtonLockGuard guard(g_buttonLock);
+        for (auto& entry : g_statics) if (!entry.hwnd) { entry = initial; return 1; }
+        return 0;
+    }
+    if (message == wmNcDestroy) {
+        ButtonLockGuard guard(g_buttonLock);
+        for (auto& entry : g_statics) if (entry.hwnd == hwnd) { entry = {}; break; }
+        return 0;
+    }
+    if (message == wmSetText) {
+        const auto* source = reinterpret_cast<const wchar_t*>(lParam);
+        wchar_t replacement[256]{}; size_t length{};
+        while (source && length < std::size(replacement) - 1 && source[length]) {
+            replacement[length] = source[length]; ++length;
+        }
+        if (source && source[length]) return 0;
+        bool updated{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            for (auto& entry : g_statics) if (entry.hwnd == hwnd) {
+                std::memcpy(entry.text, replacement, sizeof(replacement));
+                entry.length = static_cast<uint16_t>(length);
+                updated = true;
+                break;
+            }
+        }
+        if (updated) (void)User32_InvalidateRect(hwnd, nullptr, 1);
+        return updated ? 1 : 0;
+    }
+    if (message == wmGetTextLength || message == wmGetText) {
+        ButtonLockGuard guard(g_buttonLock);
+        for (const auto& entry : g_statics) if (entry.hwnd == hwnd) {
+            if (message == wmGetTextLength) return entry.length;
+            if (!lParam || !wParam) return 0;
+            const size_t copied = std::min(static_cast<size_t>(entry.length),
+                static_cast<size_t>(wParam - 1));
+            auto* destination = reinterpret_cast<wchar_t*>(lParam);
+            if (copied) std::memcpy(destination, entry.text, copied * sizeof(wchar_t));
+            destination[copied] = 0;
+            return static_cast<intptr_t>(copied);
+        }
+        return 0;
+    }
+    if (message == wmPaint) {
+        StaticState state{};
+        {
+            ButtonLockGuard guard(g_buttonLock);
+            bool found{};
+            for (const auto& entry : g_statics) if (entry.hwnd == hwnd) { state = entry; found = true; break; }
+            if (!found) return 0;
+        }
+        WinNtPaintStruct paint{};
+        void* dc = User32_BeginPaint(hwnd, &paint);
+        if (!dc) return 0;
+        MicaWin32kRect client{};
+        using GetRectFn = int32_t (*)(void*, MicaWin32kRect*);
+        const auto getRect = Win32kProc<GetRectFn>("MicaWin32kGetClientRect");
+        bool drawn = getRect && getRect(hwnd, &client) && client.right > 0 && client.bottom > 0;
+        if (drawn) {
+            const uint32_t type = state.style & 0x1fu;
+            const WinNtRect bounds{0, 0, client.right, client.bottom};
+            uint32_t background = 0xFFF0F0F0u;
+            if (type == 4) background = 0xFF000000u;
+            else if (type == 5 || type == 8) background = 0xFF808080u;
+            else if (type == 6 || type == 9) background = 0xFFFFFFFFu;
+            if (type == 4 || type == 5 || type == 6 || type == 7 || type == 8 || type == 9)
+                drawn = fillButtonRect(dc, bounds, background);
+            if ((type == 7 || type == 8 || type == 9) && client.right > 1 && client.bottom > 1) {
+                drawn &= fillButtonRect(dc, {0, 0, client.right, 1}, kColorBorder);
+                drawn &= fillButtonRect(dc, {0, client.bottom - 1, client.right, client.bottom}, kColorBorder);
+                drawn &= fillButtonRect(dc, {0, 0, 1, client.bottom}, kColorBorder);
+                drawn &= fillButtonRect(dc, {client.right - 1, 0, client.right, client.bottom}, kColorBorder);
+            }
+            if (state.length && type <= 2) {
+                void* font = GetStockObject(kStockDefaultGuiFont);
+                void* oldFont = font ? SelectObject(dc, font) : nullptr;
+                const uint32_t oldColor = SetTextColor(dc, 0x00000000u);
+                const int32_t oldMode = SetBkMode(dc, 1);
+                ButtonTextExtent extent{};
+                const bool measured = GetTextExtentPoint32W(dc, state.text, state.length, &extent) != 0;
+                int32_t x = 3;
+                if (measured && type == 1) x = std::max(0, (client.right - extent.cx) / 2);
+                else if (measured && type == 2) x = std::max(0, client.right - extent.cx - 3);
+                const int32_t y = (state.style & 0x00000200u) && measured
+                    ? std::max(0, (client.bottom - extent.cy) / 2) : 0;
+                drawn &= oldColor != 0xffffffffu && oldMode > 0 &&
+                    TextOutW(dc, x, y, state.text, state.length) != 0;
+                if (oldMode > 0) (void)SetBkMode(dc, oldMode);
+                if (oldColor != 0xffffffffu) (void)SetTextColor(dc, oldColor);
+                if (oldFont) (void)SelectObject(dc, oldFont);
+            }
+        }
+        (void)User32_EndPaint(hwnd, &paint);
+        return drawn ? 1 : 0;
+    }
     return User32_DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
@@ -3790,6 +3961,19 @@ intptr_t User32_DefWindowProcW(void* hWnd, uint32_t Msg, uintptr_t wParam, intpt
     return fn ? fn(hWnd,Msg,wParam,lParam) : 0;
 }
 
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+intptr_t User32_CallWindowProcW(void* procedure, void* window, uint32_t message,
+    uintptr_t wParam, intptr_t lParam) noexcept {
+    if (!procedure) {
+        setThreadLastError(87);
+        return 0;
+    }
+    using WindowProcedure = intptr_t (__attribute__((stdcall)) *)(
+        void*, uint32_t, uintptr_t, intptr_t);
+    return reinterpret_cast<WindowProcedure>(procedure)(window, message, wParam, lParam);
+}
+#endif
+
 thread_local uint8_t g_threadKeyboardState[256]{};
 thread_local uint8_t g_recentKeyPress[256]{};
 
@@ -3817,6 +4001,174 @@ int32_t User32_GetKeyboardState(uint8_t* state) noexcept {
         return 0;
     }
     std::memcpy(state, g_threadKeyboardState, sizeof(g_threadKeyboardState));
+    return 1;
+}
+
+uintptr_t User32_GetKeyboardLayout(uint32_t threadId) noexcept {
+    uint32_t currentThreadId{};
+    __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(currentThreadId));
+    if (threadId != 0 && threadId != currentThreadId) {
+        // The current Win32k input owner has one active US layout and does not
+        // yet publish layouts for other GUI threads. Match the native failure
+        // shape instead of returning a fabricated layout for an unknown TID.
+        constexpr uint32_t errorInvalidThreadId = 1444;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidThreadId) : "memory");
+        return 0;
+    }
+    // The input stack currently emits US virtual-key/character pairs. This is
+    // the sole installed layout until Win32k owns configurable per-thread KLs.
+    return 0x04090409u; // US English (United States)
+}
+
+namespace {
+bool validUsKeyboardLayout(uintptr_t layout) noexcept {
+    return layout == 0 || layout == 0x04090409u;
+}
+
+uint8_t usVirtualKeyToScan(uint32_t key) noexcept {
+    if (key >= 'A' && key <= 'Z') {
+        constexpr uint8_t scans[26]{
+            0x1E,0x30,0x2E,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,
+            0x31,0x18,0x19,0x10,0x13,0x1F,0x14,0x16,0x2F,0x11,0x2D,0x15,0x2C};
+        return scans[key - 'A'];
+    }
+    if (key >= '1' && key <= '9') {
+        constexpr uint8_t scans[]{0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A};
+        return scans[key - '1'];
+    }
+    if (key == '0') return 0x0B;
+    switch (key) {
+        case 0x08: return 0x0E; // Backspace
+        case 0x09: return 0x0F; // Tab
+        case 0x0D: return 0x1C; // Enter
+        case 0x10: case 0xA0: return 0x2A;
+        case 0xA1: return 0x36;
+        case 0x11: case 0xA2: case 0xA3: return 0x1D;
+        case 0x12: case 0xA4: case 0xA5: return 0x38;
+        case 0x14: return 0x3A;
+        case 0x1B: return 0x01;
+        case 0x20: return 0x39;
+        case 0x21: return 0x49; // Page Up
+        case 0x22: return 0x51; // Page Down
+        case 0x23: return 0x4F; // End
+        case 0x24: return 0x47; // Home
+        case 0x25: return 0x4B; // Left
+        case 0x26: return 0x48; // Up
+        case 0x27: return 0x4D; // Right
+        case 0x28: return 0x50; // Down
+        case 0x2D: return 0x52; // Insert
+        case 0x2E: return 0x53; // Delete
+        case 0x6A: return 0x37; // Numpad multiply
+        case 0x6B: return 0x4E; // Numpad add
+        case 0x6D: return 0x4A; // Numpad subtract
+        case 0x6E: return 0x53; // Numpad decimal
+        case 0x6F: return 0x35; // Numpad divide
+        case 0xBA: return 0x27; // ;:
+        case 0xBB: return 0x0D; // =+
+        case 0xBC: return 0x33; // ,<
+        case 0xBD: return 0x0C; // -_
+        case 0xBE: return 0x34; // .>
+        case 0xBF: return 0x35; // /?
+        case 0xC0: return 0x29; // `~
+        case 0xDB: return 0x1A; // [{
+        case 0xDC: return 0x2B; // \\
+        case 0xDD: return 0x1B; // ]}
+        case 0xDE: return 0x28; // '
+        default: break;
+    }
+    if (key >= 0x70 && key <= 0x7B) return static_cast<uint8_t>(0x3B + key - 0x70);
+    if (key >= 0x60 && key <= 0x69) {
+        constexpr uint8_t scans[]{0x52,0x4F,0x50,0x51,0x4B,0x4C,0x4D,0x47,0x48,0x49};
+        return scans[key - 0x60];
+    }
+    return 0;
+}
+
+wchar_t usVirtualKeyToCharacter(uint32_t key) noexcept {
+    if (key >= 'A' && key <= 'Z') return static_cast<wchar_t>(key - 'A' + 'a');
+    if (key >= '0' && key <= '9') return static_cast<wchar_t>(key);
+    switch (key) {
+        case 0x20: return L' ';
+        case 0xBA: return L';'; case 0xBB: return L'='; case 0xBC: return L',';
+        case 0xBD: return L'-'; case 0xBE: return L'.'; case 0xBF: return L'/';
+        case 0xC0: return L'`'; case 0xDB: return L'['; case 0xDC: return L'\\';
+        case 0xDD: return L']'; case 0xDE: return L'\'';
+        default: return 0;
+    }
+}
+}
+
+uint32_t User32_MapVirtualKeyExW(uint32_t code, uint32_t mapType,
+                                uintptr_t layout) noexcept {
+    if (!validUsKeyboardLayout(layout)) return 0;
+    if (mapType == 0 || mapType == 4) return usVirtualKeyToScan(code);
+    if (mapType == 2) return static_cast<uint32_t>(usVirtualKeyToCharacter(code));
+    if (mapType == 1 || mapType == 3) {
+        const uint32_t scan = code & 0xFFu;
+        if (scan == 0x1E) return 'A'; if (scan == 0x30) return 'B';
+        if (scan == 0x2E) return 'C'; if (scan == 0x20) return 'D';
+        if (scan == 0x12) return 'E'; if (scan == 0x21) return 'F';
+        if (scan == 0x22) return 'G'; if (scan == 0x23) return 'H';
+        if (scan == 0x17) return 'I'; if (scan == 0x24) return 'J';
+        if (scan == 0x25) return 'K'; if (scan == 0x26) return 'L';
+        if (scan == 0x32) return 'M'; if (scan == 0x31) return 'N';
+        if (scan == 0x18) return 'O'; if (scan == 0x19) return 'P';
+        if (scan == 0x10) return 'Q'; if (scan == 0x13) return 'R';
+        if (scan == 0x1F) return 'S'; if (scan == 0x14) return 'T';
+        if (scan == 0x16) return 'U'; if (scan == 0x2F) return 'V';
+        if (scan == 0x11) return 'W'; if (scan == 0x2D) return 'X';
+        if (scan == 0x15) return 'Y'; if (scan == 0x2C) return 'Z';
+        if (scan >= 0x02 && scan <= 0x0A) return '1' + scan - 0x02;
+        if (scan == 0x0B) return '0';
+        if (scan == 0x1C) return 0x0D;
+        if (scan == 0x39) return 0x20;
+        if (scan == 0x0F) return 0x09;
+        if (mapType == 3 && (code & 0xFF00u) == 0xE000u) {
+            switch (scan) {
+                case 0x47: return 0x24; case 0x48: return 0x26;
+                case 0x49: return 0x21; case 0x4B: return 0x25;
+                case 0x4D: return 0x27; case 0x4F: return 0x23;
+                case 0x50: return 0x28; case 0x51: return 0x22;
+                case 0x52: return 0x2D; case 0x53: return 0x2E;
+                default: return 0;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+int32_t User32_ToAsciiEx(uint32_t virtualKey, uint32_t /*scanCode*/,
+    const uint8_t* keyState, uint16_t* characters, uint32_t /*flags*/,
+    uintptr_t layout) noexcept {
+    if (!keyState || !characters || !validUsKeyboardLayout(layout)) return 0;
+    bool shift = (keyState[0x10] & 0x80u) ||
+                 (keyState[0xA0] & 0x80u) || (keyState[0xA1] & 0x80u);
+    const bool control = (keyState[0x11] & 0x80u) ||
+                         (keyState[0xA2] & 0x80u) || (keyState[0xA3] & 0x80u);
+    if (virtualKey >= 'A' && virtualKey <= 'Z') {
+        wchar_t ch = static_cast<wchar_t>(virtualKey - 'A' + 'a');
+        if (shift ^ ((keyState[0x14] & 1u) != 0)) ch = static_cast<wchar_t>(ch - 'a' + 'A');
+        if (control) ch = static_cast<wchar_t>(virtualKey - 'A' + 1);
+        *characters = static_cast<uint16_t>(ch);
+        return 1;
+    }
+    wchar_t ch = usVirtualKeyToCharacter(virtualKey);
+    if (!ch) return 0;
+    if (virtualKey >= '0' && virtualKey <= '9' && shift) {
+        constexpr wchar_t shiftedDigits[]{L')',L'!',L'@',L'#',L'$',L'%',L'^',L'&',L'*',L'('};
+        ch = shiftedDigits[virtualKey - '0'];
+    } else if (shift) {
+        switch (virtualKey) {
+            case 0xBA: ch = L':'; break; case 0xBB: ch = L'+'; break;
+            case 0xBC: ch = L'<'; break; case 0xBD: ch = L'_'; break;
+            case 0xBE: ch = L'>'; break; case 0xBF: ch = L'?'; break;
+            case 0xC0: ch = L'~'; break; case 0xDB: ch = L'{'; break;
+            case 0xDC: ch = L'|'; break; case 0xDD: ch = L'}'; break;
+            case 0xDE: ch = L'"'; break; default: break;
+        }
+    }
+    *characters = static_cast<uint16_t>(ch);
     return 1;
 }
 
@@ -3890,17 +4242,11 @@ int32_t User32_TranslateMessage(const WinNtMsg* lpMsg) noexcept {
     constexpr uint32_t WM_CHAR = 0x0102u;
     if (!lpMsg || lpMsg->message != WM_KEYDOWN) return 0;
 
-    // The kernel input path already queues WM_CHAR for printable keys. It
-    // leaves control keys as WM_KEYDOWN, so translate the character-producing
-    // keys here just as TranslateMessage does for a normal message loop.
-    uint16_t character{};
-    switch (static_cast<uint32_t>(lpMsg->wParam)) {
-        case 0x08u: character = u'\b'; break; // VK_BACK
-        case 0x09u: character = u'\t'; break; // VK_TAB
-        case 0x0Du: character = u'\r'; break; // VK_RETURN
-        default: return 0;
-    }
-    return User32_PostMessageW(lpMsg->hwnd, WM_CHAR, character, lpMsg->lParam) ? 1 : 0;
+    // The kernel keyboard path queues both WM_KEYDOWN and its WM_CHAR for
+    // printable and control keys. Reposting here would duplicate Backspace,
+    // Enter, and Tab in native message loops.
+    (void)WM_CHAR;
+    return 0;
 }
 
 intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
@@ -4020,6 +4366,274 @@ int32_t User32_EnumWindows(void* callback, intptr_t parameter) noexcept {
     return fn ? fn(callback,parameter) : 0;
 }
 
+void* User32_GetDlgItem(void* dialog, int32_t controlId) noexcept {
+    if (!dialog) return nullptr;
+    using Fn = void* (*)(void*, int32_t);
+    const auto fn = Win32kProc<Fn>("MicaWin32kGetDlgItem");
+    return fn ? fn(dialog, controlId) : nullptr;
+}
+
+uint32_t User32_GetDlgItemTextW(void* dialog, int32_t controlId,
+    wchar_t* text, int32_t capacity) noexcept {
+    if (capacity <= 0) return 0;
+    if (!text) {
+        constexpr uint32_t errorInvalidParameter = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidParameter) : "memory");
+        return 0;
+    }
+    text[0] = L'\0';
+    void* control = User32_GetDlgItem(dialog, controlId);
+    if (!control) return 0;
+    const intptr_t copied = User32_SendMessageW(control, 0x000Du /* WM_GETTEXT */,
+        static_cast<uintptr_t>(capacity), reinterpret_cast<intptr_t>(text));
+    return copied > 0 ? static_cast<uint32_t>(copied) : 0;
+}
+
+int32_t User32_SetDlgItemTextW(void* dialog, int32_t controlId,
+    const wchar_t* text) noexcept {
+    if (!dialog || !text) {
+        constexpr uint32_t errorInvalidParameter = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidParameter) : "memory");
+        return 0;
+    }
+    void* control = User32_GetDlgItem(dialog, controlId);
+    if (!control) {
+        constexpr uint32_t errorInvalidWindowHandle = 1400;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidWindowHandle) : "memory");
+        return 0;
+    }
+    return User32_SendMessageW(control, 0x000Cu /* WM_SETTEXT */, 0,
+        reinterpret_cast<intptr_t>(text)) != 0;
+}
+
+uint32_t User32_IsDlgButtonChecked(void* dialog, int32_t controlId) noexcept {
+    void* control = User32_GetDlgItem(dialog, controlId);
+    if (!control) return 0;
+    const intptr_t state = User32_SendMessageW(control, 0x00F0u /* BM_GETCHECK */, 0, 0);
+    return state >= 0 && state <= 2 ? static_cast<uint32_t>(state) : 0;
+}
+intptr_t User32_SendDlgItemMessageW(void* dialog, int32_t controlId,
+    uint32_t message, uintptr_t wParam, intptr_t lParam) noexcept {
+    void* control = User32_GetDlgItem(dialog, controlId);
+    return control ? User32_SendMessageW(control, message, wParam, lParam) : 0;
+}
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+int32_t User32_CheckRadioButton(void* dialog, uint32_t firstId,
+    uint32_t lastId, uint32_t checkId) noexcept {
+    if (!dialog || firstId > lastId ||
+        static_cast<uint64_t>(lastId) - firstId >= 1024u) {
+        setThreadLastError(87);
+        return 0;
+    }
+    for (uint32_t id = firstId;; ++id) {
+        if (void* control = User32_GetDlgItem(dialog, static_cast<int32_t>(id))) {
+            (void)User32_SendMessageW(control, 0x00F1u /* BM_SETCHECK */,
+                id == checkId ? 1u : 0u, 0);
+        }
+        if (id == lastId) break;
+    }
+    return 1;
+}
+int32_t User32_CheckDlgButton(void* dialog, int32_t controlId,
+    uint32_t check) noexcept {
+    if (!dialog || check > 2) {
+        setThreadLastError(87);
+        return 0;
+    }
+    void* control = User32_GetDlgItem(dialog, controlId);
+    if (!control) return 0;
+    return User32_SendMessageW(control, 0x00F1u /* BM_SETCHECK */, check, 0) == 0;
+}
+#endif
+
+int32_t User32_GetClassNameW(void* window, wchar_t* output,
+                             int32_t capacity) noexcept {
+    if (output && capacity > 0) output[0] = L'\0';
+    if (!window || !output || capacity <= 0) return 0;
+    using Fn = int32_t (*)(void*, wchar_t*, int32_t);
+    const auto fn = Win32kProc<Fn>("MicaWin32kGetClassNameW");
+    return fn ? fn(window, output, capacity) : 0;
+}
+
+int32_t User32_EnumChildWindows(void* parent, void* callback,
+                                intptr_t parameter) noexcept {
+    if (!callback) return 0;
+    if (!parent) return User32_EnumWindows(callback, parameter);
+    using Fn = int32_t (*)(void*, void*, intptr_t);
+    const auto fn = Win32kProc<Fn>("MicaWin32kEnumChildWindows");
+    return fn ? fn(parent, callback, parameter) : 0;
+}
+
+int32_t User32_EnableWindow(void* window, int32_t enable) noexcept {
+    if (!window) {
+        constexpr uint32_t errorInvalidWindowHandle = 1400;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidWindowHandle) : "memory");
+        return 0;
+    }
+    using Fn = int32_t (*)(void*, int32_t, int32_t*, int32_t*);
+    const auto fn = Win32kProc<Fn>("MicaWin32kEnableWindow");
+    int32_t wasDisabled{}, changed{};
+    if (!fn || !fn(window, enable, &wasDisabled, &changed)) {
+        constexpr uint32_t errorInvalidWindowHandle = 1400;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidWindowHandle) : "memory");
+        return 0;
+    }
+    if (changed) (void)User32_SendMessageW(window, 0x000Au /* WM_ENABLE */,
+                                            enable != 0, 0);
+    return wasDisabled;
+}
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+int32_t User32_IsWindowEnabled(void* window) noexcept {
+    if (!window) {
+        setThreadLastError(1400);
+        return 0;
+    }
+    constexpr int32_t kGwlStyle = -16;
+    constexpr uintptr_t kWsDisabled = 0x08000000u;
+    return (static_cast<uintptr_t>(User32_GetWindowLongPtrW(window, kGwlStyle)) &
+        kWsDisabled) == 0;
+}
+int32_t User32_IsWindow(void* window) noexcept {
+    WinNtRect bounds{};
+    return window && User32_GetWindowRect(window, &bounds);
+}
+void* User32_GetParent(void* window) noexcept {
+    if (!window) return nullptr;
+    using Fn = void* (*)(void*);
+    const auto fn = Win32kProc<Fn>("MicaWin32kGetParent");
+    return fn ? fn(window) : nullptr;
+}
+#endif
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+int32_t User32_DrawStateW(void* dc, void*, void* callback, intptr_t data,
+    uintptr_t count, int32_t x, int32_t y, int32_t width, int32_t height,
+    uint32_t flags) noexcept {
+    constexpr uint32_t kDstText = 0x0001u;
+    constexpr uint32_t kDssDisabled = 0x0020u;
+    constexpr uint32_t kDssMask = 0x00FFu;
+    if (!dc || callback || (flags & 0x000Fu) != kDstText ||
+        (flags & ~(0x000Fu | kDssMask)) != 0 || count > 4096u) {
+        setThreadLastError(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    const auto* text = reinterpret_cast<const wchar_t*>(data);
+    if (!text) { setThreadLastError(87); return 0; }
+    size_t length = static_cast<size_t>(count);
+    if (!length) {
+        while (length < 4096u && text[length]) ++length;
+        if (length == 4096u) { setThreadLastError(87); return 0; }
+    }
+    if (width <= 0 || height <= 0) return 1;
+    if (flags & kDssDisabled) {
+        const uint32_t prior = SetTextColor(dc, 0x00FFFFFFu);
+        const bool highlight = TextOutW(dc, x + 1, y + 1, text,
+            static_cast<int32_t>(length)) != 0;
+        if (prior != UINT32_MAX) (void)SetTextColor(dc, prior);
+        if (!highlight) return 0;
+        const uint32_t priorDisabled = SetTextColor(dc, 0x00808080u);
+        const bool drawn = TextOutW(dc, x, y, text,
+            static_cast<int32_t>(length)) != 0;
+        if (priorDisabled != UINT32_MAX) (void)SetTextColor(dc, priorDisabled);
+        return drawn ? 1 : 0;
+    }
+    return TextOutW(dc, x, y, text, static_cast<int32_t>(length));
+}
+
+int32_t User32_DrawFrameControl(void* dc, WinNtRect* rect, uint32_t type,
+    uint32_t state) noexcept {
+    constexpr uint32_t kDfcButton = 4u, kDfcsButtonPush = 0x0010u;
+    constexpr uint32_t kPushed = 0x0200u, kInactive = 0x0100u;
+    constexpr uint32_t kFlat = 0x4000u, kMono = 0x8000u;
+    constexpr uint32_t kAdjustRect = 0x2000u;
+    if (!dc || !rect || type != kDfcButton ||
+        (state & 0x00F0u) != kDfcsButtonPush ||
+        (state & ~(kDfcsButtonPush | kPushed | kInactive | kFlat | kMono | kAdjustRect))) {
+        setThreadLastError(87);
+        return 0;
+    }
+    if (rect->right <= rect->left || rect->bottom <= rect->top) {
+        setThreadLastError(87);
+        return 0;
+    }
+    constexpr uint32_t kFace = 0x00F0F0F0u;
+    const bool sunken = (state & kPushed) != 0;
+    const uint32_t topLeft = (state & kInactive) ? 0x00FFFFFFu
+        : sunken ? 0x00808080u : 0x00FFFFFFu;
+    const uint32_t bottomRight = (state & kInactive) ? 0x00C8C8C8u
+        : sunken ? 0x00FFFFFFu : 0x00808080u;
+    auto fill = [dc](const WinNtRect& area, uint32_t color) noexcept {
+        void* brush = CreateSolidBrush(color);
+        if (!brush) return false;
+        const bool ok = FillRect(dc, &area, brush) != 0;
+        (void)DeleteObject(brush);
+        return ok;
+    };
+    WinNtRect inner = *rect;
+    if (!fill(inner, kFace)) return 0;
+    if (state & kFlat) {
+        if (!fill({rect->left, rect->top, rect->right, rect->top + 1}, bottomRight) ||
+            !fill({rect->left, rect->bottom - 1, rect->right, rect->bottom}, bottomRight) ||
+            !fill({rect->left, rect->top, rect->left + 1, rect->bottom}, bottomRight) ||
+            !fill({rect->right - 1, rect->top, rect->right, rect->bottom}, bottomRight)) return 0;
+    } else {
+        if (!fill({rect->left, rect->top, rect->right, rect->top + 1}, topLeft) ||
+            !fill({rect->left, rect->top, rect->left + 1, rect->bottom}, topLeft) ||
+            !fill({rect->left, rect->bottom - 1, rect->right, rect->bottom}, bottomRight) ||
+            !fill({rect->right - 1, rect->top, rect->right, rect->bottom}, bottomRight)) return 0;
+    }
+    if (state & kAdjustRect) {
+        ++rect->left; ++rect->top; --rect->right; --rect->bottom;
+    }
+    return 1;
+}
+#endif
+
+struct WinNtTrackMouseEvent {
+    uint32_t size{};
+    uint32_t flags{};
+    void* window{};
+    uint32_t hoverTime{};
+};
+static_assert(sizeof(WinNtTrackMouseEvent) == 24);
+
+int32_t User32_TrackMouseEvent(WinNtTrackMouseEvent* event) noexcept {
+    constexpr uint32_t tmeHover = 0x00000001u;
+    constexpr uint32_t tmeLeave = 0x00000002u;
+    constexpr uint32_t tmeNonClient = 0x00000010u;
+    constexpr uint32_t tmeCancel = 0x80000000u;
+    constexpr uint32_t tmeQuery = 0x40000000u;
+    constexpr uint32_t supported = tmeHover | tmeLeave | tmeNonClient |
+                                   tmeCancel | tmeQuery;
+    if (!event || event->size != sizeof(*event) || !event->window ||
+        (event->flags & ~supported)) {
+        constexpr uint32_t errorInvalidParameter = 87;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidParameter) : "memory");
+        return 0;
+    }
+    using Fn = int32_t (*)(void*, uint32_t, uint32_t, uint32_t*, uint32_t*);
+    const auto fn = Win32kProc<Fn>("MicaWin32kTrackMouseEvent");
+    if (!fn) {
+        constexpr uint32_t errorNotSupported = 50;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorNotSupported) : "memory");
+        return 0;
+    }
+    uint32_t currentFlags{}, currentHoverTime{};
+    if (!fn(event->window, event->flags, event->hoverTime,
+            &currentFlags, &currentHoverTime)) {
+        constexpr uint32_t errorInvalidWindowHandle = 1400;
+        __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(errorInvalidWindowHandle) : "memory");
+        return 0;
+    }
+    if (event->flags & tmeQuery) {
+        event->flags = currentFlags;
+        event->hoverTime = currentHoverTime;
+    }
+    return 1;
+}
+
 int32_t User32_GetWindowTextW(void* hWnd, wchar_t* lpString, int32_t nMaxCount) noexcept {
     if (lpString && nMaxCount > 0) lpString[0]=L'\0';
     if (!hWnd || !lpString || nMaxCount <= 0) return 0;
@@ -4102,6 +4716,29 @@ int32_t User32_SetWindowPos(void* hWnd, void* hWndInsertAfter, int32_t X, int32_
     auto fn=Win32kProc<Fn>("MicaWin32kSetWindowPos"); return fn ? fn(hWnd,hWndInsertAfter,X,Y,cx,cy,uFlags) : 0;
 }
 
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+int32_t User32_MoveWindow(void* window, int32_t x, int32_t y, int32_t width,
+    int32_t height, int32_t repaint) noexcept {
+    if (!window || width < 0 || height < 0) {
+        setThreadLastError(window ? 87u : 1400u);
+        return 0;
+    }
+    constexpr uint32_t kSwpNoZOrder = 0x0004u;
+    constexpr uint32_t kSwpNoActivate = 0x0010u;
+    constexpr uint32_t kSwpNoRedraw = 0x0008u;
+    if (!User32_SetWindowPos(window, nullptr, x, y, width, height,
+            kSwpNoZOrder | kSwpNoActivate | (repaint ? 0u : kSwpNoRedraw))) {
+        setThreadLastError(1400);
+        return 0;
+    }
+    if (repaint) {
+        (void)User32_InvalidateRect(window, nullptr, 1);
+        (void)User32_UpdateWindow(window);
+    }
+    return 1;
+}
+#endif
+
 int32_t User32_RegisterRawInputDevices(const WinNtRawInputDevice* pRawInputDevices, uint32_t uiNumDevices, uint32_t cbSize) noexcept {
     if (!pRawInputDevices || uiNumDevices == 0 || cbSize < sizeof(WinNtRawInputDevice)) return 0;
     return 1;
@@ -4183,6 +4820,18 @@ int32_t User32_EnumDisplaySettingsExW(const wchar_t* /*lpszDeviceName*/, uint32_
 int32_t User32_SetProcessDpiAwarenessContext(void* /*value*/) noexcept {
     return 1;
 }
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+int32_t User32_MessageBeep(uint32_t type) noexcept {
+    if (type == 0xffffffffu) return 1; // MB_OK: explicitly request silence.
+    uint32_t frequency = 800;
+    if (type & 0x10u) frequency = 440;       // MB_ICONHAND / MB_ICONERROR
+    else if (type & 0x20u) frequency = 660;  // MB_ICONQUESTION
+    else if (type & 0x30u) frequency = 880;  // MB_ICONEXCLAMATION / MB_ICONWARNING
+    if (Beep(frequency, 120)) return 1;
+    return 0;
+}
+#endif
 
 // user32.dll implementations
 void* User32_GetDC(void* hWnd) noexcept {
@@ -5076,6 +5725,11 @@ __declspec(dllexport) int32_t ReleaseDC(void* hWnd, void* hDC) {
 __declspec(dllexport) intptr_t DefWindowProcW(void* hWnd, uint32_t Msg, uintptr_t wParam, intptr_t lParam) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_DefWindowProcW(hWnd, Msg, wParam, lParam);
 }
+__declspec(dllexport) intptr_t __stdcall CallWindowProcW(void* procedure,
+    void* window, uint32_t message, uintptr_t wParam, intptr_t lParam) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CallWindowProcW(
+        procedure, window, message, wParam, lParam);
+}
 __declspec(dllexport) int32_t PeekMessageW(micant::um::winnt_user32_gdi32_imm32_abi::WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax, uint32_t wRemoveMsg) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
 }
@@ -5084,6 +5738,93 @@ __declspec(dllexport) int32_t GetMessageW(micant::um::winnt_user32_gdi32_imm32_a
 }
 __declspec(dllexport) int32_t GetKeyboardState(uint8_t* state) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetKeyboardState(state);
+}
+__declspec(dllexport) void* __stdcall GetDlgItem(void* dialog, int32_t controlId) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetDlgItem(dialog, controlId);
+}
+__declspec(dllexport) uint32_t __stdcall GetDlgItemTextW(
+    void* dialog, int32_t controlId, wchar_t* text, int32_t capacity) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetDlgItemTextW(
+        dialog, controlId, text, capacity);
+}
+__declspec(dllexport) int32_t __stdcall SetDlgItemTextW(
+    void* dialog, int32_t controlId, const wchar_t* text) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetDlgItemTextW(
+        dialog, controlId, text);
+}
+__declspec(dllexport) uint32_t __stdcall IsDlgButtonChecked(
+    void* dialog, int32_t controlId) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_IsDlgButtonChecked(
+        dialog, controlId);
+}
+__declspec(dllexport) int32_t __stdcall CheckRadioButton(
+    void* dialog, uint32_t firstId, uint32_t lastId, uint32_t checkId) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CheckRadioButton(
+        dialog, firstId, lastId, checkId);
+}
+__declspec(dllexport) int32_t __stdcall CheckDlgButton(
+    void* dialog, int32_t controlId, uint32_t check) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CheckDlgButton(
+        dialog, controlId, check);
+}
+__declspec(dllexport) intptr_t __stdcall SendDlgItemMessageW(void* dialog,
+    int32_t controlId, uint32_t message, uintptr_t wParam, intptr_t lParam) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SendDlgItemMessageW(
+        dialog, controlId, message, wParam, lParam);
+}
+__declspec(dllexport) int32_t __stdcall GetClassNameW(
+    void* window, wchar_t* output, int32_t capacity) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetClassNameW(
+        window, output, capacity);
+}
+__declspec(dllexport) int32_t __stdcall EnumChildWindows(
+    void* parent, void* callback, intptr_t parameter) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumChildWindows(
+        parent, callback, parameter);
+}
+__declspec(dllexport) int32_t __stdcall EnableWindow(void* window, int32_t enable) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_EnableWindow(window, enable);
+}
+__declspec(dllexport) int32_t __stdcall IsWindowEnabled(void* window) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_IsWindowEnabled(window);
+}
+__declspec(dllexport) int32_t __stdcall IsWindow(void* window) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_IsWindow(window);
+}
+__declspec(dllexport) void* __stdcall GetParent(void* window) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetParent(window);
+}
+__declspec(dllexport) int32_t __stdcall DrawStateW(void* dc, void* brush,
+    void* callback, intptr_t data, uintptr_t count, int32_t x, int32_t y,
+    int32_t width, int32_t height, uint32_t flags) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_DrawStateW(
+        dc, brush, callback, data, count, x, y, width, height, flags);
+}
+__declspec(dllexport) int32_t __stdcall DrawFrameControl(
+    void* dc, micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* rect,
+    uint32_t type, uint32_t state) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_DrawFrameControl(
+        dc, rect, type, state);
+}
+__declspec(dllexport) int32_t __stdcall TrackMouseEvent(
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtTrackMouseEvent* event) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_TrackMouseEvent(event);
+}
+__declspec(dllexport) void* __stdcall GetKeyboardLayout(uint32_t threadId) {
+    return reinterpret_cast<void*>(
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_GetKeyboardLayout(threadId));
+}
+__declspec(dllexport) uint32_t __stdcall MapVirtualKeyExW(
+    uint32_t code, uint32_t mapType, void* layout) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_MapVirtualKeyExW(
+        code, mapType, reinterpret_cast<uintptr_t>(layout));
+}
+__declspec(dllexport) int32_t __stdcall ToAsciiEx(uint32_t virtualKey,
+    uint32_t scanCode, const uint8_t* keyState, uint16_t* characters,
+    uint32_t flags, void* layout) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_ToAsciiEx(
+        virtualKey, scanCode, keyState, characters, flags,
+        reinterpret_cast<uintptr_t>(layout));
 }
 __declspec(dllexport) int32_t TranslateMessage(const micant::um::winnt_user32_gdi32_imm32_abi::WinNtMsg* lpMsg) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_TranslateMessage(lpMsg);
@@ -5185,6 +5926,11 @@ __declspec(dllexport) intptr_t GetWindowLongPtrW(void* hWnd, int32_t nIndex) {
 __declspec(dllexport) int32_t SetWindowPos(void* hWnd, void* hWndInsertAfter, int32_t X, int32_t Y, int32_t cx, int32_t cy, uint32_t uFlags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
 }
+__declspec(dllexport) int32_t MoveWindow(void* window, int32_t x, int32_t y,
+    int32_t width, int32_t height, int32_t repaint) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_MoveWindow(
+        window, x, y, width, height, repaint);
+}
 __declspec(dllexport) int32_t RegisterRawInputDevices(const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRawInputDevice* pRawInputDevices, uint32_t uiNumDevices, uint32_t cbSize) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_RegisterRawInputDevices(pRawInputDevices, uiNumDevices, cbSize);
 }
@@ -5223,6 +5969,9 @@ __declspec(dllexport) int32_t EnumDisplaySettingsExW(const wchar_t* lpszDeviceNa
 }
 __declspec(dllexport) int32_t SetProcessDpiAwarenessContext(void* value) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetProcessDpiAwarenessContext(value);
+}
+__declspec(dllexport) int32_t MessageBeep(uint32_t type) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_MessageBeep(type);
 }
 } // extern "C"
 #elif defined(BUILD_SYSTEM32_GDI32_DLL)

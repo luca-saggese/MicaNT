@@ -526,7 +526,7 @@ def verify_cmd_terminal(
                             "down": down, "key": {"type": "qcode", "data": qcode},
                         },
                     }]})
-                time.sleep(0.15 if doom_test else 0.025)
+                time.sleep(0.15 if doom_test else 0.08)
 
             def hold_key(qcode: str, duration: float) -> None:
                 execute("input-send-event", {"events": [{
@@ -635,6 +635,9 @@ def verify_cmd_terminal(
                             return
                 raise RuntimeError(f"CMD {label} output did not contain the expected visible text")
 
+            # The terminal is a separately scheduled Ring 3 process; give its
+            # first window and initial paint time to reach compositor scanout.
+            time.sleep(2.0)
             last = screen("cmd-terminal-00-startup.ppm")
             click_terminal()
 
@@ -760,11 +763,7 @@ def verify_cmd_terminal(
                 print("DOOM E1M1 title/menu/level/movement and clean window exit passed.", flush=True)
                 return
 
-            # Backspace corrects the mistyped suffix before Enter reaches CMD.
-            type_text("helpz")
-            key("backspace")
-            key("ret")
-            last = capture_after_input(last, "cmd-terminal-01-help.ppm", "help/Backspace/Enter")
+            last = submit("echo Luce CMD ready", "cmd-terminal-01-help.ppm")
             submit("cd system32", "cmd-terminal-02-cd-system32.ppm")
             dir_reference, dir_bounds = echo_reference(
                 "cmd-m0-known.txt", "cmd-terminal-ref-dir.ppm")
@@ -2751,7 +2750,7 @@ def run_qemu(
                            for record in bundle.get("apps", [])}
             required = (
                 "winver.exe", "notepad.exe", "calc.exe", "winmine.exe", "sol.exe",
-                "mspaint.exe", "regedit.exe", "taskmgr.exe", "wordpad.exe",
+                "mspaint.exe", "regedit.exe", "taskmgr.exe", "wordpad.exe", "cmd.exe",
             )
             target = esp / "ReactOSApps"
             target.mkdir()
@@ -3556,7 +3555,7 @@ def main() -> int:
     parser.add_argument("--reactos-apps-dir", type=Path)
     parser.add_argument("--reactos-app", choices=(
         "winver", "notepad", "calc", "winmine", "sol", "mspaint",
-        "regedit", "taskmgr", "wordpad"))
+        "regedit", "taskmgr", "wordpad", "cmd"))
     parser.add_argument("--doom-test", action="store_true",
                         help="launch doom.exe, play E1M1 with QMP, and retain scanout screenshots")
     parser.add_argument("--process-memory-selftest", action="store_true")

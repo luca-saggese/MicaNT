@@ -12,7 +12,7 @@
 #define MICANT_WIN32K_IMPORTS
 #include "micant/shared/win32k_client.h"
 #include "micant/shared/theme_snapshot.h"
-#include "cmd_engine.hpp"
+#include "cmd/luce_cmd_bridge.h"
 
 extern "C" {
 __declspec(dllimport) uint16_t RegisterClassExW(const MicaWin32kWindowClassEx*);
@@ -30,6 +30,7 @@ __declspec(dllimport) int32_t TranslateMessage(const MicaWin32kMessage*);
 __declspec(dllimport) intptr_t DispatchMessageW(const MicaWin32kMessage*);
 __declspec(dllimport) void PostQuitMessage(int32_t);
 __declspec(dllimport) int32_t GetClientRect(void*, MicaWin32kRect*);
+__declspec(dllimport) int32_t SetWindowTextW(void*, const wchar_t*);
 
 __declspec(dllimport) void* CreateSolidBrush(uint32_t);
 __declspec(dllimport) int32_t FillRect(void*, const MicaWin32kRect*, void*);
@@ -101,8 +102,13 @@ uint32_t s_lineLength{};
 uint32_t s_promptLength{};
 void* s_window{};
 void* s_font{};
-micant::cmd::CommandEngine* s_engine{};
-micant::NtStatus s_startupStatus{micant::NtStatus::Success};
+bool s_cmdInitialized{};
+bool s_modalInput{};
+bool s_modalInputReady{};
+uint32_t s_modalInputCapacity{};
+uint32_t s_modalInputLength{};
+bool s_modalKeyOnly{};
+wchar_t s_modalBuffer[MaxInput]{};
 uint32_t s_backgroundColorRef{0x00F3F3F3u};
 uint32_t s_foregroundColorRef{0x001E1E1Eu};
 
@@ -205,6 +211,9 @@ void AppendOutput(std::wstring_view text, uint8_t attribute = DefaultTextAttribu
             continue;
         } else if (character == L'\n') {
             StartLine();
+        } else if (character == L'\f') {
+            ClearScreen();
+            StartLine();
         } else if (character == L'\t') {
             const uint32_t spaces = 4u - (s_lineLength & 3u);
             for (uint32_t i = 0; i < spaces; ++i) {
@@ -221,41 +230,24 @@ void AppendOutput(std::wstring_view text, uint8_t attribute = DefaultTextAttribu
     if (s_window) (void)InvalidateRect(s_window, nullptr, 1);
 }
 
-struct TerminalWriter {
-    void operator()(std::wstring_view text) const noexcept { AppendOutput(text); }
-    void clear() const noexcept { ClearScreen(); }
-};
+int32_t __stdcall TerminalWriteCallback(void*, const wchar_t* text,
+                                        uint32_t length) noexcept;
+
+int32_t __stdcall TerminalWriteCallback(void* stream, const wchar_t* text,
+                                        uint32_t length) noexcept {
+    if (!text && length) return 0;
+    const uint8_t attribute = static_cast<uint8_t>(LuceCmdGetStreamAttribute(stream));
+    AppendOutput(std::wstring_view(text ? text : L"", length), attribute);
+    return static_cast<int32_t>(length);
+}
 
 void AppendPrompt() noexcept {
-    static constexpr wchar_t prefix[] = L"LuceOS ";
-    AppendOutput(std::wstring_view(prefix, sizeof(prefix) / sizeof(prefix[0]) - 1));
-    std::wstring_view directory = s_engine ? s_engine->currentDirectory() : std::wstring_view{};
-    constexpr size_t MaxDirectoryInPrompt = 200;
-    if (directory.size() > MaxDirectoryInPrompt) {
-        AppendOutput(L"...");
-        directory.remove_prefix(directory.size() - MaxDirectoryInPrompt);
-    }
-    AppendOutput(directory);
-    AppendOutput(L"> ");
+    LuceCmdPrintPrompt();
     s_promptLength = s_lineLength;
 }
 
-void AppendStatus(micant::NtStatus status) noexcept {
-    wchar_t digits[8]{};
-    constexpr wchar_t hex[] = L"0123456789ABCDEF";
-    uint32_t value = static_cast<uint32_t>(status);
-    for (size_t i = 0; i < 8; ++i) {
-        digits[7 - i] = hex[value & 0xFu];
-        value >>= 4;
-    }
-    AppendOutput(L"NTSTATUS 0x", ErrorTextAttribute);
-    AppendOutput(std::wstring_view(digits, 8), ErrorTextAttribute);
-    AppendOutput(L"\r\n", ErrorTextAttribute);
-}
-
 void ShowInitializationFailure() noexcept {
-    AppendOutput(L"Command engine initialization failed: ", ErrorTextAttribute);
-    AppendStatus(s_startupStatus);
+    AppendOutput(L"Luce CMD initialization failed.\r\n", ErrorTextAttribute);
 }
 
 void RememberCommand() noexcept {
@@ -264,22 +256,6 @@ void RememberCommand() noexcept {
     for (uint32_t i = 0; i <= s_inputLength; ++i) entry[i] = s_input[i];
     s_historyNext = (s_historyNext + 1) % HistoryCount;
     if (s_historyCount < HistoryCount) ++s_historyCount;
-}
-
-void MarkCommandErrorCells() noexcept {
-    static constexpr wchar_t marker[] = L"Command failed (NTSTATUS 0x";
-    constexpr uint32_t markerLength = sizeof(marker) / sizeof(marker[0]) - 1;
-    for (uint32_t row = 0; row < s_rowCount; ++row) {
-        for (uint32_t column = 0; column + markerLength <= MaxColumns; ++column) {
-            uint32_t matched = 0;
-            while (matched < markerLength &&
-                   s_rows[row][column + matched] == marker[matched]) ++matched;
-            if (matched != markerLength) continue;
-            for (uint32_t cell = column; cell < MaxColumns; ++cell)
-                s_cellAttributes[row][cell] = ErrorTextAttribute;
-            return;
-        }
-    }
 }
 
 bool IsHighSurrogate(wchar_t value) noexcept;
@@ -330,17 +306,26 @@ bool SubmitInput() noexcept {
     }
     wchar_t commandBuffer[MaxInput]{};
     for (uint32_t i = 0; i < s_inputLength; ++i) commandBuffer[i] = s_input[i];
-    const std::wstring_view command(commandBuffer, s_inputLength);
     s_inputLength = 0;
     s_caret = 0;
     s_input[0] = 0;
     s_historyCursor = -1;
     s_promptLength = 0;
     StartLine();
-    if (s_engine && s_startupStatus == micant::NtStatus::Success) {
-        const auto result = s_engine->execute(command, TerminalWriter{});
-        if (result.status != micant::NtStatus::Success) MarkCommandErrorCells();
-        if (result.exitRequested) {
+    if (s_cmdInitialized) {
+        (void)LuceCmdExecuteLine(commandBuffer);
+        size_t token{};
+        while (commandBuffer[token] == L' ' || commandBuffer[token] == L'\t') ++token;
+        constexpr wchar_t exitCommand[] = L"exit";
+        bool explicitExit = true;
+        for (size_t index = 0; index < 4; ++index) {
+            wchar_t value = commandBuffer[token + index];
+            if (value >= L'A' && value <= L'Z') value += L'a' - L'A';
+            if (value != exitCommand[index]) { explicitExit = false; break; }
+        }
+        const wchar_t afterExit = commandBuffer[token + 4];
+        explicitExit &= afterExit == 0 || afterExit == L' ' || afterExit == L'\t';
+        if (explicitExit) {
             if (s_window) (void)DestroyWindow(s_window);
             return false;
         }
@@ -486,8 +471,6 @@ intptr_t TerminalWindowProc(void* hwnd, uint32_t message,
                             uintptr_t wParam, intptr_t lParam) noexcept {
     switch (message) {
     case WM_CREATE:
-        if (s_startupStatus != micant::NtStatus::Success) ShowInitializationFailure();
-        AppendPrompt();
         Invalidate();
         return 0;
     case WM_SIZE: {
@@ -504,6 +487,60 @@ intptr_t TerminalWindowProc(void* hwnd, uint32_t message,
         return 0;
     case WM_CHAR: {
         const wchar_t character = static_cast<wchar_t>(wParam);
+        if (s_modalInput) {
+            if (character == L'\r' || character == L'\n') {
+                if (!s_modalKeyOnly && s_rowCount) {
+                    wchar_t* submitted = s_rows[s_rowCount - 1];
+                    const uint32_t count = s_inputLength < MaxColumns - s_promptLength
+                        ? s_inputLength : MaxColumns - s_promptLength;
+                    for (uint32_t i = 0; i < count; ++i) {
+                        submitted[s_promptLength + i] = s_input[i];
+                        s_cellAttributes[s_rowCount - 1][s_promptLength + i] =
+                            DefaultTextAttribute;
+                    }
+                    s_lineLength = s_promptLength + count;
+                    StartLine();
+                }
+                if (s_modalKeyOnly && s_inputLength == 0) {
+                    s_input[0] = character;
+                    s_inputLength = 1;
+                }
+                s_modalInputLength = s_inputLength;
+                for (uint32_t i = 0; i < s_modalInputLength && i < MaxInput; ++i)
+                    s_modalBuffer[i] = s_input[i];
+                s_modalInputReady = true;
+                s_input[0] = 0;
+                s_inputLength = s_caret = 0;
+                s_promptLength = 0;
+                Invalidate();
+                return 0;
+            }
+            if (character == L'\b') {
+                if (s_caret) {
+                    for (uint32_t i = s_caret; i < s_inputLength; ++i)
+                        s_input[i - 1] = s_input[i];
+                    --s_caret;
+                    --s_inputLength;
+                    s_input[s_inputLength] = 0;
+                }
+            } else if (character >= L' ' && character != 0x7f &&
+                       s_inputLength + 1 < s_modalInputCapacity &&
+                       s_inputLength + 1 < MaxInput) {
+                s_input[s_inputLength++] = character;
+                s_input[s_inputLength] = 0;
+                s_caret = s_inputLength;
+                if (s_modalKeyOnly) {
+                    s_modalInputLength = s_inputLength;
+                    for (uint32_t i = 0; i < s_modalInputLength && i < MaxInput; ++i)
+                        s_modalBuffer[i] = s_input[i];
+                    s_modalInputReady = true;
+                    s_input[0] = 0;
+                    s_inputLength = s_caret = 0;
+                }
+            }
+            Invalidate();
+            return 0;
+        }
         if (character == L'\r' || character == L'\n') (void)SubmitInput();
         else if (character == L'\b') {
             if (s_caret) {
@@ -580,18 +617,55 @@ intptr_t TerminalWindowProc(void* hwnd, uint32_t message,
 }
 } // namespace
 
-extern "C" void _start(const char* = nullptr) {
-    wchar_t initialDirectory[micant::cmd::MaxPathCharacters]{};
-    size_t initialDirectoryLength = 0;
-    const auto rootStatus = micant::cmd::CommandEngine::systemRootDirectory(
-        initialDirectory, micant::cmd::MaxPathCharacters, initialDirectoryLength);
-    const std::wstring_view startupDirectory = rootStatus == micant::NtStatus::Success
-        ? std::wstring_view(initialDirectory, initialDirectoryLength) : std::wstring_view{};
-    micant::cmd::CommandEngine engine(startupDirectory);
-    s_engine = &engine;
-    s_startupStatus = rootStatus == micant::NtStatus::Success
-        ? engine.initializationStatus() : rootStatus;
+extern "C" int32_t __stdcall LuceCmdReadInput(wchar_t* buffer,
+                                               uint32_t capacity,
+                                               int32_t keyOnly) {
+    if (!buffer || !capacity || !s_window || s_modalInput)
+        return 0;
 
+    s_modalInput = true;
+    s_modalInputReady = false;
+    s_modalInputLength = 0;
+    s_modalInputCapacity = capacity;
+    s_modalKeyOnly = keyOnly != 0;
+    s_inputLength = 0;
+    s_caret = 0;
+    s_input[0] = 0;
+    s_promptLength = s_lineLength;
+    Invalidate();
+
+    while (!s_modalInputReady) {
+        MicaWin32kMessage message{};
+        const int32_t result = GetMessageW(&message, nullptr, 0, 0);
+        if (result <= 0) {
+            s_modalInput = false;
+            s_promptLength = 0;
+            buffer[0] = 0;
+            return 0;
+        }
+        (void)TranslateMessage(&message);
+        (void)DispatchMessageW(&message);
+    }
+
+    uint32_t copied = s_modalInputLength;
+    const uint32_t limit = keyOnly ? capacity : capacity - 1;
+    if (copied > limit) copied = limit;
+    for (uint32_t i = 0; i < copied; ++i) buffer[i] = s_modalBuffer[i];
+    if (!keyOnly) buffer[copied] = 0;
+    s_modalInput = false;
+    s_modalInputReady = false;
+    s_modalKeyOnly = false;
+    s_modalInputLength = 0;
+    s_promptLength = 0;
+    Invalidate();
+    return static_cast<int32_t>(copied);
+}
+
+extern "C" int32_t LuceCmdSetTerminalTitle(const wchar_t* title) {
+    return s_window && title ? SetWindowTextW(s_window, title) : 0;
+}
+
+extern "C" void _start(const char* = nullptr) {
     constexpr wchar_t ClassName[] = L"LuceOSCmdTerminalWindow";
     MicaWin32kWindowClassEx windowClass{};
     windowClass.cbSize = sizeof(windowClass);
@@ -612,6 +686,10 @@ extern "C" void _start(const char* = nullptr) {
     }
     (void)ShowWindow(s_window, 5);
     (void)UpdateWindow(s_window);
+    s_cmdInitialized = LuceCmdInitialize(TerminalWriteCallback) != 0;
+    if (!s_cmdInitialized) ShowInitializationFailure();
+    AppendPrompt();
+    Invalidate();
     for (;;) {
         MicaWin32kMessage message{};
         const int32_t result = GetMessageW(&message, nullptr, 0, 0);
@@ -619,6 +697,8 @@ extern "C" void _start(const char* = nullptr) {
         (void)TranslateMessage(&message);
         (void)DispatchMessageW(&message);
     }
+    LuceCmdShutdown();
+    s_cmdInitialized = false;
     if (s_font) {
         (void)DeleteObject(s_font);
         s_font = nullptr;

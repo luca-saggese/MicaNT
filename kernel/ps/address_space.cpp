@@ -2432,10 +2432,12 @@ static NtStatus createProcessEx(Handle* processHandle, uint32_t desiredAccess,
     uint32_t grantedAccess{};
     if (result == NtStatus::Success)
         result = ps::detail::createProcessObject(child, childReference, objectSecurity, desiredAccess, &grantedAccess);
-    if (result == NtStatus::Success)
+    if (result == NtStatus::Success) {
         result = ps::detail::inheritProcessSecurityContext(*child, *parent);
-    if (result == NtStatus::Success && imageSection && !imagePath.empty())
+    }
+    if (result == NtStatus::Success && imageSection && !imagePath.empty()) {
         result = child->setNativeProcessParameters(imagePath, commandLine, currentDirectory);
+    }
     if (result == NtStatus::Success && imageSection) {
         if (!hal::amd64::bootstrapSchedulerClockActive()) {
             // Before scheduling starts there is no attachable execution

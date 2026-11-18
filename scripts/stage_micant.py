@@ -618,7 +618,12 @@ def run_local_build():
         if imports_win32k:
             cmd.append("-DMICANT_WIN32K_IMPORTS")
             link_win32k = True
-        cmd.extend([src, "-o", dll_path])
+        sources = [src]
+        if dll_name == "user32.dll":
+            # The PE DLL must include the canonical menu subsystem alongside
+            # the User32 client ABI; CMake's in-tree target already does this.
+            sources.append("kernel/ps/winnt_user32_menu_abi.cpp")
+        cmd.extend([*sources, "-o", dll_path])
         if link_win32k:
             cmd.append(win32k_implib)
         r = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)

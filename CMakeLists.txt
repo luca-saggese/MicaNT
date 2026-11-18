@@ -19,7 +19,7 @@ option(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST "Launch a Ring 3 client and verify rea
 option(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST "Launch a Ring 3 client and verify HDA ADC DMA in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
 set(MICANT_BOOTSTRAP_REACTOS_APP "" CACHE STRING "Launch one verified original AMD64 ReactOS PE instead of Explorer")
-set_property(CACHE MICANT_BOOTSTRAP_REACTOS_APP PROPERTY STRINGS "" winver notepad calc winmine sol mspaint regedit taskmgr wordpad)
+set_property(CACHE MICANT_BOOTSTRAP_REACTOS_APP PROPERTY STRINGS "" winver notepad calc winmine sol mspaint regedit taskmgr wordpad cmd)
 option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
 option(MICANT_KERNEL_PERF_DIAGNOSTICS "Emit aggregated 5-second Ke scheduler/accounting diagnostics" OFF)
 option(MICANT_COMPOSITOR_DEBUG_HUD "Build the compositor debug HUD" OFF)
@@ -682,23 +682,49 @@ if (MICANT_ENABLE_BAREMETAL)
     # CMD is a separate Ring 3 PE. Its graphical frontend reaches Win32k and
     # GDI through the native client DLLs; its command engine uses NTDLL file
     # syscalls rather than kernel Executive headers.
-    add_executable(cmd_boot EXCLUDE_FROM_ALL tools/cmd_app.cpp)
-    target_include_directories(cmd_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    file(GLOB _micant_cmd_reactos_sources CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/tools/cmd/reactos/*.cpp"
+        "${CMAKE_SOURCE_DIR}/tools/cmd/conutils/*.cpp")
+    add_library(cmd_reactos_core STATIC EXCLUDE_FROM_ALL
+        ${_micant_cmd_reactos_sources})
+    target_include_directories(cmd_reactos_core PRIVATE
+        "${CMAKE_SOURCE_DIR}/include"
+        "${CMAKE_SOURCE_DIR}/tools/cmd"
+        "${CMAKE_SOURCE_DIR}/tools/cmd/reactos"
+        "${CMAKE_SOURCE_DIR}/tools/cmd/conutils")
+    target_compile_definitions(cmd_reactos_core PRIVATE
+        MICANT_NATIVE_USERMODE MICANT_CMD_GUI_TERMINAL
+        UNICODE _UNICODE
+        KERNEL_VERSION_STR="${PROJECT_VERSION}"
+        KERNEL_VERSION_BUILD_STR="Luce")
+    target_compile_options(cmd_reactos_core PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -ffunction-sections -fdata-sections -O2)
+
+    add_executable(cmd_boot EXCLUDE_FROM_ALL
+        tools/cmd_app.cpp tools/cmd/reactos/cmd.rc)
+    target_include_directories(cmd_boot PRIVATE
+        "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/tools"
+        "${CMAKE_SOURCE_DIR}/tools/cmd/reactos")
     target_compile_definitions(cmd_boot PRIVATE
         MICANT_NATIVE_USERMODE MICANT_UXTHEME_IMPORTS
+        LANGUAGE_IT_IT
         MICANT_PROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         MICANT_PROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         MICANT_PROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}
     )
     target_compile_options(cmd_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
-        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe -O2
+        -fno-stack-protector -mno-red-zone -mno-stack-arg-probe
+        -ffunction-sections -fdata-sections -O2
     )
     target_link_options(cmd_boot PRIVATE
-        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start -Wl,--gc-sections
     )
     target_link_libraries(cmd_boot PRIVATE
-        user32_boot gdi32_boot win32k_boot ntdll_boot kernel32_boot ucrtbase_boot)
+        cmd_reactos_core user32_boot gdi32_boot win32k_boot ntdll_boot
+        kernel32_boot advapi32_boot shell32_boot msvcrt_boot ucrtbase_boot)
     set_target_properties(cmd_boot PROPERTIES
         OUTPUT_NAME "cmd"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
@@ -822,7 +848,7 @@ if (MICANT_ENABLE_BAREMETAL)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CMD_TEST)
     endif()
     if (MICANT_BOOTSTRAP_REACTOS_APP)
-        set(_micant_reactos_app_names winver notepad calc winmine sol mspaint regedit taskmgr wordpad)
+        set(_micant_reactos_app_names winver notepad calc winmine sol mspaint regedit taskmgr wordpad cmd)
         if (NOT MICANT_BOOTSTRAP_REACTOS_APP IN_LIST _micant_reactos_app_names)
             message(FATAL_ERROR "Unsupported MICANT_BOOTSTRAP_REACTOS_APP: ${MICANT_BOOTSTRAP_REACTOS_APP}")
         endif()
@@ -916,7 +942,7 @@ if (MICANT_ENABLE_BAREMETAL)
 
     # User32 owns per-process icon pixels and file-backed icon loading through
     # the native file/memory system calls. Those operations remain in Ring 3.
-    target_link_libraries(user32_boot PRIVATE ntdll_boot gdi32_boot uxtheme_boot)
+    target_link_libraries(user32_boot PRIVATE ntdll_boot kernel32_boot gdi32_boot uxtheme_boot)
     target_sources(user32_boot PRIVATE kernel/ps/winnt_user32_menu_abi.cpp)
     target_compile_definitions(user32_boot PRIVATE MICANT_GDI32_IMPORTS MICANT_UXTHEME_IMPORTS)
     target_link_libraries(gdi32_boot PRIVATE ntdll_boot)
@@ -1157,7 +1183,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(kernel32_boot PRIVATE
         -nostdlib -Wl,--entry,DllMainCRTStartup
     )
-    target_link_libraries(kernel32_boot PRIVATE ntdll_boot)
+    target_link_libraries(kernel32_boot PRIVATE ntdll_boot ucrtbase_boot)
     target_link_libraries(explorer_boot PRIVATE ntdll_boot)
     set_target_properties(kernel32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "kernel32"
