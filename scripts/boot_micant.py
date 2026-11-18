@@ -2144,6 +2144,27 @@ def validate_hda_render_wav(path: Path) -> tuple[int, int]:
                 raise RuntimeError(
                     "HDA render WAV does not begin with the expected three-stream mix"
                 )
+            spectral_frames = min(frame_count, 4096)
+            spectral_data = capture.readframes(spectral_frames)
+            if len(spectral_data) != spectral_frames * 4:
+                raise RuntimeError("HDA render WAV ended before the mixed sample window")
+            left_samples = struct.unpack("<%dh" % (spectral_frames * 2),
+                                         spectral_data)[::2]
+            for frequency in (440, 660, 880):
+                coefficient = 2.0 * math.cos(2.0 * math.pi * frequency / HDA_RENDER_RATE)
+                previous = previous2 = current = 0.0
+                for sample in left_samples:
+                    current = sample + coefficient * previous - previous2
+                    previous2, previous = previous, current
+                amplitude = math.sqrt(max(
+                    previous * previous + previous2 * previous2 -
+                    coefficient * previous * previous2, 0.0
+                )) / spectral_frames
+                if amplitude < 500.0:
+                    raise RuntimeError(
+                        f"HDA render WAV is missing the mixed {frequency} Hz source "
+                        f"(measured amplitude {amplitude:.1f})"
+                    )
             capture.rewind()
 
             peak = 0
