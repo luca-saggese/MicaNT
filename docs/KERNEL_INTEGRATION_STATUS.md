@@ -6,6 +6,13 @@ This is the integration progress record required by
 specification. The compatibility inventory is
 [FREESTANDING_GAP_MATRIX.md](FREESTANDING_GAP_MATRIX.md).
 
+## 2026-11-18 — M18 HDA controller e codec (A0.1–A0.2)
+
+- `kernel/io/hdaudio_baremetal.cpp` is wired into canonical `ntoskrnl_core_baremetal` startup. QEMU discovers Intel HDA by live PCI class, claims and maps the measured BAR, resets the controller, and passes an injected post-reset rollback/reclaim path.
+- CORB/RIRB rings now use canonical DMA ownership. Polled responses acknowledge the RIRB interrupt threshold so subsequent verbs continue; checked GET_PARAMETER and connection-list transactions discover the QEMU codec `1AF4:0022`, one audio function group, two widgets, one pin, and one connection.
+- Verified with `python3 qemu.py --headless --doom-test --audio-controller-test --memory-mib 512 --diagnostics-dir /private/tmp/micant-audio-a02-topology-01`. QEMU reports the bounded topology inventory; Doom E1M1 title/menu/level/movement and clean window exit pass; serial remains stable for the requested five seconds. Evidence: `/private/tmp/micant-audio-a02-topology-01/serial.log`.
+- A0.3 is not implemented: no output route or PCM DMA playback exists, and no audio samples are claimed. Next work is real Ring 3 submitted PCM, codec route configuration, BDL/stream DMA completion, sample capture, and repeated start/stop cleanup.
+
 ## 2026-11-14 — dynamic memory bootstrap migration (in progress)
 
 - UEFI memory-map retrieval now retries with `AllocatePool` when the current

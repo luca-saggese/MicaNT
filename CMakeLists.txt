@@ -14,6 +14,7 @@ option(MICANT_BOOTSTRAP_TASKMGR_SELFTEST "Launch taskmgr.exe from the mounted Sy
 option(MICANT_BOOTSTRAP_THEME_TEST "Launch theme_test.exe for QEMU theme verification" OFF)
 option(MICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST "Launch procdump.exe process-memory integration self-test" OFF)
 option(MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST "Fault, persist, reboot and recover a LuceOS crash dump in QEMU" OFF)
+option(MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST "Exercise HDA PCI/MMIO rollback and reset in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
 option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
 option(MICANT_KERNEL_PERF_DIAGNOSTICS "Emit aggregated 5-second Ke scheduler/accounting diagnostics" OFF)
@@ -105,6 +106,7 @@ set(NTOSKRNL_SUBSYSTEM_SOURCES
     kernel/fsrtl/ring1_vfs.cpp
     kernel/io/ring1_dxgk.cpp
     kernel/io/ring1_audio.cpp
+    kernel/io/hdaudio_baremetal.cpp
     kernel/ps/ring1_smss.cpp
     kernel/io/ring2_wudf.cpp
     kernel/se/ring2_lsa.cpp
@@ -325,6 +327,7 @@ if (MICANT_ENABLE_BAREMETAL)
         kernel/io/file_object.cpp
         kernel/io/afd_wsk.cpp
         kernel/io/block_device.cpp
+        kernel/io/hdaudio_baremetal.cpp
         kernel/io/usb_host.cpp
         kernel/io/hid_input.cpp
         kernel/fsrtl/fat_boot.cpp
@@ -378,6 +381,9 @@ if (MICANT_ENABLE_BAREMETAL)
     endif()
     if (MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_TASKMGR_SELFTEST)
+    endif()
+    if (MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST)
+        target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST)
     endif()
     target_compile_options(ntoskrnl_core_baremetal PRIVATE -fno-builtin)
 

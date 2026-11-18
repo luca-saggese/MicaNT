@@ -2305,6 +2305,7 @@ def run_qemu(
     crash_dump_selftest: bool = False,
     resolution: tuple[int, int] | None = None,
     usb_ehci_test: bool = False,
+    audio_controller_test: bool = False,
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
@@ -2677,6 +2678,12 @@ def run_qemu(
             "-no-reboot",
             "-no-shutdown",
         ]
+        if audio_controller_test:
+            command.extend([
+                "-audiodev", "driver=none,id=micant_audio",
+                "-device", "ich9-intel-hda,id=micant_hda",
+                "-device", "hda-duplex,bus=micant_hda.0,audiodev=micant_audio",
+            ])
         network_peer = None
         network_inbound_port = None
         if network_test:
@@ -2908,6 +2915,23 @@ def run_qemu(
                             complete_since = None
                             time.sleep(0.1)
                             continue
+                        if audio_controller_test and (
+                                "[MicaNT HDA] PCI 04/03 controller claimed, BAR0 mapped, reset complete"
+                                not in serial_log):
+                            raise RuntimeError(
+                                "QEMU HDA controller did not complete canonical PCI claim, BAR mapping, and reset:\n"
+                                f"{serial_log[-8000:]}"
+                            )
+                        if audio_controller_test and (
+                                "[MicaNT HDA] Injected post-reset failure rolled back BAR mapping, Bus Master, and PCI claim"
+                                not in serial_log):
+                            raise RuntimeError("QEMU HDA rollback fault injection was not observed")
+                        if audio_controller_test and (
+                                "[MicaNT HDA] CORB/RIRB codec topology verified" not in serial_log):
+                            raise RuntimeError(
+                                "QEMU HDA did not complete bounded CORB/RIRB codec discovery:\n"
+                                f"{serial_log[-8000:]}"
+                            )
                         if theme_test and not theme_test_verified:
                             verify_theme_test(
                                 temp / "qmp.sock", temp, serial_path, diagnostics_dir,
@@ -3159,6 +3183,7 @@ def main() -> int:
                         help="launch doom.exe, play E1M1 with QMP, and retain scanout screenshots")
     parser.add_argument("--process-memory-selftest", action="store_true")
     parser.add_argument("--crash-dump-selftest", action="store_true")
+    parser.add_argument("--audio-controller-test", action="store_true")
     args = parser.parse_args()
 
     if args.ovmf_code is None:
@@ -3193,6 +3218,7 @@ def main() -> int:
             tuple(int(part) for part in args.resolution.split("x"))
                 if args.resolution else None,
             args.usb_ehci_test,
+            args.audio_controller_test,
         )
     except KeyboardInterrupt:
         return 130

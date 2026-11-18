@@ -24,6 +24,7 @@
 #include "micant/km/core/sync_baremetal.hpp"
 #include "micant/km/core/passive_work.hpp"
 #include "micant/km/drivers/usb/usb_host_baremetal.hpp"
+#include "micant/km/drivers/audio/hdaudio_baremetal.hpp"
 #include "micant/km/drivers/input/input_device_baremetal.hpp"
 #include "micant/km/drivers/input/kbdclass_contract.hpp"
 #include "micant/km/drivers/input/mouclass_contract.hpp"
@@ -2651,6 +2652,8 @@ void initializeBootStartDrivers(const micant::boot::UefiKernelHandoffV3* handoff
         serialWriteNumber(dmaFailureDetail);
         serialWrite("\r\n");
     }
+    if (micant::km::audio::hda::initializeController(serialWrite))
+        (void)micant::km::audio::hda::discoverCodecTopology(serialWrite);
     if (handoff->version == micant::boot::UEFI_KERNEL_HANDOFF_VERSION) {
         if (!initializeDisplay(handoff->displayDriver) &&
             !initializeGopFramebuffer(handoff->framebuffer))

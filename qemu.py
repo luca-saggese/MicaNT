@@ -153,6 +153,7 @@ def write_manifest(
     process_memory_selftest: bool = False,
     cmd_test: bool = False,
     doom_test: bool = False,
+    audio_controller_test: bool = False,
     crash_dump_selftest: bool = False,
 ) -> None:
     if not all(path.is_file() for path in (KERNEL, BOOTLOADER, DISPLAY_DRIVER)):
@@ -199,6 +200,7 @@ def write_manifest(
         "process_memory_selftest": process_memory_selftest,
         "cmd_test": cmd_test,
         "doom_test": doom_test,
+        "audio_controller_test": audio_controller_test,
         "crash_dump_selftest": crash_dump_selftest,
         "target": "ntoskrnl_core_baremetal",
         "architecture": "AMD64",
@@ -311,6 +313,10 @@ def main() -> int:
         help="run real doom.exe in the guest, play E1M1 with QMP, and retain screenshots",
     )
     parser.add_argument(
+        "--audio-controller-test", action="store_true",
+        help="attach QEMU Intel HDA and verify canonical PCI BAR mapping and controller reset",
+    )
+    parser.add_argument(
         "--interactive-after-cmd-test", action="store_true",
         help="keep the visible CMD-test QEMU session open for manual use after QMP verification",
     )
@@ -418,6 +424,7 @@ def main() -> int:
                 f"-DMICANT_BOOTSTRAP_PROCESS_MEMORY_SELFTEST:BOOL={'ON' if args.process_memory_selftest else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CMD_TEST:BOOL={'ON' if args.cmd_test else 'OFF'}",
                 f"-DMICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST:BOOL={'ON' if args.crash_dump_selftest else 'OFF'}",
+                f"-DMICANT_BOOTSTRAP_AUDIO_CONTROLLER_TEST:BOOL={'ON' if args.audio_controller_test else 'OFF'}",
             ]
         )
         if args.check_explorer:
@@ -478,6 +485,7 @@ def main() -> int:
             process_memory_selftest=args.process_memory_selftest,
             cmd_test=args.cmd_test,
             doom_test=args.doom_test,
+            audio_controller_test=args.audio_controller_test,
             crash_dump_selftest=args.crash_dump_selftest,
         )
         validate_build_manifest(
@@ -536,6 +544,8 @@ def main() -> int:
                 boot_command.append("--interactive")
         elif args.crash_dump_selftest:
             boot_command.append("--crash-dump-selftest")
+        elif args.audio_controller_test:
+            pass  # HDA A0.1 has a serial acceptance check; skip unrelated input automation.
         elif not args.headless:
             boot_command.append("--interactive")
         elif args.usb_test:
@@ -548,6 +558,8 @@ def main() -> int:
             boot_command.append("--usb-test")
         if args.network_test:
             boot_command.append("--network-test")
+        if args.audio_controller_test:
+            boot_command.append("--audio-controller-test")
         run(boot_command)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
         operation = "Explorer runtime check" if args.check_explorer else "QEMU launch"
