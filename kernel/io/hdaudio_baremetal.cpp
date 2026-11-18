@@ -51,6 +51,12 @@ constexpr uint8_t kRirbResponseInterruptEnable = 1u << 0;
 constexpr uint8_t kRirbResponseInterrupt = 1u << 0;
 constexpr size_t kDmaPageBytes = 4096;
 constexpr size_t kMaximumRenderBytes = micant::shared::audio::MaximumWriteBytes;
+// Keep one hardware-owned cyclic buffer running continuously. Restarting the
+// stream for each 35 Hz Doom tick adds DMA setup and silence gaps to the audio.
+constexpr size_t kRenderRingBytes = 64 * 1024;
+// Bound audible latency to about 85 ms (three Doom tics). Under CPU stalls or
+// clock drift, discard overdue audio instead of letting old sounds echo later.
+constexpr size_t kMaximumQueuedRenderBytes = 16 * 1024;
 constexpr uint32_t kStreamRun = 1u << 1;
 constexpr uint32_t kStreamReset = 1u << 0;
 constexpr uint32_t kStreamInterruptOnCompletion = 1u << 2;
@@ -99,14 +105,18 @@ int g_controllerOwner{};
 ob::ObjectType g_audioDeviceType{};
 ob::ObjectHeader* g_audioDeviceReference{};
 io::DeviceObject* g_audioDevice{};
-std::atomic_flag g_renderInProgress = ATOMIC_FLAG_INIT;
+std::atomic_flag g_audioPathInProgress = ATOMIC_FLAG_INIT;
 Log g_log{};
 uint64_t g_renderPcmToken{}, g_renderBdlToken{};
 uint64_t g_renderPcmAddress{}, g_renderBdlAddress{};
 void* g_renderPcm{};
 void* g_renderBdl{};
 bool g_renderFaulted{};
-std::atomic_flag g_captureInProgress = ATOMIC_FLAG_INIT;
+bool g_renderStreaming{};
+uint32_t g_renderLastPosition{};
+uint64_t g_renderReadPosition{};
+uint64_t g_renderWritePosition{};
+uint32_t g_renderResyncCount{};
 sync::detail::BootstrapEvent g_captureReady{true, false};
 ke::KDPC g_captureDpc{};
 std::atomic<uint32_t> g_captureInterruptStatus{};
@@ -672,114 +682,176 @@ NtStatus submitPcm(void*, uint64_t, const void* buffer, size_t length,
         !g_controller.outputDac || !g_controller.outputPin)
         return NtStatus::DeviceNotReady;
     if (g_renderFaulted) return NtStatus::DeviceNotReady;
-    if (g_renderInProgress.test_and_set(std::memory_order_acquire))
+    if (g_audioPathInProgress.test_and_set(std::memory_order_acquire))
         return NtStatus::DeviceBusy;
-    struct RenderRelease { ~RenderRelease() { g_renderInProgress.clear(std::memory_order_release); } } renderRelease;
+    struct AudioPathRelease {
+        ~AudioPathRelease() { g_audioPathInProgress.clear(std::memory_order_release); }
+    } audioPathRelease;
     const Log log = g_log;
-    if (!startCodecRings(log) || !configureOutputRoute(log)) {
+
+    if (g_captureIsrActive.load(std::memory_order_acquire)) return NtStatus::DeviceBusy;
+    if (!startCodecRings(log)) {
+        g_renderFaulted = true;
+        return NtStatus::DeviceNotReady;
+    }
+    if (!configureOutputRoute(log)) {
+        (void)stopCodecRings(log);
         g_renderFaulted = true;
         return NtStatus::DeviceNotReady;
     }
 
+#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
+    if (!g_renderFailureInjected) {
+        g_renderFailureInjected = true;
+        if (!stopCodecRings(log)) {
+            g_renderFaulted = true;
+            return NtStatus::DeviceBusy;
+        }
+        if (log) log("[MicaNT Audio] Injected render failure released all DMA resources\r\n");
+        return NtStatus::DeviceNotReady;
+    }
+#endif
+
     const uint64_t highest = (g_controller.gcap & 1u) ? UINT64_MAX : UINT32_MAX;
-    uint64_t bdlAddress{}, pcmAddress{};
-    NtStatus status = NtStatus::Success;
     if (!g_renderBdlToken && !g_renderPcmToken) {
-        status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
+        auto status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
             kDmaPageBytes, 128, highest, &g_renderBdl, &g_renderBdlAddress,
             &g_renderBdlToken);
         if (status != NtStatus::Success) {
+            (void)stopCodecRings(log);
             g_renderFaulted = true;
-            if (log) log("[MicaNT HDA] BDL DMA allocation failed\r\n");
+            if (log) log("[MicaNT HDA] Render BDL allocation failed\r\n");
             return status;
         }
         status = io::dma::allocate(&g_controllerOwner, g_controller.claimToken,
-            kMaximumRenderBytes, kDmaPageBytes, highest, &g_renderPcm,
+            kRenderRingBytes, kDmaPageBytes, highest, &g_renderPcm,
             &g_renderPcmAddress, &g_renderPcmToken);
         if (status != NtStatus::Success) {
-            g_renderFaulted = true; // Retain BDL ownership; HAL mappings release in LIFO order.
-            if (log) log("[MicaNT HDA] PCM DMA allocation failed; BDL retained\r\n");
+            const auto releaseStatus = io::dma::release(
+                &g_controllerOwner, g_renderBdlToken, dmaStopped);
+            if (releaseStatus == NtStatus::Success) {
+                g_renderBdlToken = 0;
+                g_renderBdl = nullptr;
+                g_renderBdlAddress = 0;
+            }
+            (void)stopCodecRings(log);
+            g_renderFaulted = true;
+            if (log) log("[MicaNT HDA] Render PCM ring allocation failed\r\n");
             return status;
         }
+        std::memset(g_renderPcm, 0, kRenderRingBytes);
+        auto* bdl = static_cast<BdlEntry*>(g_renderBdl);
+        bdl[0] = {g_renderPcmAddress, static_cast<uint32_t>(kRenderRingBytes),
+                  kBdlInterruptOnCompletion};
+        __atomic_thread_fence(__ATOMIC_RELEASE);
     } else if (!g_renderBdlToken || !g_renderPcmToken) {
         g_renderFaulted = true;
         return NtStatus::DeviceNotReady;
     }
-    pcmAddress = g_renderPcmAddress;
-    bdlAddress = g_renderBdlAddress;
-    std::memcpy(g_renderPcm, buffer, length);
-    auto* bdl = static_cast<BdlEntry*>(g_renderBdl);
-    bdl[0] = {pcmAddress, static_cast<uint32_t>(length), kBdlInterruptOnCompletion};
-    __atomic_thread_fence(__ATOMIC_RELEASE);
 
-    volatile uint8_t* stream = g_controller.registers + kOutputStreamBase;
-#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
-    const bool injectStartFailure = !g_renderFailureInjected;
-    if (injectStartFailure) {
-        g_renderFailureInjected = true;
-        status = NtStatus::DeviceNotReady;
-    }
-#endif
     if (kOutputStreamBase + kStreamStride > g_controller.registerLength) {
-        status = NtStatus::DeviceNotReady;
-    } else {
-        reg32(stream, 0x00) = kStreamReset;
-        bool resetObserved = false;
-        for (uint32_t i = 0; i < 1000000; ++i) {
-            if (reg32(stream, 0x00) & kStreamReset) { resetObserved = true; break; }
-        }
-        if (!resetObserved) status = NtStatus::DeviceNotReady;
-        else {
-            reg32(stream, 0x00) = 0;
-            bool resetCleared = false;
-            for (uint32_t i = 0; i < 1000000; ++i) {
-                if (!(reg32(stream, 0x00) & kStreamReset)) { resetCleared = true; break; }
-            }
-            if (!resetCleared) status = NtStatus::DeviceNotReady;
-        }
+        g_renderFaulted = true;
+        (void)stopCodecRings(log);
+        return NtStatus::DeviceNotReady;
     }
-    if (status == NtStatus::Success) {
-        reg32(stream, 0x18) = static_cast<uint32_t>(bdlAddress);
-        reg32(stream, 0x1c) = static_cast<uint32_t>(bdlAddress >> 32);
-        reg32(stream, 0x08) = static_cast<uint32_t>(length); // cyclic buffer length
-        reg16(stream, 0x0c) = 0; // one BDL entry, last valid index zero
-        reg16(stream, 0x12) = g_controller.outputFormat;
-        stream[0x03] = 0x1cu; // clear stale BCIS/FIFOE/DESE status
-        reg32(stream, 0x00) = (1u << 20) | kStreamInterruptOnCompletion | kStreamRun;
-        bool completed = false;
-        for (uint32_t i = 0; i < 100000000; ++i) {
-            if (stream[0x03] & kStreamBufferCompletionStatus) { completed = true; break; }
+    auto* ring = static_cast<uint8_t*>(g_renderPcm);
+    volatile uint8_t* stream = g_controller.registers + kOutputStreamBase;
+    if (g_renderStreaming) {
+        const uint32_t current = reg32(stream, 0x04); // HDA LPIB: cyclic DMA byte position.
+        if (current >= kRenderRingBytes) {
+            g_renderFaulted = true;
+            return NtStatus::DeviceDataError;
         }
-        if (!completed) status = NtStatus::IoTimeout;
-        else if (log) log("[MicaNT Audio] PCM stream completion verified\r\n");
+        const uint32_t advance = current >= g_renderLastPosition
+            ? current - g_renderLastPosition
+            : static_cast<uint32_t>(kRenderRingBytes) - g_renderLastPosition + current;
+        g_renderReadPosition += advance;
+        g_renderLastPosition = current;
+        uint64_t queued = g_renderWritePosition >= g_renderReadPosition
+            ? g_renderWritePosition - g_renderReadPosition : UINT64_MAX;
+        // If DMA outran the producer or the software queue drifted too far,
+        // clear stale ring contents and restart at the live hardware cursor.
+        if (queued > kMaximumQueuedRenderBytes) {
+            std::memset(ring, 0, kRenderRingBytes);
+            g_renderReadPosition = current;
+            g_renderWritePosition = current;
+            g_renderLastPosition = current;
+            queued = 0;
+            if (++g_renderResyncCount <= 4 && log)
+                log("[MicaNT Audio] Stale render backlog discarded\r\n");
+        }
+        if (length > kRenderRingBytes - queued)
+            return NtStatus::DeviceBusy;
+        const size_t offset = static_cast<size_t>(g_renderWritePosition % kRenderRingBytes);
+        const size_t first = length < kRenderRingBytes - offset
+            ? length : kRenderRingBytes - offset;
+        std::memcpy(ring + offset, buffer, first);
+        if (first < length)
+            std::memcpy(ring, static_cast<const uint8_t*>(buffer) + first, length - first);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        g_renderWritePosition += length;
+        *bytesWritten = length;
+        return NtStatus::Success;
     }
 
-    const bool streamStopped = stopOutputStream(stream);
-    if (!streamStopped) {
+    // Prime the ring before enabling DMA. The controller then runs continuously;
+    // each later write only copies into free space and returns without polling.
+    std::memcpy(ring, buffer, length);
+    g_renderReadPosition = 0;
+    g_renderWritePosition = length;
+    g_renderLastPosition = 0;
+    reg32(stream, 0x00) = kStreamReset;
+    bool resetObserved = false;
+    for (uint32_t i = 0; i < 1000000; ++i) {
+        if (reg32(stream, 0x00) & kStreamReset) { resetObserved = true; break; }
+    }
+    if (!resetObserved) {
         g_renderFaulted = true;
-        if (log) log("[MicaNT HDA] Output stream stop timed out; DMA pages retained\r\n");
-        return NtStatus::DeviceBusy;
+        (void)stopCodecRings(log);
+        return NtStatus::DeviceNotReady;
     }
-    if (log) log("[MicaNT HDA] Output stream stopped\r\n");
+    reg32(stream, 0x00) = 0;
+    bool resetCleared = false;
+    for (uint32_t i = 0; i < 1000000; ++i) {
+        if (!(reg32(stream, 0x00) & kStreamReset)) { resetCleared = true; break; }
+    }
+    if (!resetCleared) {
+        g_renderFaulted = true;
+        (void)stopCodecRings(log);
+        return NtStatus::DeviceNotReady;
+    }
+    reg32(stream, 0x18) = static_cast<uint32_t>(g_renderBdlAddress);
+    reg32(stream, 0x1c) = static_cast<uint32_t>(g_renderBdlAddress >> 32);
+    reg32(stream, 0x08) = static_cast<uint32_t>(kRenderRingBytes);
+    reg16(stream, 0x0c) = 0;
+    reg16(stream, 0x12) = g_controller.outputFormat;
     stream[0x03] = 0x1cu;
-    if (!stopCodecRings(log, false)) { g_renderFaulted = true; return NtStatus::DeviceBusy; }
-    if (g_renderPcmToken) {
-        const auto releaseStatus = io::dma::release(&g_controllerOwner, g_renderPcmToken, dmaStopped);
-        if (releaseStatus != NtStatus::Success) { g_renderFaulted = true; return releaseStatus; }
-        g_renderPcmToken = 0; g_renderPcm = nullptr; g_renderPcmAddress = 0;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    reg32(stream, 0x00) = (1u << 20) | kStreamInterruptOnCompletion | kStreamRun;
+    bool running = false;
+    for (uint32_t i = 0; i < 1000000; ++i) {
+        if (reg32(stream, 0x00) & kStreamRun) { running = true; break; }
     }
-    if (g_renderBdlToken) {
-        const auto releaseStatus = io::dma::release(&g_controllerOwner, g_renderBdlToken, dmaStopped);
-        if (releaseStatus != NtStatus::Success) { g_renderFaulted = true; return releaseStatus; }
-        g_renderBdlToken = 0; g_renderBdl = nullptr; g_renderBdlAddress = 0;
+    if (!running) {
+        (void)stopOutputStream(stream);
+        stream[0x03] = 0x1cu;
+        if (g_renderPcmToken) {
+            (void)io::dma::release(&g_controllerOwner, g_renderPcmToken, dmaStopped);
+            g_renderPcmToken = 0; g_renderPcm = nullptr; g_renderPcmAddress = 0;
+        }
+        if (g_renderBdlToken) {
+            (void)io::dma::release(&g_controllerOwner, g_renderBdlToken, dmaStopped);
+            g_renderBdlToken = 0; g_renderBdl = nullptr; g_renderBdlAddress = 0;
+        }
+        (void)stopCodecRings(log);
+        g_renderFaulted = true;
+        if (log) log("[MicaNT HDA] Cyclic render stream failed to start\r\n");
+        return NtStatus::DeviceNotReady;
     }
-    if (!releaseCodecRingDma(log)) { g_renderFaulted = true; return NtStatus::DeviceBusy; }
-#if defined(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST)
-    if (injectStartFailure && status == NtStatus::DeviceNotReady && log)
-        log("[MicaNT Audio] Injected render failure released all DMA resources\r\n");
-#endif
-    if (status == NtStatus::Success) *bytesWritten = length;
-    return status;
+    g_renderStreaming = true;
+    if (log) log("[MicaNT Audio] Continuous cyclic PCM render started\r\n");
+    *bytesWritten = length;
+    return NtStatus::Success;
 }
 
 NtStatus capturePcm(void*, uint64_t, void* buffer, size_t length,
@@ -795,8 +867,13 @@ NtStatus capturePcm(void*, uint64_t, void* buffer, size_t length,
         !g_controller.inputAdc || !g_controller.inputPin)
         return NtStatus::DeviceNotReady;
     if (g_captureFaulted) return NtStatus::DeviceNotReady;
-    if (g_captureInProgress.test_and_set(std::memory_order_acquire)) return NtStatus::DeviceBusy;
-    struct CaptureRelease { ~CaptureRelease() { g_captureInProgress.clear(std::memory_order_release); } } guard;
+    if (g_audioPathInProgress.test_and_set(std::memory_order_acquire)) return NtStatus::DeviceBusy;
+    struct AudioPathRelease {
+        ~AudioPathRelease() { g_audioPathInProgress.clear(std::memory_order_release); }
+    } audioPathRelease;
+    // The render stream owns PCI bus mastering and the codec command rings for
+    // its lifetime. Capture is rejected explicitly while it is active.
+    if (g_renderStreaming) return NtStatus::DeviceBusy;
     const Log log = g_log;
     if (!startCodecRings(log)) {
         g_captureFaulted = true;

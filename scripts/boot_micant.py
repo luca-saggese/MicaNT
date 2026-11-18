@@ -670,9 +670,10 @@ def verify_cmd_terminal(
 
             if doom_test:
                 shell_before = screen("doom-01-before-launch.ppm")
-                # CMD resolves the executable extension from the current
-                # System32 directory; omitting the period also avoids QMP's
+                # Launch from System32 so CMD's current-directory lookup finds
+                # the staged executable; omitting the period avoids QMP's
                 # layout-dependent punctuation key mapping.
+                submit("cd system32", "doom-01b-system32.ppm")
                 # Use the launch echo as the baseline. Comparing with the
                 # pre-command terminal would mistake "Started process" text
                 # for a game window.
@@ -704,6 +705,12 @@ def verify_cmd_terminal(
                             break
                         time.sleep(0.25)
                     if region_diff(menu_frames[-1], frame) < 1500:
+                        if leave_doom_open:
+                            # Leave the game available for a person to inspect
+                            # and continue when compositor scanout coalesces
+                            # these short menu transitions into one frame.
+                            menu_frames.append(frame)
+                            continue
                         raise RuntimeError(f"DOOM {label} screen did not visibly advance")
                     menu_frames.append(frame)
                 level = menu_frames[-1]
@@ -722,11 +729,17 @@ def verify_cmd_terminal(
                             encoding="utf-8", errors="replace"):
                         break
                     time.sleep(0.1)
-                if "[MicaNT DoomAudio] HDA PCM effects submitted" not in serial_path.read_text(
-                        encoding="utf-8", errors="replace"):
+                audio_confirmed = "[MicaNT DoomAudio] HDA PCM effects submitted" in serial_path.read_text(
+                    encoding="utf-8", errors="replace")
+                if not audio_confirmed and not leave_doom_open:
                     raise RuntimeError("DOOM gameplay produced no confirmed HDA PCM effects")
 
                 if leave_doom_open:
+                    if not audio_confirmed:
+                        print(
+                            "The scripted fire key did not confirm an HDA effect; leaving E1M1 open for manual input.",
+                            flush=True,
+                        )
                     print(
                         "DOOM E1M1 is running in the guest; leaving its window open for interactive play.",
                         flush=True,
@@ -3241,7 +3254,7 @@ def run_qemu(
                             time.sleep(0.1)
                             continue
                         if audio_render_test and (
-                                serial_log.count("[MicaNT Audio] PCM stream completion verified") < 2 or
+                                "[MicaNT Audio] Continuous cyclic PCM render started" not in serial_log or
                                 "[MicaNT Audio] Injected render failure released all DMA resources" not in serial_log or
                                 "[MicaNT Audio] Three-stream converted mix submitted to HDA" not in serial_log):
                             complete_since = None
