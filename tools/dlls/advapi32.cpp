@@ -11,12 +11,23 @@
 #include <winreg.h>
 #include <winsvc.h>
 #include <processthreadsapi.h>
+#include <cstdint>
 
 namespace {
 constexpr LSTATUS kNotImplemented = ERROR_CALL_NOT_IMPLEMENTED;
 
+void set_last_error(DWORD error) noexcept {
+#if defined(__x86_64__)
+    uint64_t teb = 0;
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (teb) *reinterpret_cast<DWORD*>(teb + 0x68) = error;
+#else
+    (void)error;
+#endif
+}
+
 BOOL fail_boolean_api() noexcept {
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
 }
 }
@@ -33,7 +44,7 @@ __declspec(dllexport) LSTATUS WINAPI RegOpenKeyExA(
 
 __declspec(dllexport) LSTATUS WINAPI RegCreateKeyExW(
     HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
-    const SECURITY_ATTRIBUTES*, PHKEY, LPDWORD) { return kNotImplemented; }
+    LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD) { return kNotImplemented; }
 
 __declspec(dllexport) LSTATUS WINAPI RegQueryValueExW(
     HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD) { return kNotImplemented; }
@@ -56,22 +67,22 @@ __declspec(dllexport) BOOL WINAPI GetTokenInformation(
 }
 
 __declspec(dllexport) SC_HANDLE WINAPI OpenSCManagerW(LPCWSTR, LPCWSTR, DWORD) {
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
     return nullptr;
 }
 
 __declspec(dllexport) SC_HANDLE WINAPI OpenSCManagerA(LPCSTR, LPCSTR, DWORD) {
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
     return nullptr;
 }
 
 __declspec(dllexport) SC_HANDLE WINAPI OpenServiceW(SC_HANDLE, LPCWSTR, DWORD) {
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
     return nullptr;
 }
 
 __declspec(dllexport) SC_HANDLE WINAPI OpenServiceA(SC_HANDLE, LPCSTR, DWORD) {
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
     return nullptr;
 }
 
