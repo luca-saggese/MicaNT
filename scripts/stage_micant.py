@@ -281,6 +281,7 @@ KNOWN_DLLS = [
     ("tools/dlls/shlwapi.cpp", "build/shlwapi.dll", "shlwapi.dll"),
     ("tools/dlls/ole32.cpp", "build/ole32.dll", "ole32.dll"),
     ("tools/dlls/oleaut32.cpp", "build/oleaut32.dll", "oleaut32.dll"),
+    ("tools/dlls/version.cpp", "build/version.dll", "version.dll"),
 ]
 
 WINDOWING_DLLS = [
@@ -477,6 +478,8 @@ def run_local_build():
                 "tools/dlls/native_stack_probe.cpp",
                 "kernel/ex/freestanding_memory.cpp",
             ))
+        if name == "version.dll":
+            runtime_dependencies.extend(("tools/dlls/version.def", "build/libkernel32.dll.a"))
         if name in ("ntdll.dll", "ws2_32.dll", "dnsapi.dll", "crypt32.dll", "winhttp.dll"):
             runtime_dependencies.append("tools/dlls/native_stack_probe.cpp")
         if name in ("ws2_32.dll", "crypt32.dll", "winhttp.dll"):
@@ -558,6 +561,12 @@ def run_local_build():
                           "-o", out_path))
         elif name == "ntdll.dll":
             c_cmd.extend((src, "tools/dlls/native_stack_probe.cpp", "-o", out_path))
+        elif name == "version.dll":
+            c_cmd.extend(("-std=c++23", "-ffreestanding", "-fno-builtin",
+                          "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics",
+                          "-fno-stack-protector", "-mno-red-zone", src,
+                          "tools/dlls/version.def",
+                          "build/libkernel32.dll.a", "-o", out_path))
         else:
             c_cmd.extend((src, "-o", out_path))
         r = subprocess.run(c_cmd, cwd=REPO_ROOT, capture_output=True, text=True)

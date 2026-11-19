@@ -38,6 +38,7 @@ def variants() -> tuple[Variant, ...]:
         Variant("svchost_boot", "tools/dlls/dhcpcsvc.cpp", ("MICANT_NATIVE_USERMODE",)),
         Variant("kernel32_boot", "tools/dlls/abi/kernel32_system32.cpp",
                 ("MICANT_FREESTANDING_KERNEL32",)),
+        Variant("version_boot", "tools/dlls/version.cpp"),
         Variant("ucrtbase_boot", "kernel/ps/winnt_ucrtbase_runtime_abi.cpp",
                 ("MICANT_FREESTANDING_UCRT",)),
         Variant("win32k_boot", "kernel/ps/winnt_win32k_server.cpp",
