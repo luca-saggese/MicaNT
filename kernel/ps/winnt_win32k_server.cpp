@@ -335,10 +335,19 @@ int32_t MicaWin32kEnumChildWindows(void* parent, void* callback,
         value.args[0] = reinterpret_cast<uint64_t>(parent);
         value.args[1] = first;
         value.args[2] = MICANT_WIN32K_ENUM_BATCH_CAPACITY;
-        if (!request(MICANT_WIN32K_OP_ENUM_CHILD_WINDOWS, value)) return 0;
+        if (!request(MICANT_WIN32K_OP_ENUM_CHILD_WINDOWS, value)) {
+            MicaWin32kDebugInputTrace(41,
+                static_cast<uint32_t>(reinterpret_cast<uintptr_t>(parent)),
+                static_cast<uint32_t>(first));
+            return 0;
+        }
         for (uint64_t index = 0; index < value.result; ++index) {
-            if (!enumerate(reinterpret_cast<void*>(value.windowHandles[index]), parameter))
+            if (!enumerate(reinterpret_cast<void*>(value.windowHandles[index]), parameter)) {
+                MicaWin32kDebugInputTrace(42,
+                    static_cast<uint32_t>(value.windowHandles[index]),
+                    static_cast<uint32_t>(index));
                 return 0;
+            }
         }
         if (value.result < MICANT_WIN32K_ENUM_BATCH_CAPACITY) return 1;
         if (first > UINT64_MAX - value.result) return 0;

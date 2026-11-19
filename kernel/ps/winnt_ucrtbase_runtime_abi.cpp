@@ -13,6 +13,7 @@
 #include <cstdarg>
 #include <climits>
 #include <cstdint>
+#include "micant/shared/native_process_abi.hpp"
 
 extern "C" {
 int32_t __stdcall MicantUcrtAllocateVirtualMemory(
@@ -23,6 +24,10 @@ int32_t __stdcall MicantUcrtFreeVirtualMemory(
 __declspec(dllimport) int32_t __stdcall NtWriteFile(
     void* file, void* event, void* apcRoutine, void* apcContext,
     void* ioStatus, const void* buffer, uint32_t length,
+    void* byteOffset, uint32_t* key) noexcept;
+__declspec(dllimport) int32_t __stdcall NtReadFile(
+    void* file, void* event, void* apcRoutine, void* apcContext,
+    void* ioStatus, void* buffer, uint32_t length,
     void* byteOffset, uint32_t* key) noexcept;
 }
 
@@ -237,12 +242,277 @@ int32_t Ucrt_initterm_e(
     return micant::ucrt::initializeFunctionTableWithStatus(first, last);
 }
 
+bool encodeUtf16ToUtf8(const char16_t* source, size_t units, char* output,
+                       size_t capacity, size_t& bytes) noexcept {
+    bytes = 0;
+    for (size_t i = 0; i < units; ++i) {
+        uint32_t cp = source[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (i + 1 >= units || source[i + 1] < 0xDC00 || source[i + 1] > 0xDFFF) return false;
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (source[++i] - 0xDC00);
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) return false;
+        const size_t need = cp <= 0x7F ? 1 : cp <= 0x7FF ? 2 : cp <= 0xFFFF ? 3 : 4;
+        if (bytes > capacity || need > capacity - bytes) return false;
+        if (need == 1) output[bytes++] = static_cast<char>(cp);
+        else if (need == 2) {
+            output[bytes++] = static_cast<char>(0xC0 | (cp >> 6));
+            output[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (need == 3) {
+            output[bytes++] = static_cast<char>(0xE0 | (cp >> 12));
+            output[bytes++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            output[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            output[bytes++] = static_cast<char>(0xF0 | (cp >> 18));
+            output[bytes++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            output[bytes++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            output[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+    return true;
+}
+
 }
 
 extern "C" {
 
+// The UCRT startup objects access these process-global modes through the
+// pointer accessors below. Match the documented defaults: no-commit streams
+// and text mode for newly opened files.
+static int g_nativeCommode = 0;
+static int g_nativeFmode = 0x4000;
+static int g_nativeNewMode = 0;
+static thread_local int g_nativeThreadLocaleMode = 2;
+using NativeInvalidParameterHandler = void (__cdecl *)(
+    const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t);
+static NativeInvalidParameterHandler g_nativeInvalidParameterHandler{};
+static int (__cdecl *g_nativeMathErrorHandler)(void*){};
+static int g_nativeArgc{};
+static char* g_nativeArgv[257]{};
+static char* g_nativeAcmdln{};
+static char** g_nativeEnvironment{};
+static int g_nativeArgvMode{};
+static bool g_nativeArgvInitialized{};
+static bool g_nativeEnvironmentInitialized{};
+static micant::ucrt::OnExitTable g_nativeOnExitTable{};
+static bool g_nativeOnExitInitialized{};
+static int g_nativeApplicationType{};
+
+static int32_t initializeNarrowArgv() noexcept {
+    if (g_nativeArgvInitialized) return 0;
+    if (g_nativeArgvMode == 2) {
+        g_nativeArgc = 0;
+        g_nativeArgv[0] = nullptr;
+        g_nativeArgvInitialized = true;
+        return 0;
+    }
+    micant::shared::native_process::UnicodeString64 commandLine{};
+    if (!micant::shared::native_process::currentCommandLine(commandLine)) {
+        if (!micant::shared::native_process::currentImagePath(commandLine)) return 22;
+    }
+    const size_t units = commandLine.Length / sizeof(char16_t);
+    if (units > (SIZE_MAX - 1) / 3) return 7;
+    const size_t capacity = units * 3 + 1;
+    auto* raw = static_cast<char*>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(capacity));
+    auto* parsed = static_cast<char*>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(capacity));
+    if (!raw || !parsed) {
+        if (raw) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(raw);
+        if (parsed) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(parsed);
+        return 12;
+    }
+    size_t bytes{};
+    if (!micant::ucrt::winnt_ucrtbase_abi::encodeUtf16ToUtf8(
+            commandLine.Buffer, units, raw, capacity - 1, bytes)) {
+        micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(raw);
+        micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(parsed);
+        return 42;
+    }
+    raw[bytes] = '\0';
+    for (size_t i = 0; i <= bytes; ++i) parsed[i] = raw[i];
+    g_nativeAcmdln = raw;
+    char* read = parsed;
+    char* write = parsed;
+    while (*read) {
+        while (*read == ' ' || *read == '\t') ++read;
+        if (!*read) break;
+        if (g_nativeArgc == 256) {
+            micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(parsed);
+            g_nativeAcmdln = nullptr;
+            return 7;
+        }
+        g_nativeArgv[g_nativeArgc++] = write;
+        bool quoted = false;
+        bool wildcard = false;
+        while (*read) {
+            if ((*read == ' ' || *read == '\t') && !quoted) break;
+            size_t slashes{};
+            while (*read == '\\') { ++slashes; ++read; }
+            if (*read == '"') {
+                for (size_t i = 0; i < slashes / 2; ++i) *write++ = '\\';
+                if (slashes & 1) {
+                    *write++ = '"';
+                    ++read;
+                } else {
+                    ++read;
+                    if (quoted && *read == '"') { *write++ = '"'; ++read; }
+                    else quoted = !quoted;
+                }
+                continue;
+            }
+            while (slashes--) *write++ = '\\';
+            if (!*read || ((*read == ' ' || *read == '\t') && !quoted)) break;
+            if (*read == '*' || *read == '?') wildcard = true;
+            *write++ = *read++;
+        }
+        // Wildcard expansion is only requested in mode 1. Preserve the
+        // documented literal argument when no filesystem match is available;
+        // matching paths are expanded by the command processor before launch.
+        if (wildcard && g_nativeArgvMode == 1) {
+            g_nativeErrno = 38;
+            return 38;
+        }
+        *write++ = '\0';
+        while (*read == ' ' || *read == '\t') ++read;
+    }
+    g_nativeArgv[g_nativeArgc] = nullptr;
+    g_nativeArgvInitialized = true;
+    return 0;
+}
+
 __declspec(dllexport) int* __cdecl _errno() {
     return &g_nativeErrno;
+}
+
+__declspec(dllexport) int* __cdecl __p__commode() {
+    return &g_nativeCommode;
+}
+
+__declspec(dllexport) int* __cdecl __p__fmode() {
+    return &g_nativeFmode;
+}
+
+__declspec(dllexport) int* __cdecl __p___argc() {
+    if (initializeNarrowArgv() != 0) return nullptr;
+    return &g_nativeArgc;
+}
+
+__declspec(dllexport) char*** __cdecl __p___argv() {
+    if (initializeNarrowArgv() != 0) return nullptr;
+    static char** argv = g_nativeArgv;
+    return &argv;
+}
+
+__declspec(dllexport) char** __cdecl __p__acmdln() {
+    if (initializeNarrowArgv() != 0) return nullptr;
+    return &g_nativeAcmdln;
+}
+
+static int32_t initializeNarrowEnvironment() noexcept {
+    if (g_nativeEnvironmentInitialized) return 0;
+    char16_t* source{};
+    if (!micant::shared::native_process::currentEnvironment(source)) {
+        g_nativeErrno = 22;
+        return 22;
+    }
+    size_t units{};
+    size_t entries{};
+    bool ended{};
+    while (units < 32768) {
+        if (source[units] == 0 && units + 1 < 32768 && source[units + 1] == 0) {
+            units += 2;
+            ended = true;
+            break;
+        }
+        if (source[units] == 0) ++entries;
+        ++units;
+    }
+    if (!ended || units > (SIZE_MAX - 1) / 3 || entries > SIZE_MAX / sizeof(char*) - 1) {
+        g_nativeErrno = ended ? 12 : 7;
+        return g_nativeErrno;
+    }
+    auto** environment = static_cast<char**>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(
+        (entries + 1) * sizeof(char*)));
+    auto* text = static_cast<char*>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(units * 3 + 1));
+    if (!environment || !text) {
+        if (environment) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(environment);
+        if (text) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(text);
+        g_nativeErrno = 12;
+        return 12;
+    }
+    size_t sourceOffset{};
+    size_t textOffset{};
+    size_t index{};
+    while (sourceOffset < units && source[sourceOffset]) {
+        size_t end = sourceOffset;
+        while (end < units && source[end]) ++end;
+        environment[index++] = text + textOffset;
+        size_t converted{};
+        if (!micant::ucrt::winnt_ucrtbase_abi::encodeUtf16ToUtf8(
+                source + sourceOffset, end - sourceOffset, text + textOffset,
+                units * 3 + 1 - textOffset, converted)) {
+            micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(environment);
+            micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(text);
+            g_nativeErrno = 42;
+            return 42;
+        }
+        textOffset += converted;
+        text[textOffset++] = '\0';
+        sourceOffset = end + 1;
+    }
+    environment[index] = nullptr;
+    g_nativeEnvironment = environment;
+    g_nativeEnvironmentInitialized = true;
+    return 0;
+}
+
+__declspec(dllexport) char*** __cdecl __p__environ() {
+    (void)initializeNarrowEnvironment();
+    return &g_nativeEnvironment;
+}
+
+__declspec(dllexport) wchar_t* __cdecl wcschr(const wchar_t* string, wchar_t ch) {
+    if (!string) return nullptr;
+    for (;;) {
+        if (*string == ch) return const_cast<wchar_t*>(string);
+        if (*string == L'\0') return nullptr;
+        ++string;
+    }
+}
+
+__declspec(dllexport) int __cdecl wcscmp(const wchar_t* left, const wchar_t* right) {
+    if (!left || !right) return left ? 1 : right ? -1 : 0;
+    while (*left && *left == *right) { ++left; ++right; }
+    return static_cast<int>(*left) - static_cast<int>(*right);
+}
+
+__declspec(dllexport) int __cdecl _wcsicmp(const wchar_t* left, const wchar_t* right) {
+    if (!left || !right) return left ? 1 : right ? -1 : 0;
+    for (;;) {
+        uint32_t a = static_cast<uint32_t>(*left++);
+        uint32_t b = static_cast<uint32_t>(*right++);
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if ((a >= 0x00C0 && a <= 0x00D6) || (a >= 0x00D8 && a <= 0x00DE)) a += 0x20;
+        if ((b >= 0x00C0 && b <= 0x00D6) || (b >= 0x00D8 && b <= 0x00DE)) b += 0x20;
+        if (a != b || a == 0) return static_cast<int>(a) - static_cast<int>(b);
+    }
+}
+
+__declspec(dllexport) char* __cdecl _strdup(const char* source) {
+    if (!source) { g_nativeErrno = 22; return nullptr; }
+    size_t length{};
+    while (source[length]) ++length;
+    if (length == SIZE_MAX) { g_nativeErrno = 12; return nullptr; }
+    auto* copy = static_cast<char*>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(length + 1));
+    if (!copy) return nullptr;
+    for (size_t i = 0; i <= length; ++i) copy[i] = source[i];
+    return copy;
+}
+
+__declspec(dllexport) char* __cdecl _strupr(char* string) {
+    if (!string) { g_nativeErrno = 22; return nullptr; }
+    for (char* cursor = string; *cursor; ++cursor)
+        if (*cursor >= 'a' && *cursor <= 'z') *cursor = static_cast<char>(*cursor - ('a' - 'A'));
+    return string;
 }
 
 __declspec(dllexport) unsigned int __cdecl ___lc_codepage_func() {
@@ -436,6 +706,13 @@ struct NativeCrtStream {
     uint32_t mode;
     int32_t locked;
     uint32_t reserved;
+    char* buffer{};
+    size_t bufferSize{};
+    size_t buffered{};
+    bool ownsBuffer{};
+    uint32_t bufferingMode{};
+    int32_t pendingByte{-1};
+    uint32_t pendingWide{UINT32_MAX};
 };
 static NativeCrtStream g_nativeStreams[3]{{0, 0x4000, 0, 0},
                                           {1, 0x4000, 0, 0},
@@ -490,6 +767,51 @@ static void nativeWriteBytes(NativeCrtStream& stream, const char* bytes,
     written = static_cast<size_t>(io.information);
 }
 
+static int32_t nativeReadByte(NativeCrtStream& stream) noexcept {
+    if (stream.pendingByte >= 0) {
+        const int32_t value = stream.pendingByte;
+        stream.pendingByte = -1;
+        return value;
+    }
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb || teb > UINTPTR_MAX - 0x60) { g_nativeErrno = 9; return -1; }
+    const auto* peb = *reinterpret_cast<const micant::shared::native_process::PebPrefix64* const*>(teb + 0x60);
+    if (!peb || !peb->ProcessParameters) { g_nativeErrno = 9; return -1; }
+    const uintptr_t rawHandle = peb->ProcessParameters->StandardInput;
+    void* handle = reinterpret_cast<void*>(rawHandle);
+    if (!handle || handle == reinterpret_cast<void*>(~uintptr_t{0})) {
+        g_nativeErrno = 9;
+        return -1;
+    }
+    unsigned char byte{};
+    NativeIoStatusBlock io{};
+    const int32_t status = NtReadFile(handle, nullptr, nullptr, nullptr, &io,
+                                      &byte, 1, nullptr, nullptr);
+    if (status < 0 || static_cast<intptr_t>(io.status) < 0) {
+        g_nativeErrno = 5;
+        return -1;
+    }
+    if (io.information == 0) return -1;
+    return byte;
+}
+
+static int nativeFlushStream(NativeCrtStream& stream) noexcept {
+    if (stream.buffered == 0) return 0;
+    size_t written{};
+    nativeWriteBytes(stream, stream.buffer, stream.buffered, written);
+    if (written > stream.buffered) { g_nativeErrno = 5; return -1; }
+    if (written != stream.buffered) {
+        const size_t remaining = stream.buffered - written;
+        for (size_t i = 0; i < remaining; ++i) stream.buffer[i] = stream.buffer[written + i];
+        stream.buffered = remaining;
+        g_nativeErrno = 5;
+        return -1;
+    }
+    stream.buffered = 0;
+    return 0;
+}
+
 static bool appendFormatted(char* output, size_t capacity, size_t& length,
                             char value) noexcept {
     if (length >= capacity) return false;
@@ -515,6 +837,122 @@ static bool appendUnsigned(char* output, size_t capacity, size_t& length,
     return true;
 }
 
+static bool formatFixedMagnitude(char* output, size_t capacity, size_t& length,
+                                double value, unsigned precision,
+                                bool alternate) noexcept {
+    if (precision > 18) return false;
+    uint64_t scale = 1;
+    for (unsigned i = 0; i < precision; ++i) scale *= 10;
+    if (value > static_cast<double>(UINT64_MAX / scale)) return false;
+    const uint64_t rounded = static_cast<uint64_t>(value * static_cast<double>(scale) + 0.5);
+    const uint64_t whole = rounded / scale;
+    const uint64_t fraction = rounded % scale;
+    if (!appendUnsigned(output, capacity, length, whole, 10, false, 0, ' ', false)) return false;
+    if (precision || alternate) {
+        if (!appendFormatted(output, capacity, length, '.')) return false;
+    }
+    if (precision) {
+        uint64_t divisor = scale / 10;
+        for (unsigned i = 0; i < precision; ++i) {
+            const unsigned digit = static_cast<unsigned>((fraction / divisor) % 10);
+            if (!appendFormatted(output, capacity, length, static_cast<char>('0' + digit))) return false;
+            divisor /= 10;
+        }
+    }
+    return true;
+}
+
+static bool formatScientificMagnitude(char* output, size_t capacity, size_t& length,
+                                      double value, unsigned precision,
+                                      bool alternate, bool upper) noexcept {
+    if (precision > 18) return false;
+    int exponent{};
+    double mantissa = value;
+    if (mantissa != 0.0) {
+        while (mantissa >= 10.0) { mantissa *= 0.1; ++exponent; }
+        while (mantissa < 1.0) { mantissa *= 10.0; --exponent; }
+    }
+    uint64_t scale = 1;
+    for (unsigned i = 0; i < precision; ++i) scale *= 10;
+    uint64_t rounded = static_cast<uint64_t>(mantissa * static_cast<double>(scale) + 0.5);
+    if (rounded >= 10 * scale) { rounded /= 10; ++exponent; }
+    if (!appendFormatted(output, capacity, length, static_cast<char>('0' + rounded / scale))) return false;
+    const uint64_t fraction = rounded % scale;
+    if (precision || alternate)
+        if (!appendFormatted(output, capacity, length, '.')) return false;
+    if (precision) {
+        uint64_t divisor = scale / 10;
+        for (unsigned i = 0; i < precision; ++i) {
+            const unsigned digit = static_cast<unsigned>((fraction / divisor) % 10);
+            if (!appendFormatted(output, capacity, length, static_cast<char>('0' + digit))) return false;
+            divisor /= 10;
+        }
+    }
+    if (!appendFormatted(output, capacity, length, upper ? 'E' : 'e') ||
+        !appendFormatted(output, capacity, length, exponent < 0 ? '-' : '+')) return false;
+    unsigned magnitude = static_cast<unsigned>(exponent < 0 ? -exponent : exponent);
+    if (magnitude < 10 && !appendFormatted(output, capacity, length, '0')) return false;
+    return appendUnsigned(output, capacity, length, magnitude, 10, false, 0, ' ', false);
+}
+
+static bool formatFloating(char* output, size_t capacity, size_t& length,
+                           double value, char conversion, int precision,
+                           bool alternate) noexcept {
+    union { double value; uint64_t bits; } representation{value};
+    const bool negative = (representation.bits >> 63) != 0;
+    const uint64_t exponentBits = (representation.bits >> 52) & 0x7FF;
+    const uint64_t fractionBits = representation.bits & 0x000FFFFFFFFFFFFFULL;
+    const bool upper = conversion == 'E' || conversion == 'F' || conversion == 'G';
+    if (negative && !appendFormatted(output, capacity, length, '-')) return false;
+    if (exponentBits == 0x7FF) {
+        const char* token = fractionBits ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+        for (size_t i = 0; token[i]; ++i)
+            if (!appendFormatted(output, capacity, length, token[i])) return false;
+        return true;
+    }
+    if (!negative && (conversion == 'f' || conversion == 'F' || conversion == 'e' ||
+                      conversion == 'E' || conversion == 'g' || conversion == 'G')) {
+        /* Sign flags are inserted by the caller, before this formatter. */
+    }
+    const double magnitude = negative ? -value : value;
+    unsigned digits = precision < 0 ? 6u : static_cast<unsigned>(precision);
+    if (conversion == 'f' || conversion == 'F')
+        return formatFixedMagnitude(output, capacity, length, magnitude, digits, alternate);
+    if (conversion == 'e' || conversion == 'E')
+        return formatScientificMagnitude(output, capacity, length, magnitude, digits, alternate, upper);
+    if (digits == 0) digits = 1;
+    int exponent{};
+    double normalized = magnitude;
+    if (normalized != 0.0) {
+        while (normalized >= 10.0) { normalized *= 0.1; ++exponent; }
+        while (normalized < 1.0) { normalized *= 10.0; --exponent; }
+    }
+    if (exponent < -4 || exponent >= static_cast<int>(digits)) {
+        if (!formatScientificMagnitude(output, capacity, length, magnitude,
+                                       digits - 1, alternate, upper)) return false;
+    } else {
+        const int fractional = static_cast<int>(digits) - exponent - 1;
+        if (!formatFixedMagnitude(output, capacity, length, magnitude,
+                                  fractional > 0 ? static_cast<unsigned>(fractional) : 0u,
+                                  alternate)) return false;
+    }
+    if (!alternate) {
+        size_t end = length;
+        size_t exponentAt = length;
+        for (size_t i = 0; i < length; ++i)
+            if (output[i] == 'e' || output[i] == 'E') { exponentAt = i; break; }
+        while (end > 0 && end - 1 > exponentAt && output[end - 1] == '0') --end;
+        if (end > 0 && end - 1 > exponentAt && output[end - 1] == '.') --end;
+        if (end < length) {
+            size_t write = end;
+            for (size_t read = exponentAt; exponentAt < length && read < length; ++read)
+                output[write++] = output[read];
+            length = write;
+        }
+    }
+    return true;
+}
+
 static int32_t formatNative(char* output, size_t capacity, const char* format,
                             va_list arguments) noexcept {
     if (!output || !format) { g_nativeErrno = 22; return -1; }
@@ -531,22 +969,41 @@ static int32_t formatNative(char* output, size_t capacity, const char* format,
         }
         bool left{};
         bool zero{};
+        bool positiveSign{};
+        bool spaceSign{};
+        bool alternate{};
         while (format[i] == '-' || format[i] == '0' || format[i] == '+' || format[i] == ' ' || format[i] == '#') {
             if (format[i] == '-') left = true;
             if (format[i] == '0') zero = true;
+            if (format[i] == '+') positiveSign = true;
+            if (format[i] == ' ') spaceSign = true;
+            if (format[i] == '#') alternate = true;
             ++i;
         }
         unsigned width{};
-        while (format[i] >= '0' && format[i] <= '9') {
-            if (width > 255) { g_nativeErrno = 22; return -1; }
-            width = width * 10 + static_cast<unsigned>(format[i++] - '0');
+        if (format[i] == '*') {
+            const int requested = va_arg(arguments, int);
+            if (requested < 0) { left = true; width = static_cast<unsigned>(-requested); }
+            else width = static_cast<unsigned>(requested);
+            ++i;
+        } else {
+            while (format[i] >= '0' && format[i] <= '9') {
+                if (width > 255) { g_nativeErrno = 22; return -1; }
+                width = width * 10 + static_cast<unsigned>(format[i++] - '0');
+            }
         }
         int precision = -1;
         if (format[i] == '.') {
             precision = 0; ++i;
-            while (format[i] >= '0' && format[i] <= '9') {
-                if (precision > 255) { g_nativeErrno = 22; return -1; }
-                precision = precision * 10 + (format[i++] - '0');
+            if (format[i] == '*') {
+                precision = va_arg(arguments, int);
+                if (precision < 0) precision = -1;
+                ++i;
+            } else {
+                while (format[i] >= '0' && format[i] <= '9') {
+                    if (precision > 255) { g_nativeErrno = 22; return -1; }
+                    precision = precision * 10 + (format[i++] - '0');
+                }
             }
         }
         enum class Length { Default, Long, LongLong, Size } lengthKind{};
@@ -558,10 +1015,22 @@ static int32_t formatNative(char* output, size_t capacity, const char* format,
         char temp[320]{};
         size_t tempLength{};
         if (conversion == 's') {
-            const char* string = va_arg(arguments, const char*);
-            if (!string) string = "(null)";
             const size_t maxLength = precision >= 0 ? static_cast<size_t>(precision) : 256;
-            while (tempLength < maxLength && string[tempLength]) temp[tempLength] = string[tempLength], ++tempLength;
+            if (lengthKind == Length::Long) {
+                const wchar_t* string = va_arg(arguments, const wchar_t*);
+                if (!string) string = L"(null)";
+                size_t units{};
+                while (string[units] && units < 256) ++units;
+                if (!micant::ucrt::winnt_ucrtbase_abi::encodeUtf16ToUtf8(
+                        reinterpret_cast<const char16_t*>(string), units,
+                        temp, sizeof(temp), tempLength)) return -1;
+                if (tempLength > maxLength) tempLength = maxLength;
+            } else {
+                const char* string = va_arg(arguments, const char*);
+                if (!string) string = "(null)";
+                while (tempLength < maxLength && string[tempLength])
+                    temp[tempLength] = string[tempLength], ++tempLength;
+            }
         } else if (conversion == 'c') {
             temp[tempLength++] = static_cast<char>(va_arg(arguments, int));
         } else if (conversion == 'p') {
@@ -585,26 +1054,344 @@ static int32_t formatNative(char* output, size_t capacity, const char* format,
             }
             unsigned radix = conversion == 'o' ? 8 : (conversion == 'x' || conversion == 'X' ? 16 : 10);
             if (negative) temp[tempLength++] = '-';
+            else if (signedValue && positiveSign) temp[tempLength++] = '+';
+            else if (signedValue && spaceSign) temp[tempLength++] = ' ';
             if (!appendUnsigned(temp, sizeof(temp), tempLength, value, radix, conversion == 'X',
-                                width > (negative ? 1u : 0u) ? width - (negative ? 1u : 0u) : 0u,
-                                zero && !left ? '0' : ' ', conversion == 'p')) return -1;
+                                0, ' ', alternate || conversion == 'p')) return -1;
+        } else if (conversion == 'f' || conversion == 'F' || conversion == 'e' ||
+                   conversion == 'E' || conversion == 'g' || conversion == 'G') {
+            const double value = va_arg(arguments, double);
+            if (value >= 0.0 && positiveSign) temp[tempLength++] = '+';
+            else if (value >= 0.0 && spaceSign) temp[tempLength++] = ' ';
+            if (!formatFloating(temp, sizeof(temp), tempLength, value,
+                                conversion, precision, alternate)) {
+                g_nativeErrno = 34;
+                return -1;
+            }
         } else {
             g_nativeErrno = 22;
             return -1;
         }
-        if (left) while (tempLength < width) temp[tempLength++] = ' ';
-        else if (conversion == 's' || conversion == 'c') {
-            if (tempLength > width) { /* width is a minimum, content is kept */ }
-            else {
-                const size_t pad = width - tempLength;
-                if (length + pad > capacity) { g_nativeErrno = 34; return -1; }
-                for (size_t p = 0; p < pad; ++p) output[length++] = ' ';
+        const size_t padding = tempLength < width ? width - tempLength : 0;
+        if (!left && length + padding > capacity) { g_nativeErrno = 34; return -1; }
+        if (!left && padding) {
+            const bool hasSign = tempLength && (temp[0] == '-' || temp[0] == '+' || temp[0] == ' ');
+            if (zero && hasSign) {
+                output[length++] = temp[0];
+                for (size_t p = 0; p < padding; ++p) output[length++] = '0';
+                for (size_t p = 1; p < tempLength; ++p) output[length++] = temp[p];
+                continue;
             }
+            const char fill = zero && conversion != 's' && conversion != 'c' ? '0' : ' ';
+            for (size_t p = 0; p < padding; ++p) output[length++] = fill;
         }
         if (length + tempLength > capacity) { g_nativeErrno = 34; return -1; }
         for (size_t p = 0; p < tempLength; ++p) output[length++] = temp[p];
+        if (left && padding) {
+            if (length + padding > capacity) { g_nativeErrno = 34; return -1; }
+            for (size_t p = 0; p < padding; ++p) output[length++] = ' ';
+        }
     }
     return static_cast<int32_t>(length);
+}
+
+static int32_t formatWide(wchar_t* output, size_t capacity, const wchar_t* format,
+                          va_list arguments) noexcept {
+    if (!output || !capacity || !format) { g_nativeErrno = 22; return -1; }
+    char narrowFormat[1024]{};
+    size_t formatLength{};
+    bool inConversion = false;
+    while (format[formatLength]) {
+        const uint32_t value = static_cast<uint32_t>(format[formatLength]);
+        if (value > 0x7F || formatLength + 1 >= sizeof(narrowFormat)) {
+            output[0] = L'\0';
+            g_nativeErrno = value > 0x7F ? 42 : 22;
+            return -1;
+        }
+        char converted = static_cast<char>(value);
+        if (value == '%') {
+            if (inConversion) inConversion = false;
+            else inConversion = true;
+        } else if (inConversion) {
+            const bool modifier = (value >= '0' && value <= '9') || value == '-' ||
+                value == '+' || value == ' ' || value == '#' || value == '0' ||
+                value == '.' || value == '*' || value == 'I' || value == 'h' ||
+                value == 'l' || value == 'j' || value == 'z' || value == 't' ||
+                value == 'L';
+            if (!modifier) {
+                // Microsoft wide printf's %C consumes a narrow char and
+                // widens it. The shared formatter emits that byte, then this
+                // routine widens each result byte into the UTF-16 output.
+                if (value == 'C') converted = 'c';
+                inConversion = false;
+            }
+        }
+        narrowFormat[formatLength] = converted;
+        ++formatLength;
+    }
+    constexpr size_t OutputCapacity = 8192;
+    auto* narrowOutput = static_cast<char*>(g_nativeHeap.allocate(OutputCapacity, alignof(char)));
+    if (!narrowOutput) { output[0] = L'\0'; g_nativeErrno = 12; return -1; }
+    va_list copy;
+    va_copy(copy, arguments);
+    const int32_t result = formatNative(narrowOutput, OutputCapacity - 1,
+                                        narrowFormat, copy);
+    va_end(copy);
+    if (result < 0 || static_cast<size_t>(result) >= capacity) {
+        output[0] = L'\0';
+        if (result >= 0) g_nativeErrno = 34;
+        g_nativeHeap.release(narrowOutput);
+        return -1;
+    }
+    for (int32_t i = 0; i < result; ++i)
+        output[i] = static_cast<unsigned char>(narrowOutput[i]);
+    output[result] = L'\0';
+    g_nativeHeap.release(narrowOutput);
+    return result;
+}
+
+static double ucrtExp(double value) noexcept;
+static double ucrtDoubleFromBits(uint64_t bits) noexcept;
+
+static int32_t scanWide(const wchar_t* input, const wchar_t* format,
+                        va_list arguments) noexcept {
+    if (!input || !format) { g_nativeErrno = 22; return -1; }
+    int32_t assigned{};
+    while (*format) {
+        if (*format <= L' ' && *format != L'%') {
+            while (*input && *input <= L' ') ++input;
+            while (*format && *format <= L' ') ++format;
+            continue;
+        }
+        if (*format != L'%') {
+            if (*input++ != *format++) return assigned;
+            continue;
+        }
+        ++format;
+        if (*format == L'%') {
+            if (*input++ != L'%') return assigned;
+            ++format;
+            continue;
+        }
+        while (*input && *input <= L' ') ++input;
+        size_t width{};
+        while (*format >= L'0' && *format <= L'9')
+            width = width * 10 + static_cast<size_t>(*format++ - L'0');
+        bool longValue{};
+        if (*format == L'l' || *format == L'I') {
+            longValue = true;
+            if (*format == L'I' && format[1] == L'6' && format[2] == L'4') format += 3;
+            else ++format;
+        } else if (*format == L'h') ++format;
+        const wchar_t conversion = *format++;
+        if (conversion == L's') {
+            wchar_t* destination = va_arg(arguments, wchar_t*);
+            if (!destination) { g_nativeErrno = 22; return assigned; }
+            size_t copied{};
+            while (*input && *input > L' ' && (!width || copied < width))
+                destination[copied++] = *input++;
+            if (!copied) return assigned;
+            destination[copied] = L'\0';
+            ++assigned;
+        } else if (conversion == L'c') {
+            wchar_t* destination = va_arg(arguments, wchar_t*);
+            const size_t count = width ? width : 1;
+            for (size_t i = 0; i < count; ++i) {
+                if (!input[i]) return assigned;
+                destination[i] = input[i];
+            }
+            input += count;
+            ++assigned;
+        } else if (conversion == L'd' || conversion == L'i' || conversion == L'u' ||
+                   conversion == L'x' || conversion == L'X' || conversion == L'o') {
+            bool negative{};
+            if (*input == L'+' || *input == L'-') negative = *input++ == L'-';
+            unsigned radix = conversion == L'o' ? 8u :
+                conversion == L'x' || conversion == L'X' ? 16u : 10u;
+            uint64_t value{};
+            size_t digits{};
+            while (*input) {
+                unsigned digit;
+                if (*input >= L'0' && *input <= L'9') digit = static_cast<unsigned>(*input - L'0');
+                else if (*input >= L'a' && *input <= L'f') digit = static_cast<unsigned>(*input - L'a' + 10);
+                else if (*input >= L'A' && *input <= L'F') digit = static_cast<unsigned>(*input - L'A' + 10);
+                else break;
+                if (digit >= radix || (width && digits >= width)) break;
+                if (value > (UINT64_MAX - digit) / radix) { g_nativeErrno = 34; return assigned; }
+                value = value * radix + digit;
+                ++digits;
+                ++input;
+            }
+            if (!digits) return assigned;
+            if (conversion == L'd' || conversion == L'i') {
+                if (longValue) *va_arg(arguments, int64_t*) = negative ? -static_cast<int64_t>(value) : static_cast<int64_t>(value);
+                else *va_arg(arguments, int*) = negative ? -static_cast<int>(value) : static_cast<int>(value);
+            } else if (longValue) *va_arg(arguments, uint64_t*) = value;
+            else *va_arg(arguments, unsigned int*) = static_cast<unsigned int>(value);
+            ++assigned;
+        } else if (conversion == L'a' || conversion == L'A' || conversion == L'e' ||
+                   conversion == L'E' || conversion == L'f' || conversion == L'F' ||
+                   conversion == L'g' || conversion == L'G') {
+            const wchar_t* cursor = input;
+            size_t consumed{};
+            bool negative{};
+            if (*cursor == L'+' || *cursor == L'-') {
+                negative = *cursor == L'-'; ++cursor; ++consumed;
+            }
+            double value{};
+            size_t digits{};
+            while (*cursor >= L'0' && *cursor <= L'9' && (!width || consumed < width)) {
+                value = value * 10.0 + static_cast<double>(*cursor - L'0');
+                ++cursor; ++consumed; ++digits;
+            }
+            int32_t decimalExponent{};
+            if (*cursor == L'.' && (!width || consumed < width)) {
+                ++cursor; ++consumed;
+                while (*cursor >= L'0' && *cursor <= L'9' && (!width || consumed < width)) {
+                    value = value * 10.0 + static_cast<double>(*cursor - L'0');
+                    --decimalExponent;
+                    ++cursor; ++consumed; ++digits;
+                }
+            }
+            int32_t explicitExponent{};
+            if ((*cursor == L'e' || *cursor == L'E') && (!width || consumed < width)) {
+                const wchar_t* exponentStart = cursor;
+                ++cursor; ++consumed;
+                bool exponentNegative{};
+                if (*cursor == L'+' || *cursor == L'-') {
+                    exponentNegative = *cursor == L'-'; ++cursor; ++consumed;
+                }
+                size_t exponentDigits{};
+                while (*cursor >= L'0' && *cursor <= L'9' &&
+                       (!width || consumed < width)) {
+                    if (explicitExponent < 10000)
+                        explicitExponent = explicitExponent * 10 + (*cursor - L'0');
+                    ++cursor; ++consumed; ++exponentDigits;
+                }
+                if (!exponentDigits) {
+                    cursor = exponentStart;
+                    while (consumed > static_cast<size_t>(cursor - input)) --consumed;
+                } else if (exponentNegative) explicitExponent = -explicitExponent;
+            }
+            if (!digits) return assigned;
+            const int32_t totalExponent = decimalExponent + explicitExponent;
+            if (totalExponent > 308) value = ucrtDoubleFromBits(0x7FF0000000000000ULL);
+            else if (totalExponent < -324) value = 0.0;
+            else if (totalExponent != 0)
+                value *= ucrtExp(static_cast<double>(totalExponent) * 2.302585092994045684);
+            if (negative) value = -value;
+            if (longValue) *va_arg(arguments, double*) = value;
+            else *va_arg(arguments, float*) = static_cast<float>(value);
+            input = cursor;
+            ++assigned;
+        } else {
+            g_nativeErrno = 22;
+            return assigned;
+        }
+    }
+    return assigned;
+}
+
+static uint64_t ucrtDoubleBits(double value) noexcept {
+    union { double value; uint64_t bits; } representation{value};
+    return representation.bits;
+}
+static double ucrtDoubleFromBits(uint64_t bits) noexcept {
+    union { double value; uint64_t bits; } representation{};
+    representation.bits = bits;
+    return representation.value;
+}
+static bool ucrtFinite(double value) noexcept {
+    return (ucrtDoubleBits(value) & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
+}
+static bool ucrtNan(double value) noexcept {
+    const uint64_t bits = ucrtDoubleBits(value);
+    return (bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
+           (bits & 0x000FFFFFFFFFFFFFULL) != 0;
+}
+static double ucrtAtan(double value) noexcept {
+    double result;
+    __asm__ __volatile__("fldl %1; fld1; fpatan; fstpl %0" : "=m"(result) : "m"(value) : "st");
+    return result;
+}
+static double ucrtAtan2(double y, double x) noexcept {
+    double result;
+    __asm__ __volatile__("fldl %1; fldl %2; fpatan; fstpl %0" : "=m"(result) : "m"(x), "m"(y) : "st");
+    return result;
+}
+static double ucrtSqrt(double value) noexcept {
+    double result;
+    __asm__ __volatile__("fldl %1; fsqrt; fstpl %0" : "=m"(result) : "m"(value) : "st");
+    return result;
+}
+static double ucrtSin(double value) noexcept {
+    double result;
+    __asm__ __volatile__("fldl %1; fsin; fstpl %0" : "=m"(result) : "m"(value) : "st");
+    return result;
+}
+static double ucrtCos(double value) noexcept {
+    double result;
+    __asm__ __volatile__("fldl %1; fcos; fstpl %0" : "=m"(result) : "m"(value) : "st");
+    return result;
+}
+static double ucrtExp(double value) noexcept {
+    if (value > 709.782712893384) return ucrtDoubleFromBits(0x7FF0000000000000ULL);
+    if (value < -745.133219101941) return 0.0;
+    double result;
+    __asm__ __volatile__(
+        "fldl %1; fldl2e; fmulp %%st, %%st(1); fld %%st(0); frndint; "
+        "fxch %%st(1); fsub %%st(1), %%st(0); f2xm1; fld1; faddp; "
+        "fscale; fstp %%st(1); fstpl %0"
+        : "=m"(result) : "m"(value) : "st");
+    return result;
+}
+static double ucrtLog(double value) noexcept {
+    double result;
+    __asm__ __volatile__("fldln2; fldl %1; fyl2x; fstpl %0" : "=m"(result) : "m"(value) : "st");
+    return result;
+}
+static double ucrtFmod(double x, double y) noexcept {
+    if (!ucrtFinite(x) || !ucrtFinite(y) || y == 0.0)
+        return ucrtDoubleFromBits(0x7FF8000000000000ULL);
+    double result;
+    __asm__ __volatile__(
+        "fldl %1; fldl %2; 1: fprem; fnstsw %%ax; test $0x0400, %%ah; "
+        "jnz 1b; fstp %%st(1); fstpl %0"
+        : "=m"(result) : "m"(y), "m"(x) : "ax", "st");
+    return result;
+}
+static double ucrtModf(double value, double* integral) noexcept {
+    const uint64_t bits = ucrtDoubleBits(value);
+    const unsigned exponent = static_cast<unsigned>((bits >> 52) & 0x7FF);
+    if (exponent == 0x7FF) {
+        if (integral) *integral = value;
+        return ucrtDoubleFromBits(bits & 0x8000000000000000ULL);
+    }
+    if (exponent < 1023) {
+        if (integral) *integral = ucrtDoubleFromBits(bits & 0x8000000000000000ULL);
+        return value;
+    }
+    if (exponent >= 1075) {
+        if (integral) *integral = value;
+        return ucrtDoubleFromBits(bits & 0x8000000000000000ULL);
+    }
+    const unsigned fractionalBits = 1075 - exponent;
+    const uint64_t mask = (uint64_t{1} << fractionalBits) - 1;
+    const double whole = ucrtDoubleFromBits(bits & ~mask);
+    if (integral) *integral = whole;
+    return value - whole;
+}
+static double ucrtPow(double x, double y) noexcept {
+    if (y == 0.0) return 1.0;
+    if (x == 0.0) return y > 0.0 ? x : ucrtDoubleFromBits(0x7FF0000000000000ULL);
+    if (x < 0.0) {
+        double integer{};
+        (void)ucrtModf(y, &integer);
+        if (integer != y) { g_nativeErrno = 33; return ucrtDoubleFromBits(0x7FF8000000000000ULL); }
+        const double magnitude = ucrtExp(y * ucrtLog(-x));
+        return ucrtFmod(y, 2.0) == 0.0 ? magnitude : -magnitude;
+    }
+    return ucrtExp(y * ucrtLog(x));
 }
 
 __declspec(dllexport) void* __cdecl __acrt_iob_func(unsigned index) {
@@ -644,19 +1431,46 @@ __declspec(dllexport) void __cdecl _unlock_file(void* stream) {
 }
 
 __declspec(dllexport) int __cdecl fflush(void* stream) {
-    if (!stream) return 0; // This runtime's streams are unbuffered.
-    return nativeStream(stream) ? 0 : -1;
+    if (!stream) {
+        for (auto& value : g_nativeStreams)
+            if (nativeFlushStream(value) != 0) return -1;
+        return 0;
+    }
+    auto* value = nativeStream(stream);
+    if (!value) { g_nativeErrno = 9; return -1; }
+    return nativeFlushStream(*value);
 }
 
 __declspec(dllexport) int __cdecl fputc(int character, void* stream) {
     auto* value = nativeStream(stream);
     if (!value) { g_nativeErrno = 9; return -1; }
     _lock_file(stream);
-    const char byte = static_cast<char>(character);
-    size_t written{};
-    nativeWriteBytes(*value, &byte, 1, written);
+    char bytes[2]{};
+    size_t count = 1;
+    bytes[0] = static_cast<char>(character);
+    if (bytes[0] == '\n' && value->mode == 0x4000) {
+        bytes[0] = '\r';
+        bytes[1] = '\n';
+        count = 2;
+    }
+    bool failed = false;
+    if (value->buffer && value->bufferSize) {
+        for (size_t i = 0; i < count; ++i) {
+            if (value->buffered == value->bufferSize && nativeFlushStream(*value) != 0) {
+                failed = true;
+                break;
+            }
+            value->buffer[value->buffered++] = bytes[i];
+        }
+        if (!failed && value->bufferingMode == 1 && bytes[count - 1] == '\n')
+            failed = nativeFlushStream(*value) != 0;
+    } else {
+        size_t written{};
+        nativeWriteBytes(*value, bytes, count, written);
+        failed = written != count;
+    }
     _unlock_file(stream);
-    return written == 1 ? static_cast<unsigned char>(byte) : -1;
+    return failed ? -1 : (unsigned char)character;
 }
 
 __declspec(dllexport) int __cdecl __stdio_common_vfprintf(
@@ -674,6 +1488,189 @@ __declspec(dllexport) int __cdecl __stdio_common_vfprintf(
     nativeWriteBytes(*value, output, static_cast<size_t>(length), written);
     _unlock_file(stream);
     return written == static_cast<size_t>(length) ? length : -1;
+}
+
+__declspec(dllexport) int __cdecl __stdio_common_vsprintf(
+    uint64_t, char* buffer, size_t capacity, const char* format, void*, va_list arguments) {
+    if (!buffer || !capacity || !format) { g_nativeErrno = 22; return -1; }
+    const int32_t result = formatNative(buffer, capacity - 1, format, arguments);
+    if (result < 0) { buffer[0] = '\0'; return -1; }
+    buffer[result] = '\0';
+    return result;
+}
+
+__declspec(dllexport) int __cdecl __stdio_common_vswprintf(
+    uint64_t, wchar_t* buffer, size_t capacity, const wchar_t* format, void*, va_list arguments) {
+    return formatWide(buffer, capacity, format, arguments);
+}
+
+__declspec(dllexport) int __cdecl __stdio_common_vswscanf(
+    uint64_t, const wchar_t* input, size_t, const wchar_t* format, void*, va_list arguments) {
+    return scanWide(input, format, arguments);
+}
+
+__declspec(dllexport) int __cdecl getc(void* stream) {
+    auto* value = nativeStream(stream);
+    if (!value || value->descriptor != 0) { g_nativeErrno = 9; return -1; }
+    const int32_t byte = nativeReadByte(*value);
+    if (byte < 0) return -1;
+    if (value->mode == 0x4000 && byte == '\r') {
+        const int32_t following = nativeReadByte(*value);
+        if (following == '\n') return '\n';
+        if (following >= 0) value->pendingByte = following;
+    }
+    return byte;
+}
+
+__declspec(dllexport) unsigned int __cdecl fgetwc(void* stream) {
+    auto* value = nativeStream(stream);
+    if (!value || value->descriptor != 0) { g_nativeErrno = 9; return UINT32_MAX; }
+    if (value->pendingWide != UINT32_MAX) {
+        const unsigned int pending = value->pendingWide;
+        value->pendingWide = UINT32_MAX;
+        return pending;
+    }
+    const int first = getc(stream);
+    if (first < 0) return UINT32_MAX;
+    uint32_t cp{}; unsigned remaining{};
+    if (first < 0x80) cp = static_cast<uint32_t>(first);
+    else if (first >= 0xC2 && first <= 0xDF) { cp = first & 0x1F; remaining = 1; }
+    else if (first >= 0xE0 && first <= 0xEF) { cp = first & 0x0F; remaining = 2; }
+    else if (first >= 0xF0 && first <= 0xF4) { cp = first & 7; remaining = 3; }
+    else { g_nativeErrno = 42; return UINT32_MAX; }
+    for (unsigned i = 0; i < remaining; ++i) {
+        const int next = getc(stream);
+        if (next < 0 || (next & 0xC0) != 0x80) { g_nativeErrno = 42; return UINT32_MAX; }
+        cp = (cp << 6) | static_cast<uint32_t>(next & 0x3F);
+    }
+    if ((remaining == 1 && cp < 0x80) || (remaining == 2 && cp < 0x800) ||
+        (remaining == 3 && cp < 0x10000) || cp > 0x10FFFF ||
+        (cp >= 0xD800 && cp <= 0xDFFF)) { g_nativeErrno = 42; return UINT32_MAX; }
+    if (cp <= 0xFFFF) return cp;
+    cp -= 0x10000;
+    value->pendingWide = 0xDC00 + (cp & 0x3FF);
+    return 0xD800 + (cp >> 10);
+}
+
+__declspec(dllexport) int __cdecl setvbuf(void* stream, char* buffer, int mode, size_t size) {
+    auto* value = nativeStream(stream);
+    if (!value) { g_nativeErrno = 9; return -1; }
+    if (mode < 0 || mode > 2 || (mode != 2 && size == 0) || size > UINT32_MAX) {
+        g_nativeErrno = 22; return -1;
+    }
+    if (fflush(stream) != 0) return -1;
+    if (value->ownsBuffer && value->buffer) g_nativeHeap.release(value->buffer);
+    value->buffer = buffer; value->bufferSize = mode == 2 ? 0 : size;
+    value->buffered = 0; value->ownsBuffer = false;
+    value->bufferingMode = static_cast<uint32_t>(mode);
+    if (mode != 2 && !buffer) {
+        value->buffer = static_cast<char*>(g_nativeHeap.allocate(size, alignof(char)));
+        if (!value->buffer) { value->bufferSize = 0; g_nativeErrno = 12; return -1; }
+        value->ownsBuffer = true;
+    }
+    return 0;
+}
+
+__declspec(dllexport) int32_t __cdecl _configure_narrow_argv(int32_t mode) {
+    if (mode < 0 || mode > 2) { g_nativeErrno = 22; return 22; }
+    if (g_nativeArgvInitialized) { g_nativeErrno = 22; return 22; }
+    g_nativeArgvMode = mode; return 0;
+}
+__declspec(dllexport) int32_t __cdecl _initialize_narrow_environment() {
+    return initializeNarrowEnvironment();
+}
+__declspec(dllexport) char** __cdecl _get_initial_narrow_environment() {
+    return initializeNarrowEnvironment() == 0 ? g_nativeEnvironment : nullptr;
+}
+__declspec(dllexport) int32_t __cdecl _crt_atexit(micant::ucrt::OnExitRoutine function) {
+    if (!function) { g_nativeErrno = 22; return 22; }
+    if (!g_nativeOnExitInitialized) {
+        if (micant::ucrt::initializeOnExitTable(&g_nativeOnExitTable) != 0) {
+            g_nativeErrno = 12; return 12;
+        }
+        g_nativeOnExitInitialized = true;
+    }
+    return micant::ucrt::registerOnExitFunction(
+        &g_nativeOnExitTable, function, g_nativeHeap);
+}
+__declspec(dllexport) int32_t __cdecl _seh_filter_exe(uint32_t, void*) {
+    return 1; // EXCEPTION_EXECUTE_HANDLER
+}
+__declspec(dllexport) int32_t __cdecl _set_app_type(int32_t type) {
+    const int previous = g_nativeApplicationType; g_nativeApplicationType = type; return previous;
+}
+__declspec(dllexport) int __cdecl _configthreadlocale(int mode) {
+    const int previous = g_nativeThreadLocaleMode;
+    if (mode == -1) return previous;
+    if (mode != 0 && mode != 1 && mode != 2) { g_nativeErrno = 22; return -1; }
+    g_nativeThreadLocaleMode = mode; return previous;
+}
+__declspec(dllexport) int __cdecl _set_new_mode(int mode) {
+    const int previous = g_nativeNewMode;
+    if (mode != 0 && mode != 1) { g_nativeErrno = 22; return -1; }
+    g_nativeNewMode = mode; return previous;
+}
+__declspec(dllexport) NativeInvalidParameterHandler __cdecl
+_set_invalid_parameter_handler(NativeInvalidParameterHandler handler) {
+    const auto previous = g_nativeInvalidParameterHandler;
+    g_nativeInvalidParameterHandler = handler; return previous;
+}
+__declspec(dllexport) void __cdecl __setusermatherr(int (__cdecl *handler)(void*)) {
+    g_nativeMathErrorHandler = handler;
+}
+__declspec(dllexport) int __cdecl _finite(double value) { return ucrtFinite(value) ? 1 : 0; }
+__declspec(dllexport) int __cdecl _isnan(double value) { return ucrtNan(value) ? 1 : 0; }
+__declspec(dllexport) double __cdecl atan(double value) { return ucrtAtan(value); }
+__declspec(dllexport) double __cdecl acos(double value) {
+    if (value < -1.0 || value > 1.0) { g_nativeErrno = 33; return ucrtDoubleFromBits(0x7FF8000000000000ULL); }
+    return ucrtAtan2(ucrtSqrt((1.0 - value) * (1.0 + value)), value);
+}
+__declspec(dllexport) double __cdecl asin(double value) {
+    if (value < -1.0 || value > 1.0) { g_nativeErrno = 33; return ucrtDoubleFromBits(0x7FF8000000000000ULL); }
+    return ucrtAtan2(value, ucrtSqrt((1.0 - value) * (1.0 + value)));
+}
+__declspec(dllexport) double __cdecl cbrt(double value) {
+    if (value == 0.0 || !ucrtFinite(value)) return value;
+    const double magnitude = ucrtExp(ucrtLog(value < 0.0 ? -value : value) / 3.0);
+    return value < 0.0 ? -magnitude : magnitude;
+}
+__declspec(dllexport) double __cdecl ceil(double value) {
+    if (!ucrtFinite(value) || value == 0.0) return value;
+    double integral{}; const double fraction = ucrtModf(value, &integral);
+    return fraction > 0.0 ? integral + 1.0 : integral;
+}
+__declspec(dllexport) double __cdecl cos(double value) { return ucrtCos(value); }
+__declspec(dllexport) double __cdecl cosh(double value) { return (ucrtExp(value) + ucrtExp(-value)) * 0.5; }
+__declspec(dllexport) double __cdecl exp(double value) { return ucrtExp(value); }
+__declspec(dllexport) double __cdecl fmod(double x, double y) { return ucrtFmod(x, y); }
+__declspec(dllexport) double __cdecl log(double value) {
+    if (value < 0.0) { g_nativeErrno = 33; return ucrtDoubleFromBits(0x7FF8000000000000ULL); }
+    if (value == 0.0) { g_nativeErrno = 34; return -ucrtDoubleFromBits(0x7FF0000000000000ULL); }
+    return ucrtLog(value);
+}
+__declspec(dllexport) double __cdecl log10(double value) { return ucrtLog(value) / 2.302585092994045684; }
+__declspec(dllexport) double __cdecl modf(double value, double* integral) { return ucrtModf(value, integral); }
+__declspec(dllexport) double __cdecl pow(double x, double y) { return ucrtPow(x, y); }
+__declspec(dllexport) double __cdecl sin(double value) { return ucrtSin(value); }
+__declspec(dllexport) double __cdecl sinh(double value) { return (ucrtExp(value) - ucrtExp(-value)) * 0.5; }
+__declspec(dllexport) double __cdecl sqrt(double value) {
+    if (value < 0.0) { g_nativeErrno = 33; return ucrtDoubleFromBits(0x7FF8000000000000ULL); }
+    return ucrtSqrt(value);
+}
+__declspec(dllexport) double __cdecl tan(double value) { return ucrtSin(value) / ucrtCos(value); }
+__declspec(dllexport) double __cdecl tanh(double value) {
+    const double positive = ucrtExp(value), negative = ucrtExp(-value);
+    return (positive - negative) / (positive + negative);
+}
+__declspec(dllexport) void __cdecl _cexit() {
+    if (g_nativeOnExitInitialized)
+        (void)micant::ucrt::executeOnExitTable(&g_nativeOnExitTable, g_nativeHeap);
+    (void)fflush(nullptr);
+}
+__declspec(dllexport) void __cdecl exit(int status) {
+    _cexit();
+    (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}), status);
+    __builtin_trap();
 }
 
 __declspec(dllexport) void __cdecl abort(void) {
@@ -836,9 +1833,10 @@ namespace micant::ucrt::winnt_ucrtbase_abi {
 namespace {
 thread_local int32_t g_ucrtErrno = 0;
 int32_t g_appType = 0;
-char g_dummyEnvKey[] = "PATH=C:\\Windows\\System32";
-char* g_dummyEnv[2] = { g_dummyEnvKey, nullptr };
+char* g_dummyEnv[1]{};
 char g_iobDummy[3][48]{};
+_onexit_table_t g_globalOnExitTable{};
+bool g_globalOnExitInitialized{};
 } // namespace
 
 int32_t Ucrt_initialize_onexit_table(_onexit_table_t* table) noexcept {
@@ -881,13 +1879,102 @@ int32_t Ucrt_execute_onexit_table(_onexit_table_t* table) noexcept {
 }
 
 int32_t Ucrt_crt_atexit(_onexit_t function) noexcept {
-    static _onexit_table_t s_globalTable{};
-    static bool s_inited = false;
-    if (!s_inited) {
-        Ucrt_initialize_onexit_table(&s_globalTable);
-        s_inited = true;
+    if (!g_globalOnExitInitialized) {
+        Ucrt_initialize_onexit_table(&g_globalOnExitTable);
+        g_globalOnExitInitialized = true;
     }
-    return Ucrt_register_onexit_function(&s_globalTable, function);
+    return Ucrt_register_onexit_function(&g_globalOnExitTable, function);
+}
+
+bool encodeUtf16ToUtf8(const char16_t* source, size_t units, char* output,
+                       size_t capacity, size_t& bytes) noexcept {
+    bytes = 0;
+    for (size_t i = 0; i < units; ++i) {
+        uint32_t cp = source[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (i + 1 >= units || source[i + 1] < 0xDC00 || source[i + 1] > 0xDFFF)
+                return false;
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (source[++i] - 0xDC00);
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            return false;
+        }
+        const size_t need = cp <= 0x7F ? 1 : cp <= 0x7FF ? 2 : cp <= 0xFFFF ? 3 : 4;
+        if (need > capacity - bytes) return false;
+        if (need == 1) output[bytes++] = static_cast<char>(cp);
+        else if (need == 2) {
+            output[bytes++] = static_cast<char>(0xC0 | (cp >> 6));
+            output[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (need == 3) {
+            output[bytes++] = static_cast<char>(0xE0 | (cp >> 12));
+            output[bytes++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            output[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            output[bytes++] = static_cast<char>(0xF0 | (cp >> 18));
+            output[bytes++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            output[bytes++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            output[bytes++] = static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+    return true;
+}
+
+static int32_t initializeNarrowEnvironment() noexcept {
+    if (g_nativeEnvironmentInitialized) return 0;
+    char16_t* source{};
+    if (!micant::shared::native_process::currentEnvironment(source)) {
+        g_ucrtErrno = 22;
+        return 22;
+    }
+    size_t units{};
+    size_t entries{};
+    bool ended{};
+    while (units < 32768) {
+        if (source[units] == 0 && units + 1 < 32768 && source[units + 1] == 0) {
+            units += 2;
+            ended = true;
+            break;
+        }
+        if (source[units] == 0) ++entries;
+        ++units;
+    }
+    if (!ended) { g_ucrtErrno = 7; return 7; }
+    if (units > SIZE_MAX / 3 || entries > (SIZE_MAX / sizeof(char*)) - 1) {
+        g_ucrtErrno = 12;
+        return 12;
+    }
+    auto** environment = static_cast<char**>(g_nativeHeap.allocate(
+        (entries + 1) * sizeof(char*), alignof(char*)));
+    auto* text = static_cast<char*>(g_nativeHeap.allocate(units * 3 + 1, alignof(char)));
+    if (!environment || !text) {
+        if (environment) g_nativeHeap.release(environment);
+        if (text) g_nativeHeap.release(text);
+        g_ucrtErrno = 12;
+        return 12;
+    }
+    size_t sourceOffset{};
+    size_t textOffset{};
+    size_t index{};
+    while (sourceOffset < units && source[sourceOffset]) {
+        size_t end = sourceOffset;
+        while (end < units && source[end]) ++end;
+        environment[index++] = text + textOffset;
+        size_t converted{};
+        if (!encodeUtf16ToUtf8(source + sourceOffset, end - sourceOffset,
+                         text + textOffset, units * 3 + 1 - textOffset,
+                         converted)) {
+            g_nativeHeap.release(environment);
+            g_nativeHeap.release(text);
+            g_ucrtErrno = 42;
+            return 42;
+        }
+        textOffset += converted;
+        text[textOffset++] = '\0';
+        sourceOffset = end + 1;
+    }
+    environment[index] = nullptr;
+    g_nativeEnvironment = environment;
+    g_nativeEnvironmentInitialized = true;
+    return 0;
 }
 
 int32_t Ucrt_seh_filter_exe(uint32_t /*xcptNum*/, void* /*pXcp*/) noexcept {
@@ -898,16 +1985,18 @@ void Ucrt_set_app_type(int32_t appType) noexcept {
     g_appType = appType;
 }
 
-int32_t Ucrt_configure_narrow_argv(int32_t /*mode*/) noexcept {
+int32_t Ucrt_configure_narrow_argv(int32_t mode) noexcept {
+    if (mode < 0 || mode > 2) { g_ucrtErrno = 22; return 22; }
+    g_nativeArgvMode = mode;
     return 0;
 }
 
 int32_t Ucrt_initialize_narrow_environment() noexcept {
-    return 0;
+    return initializeNarrowEnvironment();
 }
 
 char** Ucrt_get_initial_narrow_environment() noexcept {
-    return g_dummyEnv;
+    return g_nativeEnvironmentInitialized ? g_nativeEnvironment : nullptr;
 }
 
 void Ucrt_initterm(void (**first)(void), void (**last)(void)) noexcept {
@@ -968,9 +2057,20 @@ int32_t* Ucrt_errno() noexcept {
     return &g_ucrtErrno;
 }
 
-void Ucrt_exit(int32_t /*status*/) noexcept {}
-void Ucrt_quick_exit(int32_t /*status*/) noexcept {}
-void Ucrt_abort() noexcept {}
+void Ucrt_exit(int32_t status) noexcept {
+    if (g_globalOnExitInitialized) (void)Ucrt_execute_onexit_table(&g_globalOnExitTable);
+    (void)::fflush(nullptr);
+    (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}), status);
+    __builtin_trap();
+}
+void Ucrt_quick_exit(int32_t status) noexcept {
+    (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}), status);
+    __builtin_trap();
+}
+void Ucrt_abort() noexcept {
+    (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}), 3);
+    __builtin_trap();
+}
 
 double Ucrt_sin(double x) noexcept { return std::sin(x); }
 double Ucrt_cos(double x) noexcept { return std::cos(x); }
@@ -1066,6 +2166,192 @@ void WinNtUcrtbaseInitializeExecutiveSubsystem() noexcept {
 } // namespace micant::sys::internal
 #endif
 
+#if !defined(BUILD_SYSTEM32_UCRTBASE_DLL)
+extern "C" {
+
+__declspec(dllexport) int32_t __cdecl __stdio_common_vswprintf(
+    uint64_t, wchar_t* buffer, size_t capacity, const wchar_t* format,
+    void*, va_list arguments) {
+    if (!buffer || !capacity || !format) { g_nativeErrno = 22; return -1; }
+    const int result = std::vswprintf(buffer, capacity, format, arguments);
+    if (result < 0) g_nativeErrno = 34;
+    return result;
+}
+
+__declspec(dllexport) int32_t __cdecl __stdio_common_vswscanf(
+    uint64_t, const wchar_t* input, size_t, const wchar_t* format,
+    void*, va_list arguments) {
+    if (!input || !format) { g_nativeErrno = 22; return -1; }
+    return std::vswscanf(input, format, arguments);
+}
+
+__declspec(dllexport) int __cdecl getc(void* stream) {
+    auto* value = nativeStream(stream);
+    if (!value || value->descriptor != 0) { g_nativeErrno = 9; return -1; }
+    int32_t byte = nativeReadByte(*value);
+    if (byte < 0) return -1;
+    if (value->mode == 0x4000 && byte == '\r') {
+        const int32_t following = nativeReadByte(*value);
+        if (following == '\n') return '\n';
+        if (following >= 0) value->pendingByte = following;
+    }
+    return byte;
+}
+
+__declspec(dllexport) wint_t __cdecl fgetwc(void* stream) {
+    auto* value = nativeStream(stream);
+    if (!value || value->descriptor != 0) { g_nativeErrno = 9; return WEOF; }
+    if (value->pendingWide != UINT32_MAX) {
+        const wint_t pending = static_cast<wint_t>(value->pendingWide);
+        value->pendingWide = UINT32_MAX;
+        return pending;
+    }
+    const int first = getc(stream);
+    if (first < 0) return WEOF;
+    uint32_t codepoint{};
+    unsigned remaining{};
+    if (first <= 0x7F) codepoint = static_cast<uint32_t>(first);
+    else if (first >= 0xC2 && first <= 0xDF) { codepoint = first & 0x1F; remaining = 1; }
+    else if (first >= 0xE0 && first <= 0xEF) { codepoint = first & 0x0F; remaining = 2; }
+    else if (first >= 0xF0 && first <= 0xF4) { codepoint = first & 0x07; remaining = 3; }
+    else { g_nativeErrno = 42; return WEOF; }
+    for (unsigned i = 0; i < remaining; ++i) {
+        const int next = getc(stream);
+        if (next < 0 || (next & 0xC0) != 0x80) { g_nativeErrno = 42; return WEOF; }
+        codepoint = (codepoint << 6) | static_cast<uint32_t>(next & 0x3F);
+    }
+    if ((remaining == 1 && codepoint < 0x80) ||
+        (remaining == 2 && codepoint < 0x800) ||
+        (remaining == 3 && codepoint < 0x10000) || codepoint > 0x10FFFF ||
+        (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+        g_nativeErrno = 42;
+        return WEOF;
+    }
+    if (codepoint <= 0xFFFF) return static_cast<wint_t>(codepoint);
+    codepoint -= 0x10000;
+    value->pendingWide = 0xDC00 + (codepoint & 0x3FF);
+    return static_cast<wint_t>(0xD800 + (codepoint >> 10));
+}
+
+__declspec(dllexport) int __cdecl setvbuf(
+    void* stream, char* buffer, int mode, size_t size) {
+    auto* value = nativeStream(stream);
+    if (!value) { g_nativeErrno = 9; return -1; }
+    if (mode != 0 && mode != 1 && mode != 2) { g_nativeErrno = 22; return -1; }
+    if (mode != 2 && size == 0) { g_nativeErrno = 22; return -1; }
+    if (mode == 2) size = 0;
+    else if (size > UINT32_MAX) { g_nativeErrno = 22; return -1; }
+    if (fflush(stream) != 0) return -1;
+    if (value->ownsBuffer && value->buffer)
+        micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(value->buffer);
+    value->buffer = buffer;
+    value->bufferSize = size;
+    value->buffered = 0;
+    value->ownsBuffer = false;
+    value->bufferingMode = static_cast<uint32_t>(mode);
+    if (mode != 2 && !buffer) {
+        value->buffer = static_cast<char*>(
+            micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(size));
+        if (!value->buffer) { value->bufferSize = 0; return -1; }
+        value->ownsBuffer = true;
+    }
+    return 0;
+}
+
+__declspec(dllexport) void __cdecl _cexit() {
+    if (micant::ucrt::winnt_ucrtbase_abi::g_globalOnExitInitialized)
+        (void)micant::ucrt::winnt_ucrtbase_abi::Ucrt_execute_onexit_table(
+            &micant::ucrt::winnt_ucrtbase_abi::g_globalOnExitTable);
+    (void)::fflush(nullptr);
+}
+
+__declspec(dllexport) int32_t __cdecl _configure_narrow_argv(int32_t mode) {
+    return micant::ucrt::winnt_ucrtbase_abi::Ucrt_configure_narrow_argv(mode);
+}
+
+__declspec(dllexport) int32_t __cdecl _initialize_narrow_environment() {
+    return micant::ucrt::winnt_ucrtbase_abi::Ucrt_initialize_narrow_environment();
+}
+
+__declspec(dllexport) char** __cdecl _get_initial_narrow_environment() {
+    return micant::ucrt::winnt_ucrtbase_abi::Ucrt_get_initial_narrow_environment();
+}
+
+__declspec(dllexport) int32_t __cdecl _crt_atexit(
+    micant::ucrt::winnt_ucrtbase_abi::_onexit_t function) {
+    return micant::ucrt::winnt_ucrtbase_abi::Ucrt_crt_atexit(function);
+}
+
+__declspec(dllexport) int32_t __cdecl _seh_filter_exe(uint32_t code, void* context) {
+    return micant::ucrt::winnt_ucrtbase_abi::Ucrt_seh_filter_exe(code, context);
+}
+
+__declspec(dllexport) void __cdecl _set_app_type(int32_t type) {
+    micant::ucrt::winnt_ucrtbase_abi::Ucrt_set_app_type(type);
+}
+
+__declspec(dllexport) NativeInvalidParameterHandler __cdecl
+_set_invalid_parameter_handler(NativeInvalidParameterHandler handler) {
+    const auto previous = g_nativeInvalidParameterHandler;
+    g_nativeInvalidParameterHandler = handler;
+    return previous;
+}
+
+__declspec(dllexport) void __cdecl exit(int status) {
+    micant::ucrt::winnt_ucrtbase_abi::Ucrt_exit(status);
+}
+
+__declspec(dllexport) int __cdecl _configthreadlocale(int mode) {
+    const int previous = g_nativeThreadLocaleMode;
+    if (mode == -1) return previous;
+    if (mode == 1 || mode == 2) {
+        g_nativeThreadLocaleMode = mode;
+        return previous;
+    }
+    g_nativeErrno = 22;
+    return -1;
+}
+
+__declspec(dllexport) int __cdecl _set_new_mode(int mode) {
+    const int previous = g_nativeNewMode;
+    if (mode != 0 && mode != 1) { g_nativeErrno = 22; return -1; }
+    g_nativeNewMode = mode;
+    return previous;
+}
+
+__declspec(dllexport) void __cdecl __setusermatherr(
+    int (__cdecl *handler)(void*)) {
+    g_nativeMathErrorHandler = handler;
+}
+
+__declspec(dllexport) int __cdecl _finite(double value) {
+    return std::isfinite(value) ? 1 : 0;
+}
+__declspec(dllexport) int __cdecl _isnan(double value) {
+    return std::isnan(value) ? 1 : 0;
+}
+__declspec(dllexport) double __cdecl acos(double value) { return std::acos(value); }
+__declspec(dllexport) double __cdecl asin(double value) { return std::asin(value); }
+__declspec(dllexport) double __cdecl atan(double value) { return std::atan(value); }
+__declspec(dllexport) double __cdecl cbrt(double value) { return std::cbrt(value); }
+__declspec(dllexport) double __cdecl ceil(double value) { return std::ceil(value); }
+__declspec(dllexport) double __cdecl cos(double value) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_cos(value); }
+__declspec(dllexport) double __cdecl cosh(double value) { return std::cosh(value); }
+__declspec(dllexport) double __cdecl exp(double value) { return std::exp(value); }
+__declspec(dllexport) double __cdecl fmod(double left, double right) { return std::fmod(left, right); }
+__declspec(dllexport) double __cdecl log(double value) { return std::log(value); }
+__declspec(dllexport) double __cdecl log10(double value) { return std::log10(value); }
+__declspec(dllexport) double __cdecl modf(double value, double* integral) { return std::modf(value, integral); }
+__declspec(dllexport) double __cdecl pow(double left, double right) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_pow(left, right); }
+__declspec(dllexport) double __cdecl sin(double value) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_sin(value); }
+__declspec(dllexport) double __cdecl sinh(double value) { return std::sinh(value); }
+__declspec(dllexport) double __cdecl sqrt(double value) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_sqrt(value); }
+__declspec(dllexport) double __cdecl tan(double value) { return std::tan(value); }
+__declspec(dllexport) double __cdecl tanh(double value) { return std::tanh(value); }
+
+} // extern "C"
+#endif
+
 #if defined(BUILD_SYSTEM32_UCRTBASE_DLL)
 extern "C" {
 __declspec(dllexport) int32_t _initialize_onexit_table(micant::ucrt::winnt_ucrtbase_abi::_onexit_table_t* t) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_initialize_onexit_table(t); }
@@ -1086,6 +2372,7 @@ __declspec(dllexport) void ucrt_free(void* b) { micant::ucrt::winnt_ucrtbase_abi
 __declspec(dllexport) void* ucrt_acrt_iob_func(uint32_t i) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_acrt_iob_func(i); }
 __declspec(dllexport) int32_t ucrt_puts(const char* s) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_puts(s); }
 __declspec(dllexport) int32_t ucrt_stdio_common_vsprintf(uint64_t opt, char* b, size_t bc, const char* f, void* l, va_list va) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_stdio_common_vsprintf(opt, b, bc, f, l, va); }
+__declspec(dllexport) int32_t __cdecl __stdio_common_vsprintf(uint64_t opt, char* b, size_t bc, const char* f, void* l, va_list va) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_stdio_common_vsprintf(opt, b, bc, f, l, va); }
 __declspec(dllexport) int32_t* ucrt_errno() { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_errno(); }
 __declspec(dllexport) void ucrt_exit(int32_t s) { micant::ucrt::winnt_ucrtbase_abi::Ucrt_exit(s); }
 __declspec(dllexport) void ucrt_quick_exit(int32_t s) { micant::ucrt::winnt_ucrtbase_abi::Ucrt_quick_exit(s); }

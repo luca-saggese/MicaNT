@@ -12,7 +12,7 @@ This is not a GTK port, a new window manager, a second compositor, a general GTK
 
 ## 2. Repository baseline and evidence vocabulary
 
-The current worktree contains pre-existing edits in `include/micant/km/win32k/freestanding.hpp`, `include/micant/shared/{compositor_surface.h,win32k_client.h}`, `include/micant/um/subsystems/winuser/icon_handle_table.hpp`, `kernel/{init/kiinit.cpp,ps/winnt_user32_gdi32_imm32_system32_abi.cpp,ps/winnt_win32k_server.cpp,win32k/freestanding.cpp}`, `test/suites/icon_suite.hpp`, and `tools/compositor_app.cpp`. These are not part of this specification change and must be preserved. Their ownership/diff must be reviewed before integration edits.
+The current worktree contains pre-existing edits in `include/micant/km/win32k/freestanding.hpp`, `include/micant/shared/{compositor_surface.h,win32k_client.h}`, `include/micant/um/subsystems/winuser/icon_handle_table.hpp`, `kernel/{init/kiinit.cpp,ps/winnt_win32k_server.cpp,win32k/freestanding.cpp}`, `test/suites/icon_suite.hpp`, and `tools/compositor_app.cpp`. These are not part of this specification change and must be preserved. Their ownership/diff must be reviewed before integration edits.
 
 Use these terms precisely: **declared** means a type/API exists; **implemented** means it performs the documented operation with validation and cleanup; **built** means included in a successful target; **linked** means present in the production dependency image; **QEMU exercised** means the real Ring 3 path ran in QEMU with runtime evidence; **hardware verified** means tested on physical hardware. A hosted test or successful link does not imply QEMU or hardware verification.
 

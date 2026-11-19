@@ -1099,16 +1099,36 @@ bool messageMatches(const QueuedMessage& message,
     const uint64_t requestedWindow = request.args[0];
     const uint32_t minimum = static_cast<uint32_t>(request.args[1]);
     const uint32_t maximum = static_cast<uint32_t>(request.args[2]);
-    return message.ownerProcessId == ownerProcessId &&
-           (!requestedWindow || requestedWindow == message.hwnd) &&
-           (!minimum || message.message >= minimum) &&
-           (!maximum || message.message <= maximum);
+    if (message.ownerProcessId != ownerProcessId ||
+        (minimum && message.message < minimum) ||
+        (maximum && message.message > maximum)) return false;
+    if (!requestedWindow || requestedWindow == message.hwnd) return true;
+
+    // GetMessage/PeekMessage with a non-null HWND include messages addressed
+    // to that window and any descendant. Controls otherwise never receive
+    // mouse input when an application filters its loop to the top-level HWND.
+    uint64_t ancestor = message.hwnd;
+    for (size_t depth = 0; depth < 64 && ancestor; ++depth) {
+        const auto* window = findWindow(ancestor, ownerProcessId);
+        if (!window) return false;
+        ancestor = reinterpret_cast<uint64_t>(window->parent);
+        if (ancestor == requestedWindow) return true;
+    }
+    return false;
 }
 
 bool dequeue(MicaWin32kRequest& request, uint64_t ownerProcessId) noexcept {
     QueuedMessage* oldest{};
     for (auto& message : g_messages) {
-        if (!message.active || !messageMatches(message, request, ownerProcessId)) continue;
+        if (!message.active) continue;
+        // DestroyWindow invalidates the HWND immediately. Input already
+        // queued for that window must not be dispatched later to a recycled
+        // user-mode WndProc/session (notably a modal menu popup).
+        if (message.hwnd && !findWindow(message.hwnd, message.ownerProcessId)) {
+            message.active = false;
+            continue;
+        }
+        if (!messageMatches(message, request, ownerProcessId)) continue;
         // Queue slots are reused from the start of the fixed array. Slot order
         // therefore ceases to represent enqueue order after messages are
         // removed. Select by the monotonically incremented Win32 message time

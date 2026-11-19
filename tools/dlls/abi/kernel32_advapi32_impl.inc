@@ -2849,6 +2849,36 @@ __declspec(dllexport) void __stdcall GetStartupInfoW(StartupInfoW64* info) noexc
     auto* bytes = reinterpret_cast<uint8_t*>(info);
     for (size_t i = 0; i < sizeof(StartupInfoW64); ++i) bytes[i] = 0;
     info->cb = sizeof(StartupInfoW64);
+    if (const auto* parameters = CurrentProcessParameters()) {
+        info->stdInput = reinterpret_cast<void*>(parameters->StandardInput);
+        info->stdOutput = reinterpret_cast<void*>(parameters->StandardOutput);
+        info->stdError = reinterpret_cast<void*>(parameters->StandardError);
+    }
+}
+
+struct StartupInfoA64 {
+    uint32_t cb;
+    char* reserved, *desktop, *title;
+    uint32_t x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
+    uint16_t showWindow, reserved2Size;
+    uint8_t* reserved2;
+    void* stdInput, *stdOutput, *stdError;
+};
+__declspec(dllexport) void __stdcall GetStartupInfoA(StartupInfoA64* info) noexcept {
+    if (!info) { SetLastError(87); return; }
+    if (info->cb < sizeof(StartupInfoA64)) { SetLastError(87); return; }
+    auto* bytes = reinterpret_cast<uint8_t*>(info);
+    for (size_t i = 0; i < sizeof(StartupInfoA64); ++i) bytes[i] = 0;
+    info->cb = sizeof(StartupInfoA64);
+    if (const auto* parameters = CurrentProcessParameters()) {
+        info->stdInput = reinterpret_cast<void*>(parameters->StandardInput);
+        info->stdOutput = reinterpret_cast<void*>(parameters->StandardOutput);
+        info->stdError = reinterpret_cast<void*>(parameters->StandardError);
+    }
+}
+__declspec(dllexport) int32_t __stdcall IsDBCSLeadByte(uint8_t) noexcept {
+    // The subsystem's active ANSI code page is UTF-8; UTF-8 has no DBCS lead bytes.
+    return 0;
 }
 
 __declspec(dllexport) void* __stdcall GetProcAddress(void* module, const char* name) noexcept {

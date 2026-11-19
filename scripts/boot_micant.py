@@ -2492,7 +2492,16 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
                                 "down": down, "key": {"type": "qcode", "data": key},
                             },
                         }]})
+                # The PS/2 path can coalesce a long relative movement while
+                # the app is busy processing its final owner-draw command.
+                # Re-anchor before the title-bar click so the test exercises
+                # the caption close route instead of depending on stale host
+                # pointer state.
+                clamp_pointer_to_origin()
+                pointer_x = 0
+                pointer_y = 0
                 click_at(329, 22)  # close through the real caption hit target
+                screen("reactos-calc-03-after-caption-close.ppm")
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
                     serial = serial_path.read_text(encoding="utf-8", errors="replace")
@@ -2963,8 +2972,8 @@ def run_qemu(
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
-    if reactos_debug_image is not None and reactos_app != "calc":
-        raise RuntimeError("a diagnostic ReactOS image override is limited to Calc")
+    if reactos_debug_image is not None and reactos_app not in ("calc", "winver"):
+        raise RuntimeError("a diagnostic image override is limited to Calc or winver")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
@@ -3135,50 +3144,21 @@ def run_qemu(
         if reactos_apps_dir:
             source = reactos_apps_dir.expanduser().resolve()
             if not source.is_dir():
-                raise RuntimeError(f"ReactOS application bundle directory does not exist: {source}")
-            bundle_manifest_path = source / "reactos-apps-manifest.json"
-            if not bundle_manifest_path.is_file():
-                raise RuntimeError("ReactOS application bundle lacks its verified manifest")
-            bundle = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
-            trusted_bundle = json.loads(
-                (ROOT / "docs" / "REACTOS_BINARY_COMPATIBILITY_MANIFEST.json")
-                .read_text(encoding="utf-8")
-            )
-            if bundle != trusted_bundle:
-                raise RuntimeError("ReactOS application bundle manifest differs from the repository-verified manifest")
-            if (bundle.get("git_revision") != "8fe3cee05606aecd9442674e40038649f048d10d" or
-                    bundle.get("artifact_sha256") !=
-                    "42cbb141d7c66a2c2a273292232aec06d4d98c916d8471757fc22ab0beccf26e"):
-                raise RuntimeError("ReactOS application manifest is not the pinned official x64 build")
-            app_records = {record.get("name", "").lower(): record
-                           for record in bundle.get("apps", [])}
-            required = (
-                "winver.exe", "notepad.exe", "calc.exe", "winmine.exe", "sol.exe",
-                "mspaint.exe", "regedit.exe", "taskmgr.exe", "wordpad.exe", "cmd.exe",
-            )
+                raise RuntimeError(f"application bundle directory does not exist: {source}")
             target = esp / "ReactOSApps"
             target.mkdir()
-            for name in required:
-                app = source / name
-                record = app_records.get(name)
-                if not app.is_file() or not record:
-                    raise RuntimeError(f"ReactOS bundle is missing verified app {name}")
-                digest = hashlib.sha256(app.read_bytes()).hexdigest()
-                if digest != record.get("sha256") or record.get("machine") != "0x8664":
-                    raise RuntimeError(f"ReactOS bundle PE verification failed for {name}")
-                shutil.copy2(app, target / name)
-            if reactos_debug_image is not None:
+            if reactos_app in {"winver", "calc"} and reactos_debug_image is not None:
                 debug_image = reactos_debug_image.expanduser().resolve()
                 if not debug_image.is_file():
                     raise RuntimeError(
-                        f"diagnostic ReactOS Calc PE does not exist: {debug_image}")
+                        f"LuceOS {reactos_app} diagnostic image does not exist: {debug_image}")
                 debug_pe = inspect_pe(debug_image, "WINDOWS_GUI", allow_imports=True)
                 debug_hash = hashlib.sha256(debug_image.read_bytes()).hexdigest()
-                shutil.copyfile(debug_image, target / "calc.exe")
+                shutil.copyfile(debug_image, target / f"{reactos_app}.exe")
                 if diagnostics_dir is not None:
-                    (diagnostics_dir / "reactos-calc-debug-image.json").write_text(
+                    (diagnostics_dir / f"luceos-{reactos_app}-debug-image.json").write_text(
                         json.dumps({
-                            "role": "diagnostic-only; not compatibility evidence",
+                            "role": f"LuceOS {reactos_app} port diagnostic-only; not ReactOS binary compatibility evidence",
                             "source": str(debug_image),
                             "sha256": debug_hash,
                             "machine": "AMD64" if debug_pe["machine"] == 0x8664 else
@@ -3188,8 +3168,61 @@ def run_qemu(
                         encoding="utf-8",
                     )
                 print(
-                    "Staged diagnostic ReactOS Calc source build (not original compatibility PE): "
+                    f"Staged diagnostic LuceOS {reactos_app} port (not an original ReactOS compatibility PE): "
                     f"{debug_hash}", flush=True)
+            else:
+                bundle_manifest_path = source / "reactos-apps-manifest.json"
+                if not bundle_manifest_path.is_file():
+                    raise RuntimeError("ReactOS application bundle lacks its verified manifest")
+                bundle = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+                trusted_bundle = json.loads(
+                    (ROOT / "docs" / "REACTOS_BINARY_COMPATIBILITY_MANIFEST.json")
+                    .read_text(encoding="utf-8")
+                )
+                if bundle != trusted_bundle:
+                    raise RuntimeError("ReactOS application bundle manifest differs from the repository-verified manifest")
+                if (bundle.get("git_revision") != "8fe3cee05606aecd9442674e40038649f048d10d" or
+                        bundle.get("artifact_sha256") !=
+                        "42cbb141d7c66a2c2a273292232aec06d4d98c916d8471757fc22ab0beccf26e"):
+                    raise RuntimeError("ReactOS application manifest is not the pinned official x64 build")
+                app_records = {record.get("name", "").lower(): record
+                               for record in bundle.get("apps", [])}
+                required = (
+                    "winver.exe", "notepad.exe", "calc.exe", "winmine.exe", "sol.exe",
+                    "mspaint.exe", "regedit.exe", "taskmgr.exe", "wordpad.exe", "cmd.exe",
+                )
+                for name in required:
+                    app = source / name
+                    record = app_records.get(name)
+                    if not app.is_file() or not record:
+                        raise RuntimeError(f"ReactOS bundle is missing verified app {name}")
+                    digest = hashlib.sha256(app.read_bytes()).hexdigest()
+                    if digest != record.get("sha256") or record.get("machine") != "0x8664":
+                        raise RuntimeError(f"ReactOS bundle PE verification failed for {name}")
+                    shutil.copy2(app, target / name)
+                if reactos_debug_image is not None:
+                    debug_image = reactos_debug_image.expanduser().resolve()
+                    if not debug_image.is_file():
+                        raise RuntimeError(
+                            f"diagnostic ReactOS Calc PE does not exist: {debug_image}")
+                    debug_pe = inspect_pe(debug_image, "WINDOWS_GUI", allow_imports=True)
+                    debug_hash = hashlib.sha256(debug_image.read_bytes()).hexdigest()
+                    shutil.copyfile(debug_image, target / "calc.exe")
+                    if diagnostics_dir is not None:
+                        (diagnostics_dir / "reactos-calc-debug-image.json").write_text(
+                            json.dumps({
+                                "role": "diagnostic-only; not compatibility evidence",
+                                "source": str(debug_image),
+                                "sha256": debug_hash,
+                                "machine": "AMD64" if debug_pe["machine"] == 0x8664 else
+                                           f"0x{debug_pe['machine']:04x}",
+                                "subsystem": "WINDOWS_GUI",
+                            }, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                    print(
+                        "Staged diagnostic ReactOS Calc source build (not original compatibility PE): "
+                        f"{debug_hash}", flush=True)
         # The crash recovery service only opens this directory after restart;
         # the fatal path itself writes to the dedicated reserved partition.
         (esp / "Windows" / "Minidump").mkdir(parents=True)
@@ -4042,8 +4075,8 @@ def main() -> int:
 
     if bool(args.reactos_apps_dir) != bool(args.reactos_app):
         parser.error("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
-    if args.reactos_debug_image is not None and args.reactos_app != "calc":
-        parser.error("--reactos-debug-image is only valid with --reactos-app calc")
+    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver"):
+        parser.error("--reactos-debug-image is only valid with --reactos-app calc or winver")
 
     if args.ovmf_code is None:
         parser.error("--ovmf-code or MICANT_OVMF_CODE is required")

@@ -45,6 +45,7 @@ void* User32_BeginPaint(void*, WinNtPaintStruct*) noexcept;
 int32_t User32_EndPaint(void*, const WinNtPaintStruct*) noexcept;
 void drawAttachedWindowScrollBars(void*, void*) noexcept;
 intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+int32_t User32_DestroyWindow(void*) noexcept;
 void* User32_SetFocus(void*) noexcept;
 void* User32_GetFocus() noexcept;
 intptr_t User32_GetWindowLongPtrW(void*, int32_t) noexcept;
@@ -830,6 +831,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kDebugInputTrace);
 #endif
     MICA_WIN32K_PROC(MicaWin32kEnumWindows);
+    MICA_WIN32K_PROC(MicaWin32kEnumChildWindows);
     MICA_WIN32K_PROC(MicaWin32kGetDlgItem);
     MICA_WIN32K_PROC(MicaWin32kGetWindowTextW);
     MICA_WIN32K_PROC(MicaWin32kIsWindowVisible);
@@ -1688,20 +1690,26 @@ void* User32_CreateWindowExW(
     auto fn=Win32kProc<Fn>("MicaWin32kCreateWindowExW");
     void* hwnd = fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
     if (hwnd) {
-        if (isClassName(lpClassName, L"STATIC")) {
-            bool initialized{};
-            {
-                ButtonLockGuard guard(g_buttonLock);
-                for (const auto& entry : g_statics)
-                    if (entry.hwnd == hwnd) { initialized = true; break; }
-            }
-            if (!initialized) {
-                MicaWin32kCreateStruct create{lpParam, hInstance, hMenu,
-                    hWndParent, nHeight, nWidth, Y, X, static_cast<int32_t>(dwStyle),
-                    lpWindowName, lpClassName, dwExStyle};
-                (void)User32_StaticWndProc(hwnd, 0x0081u /* WM_NCCREATE */, 1,
-                    reinterpret_cast<intptr_t>(&create));
-            }
+        MicaWin32kCreateStruct create{lpParam, hInstance, hMenu,
+            hWndParent, nHeight, nWidth, Y, X, static_cast<int32_t>(dwStyle),
+            lpWindowName, lpClassName, dwExStyle};
+        // Win32 sends these synchronously after allocating the HWND. Built-in
+        // controls need WM_NCCREATE to allocate their per-window state; app
+        // windows need it to retain CREATESTRUCT data before WM_CREATE.
+        if (User32_SendMessageW(hwnd, 0x0081u /* WM_NCCREATE */, 1,
+                reinterpret_cast<intptr_t>(&create)) == 0) {
+            (void)User32_SendMessageW(hwnd, 0x0082u /* WM_NCDESTROY */, 0, 0);
+            using DestroyFn = int32_t (*)(void*);
+            if (const auto destroy = Win32kProc<DestroyFn>("MicaWin32kDestroyWindow"))
+                (void)destroy(hwnd);
+            setThreadLastError(8); // ERROR_NOT_ENOUGH_MEMORY / create rejected.
+            return nullptr;
+        }
+        if (User32_SendMessageW(hwnd, 0x0001u /* WM_CREATE */, 0,
+                reinterpret_cast<intptr_t>(&create)) == -1) {
+            (void)User32_DestroyWindow(hwnd);
+            setThreadLastError(8);
+            return nullptr;
         }
         constexpr uint32_t kWsCaption = 0x00C00000u;
         if (!hWndParent && (dwStyle & kWsCaption) == kWsCaption)
@@ -1759,10 +1767,16 @@ int32_t User32_DestroyWindow(void* hWnd) noexcept {
     // descendant-first order while every HWND is still valid, so controls
     // release their Ring 3 state before the tree is removed.
     DestroyChildList children{};
-    if (!User32_EnumChildWindows(hWnd,
-            reinterpret_cast<void*>(&collectDestroyChild),
-            reinterpret_cast<intptr_t>(&children)) || children.overflow)
+    const int32_t enumerated = User32_EnumChildWindows(hWnd,
+        reinterpret_cast<void*>(&collectDestroyChild),
+        reinterpret_cast<intptr_t>(&children));
+    if (!enumerated || children.overflow) {
+        if (const auto trace = Win32kProc<void (*)(uint32_t, uint32_t, uint32_t)>(
+                "MicaWin32kDebugInputTrace"))
+            trace(39, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hWnd)),
+                  children.overflow ? 2u : 1u);
         return 0;
+    }
     while (children.count) {
         void* child = children.windows[--children.count];
         (void)User32_SendMessageW(child, 0x0002u, 0, 0); // WM_DESTROY
@@ -1771,6 +1785,11 @@ int32_t User32_DestroyWindow(void* hWnd) noexcept {
     (void)User32_SendMessageW(hWnd, 0x0002u, 0, 0); // WM_DESTROY
     (void)User32_SendMessageW(hWnd, 0x0082u, 0, 0); // WM_NCDESTROY
     const int32_t destroyed = fn(hWnd);
+    if (!destroyed) {
+        if (const auto trace = Win32kProc<void (*)(uint32_t, uint32_t, uint32_t)>(
+                "MicaWin32kDebugInputTrace"))
+            trace(40, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hWnd)), 0);
+    }
     if (destroyed) {
         MicaUser32MenuWindowDestroyed(hWnd);
         {
@@ -2914,6 +2933,7 @@ intptr_t User32_ButtonWndProc(void* hwnd, uint32_t message,
         ButtonState initial{};
         initial.hwnd = hwnd;
         initial.parent = create->parent;
+        initial.id = reinterpret_cast<uintptr_t>(create->menu);
         initial.style = static_cast<uint32_t>(create->style);
         if (initial.style & kWsDisabled) initial.state |= kButtonDisabled;
         if ((initial.style & kBsTypeMask) == kBsDefPushButton)
@@ -5400,7 +5420,7 @@ struct PopupSession {
     void* owner{};
     void* sourceMenu{};
     MicaThemeHandle theme{};
-    uint32_t count{};
+    uint32_t count{}, flags{};
     int32_t selected{-1};
     int32_t pressed{-1};
     int32_t x{}, y{}, width{240}, height{};
@@ -5432,6 +5452,9 @@ using DialogProcedure = intptr_t (*)(void*, uint32_t, uintptr_t, intptr_t);
 constexpr int32_t kDwlpDlgProc = static_cast<int32_t>(sizeof(uintptr_t));
 constexpr int32_t kDialogWindowExtra = 30;
 void finishPopup(bool chose, int32_t index, bool postClose) noexcept;
+int32_t showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
+                  int32_t reserved, void* owner, bool fromMenuBar = false,
+                  bool nested = false) noexcept;
 
 extern "C" {
 __declspec(dllexport) int32_t SetMenu(void*, void*) noexcept;
@@ -5665,13 +5688,24 @@ constexpr uint32_t kWmPaint = 0x000Fu, kWmClose = 0x0010u;
 constexpr uint32_t kWmDestroy = 0x0002u, kWmNcDestroy = 0x0082u;
 constexpr uint32_t kWmMouseMove = 0x0200u, kWmLButtonDown = 0x0201u;
 constexpr uint32_t kWmLButtonUp = 0x0202u, kWmKeyDown = 0x0100u;
+constexpr uint32_t kWmRButtonDown = 0x0204u, kWmRButtonUp = 0x0205u;
 constexpr uint32_t kWmKillFocus = 0x0008u, kWmCommand = 0x0111u;
 constexpr uint32_t kWmCaptureChanged = 0x0215u;
+constexpr uint32_t kWmInitMenuPopup = 0x0117u, kWmUninitMenuPopup = 0x0125u;
+constexpr uint32_t kWmEnterMenuLoop = 0x0211u, kWmExitMenuLoop = 0x0212u;
 constexpr uint32_t kWmQuit = 0x0012u, kVkUp = 0x26u, kVkDown = 0x28u;
 constexpr uint32_t kVkEnter = 0x0Du, kVkEscape = 0x1Bu;
 constexpr uint32_t kWsPopup = 0x80000000u, kWsVisible = 0x10000000u;
 constexpr uint32_t kWsChild = 0x40000000u;
-constexpr uint32_t kTpmSupportedFlags = 0u;
+constexpr uint32_t kTpmRightButton = 0x0002u;
+constexpr uint32_t kTpmCenterAlign = 0x0004u, kTpmRightAlign = 0x0008u;
+constexpr uint32_t kTpmVCenterAlign = 0x0010u, kTpmBottomAlign = 0x0020u;
+constexpr uint32_t kTpmNoNotify = 0x0080u, kTpmReturnCommand = 0x0100u;
+constexpr uint32_t kTpmHorizontalAlignMask = kTpmCenterAlign | kTpmRightAlign;
+constexpr uint32_t kTpmVerticalAlignMask = kTpmVCenterAlign | kTpmBottomAlign;
+constexpr uint32_t kTpmSupportedFlags = kTpmRightButton | kTpmCenterAlign |
+    kTpmRightAlign | kTpmVCenterAlign | kTpmBottomAlign | kTpmNoNotify |
+    kTpmReturnCommand;
 constexpr int32_t kSwShow = 5;
 constexpr uint32_t kDtSingleLine = 0x20u, kDtVCenter = 0x4u;
 constexpr uint32_t kColorMenu = 4, kColorMenuText = 7;
@@ -5705,6 +5739,12 @@ int32_t selectable(int32_t index) noexcept {
     const auto& item = g_popup.items[index];
     if ((item.type & kSeparator) || (item.state & kDisabled)) return -1;
     return index;
+}
+void tracePopup(uint32_t stage, uint32_t value, uint32_t detail) noexcept {
+    using TraceFn = void (*)(uint32_t, uint32_t, uint32_t);
+    if (const auto trace = micant::um::winnt_user32_gdi32_imm32_abi::
+            Win32kProc<TraceFn>("MicaWin32kDebugInputTrace"))
+        trace(stage, value, detail);
 }
 int32_t nextSelectable(int32_t start, int32_t direction) noexcept {
     if (!g_popup.count) return -1;
@@ -5837,15 +5877,35 @@ intptr_t MenuPopupWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         if (next != g_popup.selected) { g_popup.selected = next; invalidatePopup(); }
         return 0;
     }
-    if (message == kWmLButtonDown) {
+    if (message == kWmLButtonDown || message == kWmRButtonDown) {
+        if (message == kWmRButtonDown && !(g_popup.flags & kTpmRightButton))
+            return 0;
         const int32_t y = static_cast<int16_t>((static_cast<uintptr_t>(lParam) >> 16) & 0xFFFFu);
         const int32_t row = (y - kBorder) / kRowHeight;
         g_popup.pressed = selectable(row);
+        tracePopup(30, message, (static_cast<uint32_t>(row) & 0xFFFFu) |
+            ((static_cast<uint32_t>(g_popup.pressed) & 0xFFFFu) << 16));
+        if (!g_popup.active || g_popup.hwnd != hwnd)
+            tracePopup(38, message, (g_popup.active ? 1u : 0u) |
+                (static_cast<uint32_t>(g_popup.count) << 1) |
+                (static_cast<uint32_t>(g_popup.hwnd == hwnd) << 31));
+        if (row >= 0 && static_cast<uint32_t>(row) < g_popup.count) {
+            tracePopup(35, static_cast<uint32_t>(row),
+                (g_popup.items[row].state & 0xFFFFu) |
+                ((g_popup.items[row].type & 0xFFFFu) << 16));
+            tracePopup(36, static_cast<uint32_t>(row),
+                (g_popup.active ? 1u : 0u) |
+                ((static_cast<uint32_t>(g_popup.count) & 0xFFFFu) << 16));
+        }
         return 0;
     }
-    if (message == kWmLButtonUp) {
+    if (message == kWmLButtonUp || message == kWmRButtonUp) {
+        if (message == kWmRButtonUp && !(g_popup.flags & kTpmRightButton))
+            return 0;
         const int32_t y = static_cast<int16_t>((static_cast<uintptr_t>(lParam) >> 16) & 0xFFFFu);
         const int32_t row = (y - kBorder) / kRowHeight;
+        tracePopup(31, message, (static_cast<uint32_t>(row) & 0xFFFFu) |
+            ((static_cast<uint32_t>(g_popup.pressed) & 0xFFFFu) << 16));
         if (g_popup.pressed >= 0 && row == g_popup.pressed)
             finishPopup(true, row);
         else g_popup.pressed = -1;
@@ -6069,8 +6129,8 @@ intptr_t MenuBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         if (item.submenu) {
             micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect rect{};
             if (GetWindowRect(hwnd, &rect))
-                (void)TrackPopupMenu(item.submenu, 0, rect.left + 2, rect.bottom, 0,
-                                     owner, nullptr);
+                (void)showPopup(item.submenu, 0, rect.left + 2, rect.bottom, 0,
+                                owner, true, false);
         } else if (item.id) {
             (void)SendMessageW(owner, kWmCommand, item.id, 0);
         }
@@ -6103,8 +6163,8 @@ intptr_t MenuBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
             if (item.submenu) {
                 micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect rect{};
                 if (GetWindowRect(hwnd, &rect))
-                    (void)TrackPopupMenu(item.submenu, 0, rect.left + 2, rect.bottom,
-                                         0, owner, nullptr);
+                    (void)showPopup(item.submenu, 0, rect.left + 2, rect.bottom,
+                                    0, owner, true, false);
             } else if (!(item.state & kDisabled) && item.id)
                 (void)SendMessageW(owner, kWmCommand, item.id, 0);
             return 0;
@@ -6200,24 +6260,29 @@ bool drawMenuBar(void* owner) noexcept {
     (void)InvalidateRect(barWindow, nullptr, 1);
     return UpdateWindow(barWindow) != 0;
 }
-bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
-               int32_t reserved, void* owner) noexcept {
-    if (flags != kTpmSupportedFlags || reserved != 0 || !owner || x < 0 || y < 0 ||
-        !registerPopupClass()) return false;
+int32_t showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
+                  int32_t reserved, void* owner, bool fromMenuBar,
+                  bool nested) noexcept {
+    const uint32_t horizontal = flags & kTpmHorizontalAlignMask;
+    const uint32_t vertical = flags & kTpmVerticalAlignMask;
+    if ((flags & ~kTpmSupportedFlags) || horizontal == kTpmHorizontalAlignMask ||
+        vertical == kTpmVerticalAlignMask || reserved != 0 || !owner ||
+        !registerPopupClass()) return 0;
     {
         LockGuard guard;
         auto* menu = findMenu(handle);
-        if (!menu || !menu->count || g_popup.active || menu->count > kItemCapacity) return false;
+        if (!menu || !menu->count || g_popup.active || menu->count > kItemCapacity) return 0;
         g_popup = {};
         g_popup.owner = owner;
         g_popup.sourceMenu = handle;
+        g_popup.flags = flags;
         g_popup.count = menu->count;
         g_popup.x = x;
         g_popup.y = y;
         g_popup.height = int32_t(menu->count) * kRowHeight + 2 * kBorder;
         for (uint32_t index = 0; index < menu->count; ++index) {
         if (menu->items[index].type & (kBitmap | kOwnerDraw))
-                return false;
+                return 0;
             g_popup.items[index] = menu->items[index];
         }
         g_popup.active = true;
@@ -6227,26 +6292,72 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
     if (micant::sys::invokeUserService(0x80,
             reinterpret_cast<uint64_t>(&display)) != 0) {
         LockGuard guard; g_popup = {};
-        return false;
+        return 0;
     }
     const int32_t screenWidth = static_cast<int32_t>(display.width);
     const int32_t screenHeight = static_cast<int32_t>(display.height);
     if (screenWidth <= 0 || screenHeight <= 0) {
         LockGuard guard; g_popup = {};
-        return false;
+        return 0;
     }
+    if (horizontal == kTpmCenterAlign) g_popup.x -= g_popup.width / 2;
+    else if (horizontal == kTpmRightAlign) g_popup.x -= g_popup.width;
+    if (vertical == kTpmVCenterAlign) g_popup.y -= g_popup.height / 2;
+    else if (vertical == kTpmBottomAlign) g_popup.y -= g_popup.height;
+    g_popup.x = std::max(0, g_popup.x);
+    g_popup.y = std::max(0, g_popup.y);
     if (g_popup.x + g_popup.width > screenWidth)
         g_popup.x = std::max(0, screenWidth - g_popup.width);
     if (g_popup.y + g_popup.height > screenHeight)
         g_popup.y = std::max(0, screenHeight - g_popup.height);
+    const auto notifyMenuClosed = [&]() noexcept {
+        (void)SendMessageW(owner, kWmUninitMenuPopup,
+                           reinterpret_cast<uintptr_t>(handle), 0);
+        if (!nested)
+            (void)SendMessageW(owner, kWmExitMenuLoop, fromMenuBar ? 0u : 1u, 0);
+    };
+    if (!nested)
+        (void)SendMessageW(owner, kWmEnterMenuLoop, fromMenuBar ? 0u : 1u, 0);
+    (void)SendMessageW(owner, kWmInitMenuPopup,
+                       reinterpret_cast<uintptr_t>(handle), 0);
+    // WM_ENTERMENULOOP/WM_INITMENUPOPUP let applications update states such
+    // as Edit > Paste. Refresh the copied view after those callbacks.
+    bool menuStillValid = false;
+    {
+        LockGuard guard;
+        auto* menu = findMenu(handle);
+        if (!menu || menu->count > kItemCapacity || !g_popup.active ||
+            g_popup.sourceMenu != handle) {
+            g_popup = {};
+        } else {
+            g_popup.count = menu->count;
+            g_popup.height = int32_t(menu->count) * kRowHeight + 2 * kBorder;
+            for (uint32_t index = 0; index < menu->count; ++index) {
+                if (menu->items[index].type & (kBitmap | kOwnerDraw)) {
+                    g_popup = {};
+                    break;
+                }
+                g_popup.items[index] = menu->items[index];
+            }
+            if (g_popup.active) {
+                g_popup.selected = nextSelectable(-1, 1);
+                menuStillValid = true;
+            }
+        }
+    }
+    if (!menuStillValid) {
+        notifyMenuClosed();
+        return 0;
+    }
     g_popup.theme = OpenThemeData(owner, L"MENU");
     auto* window = CreateWindowExW(0, kPopupClassName, L"", kWsPopup,
         g_popup.x, g_popup.y, g_popup.width, g_popup.height, nullptr, nullptr,
         nullptr, nullptr);
     if (!window) {
         if (g_popup.theme) (void)CloseThemeData(g_popup.theme);
-        LockGuard guard; g_popup = {};
-        return false;
+        { LockGuard guard; g_popup = {}; }
+        notifyMenuClosed();
+        return 0;
     }
     g_popup.hwnd = window;
     (void)ShowWindow(window, kSwShow);
@@ -6264,27 +6375,53 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
             modalCompleted = false;
             break;
         }
-        const bool outsideClick = message.message == kWmLButtonDown && message.hwnd != window;
+        if (message.message == kWmLButtonDown || message.message == kWmLButtonUp ||
+            message.message == kWmRButtonDown || message.message == kWmRButtonUp)
+            tracePopup(32, message.message,
+                (message.hwnd == window ? 1u : 0u) |
+                (static_cast<uint32_t>(message.hwnd == g_popup.hwnd) << 1));
+        const bool outsideClick =
+            (message.message == kWmLButtonDown ||
+             (message.message == kWmRButtonDown && (flags & kTpmRightButton))) &&
+            message.hwnd != window;
         (void)DispatchMessageW(&message);
         if (outsideClick) finishPopup(false, -1);
     }
     const bool chose = g_popup.chose;
     const int32_t selected = g_popup.selected;
+    tracePopup(33, static_cast<uint32_t>(selected), chose ? 1u : 0u);
     void* selectedSubmenu = chose && selected >= 0 &&
         static_cast<uint32_t>(selected) < g_popup.count
         ? g_popup.items[selected].submenu : nullptr;
     const uint32_t command = chose && selected >= 0
         ? g_popup.items[selected].id : 0u;
+    const bool returnCommand = (flags & kTpmReturnCommand) != 0;
+    const bool noNotify = (flags & kTpmNoNotify) != 0;
     const int32_t submenuX = g_popup.x + g_popup.width - 2;
     const int32_t submenuY = g_popup.y + kBorder + std::max(0, selected) * kRowHeight;
-    if (g_popup.hwnd) (void)DestroyWindow(g_popup.hwnd);
+    (void)SendMessageW(owner, kWmUninitMenuPopup,
+                       reinterpret_cast<uintptr_t>(handle), 0);
+    if (g_popup.hwnd) {
+        void* popupWindow = g_popup.hwnd;
+        const int32_t destroyed = DestroyWindow(popupWindow);
+        tracePopup(37, destroyed ? 1u : 0u,
+            micant::um::winnt_user32_gdi32_imm32_abi::
+                User32_IsWindow(popupWindow) ? 1u : 0u);
+    }
     if (g_popup.theme) (void)CloseThemeData(g_popup.theme);
     g_popup = {};
     if (selectedSubmenu)
-        return showPopup(selectedSubmenu, flags, submenuX, submenuY, 0, owner);
-    if (!chose || !command) return false;
-    (void)SendMessageW(owner, kWmCommand, command, 0);
-    return modalCompleted;
+        return showPopup(selectedSubmenu, flags, submenuX, submenuY, 0, owner,
+                         false, true);
+    if (!nested)
+        (void)SendMessageW(owner, kWmExitMenuLoop, fromMenuBar ? 0u : 1u, 0);
+    if (!chose || !command) return returnCommand ? 0 : (modalCompleted ? 1 : 0);
+    if (returnCommand) return static_cast<int32_t>(command);
+    if (!noNotify) {
+        tracePopup(34, command, fromMenuBar ? 1u : 0u);
+        (void)SendMessageW(owner, kWmCommand, command, 0);
+    }
+    return modalCompleted ? 1 : 0;
 }
 }
 
