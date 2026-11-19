@@ -269,6 +269,7 @@ KNOWN_DLLS = [
     ("tools/dlls/ntdll.cpp", "build/ntdll.dll", "ntdll.dll"),
     ("tools/dlls/abi/bcrypt_system32.cpp", "build/bcrypt.dll", "bcrypt.dll"),
     ("tools/dlls/abi/secur32_system32.cpp", "build/secur32.dll", "secur32.dll"),
+    ("tools/dlls/abi/wintrust_system32.cpp", "build/wintrust.dll", "wintrust.dll"),
     ("tools/dlls/ucrtbase.cpp", "build/ucrtbase.dll", "ucrtbase.dll"),
     ("tools/dlls/ws2_32.cpp", "build/ws2_32.dll", "ws2_32.dll"),
     ("tools/dlls/dnsapi.cpp", "build/dnsapi.dll", "dnsapi.dll"),
@@ -478,6 +479,8 @@ def run_local_build():
             runtime_dependencies.append("tools/dlls/abi/bcrypt_crypt32_secur32_wintrust_impl.inc")
         if name == "secur32.dll":
             runtime_dependencies.append("tools/dlls/abi/bcrypt_crypt32_secur32_wintrust_impl.inc")
+        if name == "wintrust.dll":
+            runtime_dependencies.append("tools/dlls/abi/bcrypt_crypt32_secur32_wintrust_impl.inc")
         if name == "kernel32.dll":
             runtime_dependencies.extend((
                 "tools/dlls/abi/kernel32_advapi32_impl.inc",
@@ -528,7 +531,7 @@ def run_local_build():
             "-nostdlib",
             "-Iinclude",
             "-Wl,--entry=" if name == "ntdll.dll" else
-                ("-Wl,-e,DllMainCRTStartup" if name in ("kernel32.dll", "bcrypt.dll", "secur32.dll") else "-Wl,-e,DllMain"),
+                ("-Wl,-e,DllMainCRTStartup" if name in ("kernel32.dll", "bcrypt.dll", "secur32.dll", "wintrust.dll") else "-Wl,-e,DllMain"),
             "-Wl,--subsystem,native",
             "-O2",
         ]
@@ -560,6 +563,12 @@ def run_local_build():
                           "-fno-stack-protector", "-mno-red-zone",
                           "-ffunction-sections", "-fdata-sections",
                           "-DBUILD_SYSTEM32_STANDALONE_DLL", "-DBUILD_SYSTEM32_SECUR32_DLL",
+                          "-Wl,--gc-sections", src, "-o", out_path))
+        elif name == "wintrust.dll":
+            c_cmd.extend(("-std=c++23", "-ffreestanding", "-fno-builtin",
+                          "-fno-exceptions", "-fno-rtti", "-fno-stack-protector",
+                          "-mno-red-zone", "-ffunction-sections", "-fdata-sections",
+                          "-DBUILD_SYSTEM32_STANDALONE_DLL", "-DBUILD_SYSTEM32_WINTRUST_DLL",
                           "-Wl,--gc-sections", src, "-o", out_path))
         elif name == "ucrtbase.dll":
             c_cmd.extend(("-Wl,--out-implib,build/libucrtbase.dll.a", src, "-o", out_path))

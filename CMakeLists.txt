@@ -1135,6 +1135,25 @@ if (MICANT_ENABLE_BAREMETAL)
         PREFIX "" OUTPUT_NAME "secur32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+
+    # Authenticode operations fail with trust-provider statuses until the
+    # signature policy and image hashing services are integrated.
+    add_library(wintrust_boot SHARED EXCLUDE_FROM_ALL tools/dlls/abi/wintrust_system32.cpp)
+    target_include_directories(wintrust_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(wintrust_boot PRIVATE
+        MICANT_NATIVE_USERMODE BUILD_SYSTEM32_STANDALONE_DLL BUILD_SYSTEM32_WINTRUST_DLL)
+    target_compile_options(wintrust_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-threadsafe-statics
+        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone
+        -ffunction-sections -fdata-sections -O2)
+    target_link_options(wintrust_boot PRIVATE
+        -nostdlib -fuse-ld=lld -Wl,--entry=DllMainCRTStartup
+        -Wl,--subsystem,native -Wl,--gc-sections -Wl,--exclude-all-symbols
+        -Wl,--dynamicbase)
+    set_target_properties(wintrust_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "wintrust"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
     target_link_libraries(compositor_boot PRIVATE ntdll_boot)
 
     # User32 owns per-process icon pixels and file-backed icon loading through
@@ -1445,7 +1464,7 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "msvcrt_probe" SUFFIX ".exe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot oleaut32_boot shlwapi_boot version_boot bcrypt_boot secur32_boot
+        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot oleaut32_boot shlwapi_boot version_boot bcrypt_boot secur32_boot wintrust_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)
@@ -1492,7 +1511,7 @@ if(WIN32 OR MICANT_ENABLE_BAREMETAL)
     foreach(_user_mode_variant IN ITEMS
         micant_win32k micant_user32 micant_gdi32 micant_imm32
         kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot uxtheme_boot luceglass_boot
-        imm32_boot version_boot bcrypt_boot secur32_boot explorer_boot mac_shell_boot explorer_runtime_boot
+        imm32_boot version_boot bcrypt_boot secur32_boot wintrust_boot explorer_boot mac_shell_boot explorer_runtime_boot
     )
         add_custom_target(micant_boundary_${_user_mode_variant}
             COMMAND "${Python3_EXECUTABLE}"

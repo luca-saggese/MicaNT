@@ -176,8 +176,8 @@ uint8_t Secur32_GetUserNameExW(uint32_t /*NameFormat*/, wchar_t* lpNameBuffer, u
 // --- 4. wintrust.dll implementations (4 functions) ---
 #if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_WINTRUST_DLL)
 int32_t Wintrust_WinVerifyTrust(void* /*hwnd*/, const void* pgActionID, void* pWVTData) noexcept {
-    if (!pgActionID || !pWVTData) return static_cast<int32_t>(0x800B0100U); // TRUST_E_NOSIGNATURE
-    return 0; // ERROR_SUCCESS (Verified)
+    if (!pgActionID || !pWVTData) return static_cast<int32_t>(0x800B0003U); // TRUST_E_SUBJECT_FORM_UNKNOWN
+    return static_cast<int32_t>(0x800B0001U); // TRUST_E_PROVIDER_UNKNOWN
 }
 
 int32_t Wintrust_WinVerifyTrustEx(void* hwnd, const void* pgActionID, void* pWinTrustData) noexcept {
@@ -185,11 +185,13 @@ int32_t Wintrust_WinVerifyTrustEx(void* hwnd, const void* pgActionID, void* pWin
 }
 
 void* Wintrust_WTHelperProvDataFromStateData(void* hStateData) noexcept {
-    return hStateData ? reinterpret_cast<void*>(0x0000000057545001ULL) : nullptr;
+    (void)hStateData;
+    return nullptr;
 }
 
 void* Wintrust_WTHelperGetProvSignerFromChain(void* pProvData, uint32_t /*idxSigner*/, int32_t /*fCounterSigner*/, uint32_t /*idxCounterSigner*/) noexcept {
-    return pProvData ? reinterpret_cast<void*>(0x0000000057545002ULL) : nullptr;
+    (void)pProvData;
+    return nullptr;
 }
 #endif
 
