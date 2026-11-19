@@ -160,10 +160,6 @@ set(NTOSKRNL_SUBSYSTEM_SOURCES
     kernel/io/prism_mfplat_mfreadwrite_cutscene_abi.cpp
     kernel/io/prism_dxcore_adapter_factory_com_abi.cpp
     kernel/io/prism_vulkan1_opengl32_16dll_seal.cpp
-    kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp
-    kernel/ps/winnt_ole32_dwmapi_winmm_system32_seal.cpp
-    kernel/ps/winnt_ntdll_ws2_iphlpapi_winhttp_abi.cpp
-    kernel/se/winnt_bcrypt_crypt32_secur32_wintrust_abi.cpp
     kernel/ps/winnt_shell32_dbghelp_version_40dll_iat_seal.cpp
     kernel/ps/winnt_ucrtbase_runtime_abi.cpp
     kernel/ps/winnt_vcruntime140_eh_abi.cpp
@@ -180,7 +176,9 @@ if(WIN32)
     # The window manager has one process-wide state owner. User32 resolves this
     # DLL at runtime so it never embeds a private copy of TitanWin32kSubsystem.
     add_library(micant_win32k SHARED kernel/ps/winnt_win32k_server.cpp)
-    target_compile_definitions(micant_win32k PRIVATE BUILD_SYSTEM32_STANDALONE_DLL MICANT_WIN32K_EXPORTS)
+    target_compile_definitions(micant_win32k PRIVATE
+        BUILD_SYSTEM32_STANDALONE_DLL MICANT_WIN32K_EXPORTS MICANT_NATIVE_USERMODE)
+    target_link_libraries(micant_win32k PRIVATE ntdll)
     if(MINGW)
         target_link_options(micant_win32k PRIVATE -static)
     endif()
@@ -190,13 +188,19 @@ if(WIN32)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/system32"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/system32")
 
-    foreach(_dll IN ITEMS user32 gdi32 imm32)
+    foreach(_dll IN ITEMS user32 gdi32 imm32 uxtheme)
         add_library(micant_${_dll} SHARED
             tools/dlls/${_dll}.cpp)
         add_dependencies(micant_${_dll} micant_win32k)
         target_compile_definitions(micant_${_dll} PRIVATE
-            BUILD_SYSTEM32_STANDALONE_DLL MICANT_WIN32K_IMPORTS)
-        target_link_libraries(micant_${_dll} PRIVATE micant_win32k)
+            BUILD_SYSTEM32_STANDALONE_DLL MICANT_WIN32K_IMPORTS MICANT_NATIVE_USERMODE)
+        if(_dll STREQUAL "user32")
+            target_compile_definitions(micant_${_dll} PRIVATE BUILD_SYSTEM32_USER32_DLL)
+        endif()
+        target_link_libraries(micant_${_dll} PRIVATE micant_win32k ntdll)
+        if(_dll STREQUAL "user32")
+            target_link_libraries(micant_${_dll} PRIVATE micant_gdi32 micant_uxtheme)
+        endif()
         if(MINGW)
             target_link_options(micant_${_dll} PRIVATE -static)
         endif()
@@ -210,6 +214,7 @@ endif()
 
 # Hosted initialization harness. This is not a freestanding kernel image.
 add_executable(micant_kernel
+    EXCLUDE_FROM_ALL
     kernel/init/kiinit.cpp
 )
 target_link_libraries(micant_kernel PRIVATE ntoskrnl_core)
@@ -222,31 +227,78 @@ target_compile_definitions(micant_kernel PRIVATE
     UNICODE
 )
 
-# Unit Test Runner
-add_executable(micant_tests
-    test/test_runner.cpp
+# Compile check for the per-DLL ABI translation units. Each wrapper selects
+# exactly one export family from its shared implementation fragment; keeping
+# these in an object target checks every DLL without combining their exports
+# into one image.
+add_library(micant_tests OBJECT
+    tools/dlls/abi/kernel32_system32.cpp
+    tools/dlls/abi/advapi32_system32.cpp
+    tools/dlls/abi/ntdll_system32.cpp
+    tools/dlls/abi/ws2_32_system32.cpp
+    tools/dlls/abi/iphlpapi_system32.cpp
+    tools/dlls/abi/winhttp_system32.cpp
+    tools/dlls/abi/ole32_system32.cpp
+    tools/dlls/abi/dwmapi_system32.cpp
+    tools/dlls/abi/winmm_system32.cpp
+    tools/dlls/abi/bcrypt_system32.cpp
+    tools/dlls/abi/crypt32_system32.cpp
+    tools/dlls/abi/secur32_system32.cpp
+    tools/dlls/abi/wintrust_system32.cpp
 )
-target_link_libraries(micant_tests PRIVATE ntoskrnl_core)
-
+target_include_directories(micant_tests PRIVATE "${CMAKE_SOURCE_DIR}/include")
 target_compile_definitions(micant_tests PRIVATE
-    _UNICODE
-    UNICODE
-)
+    MICANT_NATIVE_USERMODE BUILD_SYSTEM32_STANDALONE_DLL)
+set_source_files_properties(tools/dlls/abi/kernel32_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS "BUILD_SYSTEM32_KERNEL32_DLL;MICANT_FREESTANDING_KERNEL32")
+set_source_files_properties(tools/dlls/abi/advapi32_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_ADVAPI32_DLL)
+set_source_files_properties(tools/dlls/abi/ntdll_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_NTDLL_DLL)
+set_source_files_properties(tools/dlls/abi/ws2_32_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_WS2_32_DLL)
+set_source_files_properties(tools/dlls/abi/iphlpapi_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_IPHLPAPI_DLL)
+set_source_files_properties(tools/dlls/abi/winhttp_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_WINHTTP_DLL)
+set_source_files_properties(tools/dlls/abi/ole32_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_OLE32_DLL)
+set_source_files_properties(tools/dlls/abi/dwmapi_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_DWMAPI_DLL)
+set_source_files_properties(tools/dlls/abi/winmm_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_WINMM_DLL)
+set_source_files_properties(tools/dlls/abi/bcrypt_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_BCRYPT_DLL)
+set_source_files_properties(tools/dlls/abi/crypt32_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_CRYPT32_DLL)
+set_source_files_properties(tools/dlls/abi/secur32_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_SECUR32_DLL)
+set_source_files_properties(tools/dlls/abi/wintrust_system32.cpp PROPERTIES
+    COMPILE_DEFINITIONS BUILD_SYSTEM32_WINTRUST_DLL)
+
+# Historical broad host runner retained for targeted recovery; its removed
+# AFD/RIO fixture and host service bindings are outside the DLL ABI compile gate.
+add_executable(micant_legacy_tests EXCLUDE_FROM_ALL test/test_runner.cpp)
+target_link_libraries(micant_legacy_tests PRIVATE ntoskrnl_core)
+target_compile_definitions(micant_legacy_tests PRIVATE _UNICODE UNICODE)
 
 # Standalone Ring 3 Userland Test Application
 add_executable(userland_app
+    EXCLUDE_FROM_ALL
     test/userland_app.cpp
 )
 target_link_libraries(userland_app PRIVATE ntoskrnl_core)
 
 # Standalone Win32 Userland Test Application
 add_executable(win32_app
+    EXCLUDE_FROM_ALL
     test/win32_app.cpp
 )
 target_link_libraries(win32_app PRIVATE ntoskrnl_core)
 
 # Standalone PrismX 3D & Vulkan / Direct3D 12 Hardware Verification Harness
 add_executable(prismx_3d_cube_app
+    EXCLUDE_FROM_ALL
     test/prismx_3d_cube_app.cpp
 )
 target_link_libraries(prismx_3d_cube_app PRIVATE ntoskrnl_core)
@@ -1192,7 +1244,7 @@ if (MICANT_ENABLE_BAREMETAL)
     )
 
     add_library(kernel32_boot SHARED EXCLUDE_FROM_ALL
-        kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp
+        tools/dlls/abi/kernel32_system32.cpp
         tools/dlls/native_stack_probe.cpp
         kernel/ex/freestanding_memory.cpp
     )
@@ -1216,7 +1268,7 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
     add_library(advapi32_boot SHARED EXCLUDE_FROM_ALL
-        kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp)
+        tools/dlls/abi/advapi32_system32.cpp)
     target_include_directories(advapi32_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
     target_compile_definitions(advapi32_boot PRIVATE
         BUILD_SYSTEM32_STANDALONE_DLL BUILD_SYSTEM32_ADVAPI32_DLL MICANT_NATIVE_USERMODE)

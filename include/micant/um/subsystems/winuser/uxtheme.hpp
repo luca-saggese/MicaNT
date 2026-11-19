@@ -24,8 +24,8 @@ using HWND = void*;
 using HRESULT = int32_t;
 using DWORD = uint32_t;
 using BOOL = int32_t;
-inline constexpr BOOL FALSE = 0;
-inline constexpr BOOL TRUE = 1;
+using micant::FALSE;
+using micant::TRUE;
 }
 
 #if defined(MICANT_UXTHEME_GDI_IMPORTS)

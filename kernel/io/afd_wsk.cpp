@@ -3,6 +3,7 @@
 #include "micant/km/executive/io.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/km/executive/ps.hpp"
+#include "micant/km/executive/se.hpp"
 #include "micant/km/drivers/net/tcpip_kernel_api.hpp"
 #include "micant/shared/afd_socket_abi.hpp"
 
@@ -30,7 +31,9 @@ struct Endpoint {
 
 io::DriverObject g_AfdDriver{};
 io::DeviceObject g_AfdDevice{};
+#if defined(MICANT_FREESTANDING)
 se::FreestandingSecurityDescriptor g_NetworkConfigurationSecurity{};
+#endif
 bool g_Initialized{};
 
 bool makeDeadline(uint32_t milliseconds, uint64_t& deadline) noexcept {
@@ -309,6 +312,7 @@ NtStatus dispatch(io::DeviceObject*, io::Irp* irp) {
                 configuration.Flags != NetworkConfigurationSet || configuration.Reserved[0] || configuration.Reserved[1])
                 status = NtStatus::InvalidParameter;
             else {
+#if defined(MICANT_FREESTANDING)
                 auto* process = ke::KeGetCurrentProcess();
                 auto* currentThread = ke::KeGetCurrentThread();
                 se::FreestandingAccessToken* primaryToken{};
@@ -341,6 +345,9 @@ NtStatus dispatch(io::DeviceObject*, io::Irp* irp) {
                 }
                 if (impersonationTokenReference) se::SeDereferenceFreestandingToken(impersonationTokenReference);
                 if (primaryTokenReference) se::SeDereferenceFreestandingToken(primaryTokenReference);
+#else
+                status = NtStatus::NotSupported;
+#endif
             }
         }
     } else if (code == IoctlReceive || code == IoctlReceiveFrom) {
@@ -424,7 +431,9 @@ NtStatus dispatch(io::DeviceObject*, io::Irp* irp) {
 
 NtStatus IoAfdInitialize() noexcept {
     if (g_Initialized) return NtStatus::Success;
+#if defined(MICANT_FREESTANDING)
     se::SeInitializeNetworkConfigurationAcl(g_NetworkConfigurationSecurity);
+#endif
     g_AfdDriver.setDispatch(io::IRP_MJ_DEVICE_CONTROL, dispatch);
     g_AfdDevice.driverObject = &g_AfdDriver;
     g_AfdDevice.deviceType = io::DeviceType::Unknown;

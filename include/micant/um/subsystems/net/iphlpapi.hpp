@@ -26,6 +26,9 @@
 #include "micant/um/subsystems/winbase/kernel32.hpp"
 #include "micant/um/native/ldr.hpp"
 #include "micant/km/drivers/net/tcpip.hpp"
+#if !defined(MICANT_NATIVE_USERMODE)
+#include "micant/um/subsystems/winbase/version.hpp"
+#endif
 
 namespace micant::iphlpapi {
 

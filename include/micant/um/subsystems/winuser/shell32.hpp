@@ -1489,7 +1489,7 @@ inline HRESULT ShellOrdinal165(void* /*p1*/, void* /*p2*/, void* /*p3*/, void* /
 inline HRESULT SHDefExtractIconW(LPCWSTR /*pszIconFile*/, int /*iIndex*/, UINT /*uFlags*/, void** phiconLarge, void** phiconSmall, UINT /*nIconSize*/) noexcept {
     if (phiconLarge) *phiconLarge = nullptr;
     if (phiconSmall) *phiconSmall = nullptr;
-    return E_NOTIMPL;
+    return ole32::E_NOTIMPL;
 }
 
 inline int SHGetIconOverlayIndexW(LPCWSTR /*pszIconPath*/, int /*iIconIndex*/) noexcept {

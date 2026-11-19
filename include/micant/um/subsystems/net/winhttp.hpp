@@ -165,9 +165,9 @@ struct WinHttpRequest {
         bool emplace(const micant::shared::AnsiString& key, const micant::shared::AnsiString& value) {
             if (count == 64) return false;
             Header candidate{key, value};
-            if (!candidate.first.good() || !candidate.second.good()) return false;
+            if (!micant::shared::isContainerGood(candidate.first) || !micant::shared::isContainerGood(candidate.second)) return false;
             entries[count] = std::move(candidate);
-            if (!entries[count].first.good() || !entries[count].second.good()) return false;
+            if (!micant::shared::isContainerGood(entries[count].first) || !micant::shared::isContainerGood(entries[count].second)) return false;
             ++count;
             return true;
         }
@@ -456,7 +456,7 @@ inline HINTERNET WINAPI WinHttpOpen(
     if (pszProxyW) session.proxy = pszProxyW;
     if (pszProxyBypassW) session.proxyBypass = pszProxyBypassW;
     session.flags = dwFlags;
-    if (!session.userAgent.good() || !session.proxy.good() || !session.proxyBypass.good()) return nullptr;
+    if (!micant::shared::isContainerGood(session.userAgent) || !micant::shared::isContainerGood(session.proxy) || !micant::shared::isContainerGood(session.proxyBypass)) return nullptr;
 
     return WinHttpHandleTable::get().allocateSession(std::move(session));
 }
@@ -474,7 +474,7 @@ inline HINTERNET WINAPI WinHttpConnect(
     conn.sessionHandle = reinterpret_cast<uintptr_t>(hSession);
     conn.serverName = pswzServerName;
     conn.port = nServerPort;
-    if (!conn.serverName.good() || conn.serverName.empty() || conn.serverName.size() > 253) return nullptr;
+    if (!micant::shared::isContainerGood(conn.serverName) || conn.serverName.empty() || conn.serverName.size() > 253) return nullptr;
 
     return WinHttpHandleTable::get().allocateConnection(std::move(conn));
 }
@@ -515,7 +515,7 @@ inline HINTERNET WINAPI WinHttpOpenRequest(
         if (ch < 0x21 || ch > 0x7e) return nullptr;
     req.version = pwszVersion ? pwszVersion : L"HTTP/1.1";
     req.flags = dwFlags;
-    if (!req.verb.good() || !req.objectName.good() || !req.version.good()) return nullptr;
+    if (!micant::shared::isContainerGood(req.verb) || !micant::shared::isContainerGood(req.objectName) || !micant::shared::isContainerGood(req.version)) return nullptr;
 
     return WinHttpHandleTable::get().allocateRequest(std::move(req));
 }
@@ -538,7 +538,7 @@ inline BOOL WINAPI WinHttpAddRequestHeaders(
         if (ch > 0x7e) return 0;
         headerAscii.push_back(static_cast<char>(ch));
     }
-    if (!headerAscii.good()) return 0;
+    if (!micant::shared::isContainerGood(headerAscii)) return 0;
     if (headerAscii.find("\r\n\r\n") != micant::shared::AnsiString::npos || headerAscii.find('\0') != micant::shared::AnsiString::npos)
         return 0;
     size_t lineStart = 0;
@@ -693,7 +693,7 @@ inline BOOL WINAPI WinHttpSendRequest(
     rawReq.append("\r\n");
     if (!req->requestBody.empty())
         rawReq.append(reinterpret_cast<const char*>(req->requestBody.data()), req->requestBody.size());
-    if (!rawReq.good()) return 0;
+    if (!micant::shared::isContainerGood(rawReq)) return 0;
     micant::shared::AnsiString rawResponse;
 
     const bool secure = (req->flags & WINHTTP_FLAG_SECURE) != 0;
@@ -846,7 +846,7 @@ inline BOOL WINAPI WinHttpSendRequest(
                 if (!postHandshakeBytes.empty()) { closeSocket(); return 0; }
                 if (plaintext.size() > MaximumResponseBytes - rawResponse.size()) { closeSocket(); return 0; }
                 rawResponse.append(reinterpret_cast<const char*>(plaintext.data()), plaintext.size());
-                if (!rawResponse.good()) { closeSocket(); return 0; }
+                if (!micant::shared::isContainerGood(rawResponse)) { closeSocket(); return 0; }
             } else if (innerType == micant::shared::tls13::CONTENT_TYPE_ALERT) {
                 // TLS 1.3 ignores the legacy alert level; close_notify is
                 // identified by its description after record authentication.
@@ -928,7 +928,7 @@ inline BOOL WINAPI WinHttpSendRequest(
             if (count == 0) break;
             if (count < 0) { closeSocket(); return 0; }
             rawResponse.append(responseBuffer.data(), static_cast<size_t>(count));
-            if (!rawResponse.good()) { closeSocket(); return 0; }
+            if (!micant::shared::isContainerGood(rawResponse)) { closeSocket(); return 0; }
             const size_t headerEnd = rawResponse.find("\r\n\r\n");
             if (headerEnd != micant::shared::AnsiString::npos) {
                 if (headerEnd > MaximumResponseBytes - 4) { closeSocket(); return 0; }

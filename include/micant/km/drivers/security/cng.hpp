@@ -150,7 +150,7 @@ public:
                 std::span<const uint8_t> aad(inBuf.data() + 48, aadLen);
                 std::span<const uint8_t> pt(inBuf.data() + 48 + aadLen, inBuf.size() - (48 + aadLen));
 
-                std::vector<uint8_t> ct;
+                micant::shared::BoundedVector<uint8_t> ct;
                 std::array<uint8_t, 16> tag{};
                 if (!AesGcm::encrypt(key, nonce, aad, pt, ct, tag)) {
                     return STATUS_UNSUCCESSFUL;
@@ -176,12 +176,12 @@ public:
                 std::span<const uint8_t> aad(inBuf.data() + 64, aadLen);
                 std::span<const uint8_t> ct(inBuf.data() + 64 + aadLen, inBuf.size() - (64 + aadLen));
 
-                std::vector<uint8_t> pt;
+                micant::shared::BoundedVector<uint8_t> pt;
                 if (!AesGcm::decrypt(key, nonce, aad, ct, tag, pt)) {
                     return STATUS_AUTH_TAG_NEEDS_VERIFY;
                 }
 
-                outBuf = std::move(pt);
+                outBuf.assign(pt.begin(), pt.end());
                 decryptionsPerformed_++;
                 return STATUS_SUCCESS;
             }

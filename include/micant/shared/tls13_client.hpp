@@ -6,6 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#if !defined(MICANT_FREESTANDING)
+#include <vector>
+#endif
 #include "micant/shared/bounded_containers.hpp"
 #include <string_view>
 #include <utility>
@@ -454,6 +457,14 @@ public:
         state_ = Tls13State::Failed;
         return false;
     }
+#if !defined(MICANT_FREESTANDING)
+    bool processClientHello(std::span<const uint8_t> chData, std::vector<uint8_t>& serverHandshakeOut) {
+        micant::shared::BoundedVector<uint8_t> bounded;
+        const bool result = processClientHello(chData, bounded);
+        serverHandshakeOut.assign(bounded.begin(), bounded.end());
+        return result;
+    }
+#endif
 
     micant::shared::BoundedVector<uint8_t> encryptAppData(std::span<const uint8_t> plaintext) {
         if (state_ != Tls13State::Established) return {};
@@ -469,6 +480,14 @@ public:
         }
         return contentType == CONTENT_TYPE_APPLICATION_DATA;
     }
+#if !defined(MICANT_FREESTANDING)
+    bool decryptAppData(std::span<const uint8_t> wireRecord, std::vector<uint8_t>& plaintext) {
+        micant::shared::BoundedVector<uint8_t> bounded;
+        const bool result = decryptAppData(wireRecord, bounded);
+        plaintext.assign(bounded.begin(), bounded.end());
+        return result;
+    }
+#endif
 
     [[nodiscard]] bool isEstablished() const noexcept { return state_ == Tls13State::Established; }
     [[nodiscard]] uint16_t getNegotiatedCipherSuite() const noexcept { return CIPHER_SUITE_AES_128_GCM_SHA256; }
@@ -608,7 +627,8 @@ public:
         transcript_.assign(chMsg.begin(), chMsg.end());
         serverName_.assign(serverName);
         if (!chBody.good() || !exts.good() || !chMsg.good() || !wireRecord.good() ||
-            !lastClientHello_.good() || !transcript_.good() || !serverName_.good())
+            !lastClientHello_.good() || !transcript_.good() ||
+            !micant::shared::isContainerGood(serverName_))
             return failClientHello();
         clientHelloCreated_ = true;
         return wireRecord;

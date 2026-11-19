@@ -106,7 +106,7 @@ public:
                 << "   IPv4 Address. . . . . . . . . . . : " << net.getLocalIp().toString() << "\r\n"
                 << "   Subnet Mask . . . . . . . . . . . : " << net.getSubnetMask().toString() << "\r\n"
                 << "   Default Gateway . . . . . . . . . : " << net.getGateway().toString() << "\r\n"
-                << "   DHCP Server . . . . . . . . . . . : " << (dhcpCli.getServerIdentifier().isZero() ? std::string{} : dhcpCli.getServerIdentifier().toString()) << "\r\n"
+                << "   DHCP Server . . . . . . . . . . . : " << (dhcpCli.getServerIdentifier().isZero() ? std::string{} : tcpip::Ipv4Address(dhcpCli.getServerIdentifier().addr).toString()) << "\r\n"
                 << "   DNS Servers . . . . . . . . . . . : " << net.getDnsServer().toString() << "\r\n";
         } else {
             oss << "Ethernet adapter " << adapterName << ":\r\n\r\n"

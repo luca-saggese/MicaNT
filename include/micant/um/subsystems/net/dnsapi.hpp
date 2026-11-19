@@ -34,6 +34,7 @@
 #include "micant/um/native/ldr.hpp"
 #include "micant/um/servers/scm.hpp"
 #include "micant/um/subsystems/winbase/kernel32.hpp"
+#include "micant/um/subsystems/winbase/version.hpp"
 #endif
 #include "micant/um/subsystems/net/ws2_32.hpp"
 

@@ -1625,15 +1625,19 @@ void verifyAutomaticThemeBoundary() noexcept {
     g.systemTime.minute = 59;
     updateAutomaticTheme();
     const uint32_t lightPixel = g.taskbarPixels[pixelIndex];
+    const uint32_t expectedLightPixel = overColor(
+        activeShellPalette().selected, rgb(18, 20, 27), 205);
     const bool lightSelected = themeProfileEquals(g.themeProfile, "WhiteSur/Light") &&
-        lightPixel == activeShellPalette().selected;
+        lightPixel == expectedLightPixel;
 
     g.systemTime.hour = 18;
     g.systemTime.minute = 0;
     updateAutomaticTheme();
     const uint32_t darkPixel = g.taskbarPixels[pixelIndex];
+    const uint32_t expectedDarkPixel = overColor(
+        activeShellPalette().selected, rgb(18, 20, 27), 205);
     const bool darkSelected = themeProfileEquals(g.themeProfile, "WhiteSur/Dark") &&
-        darkPixel == activeShellPalette().selected && darkPixel != lightPixel;
+        darkPixel == expectedDarkPixel && darkPixel != lightPixel;
 
     loadActiveVisualTheme(previousProfile);
     const bool restored = themeProfileEquals(g.themeProfile, previousProfile) &&

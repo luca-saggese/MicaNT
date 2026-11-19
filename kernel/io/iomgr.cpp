@@ -18,6 +18,7 @@ namespace micant::sys {
 
 static std::unordered_map<Handle, std::shared_ptr<fs::FileObject>> g_KernelFiles;
 static std::unordered_map<Handle, std::shared_ptr<io::IoCompletionPort>> g_KernelIocpPorts;
+static std::unordered_map<Handle, size_t> g_DirectoryQueryIndices;
 static Handle g_NextFileHandle = 0x200;
 
 static void CloseAfdHandleAfterCaptureFailure(Handle handle) noexcept {
@@ -47,6 +48,7 @@ namespace internal {
 
 bool IoCloseKernelHandle(Handle h) {
     bool hadIocp = g_KernelIocpPorts.erase(h) > 0;
+    g_DirectoryQueryIndices.erase(h);
     std::shared_ptr<fs::FileObject> file;
     auto it = g_KernelFiles.find(h);
     if (it != g_KernelFiles.end()) { file = std::move(it->second); g_KernelFiles.erase(it); }
@@ -594,8 +596,8 @@ NtStatus NtQueryDirectoryFile(
     void* fileInformation,
     uint32_t length,
     FileInformationClass fileInformationClass,
-    bool /*returnSingleEntry*/,
-    UnicodeString* /*fileName*/,
+    bool returnSingleEntry,
+    UnicodeString* fileName,
     bool restartScan
 ) {
     if (!fileInformation) return NtStatus::InvalidParameter;
@@ -605,33 +607,62 @@ NtStatus NtQueryDirectoryFile(
     if (!fileObj) return NtStatus::InvalidHandle;
     if (!fileObj->isDirectory()) return NtStatus::NotADirectory;
     if (fileName && fileName->length != 0) return NtStatus::NotSupported;
-    if (restartScan) fileObj->setDirectoryQueryIndex(0);
+    if (restartScan) g_DirectoryQueryIndices[fileHandle] = 0;
 
     if (length < offsetof(FileBothDirInformation, fileName) + sizeof(wchar_t)) {
         if (ioStatusBlock) { ioStatusBlock->status = NtStatus::InfoLengthMismatch; ioStatusBlock->information = 0; }
         return NtStatus::InfoLengthMismatch;
     }
 
-    FileBothDirInformation entry{};
-    const size_t index = fileObj->directoryQueryIndex();
-    const NtStatus status = fileObj->queryDirectory(index, &entry);
-    if (!NT_SUCCESS(status)) {
-        if (ioStatusBlock) { ioStatusBlock->status = status; ioStatusBlock->information = 0; }
-        return status;
+    std::vector<fs::VirtualFileSystem::DirectoryEntry> entries;
+    const NtStatus queryStatus = fs::VirtualFileSystem::get().queryDirectory(
+        fileObj->getFileName(), entries);
+    if (!NT_SUCCESS(queryStatus)) {
+        if (ioStatusBlock) { ioStatusBlock->status = queryStatus; ioStatusBlock->information = 0; }
+        return queryStatus;
     }
-    const size_t nameBytes = std::min<size_t>(entry.fileNameLength, sizeof(entry.fileName) - sizeof(wchar_t));
-    const size_t recordBytes = offsetof(FileBothDirInformation, fileName) + nameBytes + sizeof(wchar_t);
-    if (recordBytes > length) {
-        if (ioStatusBlock) { ioStatusBlock->status = NtStatus::InfoLengthMismatch; ioStatusBlock->information = 0; }
-        return NtStatus::InfoLengthMismatch;
+
+    size_t& index = g_DirectoryQueryIndices[fileHandle];
+    if (index >= entries.size()) {
+        if (ioStatusBlock) { ioStatusBlock->status = NtStatus::NoMoreFiles; ioStatusBlock->information = 0; }
+        return NtStatus::NoMoreFiles;
     }
-    auto* output = static_cast<FileBothDirInformation*>(fileInformation);
-    *output = entry;
-    output->nextEntryOffset = 0;
-    output->fileNameLength = static_cast<uint32_t>(nameBytes);
-    output->fileName[nameBytes / sizeof(wchar_t)] = L'\0';
-    fileObj->setDirectoryQueryIndex(index + 1);
-    if (ioStatusBlock) { ioStatusBlock->status = NtStatus::Success; ioStatusBlock->information = recordBytes; }
+
+    auto* output = static_cast<uint8_t*>(fileInformation);
+    size_t bytesWritten = 0;
+    FileBothDirInformation* previous = nullptr;
+    do {
+        const auto& source = entries[index];
+        FileBothDirInformation entry{};
+        const size_t maxNameBytes = sizeof(entry.fileName) - sizeof(wchar_t);
+        const size_t nameBytes = std::min(source.name.size() * sizeof(wchar_t), maxNameBytes);
+        const size_t recordBytes = offsetof(FileBothDirInformation, fileName) + nameBytes + sizeof(wchar_t);
+        if (recordBytes > length - bytesWritten) {
+            if (bytesWritten == 0) {
+                if (ioStatusBlock) { ioStatusBlock->status = NtStatus::InfoLengthMismatch; ioStatusBlock->information = 0; }
+                return NtStatus::InfoLengthMismatch;
+            }
+            break;
+        }
+
+        entry.fileIndex = static_cast<uint32_t>(index);
+        entry.endOfFile.quadPart = static_cast<int64_t>(source.size);
+        entry.allocationSize.quadPart = static_cast<int64_t>(source.size);
+        entry.fileAttributes = source.attributes;
+        entry.fileNameLength = static_cast<uint32_t>(nameBytes);
+        std::memcpy(entry.fileName, source.name.data(), nameBytes);
+        auto* current = reinterpret_cast<FileBothDirInformation*>(output + bytesWritten);
+        std::memcpy(current, &entry, recordBytes);
+        current->fileName[nameBytes / sizeof(wchar_t)] = L'\0';
+        if (previous) previous->nextEntryOffset = static_cast<uint32_t>(
+            reinterpret_cast<uint8_t*>(current) - reinterpret_cast<uint8_t*>(previous));
+        previous = current;
+        bytesWritten += recordBytes;
+        ++index;
+    } while (!returnSingleEntry && index < entries.size());
+
+    if (previous) previous->nextEntryOffset = 0;
+    if (ioStatusBlock) { ioStatusBlock->status = NtStatus::Success; ioStatusBlock->information = bytesWritten; }
     return NtStatus::Success;
 }
 

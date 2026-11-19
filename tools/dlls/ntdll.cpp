@@ -2234,4 +2234,283 @@ __declspec(dllexport) void LdrInitializeThunk() noexcept {}
 __declspec(dllexport) void LdrLoadDll() noexcept {}
 __declspec(dllexport) void LdrGetProcedureAddress() noexcept {}
 
+// The following native calls are exported with their documented AMD64
+// signatures, but the corresponding kernel services are not in the current
+// LuceOS syscall contract. They fail explicitly with STATUS_NOT_SUPPORTED;
+// callers must not interpret them as successful operations.
+using IoApcRoutine = void (__stdcall *)(void*, micant::IoStatusBlock*, uint32_t);
+struct KeyValueEntry;
+
+/** @brief Opens an existing file using the NtCreateFile OPEN disposition.
+ *  FileHandle and IoStatusBlock are outputs; the returned handle is owned by
+ *  the caller and must be closed with NtClose. Failure is reported as NTSTATUS.
+ *  This forwards to the canonical file-open syscall rather than creating a
+ *  second file manager.
+ */
+__declspec(dllexport) int32_t NtOpenFile(
+    void** fileHandle, uint32_t desiredAccess, micant::ObjectAttributes* objectAttributes,
+    micant::IoStatusBlock* ioStatusBlock, uint32_t shareAccess, uint32_t openOptions) noexcept {
+    if (!fileHandle || !objectAttributes || !ioStatusBlock)
+        return micant::STATUS_INVALID_PARAMETER;
+    *fileHandle = nullptr;
+    return NtCreateFile(fileHandle, desiredAccess, objectAttributes, ioStatusBlock, nullptr,
+                        0, shareAccess, 1 /* FILE_OPEN */, openOptions, nullptr, 0);
+}
+
+/** @brief Registers change notifications for a registry key hierarchy.
+ *  The event/APC and IoStatusBlock describe asynchronous completion. Registry
+ *  notification delivery is not provided by this profile, so the operation
+ *  returns STATUS_NOT_SUPPORTED and never claims registration succeeded.
+ */
+__declspec(dllexport) int32_t NtNotifyChangeMultipleKeys(
+    void*, uint32_t, micant::ObjectAttributes*, void*, IoApcRoutine, void*,
+    micant::IoStatusBlock* ioStatusBlock, uint32_t, uint8_t, void*, uint32_t, uint8_t) noexcept {
+    if (ioStatusBlock) { ioStatusBlock->status = static_cast<micant::NtStatus>(micant::STATUS_NOT_SUPPORTED); ioStatusBlock->information = 0; }
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Queries multiple values from a registry key into a caller buffer.
+ *  ValueEntries describes the requested values; BufferLength is in/out and
+ *  RequiredBufferLength is output. Registry multi-value queries are currently
+ *  unsupported and return STATUS_NOT_SUPPORTED without modifying lengths.
+ */
+__declspec(dllexport) int32_t NtQueryMultipleValueKey(
+    void*, KeyValueEntry*, uint32_t, void*, uint32_t*, uint32_t*) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Changes registry-key metadata selected by KeySetInformationClass.
+ *  KeySetInformation is an input structure whose layout depends on the class.
+ *  Key mutation through this native service is not implemented; returns
+ *  STATUS_NOT_SUPPORTED and performs no registry change.
+ */
+__declspec(dllexport) int32_t NtSetInformationKey(void*, uint32_t, const void*, uint32_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Renames a registry key to NewName.
+ *  NewName is an input counted Unicode string and KeyHandle is an open key
+ *  handle. Registry rename is unavailable in this profile, so the operation
+ *  returns STATUS_NOT_SUPPORTED and does not change the key namespace.
+ */
+__declspec(dllexport) int32_t NtRenameKey(void*, const micant::UnicodeString*) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Applies a filesystem control code to a file handle.
+ *  Buffer directions and completion are defined by IoControlCode. The current
+ *  profile exposes only the device-control path; this FSCTL entry point reports
+ *  STATUS_NOT_SUPPORTED rather than treating a control request as successful.
+ */
+__declspec(dllexport) int32_t NtFsControlFile(
+    void*, void*, IoApcRoutine, void*, micant::IoStatusBlock* ioStatusBlock,
+    uint32_t, const void*, uint32_t, void*, uint32_t) noexcept {
+    if (ioStatusBlock) { ioStatusBlock->status = static_cast<micant::NtStatus>(micant::STATUS_NOT_SUPPORTED); ioStatusBlock->information = 0; }
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Sets thread information selected by ThreadInformationClass.
+ *  ThreadInformation is an input structure with class-specific size. No thread
+ *  mutation is performed by this export yet; it returns STATUS_NOT_SUPPORTED.
+ */
+__declspec(dllexport) int32_t NtSetInformationThread(void*, uint32_t, const void*, uint32_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Queries object metadata such as type, name, or handle counts.
+ *  ObjectInformation is an output buffer and ReturnLength is optional output.
+ *  The Object Manager query classes beyond current support fail explicitly with
+ *  STATUS_NOT_SUPPORTED.
+ */
+__declspec(dllexport) int32_t NtQueryObject(
+    void*, uint32_t, void*, uint32_t, uint32_t*) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Returns timer-resolution bounds and the current resolution.
+ *  All three pointers are outputs in 100-nanosecond units. Timer-resolution
+ *  management is not exposed by this profile, so this export returns
+ *  STATUS_NOT_SUPPORTED and leaves outputs untouched.
+ */
+__declspec(dllexport) int32_t NtQueryTimerResolution(uint32_t*, uint32_t*, uint32_t*) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Queries volume metadata for a file or volume handle.
+ *  IoStatusBlock receives operation completion and FileInformation is an output
+ *  structure selected by FsInformationClass. Volume-information classes are not
+ *  supported through the current native interface and return STATUS_NOT_SUPPORTED.
+ */
+__declspec(dllexport) int32_t NtQueryVolumeInformationFile(
+    void*, micant::IoStatusBlock* ioStatusBlock, void*, uint32_t, uint32_t) noexcept {
+    if (ioStatusBlock) { ioStatusBlock->status = static_cast<micant::NtStatus>(micant::STATUS_NOT_SUPPORTED); ioStatusBlock->information = 0; }
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Sets process information selected by ProcessInformationClass.
+ *  ProcessInformation is an input structure whose layout depends on the class.
+ *  This export does not mutate process state and returns STATUS_NOT_SUPPORTED.
+ */
+__declspec(dllexport) int32_t NtSetInformationProcess(void*, uint32_t, const void*, uint32_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Sets filesystem volume metadata for a file or volume handle.
+ *  FileInformation is class-specific input. Volume mutation is not supported
+ *  through this native interface; the call returns STATUS_NOT_SUPPORTED.
+ */
+__declspec(dllexport) int32_t NtSetVolumeInformationFile(
+    void*, micant::IoStatusBlock* ioStatusBlock, const void*, uint32_t, uint32_t) noexcept {
+    if (ioStatusBlock) { ioStatusBlock->status = static_cast<micant::NtStatus>(micant::STATUS_NOT_SUPPORTED); ioStatusBlock->information = 0; }
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Maps an NTSTATUS value to the corresponding Win32 error number.
+ *  The mapping is intentionally limited to status values used by the current
+ *  LuceOS profile; unknown failures map to ERROR_MR_MID_NOT_FOUND (317).
+ */
+__declspec(dllexport) uint32_t RtlNtStatusToDosError(int32_t status) noexcept {
+    switch (status) {
+    case 0: return 0; // ERROR_SUCCESS
+    case static_cast<int32_t>(0xC000000Du): return 87; // ERROR_INVALID_PARAMETER
+    case static_cast<int32_t>(0xC0000022u): return 5;  // ERROR_ACCESS_DENIED
+    case static_cast<int32_t>(0xC0000008u): return 6;  // ERROR_INVALID_HANDLE
+    case static_cast<int32_t>(0xC0000017u): return 14; // ERROR_OUTOFMEMORY
+    case static_cast<int32_t>(0xC0000034u): return 2;  // ERROR_FILE_NOT_FOUND
+    case static_cast<int32_t>(0xC000003Au): return 3;  // ERROR_PATH_NOT_FOUND
+    case static_cast<int32_t>(0xC00000BBu): return 50; // ERROR_NOT_SUPPORTED
+    default: return 317;
+    }
+}
+
+/** @brief Initializes a counted ANSI string without allocating storage.
+ *  DestinationString receives a byte count and a borrowed pointer to the
+ *  nul-terminated SourceString; the caller retains ownership of SourceString.
+ */
+__declspec(dllexport) void RtlInitString(micant::AnsiString* destinationString,
+                                          const char* sourceString) noexcept {
+    if (!destinationString) return;
+    size_t length = 0;
+    if (sourceString) while (sourceString[length] != '\0' && length < 0xffffu) ++length;
+    destinationString->length = static_cast<uint16_t>(length);
+    destinationString->maximumLength = sourceString && length < 0xffffu
+        ? static_cast<uint16_t>(length + 1) : static_cast<uint16_t>(length);
+    destinationString->buffer = sourceString;
+}
+
+/** @brief Initializes a counted ANSI string; this is the RtlInitString alias.
+ *  SourceString is borrowed, not copied, and must outlive DestinationString.
+ */
+__declspec(dllexport) void RtlInitAnsiString(micant::AnsiString* destinationString,
+                                              const char* sourceString) noexcept {
+    RtlInitString(destinationString, sourceString);
+}
+
+/** @brief Initializes an ANSI string and reports source lengths beyond USHORT.
+ *  DestinationString is output. STATUS_NAME_TOO_LONG is returned when the
+ *  nul-terminated source cannot be represented in counted-string fields.
+ */
+__declspec(dllexport) int32_t RtlInitStringEx(micant::AnsiString* destinationString,
+                                               const char* sourceString) noexcept {
+    if (!destinationString) return micant::STATUS_INVALID_PARAMETER;
+    size_t length = 0;
+    if (sourceString) while (sourceString[length] != '\0' && length <= 0xffffu) ++length;
+    if (length > 0xffffu || (sourceString && length == 0xffffu)) {
+        destinationString->length = 0;
+        destinationString->maximumLength = 0;
+        destinationString->buffer = nullptr;
+        return static_cast<int32_t>(0xC0000106u); // STATUS_NAME_TOO_LONG
+    }
+    RtlInitString(destinationString, sourceString);
+    return micant::STATUS_SUCCESS;
+}
+
+/** @brief Extended ANSI-string initializer with the same checked contract.
+ *  The source remains caller-owned; no allocation occurs.
+ */
+__declspec(dllexport) int32_t RtlInitAnsiStringEx(micant::AnsiString* destinationString,
+                                                   const char* sourceString) noexcept {
+    return RtlInitStringEx(destinationString, sourceString);
+}
+
+/** @brief Converts an ANSI string into a caller-supplied Unicode string.
+ *  Destination ownership and code-page conversion are not implemented; the
+ *  call returns STATUS_NOT_SUPPORTED without allocating or modifying output.
+ */
+__declspec(dllexport) int32_t RtlAnsiStringToUnicodeString(
+    micant::UnicodeString*, const micant::AnsiString*, uint8_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Converts a Unicode string into an ANSI string.
+ *  Code-page conversion and allocated destination ownership are not available;
+ *  the function returns STATUS_NOT_SUPPORTED without changing output.
+ */
+__declspec(dllexport) int32_t RtlUnicodeStringToAnsiString(
+    micant::AnsiString*, const micant::UnicodeString*, uint8_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Converts a Unicode string into an OEM string.
+ *  OEM code-page conversion is unsupported; no destination allocation occurs
+ *  and STATUS_NOT_SUPPORTED is returned.
+ */
+__declspec(dllexport) int32_t RtlUnicodeStringToOemString(
+    micant::AnsiString*, const micant::UnicodeString*, uint8_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Reports the ANSI byte count for a Unicode character buffer.
+ *  Code-page sizing is unsupported in this profile; output is left untouched
+ *  and STATUS_NOT_SUPPORTED is returned.
+ */
+__declspec(dllexport) int32_t RtlUnicodeToMultiByteSize(uint32_t*, const wchar_t*, uint32_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Parses a nul-terminated integer string using a requested base.
+ *  The Windows parser has compatibility edge cases for prefixes, whitespace,
+ *  and overflow. Those semantics are not yet validated against the selected
+ *  Windows baseline, so this export returns STATUS_NOT_SUPPORTED without
+ *  modifying Value.
+ */
+__declspec(dllexport) int32_t RtlCharToInteger(const char*, uint32_t, uint32_t*) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Converts a local-time value to UTC system time.
+ *  The timezone database conversion service is not present. SystemTime is not
+ *  modified and STATUS_NOT_SUPPORTED is returned.
+ */
+__declspec(dllexport) int32_t RtlLocalTimeToSystemTime(const micant::LargeInteger*,
+                                                       micant::LargeInteger*) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
+/** @brief Converts a Windows 100-nanosecond timestamp to Unix seconds.
+ *  Time is input and ElapsedSeconds is output. Times before the Unix epoch or
+ *  values outside the ULONG range return FALSE; success returns TRUE.
+ */
+__declspec(dllexport) uint8_t RtlTimeToSecondsSince1970(
+    const micant::LargeInteger* time, uint32_t* elapsedSeconds) noexcept {
+    if (!time || !elapsedSeconds) return 0;
+    constexpr int64_t unixEpoch = 116444736000000000LL;
+    constexpr uint64_t ticksPerSecond = 10000000ULL;
+    if (time->quadPart < unixEpoch) return 0;
+    const uint64_t seconds = static_cast<uint64_t>(time->quadPart - unixEpoch) / ticksPerSecond;
+    if (seconds > UINT32_MAX) return 0;
+    *elapsedSeconds = static_cast<uint32_t>(seconds);
+    return 1;
+}
+
+/** @brief Converts a SID to a Unicode string.
+ *  SID validation and the required security-runtime allocation policy are not
+ *  implemented; the function returns STATUS_NOT_SUPPORTED without touching
+ *  the output string.
+ */
+__declspec(dllexport) int32_t RtlConvertSidToUnicodeString(
+    micant::UnicodeString*, const void*, uint8_t) noexcept {
+    return micant::STATUS_NOT_SUPPORTED;
+}
+
 } // extern "C"

@@ -69,8 +69,12 @@ NtStatus NtQuerySystemInformation(
 
     TASKMGR_QUERY_TRACE("[MicaNT TaskmgrTest] NtQuerySystemInformation class accepted\r\n");
     ScopedQueryInterruptDisable interruptGuard;
+#if defined(MICANT_FREESTANDING)
     auto* current = ke::KeGetCurrentThread();
     const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
+#else
+    const auto mode = mm::KernelMode;
+#endif
     NtStatus status = NtStatus::Success;
 
     if (systemInformationClass == systemMemoryAccountingClass) {

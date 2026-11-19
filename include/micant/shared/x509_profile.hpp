@@ -38,7 +38,8 @@ inline constexpr uint8_t TAG_CONTEXT_0          = 0xA0;
 inline constexpr uint8_t TAG_CONTEXT_3          = 0xA3;
 
 // Helper to write ASN.1 length
-inline void writeLength(micant::shared::BoundedVector<uint8_t>& buf, size_t len) {
+template <typename Buffer>
+inline void writeLength(Buffer& buf, size_t len) {
     if (len < 128) {
         buf.push_back(static_cast<uint8_t>(len));
     } else if (len <= 0xFF) {
@@ -58,17 +59,20 @@ inline void writeLength(micant::shared::BoundedVector<uint8_t>& buf, size_t len)
 }
 
 // Helper to write TLV element
-inline void writeTLV(micant::shared::BoundedVector<uint8_t>& buf, uint8_t tag, std::span<const uint8_t> value) {
+template <typename Buffer>
+inline void writeTLV(Buffer& buf, uint8_t tag, std::span<const uint8_t> value) {
     buf.push_back(tag);
     writeLength(buf, value.size());
     buf.insert(buf.end(), value.begin(), value.end());
 }
 
-inline void writeSequence(micant::shared::BoundedVector<uint8_t>& buf, std::span<const uint8_t> inner) {
+template <typename Buffer>
+inline void writeSequence(Buffer& buf, std::span<const uint8_t> inner) {
     writeTLV(buf, TAG_SEQUENCE, inner);
 }
 
-inline void writeInteger(micant::shared::BoundedVector<uint8_t>& buf, uint64_t val) {
+template <typename Buffer>
+inline void writeInteger(Buffer& buf, uint64_t val) {
     micant::shared::BoundedVector<uint8_t> bytes;
     for (int i = 7; i >= 0; --i) {
         uint8_t b = static_cast<uint8_t>((val >> (i * 8)) & 0xFF);
@@ -80,15 +84,18 @@ inline void writeInteger(micant::shared::BoundedVector<uint8_t>& buf, uint64_t v
     writeTLV(buf, TAG_INTEGER, bytes);
 }
 
-inline void writeOid(micant::shared::BoundedVector<uint8_t>& buf, std::span<const uint8_t> oidBytes) {
+template <typename Buffer>
+inline void writeOid(Buffer& buf, std::span<const uint8_t> oidBytes) {
     writeTLV(buf, TAG_OID, oidBytes);
 }
 
-inline void writePrintableString(micant::shared::BoundedVector<uint8_t>& buf, std::string_view str) {
+template <typename Buffer>
+inline void writePrintableString(Buffer& buf, std::string_view str) {
     writeTLV(buf, TAG_PRINTABLE_STRING, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(str.data()), str.size()));
 }
 
-inline void writeUtcTime(micant::shared::BoundedVector<uint8_t>& buf, std::string_view utcStr) {
+template <typename Buffer>
+inline void writeUtcTime(Buffer& buf, std::string_view utcStr) {
     writeTLV(buf, TAG_UTC_TIME, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(utcStr.data()), utcStr.size()));
 }
 
@@ -428,7 +435,7 @@ struct X509Certificate {
                             if (name.value.empty()) return false;
                             for (uint8_t ch : name.value) if (ch == 0 || ch >= 0x80) return false;
                             micant::shared::AnsiString dns(reinterpret_cast<const char*>(name.value.data()), name.value.size());
-                            if (!dns.good()) return false;
+                            if (!micant::shared::isContainerGood(dns)) return false;
                             const size_t wildcard = dns.find('*');
                             if (wildcard != micant::shared::AnsiString::npos &&
                                 (wildcard != 0 || !dns.starts_with("*.") || dns.find('*', 1) != micant::shared::AnsiString::npos))
@@ -437,7 +444,7 @@ struct X509Certificate {
                         } else if (name.tag == 0x87) {
                             if (name.value.size() == 4) {
                                 auto ipv4 = asn1::formatIpv4Address(name.value);
-                                if (!ipv4.good() || ipv4.empty() || !parsed.ipAddresses.push_back(std::move(ipv4)))
+                                if (!micant::shared::isContainerGood(ipv4) || ipv4.empty() || !parsed.ipAddresses.push_back(std::move(ipv4)))
                                     return false;
                             }
                         }
@@ -504,8 +511,10 @@ struct X509Certificate {
             !parsed.publicKeyCurveOidDer.good() ||
             !parsed.tbsCertificateDer.good() || !parsed.rawDer.good() ||
             !parsed.dnsNames.good() || !parsed.ipAddresses.good() || !seenExtensions.good() ||
-            !parsed.subjectCommonName.good() || !parsed.issuerCommonName.good() ||
-            !parsed.validNotBefore.good() || !parsed.validNotAfter.good()) return false;
+            !micant::shared::isContainerGood(parsed.subjectCommonName) ||
+            !micant::shared::isContainerGood(parsed.issuerCommonName) ||
+            !micant::shared::isContainerGood(parsed.validNotBefore) ||
+            !micant::shared::isContainerGood(parsed.validNotAfter)) return false;
         parsed.fingerprintSha256 = Sha256::hash(der);
         output = std::move(parsed);
         return true;

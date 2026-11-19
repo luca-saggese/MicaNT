@@ -400,6 +400,7 @@ public:
     }
     const imaging::ImageFrame& frame() const noexcept { return image_; }
 private:
+    template<class T> friend void detail::destroyObject(T*) noexcept;
     ~BitmapFrame() { }
     std::atomic<ULONG> refs_{1};
     imaging::ImageFrame image_;
@@ -477,6 +478,7 @@ public:
         frame_->AddRef(); *frame = frame_; return S_OK;
     }
 private:
+    template<class T> friend void detail::destroyObject(T*) noexcept;
     ~BitmapDecoder() { if (frame_) frame_->Release(); }
     std::atomic<ULONG> refs_{1};
     BitmapFrame* frame_{};
@@ -533,6 +535,7 @@ public:
         return initialized_ ? source_->CopyPixels(rect, stride, size, buffer) : WINCODEC_ERR_WRONGSTATE;
     }
 private:
+    template<class T> friend void detail::destroyObject(T*) noexcept;
     ~FormatConverter() { }
     std::atomic<ULONG> refs_{1};
     IWICBitmapSource* source_{};
@@ -632,6 +635,7 @@ public:
     const imaging::ImageFrame& frame() const noexcept { return frame_; }
     bool committed() const noexcept { return committed_; }
 private:
+    template<class T> friend void detail::destroyObject(T*) noexcept;
     ~BitmapFrameEncode() { }
     std::atomic<ULONG> refs_{1};
     imaging::ImageAllocator allocator_{};
@@ -708,6 +712,7 @@ public:
         if (!writer) return E_POINTER; *writer = nullptr; return WINCODEC_ERR_UNSUPPORTEDOPERATION;
     }
 private:
+    template<class T> friend void detail::destroyObject(T*) noexcept;
     ~BitmapEncoder() { if (frame_) frame_->Release(); if (stream_) stream_->Release(); }
     std::atomic<ULONG> refs_{1};
     imaging::ImageAllocator allocator_{};
@@ -840,6 +845,7 @@ public:
     HRESULT __stdcall CreateQueryWriter(const GUID&, const GUID*, void** value) override { return notImplemented(value); }
     HRESULT __stdcall CreateQueryWriterFromReader(void*, const GUID*, void** value) override { return notImplemented(value); }
 private:
+    template<class T> friend void detail::destroyObject(T*) noexcept;
     static HRESULT notImplemented(void** value) noexcept {
         if (!value) return E_POINTER; *value = nullptr; return E_NOTIMPL;
     }
@@ -849,7 +855,7 @@ private:
 
 } // namespace micant::um::wic
 
-extern "C" __declspec(dllexport) micant::um::wic::HRESULT __stdcall
+extern "C" inline __declspec(dllexport) micant::um::wic::HRESULT __stdcall
 WICCreateImagingFactory_Proxy(uint32_t version, micant::um::wic::IWICImagingFactory** factory) noexcept {
     using namespace micant::um::wic;
     if (!factory) return E_POINTER;
@@ -860,7 +866,7 @@ WICCreateImagingFactory_Proxy(uint32_t version, micant::um::wic::IWICImagingFact
     *factory = result; return S_OK;
 }
 
-extern "C" __declspec(dllexport) micant::um::wic::HRESULT __stdcall
+extern "C" inline __declspec(dllexport) micant::um::wic::HRESULT __stdcall
 DllCanUnloadNow() noexcept {
     return micant::um::wic::detail::g_liveObjects.load(std::memory_order_acquire) == 0
         ? micant::um::wic::S_OK : micant::um::wic::S_FALSE;

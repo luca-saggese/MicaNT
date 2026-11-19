@@ -7,6 +7,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#if !defined(MICANT_FREESTANDING)
+#include <vector>
+#endif
 #include "micant/shared/bounded_containers.hpp"
 #include <string_view>
 
@@ -1273,6 +1276,17 @@ public:
         return true;
     }
 
+#if !defined(MICANT_FREESTANDING)
+    static bool encrypt(std::span<const uint8_t> key, std::span<const uint8_t> nonce,
+                        std::span<const uint8_t> aad, std::span<const uint8_t> plaintext,
+                        std::vector<uint8_t>& ciphertext, std::array<uint8_t, 16>& tag) {
+        micant::shared::BoundedVector<uint8_t> bounded;
+        if (!encrypt(key, nonce, aad, plaintext, bounded, tag)) return false;
+        ciphertext.assign(bounded.begin(), bounded.end());
+        return true;
+    }
+#endif
+
     static bool decrypt(
         std::span<const uint8_t> key,
         std::span<const uint8_t> nonce,
@@ -1349,6 +1363,17 @@ public:
 
         return true;
     }
+
+#if !defined(MICANT_FREESTANDING)
+    static bool decrypt(std::span<const uint8_t> key, std::span<const uint8_t> nonce,
+                        std::span<const uint8_t> aad, std::span<const uint8_t> ciphertext,
+                        std::span<const uint8_t> tag, std::vector<uint8_t>& plaintext) {
+        micant::shared::BoundedVector<uint8_t> bounded;
+        if (!decrypt(key, nonce, aad, ciphertext, tag, bounded)) return false;
+        plaintext.assign(bounded.begin(), bounded.end());
+        return true;
+    }
+#endif
 };
 
 // ============================================================================

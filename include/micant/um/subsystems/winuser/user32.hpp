@@ -23,6 +23,7 @@
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/user_graphics.hpp"
 #include "micant/shared/user_syscall.hpp"
+#include "micant/shared/win32k_client.h"
 #include "micant/um/subsystems/winbase/kernel32.hpp"
 #include "micant/um/native/ldr.hpp"
 #include "micant/um/servers/winlogon.hpp"

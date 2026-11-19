@@ -130,7 +130,7 @@ public:
         asn1::writeTLV(fullInner, asn1::TAG_BIT_STRING, sigBitStr);
         asn1::writeSequence(certDer, fullInner);
 
-        cert.rawDer = std::move(certDer);
+        cert.rawDer.assign(certDer.begin(), certDer.end());
         return cert;
     }
 };

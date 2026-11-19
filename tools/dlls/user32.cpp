@@ -6288,6 +6288,7 @@ bool showPopup(void* handle, uint32_t flags, int32_t x, int32_t y,
 }
 }
 
+namespace micant::um::winnt_user32_gdi32_imm32_abi {
 extern "C" void MicaUser32MenuWindowDestroyed(void* hwnd) noexcept {
     if (!hwnd) return;
     void* barWindow = nullptr;
@@ -6308,6 +6309,7 @@ extern "C" void MicaUser32MenuWindowDestroyed(void* hwnd) noexcept {
     }
     if (barWindow) (void)DestroyWindow(barWindow);
 }
+} // namespace micant::um::winnt_user32_gdi32_imm32_abi
 
 extern "C" {
 __declspec(dllexport) void* CreateMenu() noexcept {

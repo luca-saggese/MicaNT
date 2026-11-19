@@ -483,4 +483,10 @@ template <class CharT> using BoundedString = std::basic_string<CharT>;
 using AnsiString = BoundedString<char>;
 using UnicodeString = BoundedString<wchar_t>;
 
+template <typename T>
+[[nodiscard]] constexpr bool isContainerGood(const T& value) noexcept {
+    if constexpr (requires { value.good(); }) return value.good();
+    else return true;
+}
+
 } // namespace micant::shared
