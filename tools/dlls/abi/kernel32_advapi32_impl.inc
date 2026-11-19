@@ -3382,8 +3382,16 @@ void Kernel32_Sleep(uint32_t milliseconds) noexcept {
     (void)NtDelayExecution(0, &interval);
 }
 int32_t Kernel32_SwitchToThread() noexcept { return 1; }
-uint32_t Kernel32_GetCurrentProcessId() noexcept { return 4096U; }
-uint32_t Kernel32_GetCurrentThreadId() noexcept { return 4100U; }
+uint32_t Kernel32_GetCurrentProcessId() noexcept {
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    return teb ? *reinterpret_cast<const uint32_t*>(teb + 0x40) : 0;
+}
+uint32_t Kernel32_GetCurrentThreadId() noexcept {
+    uintptr_t teb{};
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    return teb ? *reinterpret_cast<const uint32_t*>(teb + 0x48) : 0;
+}
 uint32_t Kernel32_GetLastError() noexcept { return g_lastError; }
 void Kernel32_SetLastError(uint32_t dwErrCode) noexcept { g_lastError = dwErrCode; }
 int32_t Kernel32_SetThreadDescription(void* /*hThread*/, const wchar_t* /*lpThreadDescription*/) noexcept { return 0; }
