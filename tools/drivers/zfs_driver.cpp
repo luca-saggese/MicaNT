@@ -1,6 +1,6 @@
 /**
  * @file zfs_driver.cpp
- * Luce OS Clean-Room TitanZFS Storage Pool Kernel Driver (zfs.sys) for MicaNT.
+ @brief Luce OS Clean-Room TitanZFS Storage Pool Kernel Driver (zfs.sys) for MicaNT.
  *
  * Freestanding ISO C++23. Clean-Room NT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

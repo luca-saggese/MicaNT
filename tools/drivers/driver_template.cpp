@@ -1,6 +1,6 @@
 /**
  * @file driver_template.cpp
- * Luce OS Kernel Driver stub for MicaNT System32 Drivers.
+ @brief Luce OS Kernel Driver stub for MicaNT System32 Drivers.
  *
  * Freestanding ISO C++23. Clean-Room design.
  */

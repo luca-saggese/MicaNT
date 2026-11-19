@@ -1,6 +1,6 @@
 /**
  * @file sysdm_app.cpp
- * Luce OS Ring 3 System Properties Applet (sysdm.cpl) for MicaNT System32.
+ @brief Luce OS Ring 3 System Properties Applet (sysdm.cpl) for MicaNT System32.
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  * Executed in User-Mode Ring 3 (CPL=3).

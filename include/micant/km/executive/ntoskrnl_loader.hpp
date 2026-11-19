@@ -47,7 +47,7 @@ struct NtoskrnlLoadedImageInfo {
 };
 
 /**
- * Luce OS PE32+ Kernel Image Loader (winload.efi / BOOTX64.EFI stage).
+ @brief Luce OS PE32+ Kernel Image Loader (winload.efi / BOOTX64.EFI stage).
  */
 class NtoskrnlImageLoader64 {
 public:

@@ -1,6 +1,6 @@
 /**
  * @file subst_app.cpp
- * Luce OS Ring 3 Virtual Drive Path Substitution Utility (subst) for MicaNT System32.
+ @brief Luce OS Ring 3 Virtual Drive Path Substitution Utility (subst) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

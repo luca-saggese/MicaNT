@@ -1,6 +1,6 @@
 /**
  * @file ucrtbase.cpp
- * Luce OS Universal C Runtime DLL (ucrtbase.dll) for MicaNT System32.
+ @brief Luce OS Universal C Runtime DLL (ucrtbase.dll) for MicaNT System32.
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  * Real memory allocator, string primitives, and process termination.

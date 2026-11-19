@@ -1,6 +1,6 @@
 /**
  * @file cli_common.hpp
- * Luce OS Ring 3 Command-Line Argument Parser & Console I/O Primitives.
+ @brief Luce OS Ring 3 Command-Line Argument Parser & Console I/O Primitives.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

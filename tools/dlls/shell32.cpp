@@ -1,6 +1,6 @@
 /**
  * @file shell32.cpp
- * Luce OS Windows Shell API DLL (shell32.dll) for MicaNT System32.
+ @brief Luce OS Windows Shell API DLL (shell32.dll) for MicaNT System32.
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  */

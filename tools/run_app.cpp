@@ -1,6 +1,6 @@
 /**
  * @file run_app.cpp
- * Luce OS Ring 3 Win+R Run Dialog Utility for MicaNT System32.
+ @brief Luce OS Ring 3 Win+R Run Dialog Utility for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

@@ -1,6 +1,6 @@
 /**
  * @file paint_app.cpp
- * Luce OS Ring 3 Paint Studio Utility for MicaNT System32.
+ @brief Luce OS Ring 3 Paint Studio Utility for MicaNT System32.
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  * Executed in User-Mode Ring 3 (CPL=3).

@@ -1,6 +1,6 @@
 /**
  * @file rasdial_app.cpp
- * Luce OS Ring 3 Remote Access Service Client Dialer (rasdial) for MicaNT System32.
+ @brief Luce OS Ring 3 Remote Access Service Client Dialer (rasdial) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

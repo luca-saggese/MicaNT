@@ -1,6 +1,6 @@
 /**
  * @file thermal.hpp
- * Luce OS Clean-Room Windows NT ACPI Thermal Zone Class Driver & Fan Tachometer Subsystem
+ @brief Luce OS Clean-Room Windows NT ACPI Thermal Zone Class Driver & Fan Tachometer Subsystem
  *
  * Implements canonical Windows NT Thermal Management architecture (thermal.sys / acpitz.sys),
  * managing thermal zone device objects (\Device\ThermalZone0, \Device\ThermalZone1), ACPI 6.5

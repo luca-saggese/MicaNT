@@ -1,6 +1,6 @@
 /**
  * @file thermal.cpp
- * Luce OS Clean-Room Windows NT ACPI Thermal Zone Class Driver Executive Implementation
+ @brief Luce OS Clean-Room Windows NT ACPI Thermal Zone Class Driver Executive Implementation
  *
  * Connects the ACPI thermal zone class driver (acpitz.sys / thermal.sys) to the NT Object Manager
  * namespace (\Device\ThermalZone0), I/O Manager IRP packet hierarchy, and the Executive

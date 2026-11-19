@@ -1,6 +1,6 @@
 /**
  * @file bootsect_app.cpp
- * Luce OS Ring 3 Boot Sector Manipulation Tool (bootsect.exe) for MicaNT System32.
+ @brief Luce OS Ring 3 Boot Sector Manipulation Tool (bootsect.exe) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

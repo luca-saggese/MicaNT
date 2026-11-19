@@ -1188,7 +1188,7 @@ enum class UserThreadState : uint8_t {
 };
 
 /**
- * Luce OS User-Mode Thread Execution Context (ETHREAD/KTHREAD Ring 3).
+ @brief Luce OS User-Mode Thread Execution Context (ETHREAD/KTHREAD Ring 3).
  */
 struct UserThreadContext64 {
     uint32_t tid{0};
@@ -1208,7 +1208,7 @@ struct UserThreadContext64 {
 };
 
 /**
- * Luce OS Multi-Process / Multi-Thread Cooperative Scheduler (Unit #94).
+ @brief Luce OS Multi-Process / Multi-Thread Cooperative Scheduler (Unit #94).
  * Coordinates execution across multiple Ring 3 userland processes and threads.
  */
 class UserThreadScheduler64 {

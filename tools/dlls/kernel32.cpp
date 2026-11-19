@@ -1,6 +1,6 @@
 /**
  * @file kernel32.cpp
- * Luce OS Win32 Base API DLL (kernel32.dll) for MicaNT System32.
+ @brief Luce OS Win32 Base API DLL (kernel32.dll) for MicaNT System32.
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  * Implements core Win32 Process, Thread, Memory, and File I/O trampolines

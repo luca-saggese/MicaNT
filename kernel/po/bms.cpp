@@ -1,6 +1,6 @@
 /**
  * @file bms.cpp
- * Luce OS Clean-Room Windows NT Battery Management System (BMS) Executive Implementation
+ @brief Luce OS Clean-Room Windows NT Battery Management System (BMS) Executive Implementation
  *
  * Connects the smart battery class driver to the NT Object Manager namespace (\Device\Battery0),
  * I/O Manager IRP packet hierarchy, and the Executive Power Manager (micant::po::PowerManager).

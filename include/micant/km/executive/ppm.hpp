@@ -1,6 +1,6 @@
 /**
  * @file ppm.hpp
- * Luce OS Clean-Room Windows NT Processor Power Management (PPM) & Intel Speed Shift (HWP) Driver
+ @brief Luce OS Clean-Room Windows NT Processor Power Management (PPM) & Intel Speed Shift (HWP) Driver
  *
  * Implements canonical Windows NT Processor Power Management architecture (intelppm.sys / ppm.sys),
  * providing processor device objects (\Device\Processor0..\Device\Processor7), hardware-controlled

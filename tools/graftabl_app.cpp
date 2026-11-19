@@ -1,6 +1,6 @@
 /**
  * @file graftabl_app.cpp
- * Luce OS Ring 3 Graphics Character Set Loader (graftabl) for MicaNT System32.
+ @brief Luce OS Ring 3 Graphics Character Set Loader (graftabl) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

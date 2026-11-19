@@ -1,6 +1,6 @@
 /**
  * @file ntoskrnl.cpp
- * Luce OS Bare-Metal Windows NT Kernel Executive (ntoskrnl.exe).
+ @brief Luce OS Bare-Metal Windows NT Kernel Executive (ntoskrnl.exe).
  *
  * Standalone 64-bit PE32+ Native Kernel Binary (IMAGE_SUBSYSTEM_NATIVE).
  * Loaded by winload.efi / BOOTX64.EFI directly from \EFI\MicaNT\ntoskrnl.exe on the FAT32 System Volume.

@@ -1,6 +1,6 @@
 /**
  * @file bms.hpp
- * Luce OS Clean-Room Windows NT Battery Management System (BMS) & Smart Battery Class Driver
+ @brief Luce OS Clean-Room Windows NT Battery Management System (BMS) & Smart Battery Class Driver
  * 
  * Implements the standard Windows NT Battery Architecture (battc.sys / cmbatt.sys)
  * providing battery device objects (\Device\Battery0), dynamic battery tags, standard

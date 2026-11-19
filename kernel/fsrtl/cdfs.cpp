@@ -1,6 +1,6 @@
 /**
  * @file cdfs.cpp
- * Luce OS Clean-Room CD-ROM / DVD (CDFS / UDFS) File System Runtime Subsystem.
+ @brief Luce OS Clean-Room CD-ROM / DVD (CDFS / UDFS) File System Runtime Subsystem.
  *
  * Clean-Room ISO C++23. Sovereign MicaNT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

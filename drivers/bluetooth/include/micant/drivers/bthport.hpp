@@ -336,7 +336,7 @@ struct BthRadioTelemetry {
 };
 
 /**
- * Luce OS Bluetooth Port Driver and HCI Radio Subsystem (bthport.sys).
+ @brief Luce OS Bluetooth Port Driver and HCI Radio Subsystem (bthport.sys).
  */
 class TitanBluetoothSubsystem {
 public:

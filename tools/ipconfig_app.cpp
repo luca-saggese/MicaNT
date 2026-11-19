@@ -1,6 +1,6 @@
 /**
  * @file ipconfig_app.cpp
- * Luce OS Ring 3 TCP/IP Configuration Utility for MicaNT System32.
+ @brief Luce OS Ring 3 TCP/IP Configuration Utility for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

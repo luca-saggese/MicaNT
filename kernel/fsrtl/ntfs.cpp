@@ -1,6 +1,6 @@
 /**
  * @file ntfs.cpp
- * Luce OS Clean-Room NTFS File System Runtime Subsystem (ntfs.sys / NtfsDriver).
+ @brief Luce OS Clean-Room NTFS File System Runtime Subsystem (ntfs.sys / NtfsDriver).
  *
  * Clean-Room ISO C++23. Sovereign MicaNT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.
