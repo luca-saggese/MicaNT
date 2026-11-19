@@ -1109,10 +1109,10 @@ bool registerTreeClass() noexcept {
 
 extern "C" {
 
-bool DllMain(void*, unsigned long, void*) noexcept { return true; }
+int32_t __stdcall DllMain(void*, uint32_t, void*) { return 1; }
 
-__declspec(dllexport) int32_t InitCommonControlsEx(
-    const InitCommonControlsExArgs* args) noexcept {
+__declspec(dllexport) int32_t __stdcall InitCommonControlsEx(
+    const InitCommonControlsExArgs* args) {
     if (!args || args->size != sizeof(InitCommonControlsExArgs) ||
         (args->classes & ~(kIccProgress | kIccTab | kIccTreeView)) != 0) return 0;
     if ((args->classes & kIccProgress) && !registerProgressClass()) return 0;
@@ -1124,13 +1124,37 @@ __declspec(dllexport) int32_t InitCommonControlsEx(
 // The legacy entry point requests the standard controls set and has no return
 // value in the Windows ABI. Keep registration in the same canonical class
 // initializers used by the Ex variant.
-__declspec(dllexport) void InitCommonControls() noexcept {
+__declspec(dllexport) void __stdcall InitCommonControls() {
     const InitCommonControlsExArgs args{sizeof(InitCommonControlsExArgs),
         kIccProgress | kIccTab | kIccTreeView};
     (void)InitCommonControlsEx(&args);
 }
 
-__declspec(dllexport) void* CreatePropertySheetPageW(const void*) noexcept { return nullptr; }
-__declspec(dllexport) int64_t PropertySheetW(const void*) noexcept { return -1; }
+struct _PROPSHEETPAGEA_V3;
+struct _PROPSHEETPAGEW_V3;
+struct _PROPSHEETHEADERA;
+struct _PROPSHEETHEADERW;
+struct _PSP;
+using HPROPSHEETPAGE = _PSP*;
+using LPCPROPSHEETPAGEA = const _PROPSHEETPAGEA_V3*;
+using LPCPROPSHEETPAGEW = const _PROPSHEETPAGEW_V3*;
+using LPCPROPSHEETHEADERA = const _PROPSHEETHEADERA*;
+using LPCPROPSHEETHEADERW = const _PROPSHEETHEADERW*;
+
+__declspec(dllexport) HPROPSHEETPAGE __stdcall CreatePropertySheetPageA(LPCPROPSHEETPAGEA) {
+    return nullptr;
+}
+
+__declspec(dllexport) HPROPSHEETPAGE __stdcall CreatePropertySheetPageW(LPCPROPSHEETPAGEW) {
+    return nullptr;
+}
+
+__declspec(dllexport) intptr_t __stdcall PropertySheetA(LPCPROPSHEETHEADERA) {
+    return static_cast<intptr_t>(-1);
+}
+
+__declspec(dllexport) intptr_t __stdcall PropertySheetW(LPCPROPSHEETHEADERW) {
+    return static_cast<intptr_t>(-1);
+}
 
 } // extern "C"
