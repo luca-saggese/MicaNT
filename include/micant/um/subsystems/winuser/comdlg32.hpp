@@ -14,40 +14,56 @@
 
 namespace micant::comdlg32 {
 
-inline int32_t __stdcall PrintDlgW([[maybe_unused]] void* lppd) noexcept {
-    return 0; // FALSE / User cancelled print dialog
+// Dialogs are not connected to the User32 window manager yet. Keep the Win32
+// failure observable: FALSE plus CDERR_DIALOGFAILURE, never synthetic success
+// or a fake HWND. The loader bridge currently keeps this state process-wide.
+inline constexpr uint32_t kDialogFailure = 0xFFFF;
+inline uint32_t g_extended_error = 0;
+
+inline int32_t fail_dialog() noexcept {
+    g_extended_error = kDialogFailure;
+    return 0;
 }
 
-inline int32_t __stdcall ChooseColorW([[maybe_unused]] void* lpcc) noexcept {
-    return 0; // FALSE / User cancelled color picker
+inline int32_t __stdcall PrintDlgW([[maybe_unused]] void*) noexcept {
+    return fail_dialog();
 }
 
-inline int32_t __stdcall GetOpenFileNameW([[maybe_unused]] void* lpofn) noexcept {
-    return 0; // FALSE / User cancelled open file dialog
+inline int32_t __stdcall ChooseColorW([[maybe_unused]] void*) noexcept {
+    return fail_dialog();
 }
 
-inline int32_t __stdcall GetSaveFileNameW([[maybe_unused]] void* lpofn) noexcept {
-    return 0; // FALSE / User cancelled save file dialog
+inline int32_t __stdcall GetOpenFileNameW([[maybe_unused]] void*) noexcept {
+    return fail_dialog();
+}
+
+inline int32_t __stdcall GetSaveFileNameW([[maybe_unused]] void*) noexcept {
+    return fail_dialog();
 }
 
 inline uint32_t __stdcall CommDlgExtendedError() noexcept {
-    return 0; // No error
+    return g_extended_error;
 }
 
 inline void* __stdcall ReplaceTextW([[maybe_unused]] void* lpfr) noexcept {
+    fail_dialog();
     return nullptr;
 }
 
 inline int32_t __stdcall PrintDlgExW([[maybe_unused]] void* pPDEX) noexcept {
-    return 0; // S_OK
+    g_extended_error = kDialogFailure;
+    return static_cast<int32_t>(0x80004001u); // E_NOTIMPL
 }
 
-inline int32_t __stdcall ChooseColorA([[maybe_unused]] void* lpcc) noexcept { return 1; }
-inline int32_t __stdcall ChooseFontA([[maybe_unused]] void* lpcf) noexcept { return 1; }
-inline int32_t __stdcall ChooseFontW([[maybe_unused]] void* lpcf) noexcept { return 1; }
-inline int32_t __stdcall GetOpenFileNameA([[maybe_unused]] void* lpofn) noexcept { return 1; }
-inline int32_t __stdcall GetSaveFileNameA([[maybe_unused]] void* lpofn) noexcept { return 1; }
-inline void* __stdcall FindTextW([[maybe_unused]] void* lpfr) noexcept { return reinterpret_cast<void*>(0x8800); }
+inline int32_t __stdcall ChooseColorA([[maybe_unused]] void*) noexcept { return fail_dialog(); }
+inline int32_t __stdcall ChooseFontA([[maybe_unused]] void*) noexcept { return fail_dialog(); }
+inline int32_t __stdcall ChooseFontW([[maybe_unused]] void*) noexcept { return fail_dialog(); }
+inline int32_t __stdcall GetOpenFileNameA([[maybe_unused]] void*) noexcept { return fail_dialog(); }
+inline int32_t __stdcall GetSaveFileNameA([[maybe_unused]] void*) noexcept { return fail_dialog(); }
+inline void* __stdcall FindTextW([[maybe_unused]] void*) noexcept {
+    fail_dialog();
+    return nullptr;
+}
 
 inline void InitializeComDlg32SubsystemExports() {
     auto& ldr = ldr::DynamicLoader::get();

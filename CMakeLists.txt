@@ -541,6 +541,19 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
 
+    # Common-dialog exports are a separate Ring 3 DLL. Until the dialog server
+    # is connected, these ABI-correct entry points report explicit failure.
+    add_library(comdlg32_boot SHARED EXCLUDE_FROM_ALL tools/dlls/comdlg32.cpp)
+    target_compile_options(comdlg32_boot PRIVATE
+        -ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics
+        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone -O2)
+    target_link_options(comdlg32_boot PRIVATE
+        -nostdlib -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase)
+    set_target_properties(comdlg32_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "comdlg32"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+
     # Comctl32 image lists are process-local Ring 3 objects. Bitmap/icon bytes
     # cross the existing GDI32/User32 DLL interfaces; allocation uses NTDLL.
     add_library(comctl32_boot SHARED EXCLUDE_FROM_ALL
