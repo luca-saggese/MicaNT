@@ -594,21 +594,7 @@ inline HRESULT CLSIDFromString(const wchar_t* lpsz, CLSID* lpclsid) noexcept {
 
 inline HRESULT CoCreateGuid(GUID* pguid) noexcept {
     if (!pguid) return E_INVALIDARG;
-    static std::atomic<uint32_t> s_guidCounter{0xCAFE0001};
-    uint32_t seq = s_guidCounter.fetch_add(1);
-
-    pguid->Data1 = 0xA1B2C3D4 ^ seq;
-    pguid->Data2 = static_cast<uint16_t>(seq & 0xFFFF);
-    pguid->Data3 = 0x4123; // Version 4 (Random)
-    pguid->Data4[0] = 0x80 | static_cast<uint8_t>(seq & 0x3F); // Variant 1
-    pguid->Data4[1] = 0x11;
-    pguid->Data4[2] = 0x22;
-    pguid->Data4[3] = 0x33;
-    pguid->Data4[4] = 0x44;
-    pguid->Data4[5] = 0x55;
-    pguid->Data4[6] = 0x66;
-    pguid->Data4[7] = static_cast<uint8_t>(seq & 0xFF);
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT CoGetClassObject(REFCLSID rclsid, uint32_t dwClsContext, void* pvReserved, REFIID riid, void** ppv) noexcept {
@@ -660,29 +646,14 @@ struct IBindCtx {
 
 inline HRESULT BindCtx_QI(void* /*thisPtr*/, const void* /*riid*/, void** ppv) noexcept {
     if (!ppv) return E_POINTER;
-    static const IBindCtxVtbl vtbl = {
-        BindCtx_QI,
-        [](void*) -> uint32_t { return 1; },
-        [](void*) -> uint32_t { return 1; },
-        [](void*, void*) -> HRESULT { return S_OK; },
-        [](void*, void*) -> HRESULT { return S_OK; },
-        [](void*) -> HRESULT { return S_OK; },
-        [](void*, void*) -> HRESULT { return S_OK; },
-        [](void*, void*) -> HRESULT { return S_OK; },
-        [](void*, void**) -> HRESULT { return E_NOTIMPL; },
-        [](void*, wchar_t*, void*) -> HRESULT { return S_OK; },
-        [](void*, wchar_t*, void**) -> HRESULT { return E_FAIL; },
-        [](void*, void**) -> HRESULT { return E_NOTIMPL; },
-        [](void*, wchar_t*) -> HRESULT { return S_OK; }
-    };
-    static IBindCtx s_ctx = { &vtbl };
-    *ppv = &s_ctx;
-    return S_OK;
+    *ppv = nullptr;
+    return E_NOTIMPL;
 }
 
 inline HRESULT CreateBindCtx(uint32_t /*reserved*/, void** ppbc) noexcept {
     if (!ppbc) return E_POINTER;
-    return BindCtx_QI(nullptr, nullptr, ppbc);
+    *ppbc = nullptr;
+    return E_NOTIMPL;
 }
 
 // ============================================================================
@@ -791,35 +762,33 @@ inline void OleUninitialize() noexcept {
 }
 
 inline HRESULT RegisterDragDrop(win32::HWND /*hwnd*/, void* /*pDropTarget*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT RevokeDragDrop(win32::HWND /*hwnd*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT DoDragDrop(void* /*pDataObj*/, void* /*pDropSource*/, uint32_t /*dwOKEffects*/, uint32_t* pdwEffect) noexcept {
     if (pdwEffect) *pdwEffect = 0;
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline void ReleaseStgMedium(void* /*pmedium*/) noexcept {}
 
 inline HRESULT CLSIDFromProgID(LPCOLESTR lpszProgID, CLSID* lpclsid) noexcept {
     if (!lpszProgID || !lpclsid) return E_INVALIDARG;
-    *lpclsid = IID_IUnknown;
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT CoGetMalloc(uint32_t /*dwMemContext*/, void** ppMalloc) noexcept {
     if (!ppMalloc) return E_POINTER;
-    static uintptr_t s_malloc = 0x9001;
-    *ppMalloc = reinterpret_cast<void*>(s_malloc);
-    return S_OK;
+    *ppMalloc = nullptr;
+    return E_NOTIMPL;
 }
 
 inline HRESULT CoSetProxyBlanket(void* /*pProxy*/, uint32_t /*dwAuthnSvc*/, uint32_t /*dwAuthzSvc*/, void* /*pServerPrincName*/, uint32_t /*dwAuthnLevel*/, uint32_t /*dwImpLevel*/, void* /*pAuthInfo*/, uint32_t /*dwCapabilities*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT WINAPI CoInitializeSecurity(
@@ -833,47 +802,42 @@ inline HRESULT WINAPI CoInitializeSecurity(
     uint32_t /*dwCapabilities*/,
     void* /*pReserved3*/
 ) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT WINAPI CoCreateFreeThreadedMarshaler(void* /*punkOuter*/, void** ppunkMarshaler) noexcept {
-    if (ppunkMarshaler) {
-        static uintptr_t s_marshaler = 0xBB00;
-        *ppunkMarshaler = reinterpret_cast<void*>(++s_marshaler);
-    }
-    return S_OK;
+    if (!ppunkMarshaler) return E_POINTER;
+    *ppunkMarshaler = nullptr;
+    return E_NOTIMPL;
 }
 
-inline win32::BOOL WINAPI OleTranslateAccelerator(void* /*lpFrame*/, void* /*lpFrameInfo*/, void* /*lpmsg*/) noexcept {
-    return 1; // S_FALSE
+inline HRESULT WINAPI OleTranslateAccelerator(void* /*lpFrame*/, void* /*lpFrameInfo*/, void* /*lpmsg*/) noexcept {
+    return E_NOTIMPL;
 }
 
 inline HRESULT WINAPI OleDestroyMenuDescriptor(void* /*holemenu*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline void* WINAPI OleCreateMenuDescriptor(void* /*hmenuCombined*/, void* /*lpMenuWidths*/) noexcept {
-    static uintptr_t s_hmenu = 0xCC00;
-    return reinterpret_cast<void*>(++s_hmenu);
+    return nullptr;
 }
 
 inline HRESULT WINAPI CoRegisterMessageFilter(void* lpMessageFilter, void** lplpMessageFilter) noexcept {
-    static void* s_prevFilter = nullptr;
-    if (lplpMessageFilter) {
-        *lplpMessageFilter = s_prevFilter;
-    }
-    s_prevFilter = lpMessageFilter;
-    return S_OK;
+    (void)lpMessageFilter;
+    if (lplpMessageFilter) *lplpMessageFilter = nullptr;
+    return E_NOTIMPL;
 }
 
 inline void WINAPI CoFreeUnusedLibraries() noexcept {}
 
 inline void* WINAPI OleDuplicateData(void* hSrc, uint16_t /*cfFormat*/, uint32_t /*uiFlags*/) noexcept {
-    return hSrc;
+    (void)hSrc;
+    return nullptr;
 }
 
 inline HRESULT WINAPI CoLockObjectExternal(void* /*pUnk*/, win32::BOOL /*fLock*/, win32::BOOL /*fLastUnlockReleases*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT WINAPI CoGetObject(const wchar_t* /*pszName*/, void* /*pBindOptions*/, const void* /*riid*/, void** ppv) noexcept {
@@ -884,14 +848,11 @@ inline HRESULT WINAPI CoGetObject(const wchar_t* /*pszName*/, void* /*pBindOptio
 }
 
 inline HRESULT WINAPI OleRun(void* /*pUnknown*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 inline HRESULT WINAPI PropVariantClear(void* pvar) noexcept {
-    if (pvar) {
-        std::memset(pvar, 0, 24);
-    }
-    return S_OK;
+    return pvar ? E_NOTIMPL : E_INVALIDARG;
 }
 
 inline uint32_t WINAPI OleUIBusyW(void* /*lpUIBusy*/) noexcept {
@@ -899,78 +860,94 @@ inline uint32_t WINAPI OleUIBusyW(void* /*lpUIBusy*/) noexcept {
 }
 
 inline HRESULT WINAPI CoGetSystemSecurityPermissions(void* /*pSecurityDescriptor*/, uint32_t* pcb) noexcept {
-    if (pcb) *pcb = 32;
-    return S_OK;
+    (void)pcb;
+    return E_NOTIMPL;
 }
 
 inline HRESULT WINAPI CreateDataAdviseHolder(void** ppDAHolder) noexcept {
-    if (ppDAHolder) *ppDAHolder = reinterpret_cast<void*>(0x8800);
-    return S_OK;
+    if (!ppDAHolder) return E_POINTER;
+    *ppDAHolder = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI OleRegEnumVerbs(const void* /*clsid*/, void** ppenum) noexcept {
-    if (ppenum) *ppenum = nullptr;
-    return S_OK;
+    if (!ppenum) return E_POINTER;
+    *ppenum = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI OleGetClipboard(void** ppDataObj) noexcept {
-    if (ppDataObj) *ppDataObj = reinterpret_cast<void*>(0x8800);
-    return S_OK;
+    if (!ppDataObj) return E_POINTER;
+    *ppDataObj = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI OleSetClipboard(void* /*pDataObj*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
-inline win32::BOOL WINAPI OleIsEqualGUID_Export(const void* /*a*/, const void* /*b*/) noexcept {
-    return win32::TRUE;
+inline win32::BOOL WINAPI OleIsEqualGUID_Export(const void* a, const void* b) noexcept {
+    if (!a || !b) return win32::FALSE;
+    const auto& left = *static_cast<const GUID*>(a);
+    const auto& right = *static_cast<const GUID*>(b);
+    return left.Data1 == right.Data1 && left.Data2 == right.Data2 &&
+           left.Data3 == right.Data3 &&
+           std::memcmp(left.Data4, right.Data4, sizeof(left.Data4)) == 0
+        ? win32::TRUE : win32::FALSE;
 }
 inline HRESULT WINAPI OleFlushClipboard() noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI OleIsCurrentClipboard(void* /*pDataObj*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI OleDraw(void* /*pUnk*/, uint32_t /*dwAspect*/, void* /*hdcDraw*/, const void* /*lprcBounds*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI StringFromCLSID(const void* /*rclsid*/, wchar_t** lplpsz) noexcept {
-    if (lplpsz) *lplpsz = nullptr;
-    return S_OK;
+    if (!lplpsz) return E_POINTER;
+    *lplpsz = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI CoMarshalInterThreadInterfaceInStream(const void* /*riid*/, void* /*pUnk*/, void** ppStm) noexcept {
-    if (ppStm) *ppStm = reinterpret_cast<void*>(0x8800);
-    return S_OK;
+    if (!ppStm) return E_POINTER;
+    *ppStm = nullptr;
+    return E_NOTIMPL;
 }
 inline win32::BOOL WINAPI IsAccelerator(void* /*hAccel*/, int /*cAccelEntries*/, void* /*lpMsg*/, uint16_t* /*lpcmd*/) noexcept {
     return win32::FALSE;
 }
 inline HRESULT WINAPI CoGetInterfaceAndReleaseStream(void* /*pStm*/, const void* /*riid*/, void** ppv) noexcept {
-    if (ppv) *ppv = reinterpret_cast<void*>(0x8800);
-    return S_OK;
+    if (!ppv) return E_POINTER;
+    *ppv = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI ProgIDFromCLSID(const void* /*clsid*/, wchar_t** lplpszProgID) noexcept {
-    if (lplpszProgID) *lplpszProgID = nullptr;
-    return S_OK;
+    if (!lplpszProgID) return E_POINTER;
+    *lplpszProgID = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI CoDisconnectObject(void* /*pUnk*/, uint32_t /*dwReserved*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI OleSetMenuDescriptor(void* /*holemenu*/, win32::HWND /*hwndFrame*/, win32::HWND /*hwndActiveObject*/, void* /*lpFrame*/, void* /*lpActiveObj*/) noexcept {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 // WinRT Core Stubs (conforming to win32metadata)
-inline HRESULT WINAPI RoInitialize(uint32_t /*initType*/) noexcept { return S_OK; }
+inline HRESULT WINAPI RoInitialize(uint32_t /*initType*/) noexcept { return E_NOTIMPL; }
 inline void WINAPI RoUninitialize() noexcept {}
 inline HRESULT WINAPI RoGetActivationFactory(void* /*activatableClassId*/, const IID& /*iid*/, void** factory) noexcept {
-    if (factory) *factory = nullptr;
-    return static_cast<HRESULT>(0x80040154); // REGDB_E_CLASSNOTREG
+    if (!factory) return E_POINTER;
+    *factory = nullptr;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI RoOriginateLanguageException(HRESULT error, void* /*message*/, void* /*languageException*/) noexcept {
-    return error;
+    (void)error;
+    return E_NOTIMPL;
 }
 inline HRESULT WINAPI WindowsCreateStringReference(const wchar_t* /*sourceString*/, uint32_t /*length*/, void* /*hstringHeader*/, void** string) noexcept {
-    if (string) *string = reinterpret_cast<void*>(0x57525401);
-    return S_OK;
+    if (!string) return E_POINTER;
+    *string = nullptr;
+    return E_NOTIMPL;
 }
-inline HRESULT WINAPI WindowsDeleteString(void* /*string*/) noexcept { return S_OK; }
+inline HRESULT WINAPI WindowsDeleteString(void* /*string*/) noexcept { return E_NOTIMPL; }
 
 // ============================================================================
 // 7. Subsystem Export Registration

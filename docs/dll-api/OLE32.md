@@ -18,6 +18,16 @@ The typed entry points compile as a freestanding Ring 3 DLL target (`ole32_boot`
 No C++ exception crosses COM's HRESULT ABI. `E_NOTIMPL` is an explicit failure,
 not a successful initialization or activation result.
 
+The legacy dynamic-loader bridge has a wider declaration surface than the
+standalone DLL. Its formerly synthetic success paths now return `E_NOTIMPL`
+for unsupported bind contexts, drag/drop, proxy security, class factories,
+clipboard, OLE menu descriptors, COM marshaling, ProgID lookup, and WinRT
+activation/string operations. Output interface slots are cleared where the
+ABI defines an output pointer. `CoCreateGuid` no longer emits predictable
+fabricated identifiers. `IsEqualGUID` compares all GUID fields. These bridge
+exports remain a separate work item for ABI-by-ABI audit; this does not claim
+full Ole32 or WinRT coverage.
+
 ## Coverage ledger
 
 | DLL | Reference exports | Declared | Documented | Implemented | Partial | Verified | Unsupported | Missing |
