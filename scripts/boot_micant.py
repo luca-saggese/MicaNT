@@ -2215,6 +2215,133 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
             # judging its first frame.
             time.sleep(5.0 if app in {"calc", "notepad"} else 1.5)
             before = screen(f"reactos-{app}-01-window-before-input.ppm")
+            if app == "comdlgtest":
+                def press_dialog_key(key: str, down: bool) -> None:
+                    execute("input-send-event", {"events": [{
+                        "type": "key", "data": {
+                            "down": down, "key": {"type": "qcode", "data": key},
+                        },
+                    }]})
+
+                pointer_x, pointer_y = 512, 384
+
+                def click_dialog_at(x: int, y: int) -> None:
+                    nonlocal pointer_x, pointer_y
+                    for axis_name, distance in (("x", x - pointer_x), ("y", y - pointer_y)):
+                        while distance:
+                            step = max(-64, min(64, distance))
+                            execute("input-send-event", {"events": [{
+                                "type": "rel", "data": {"axis": axis_name, "value": step},
+                            }]})
+                            time.sleep(0.03)
+                            distance -= step
+                    pointer_x, pointer_y = x, y
+                    time.sleep(0.2)
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "btn", "data": {"button": "left", "down": down},
+                        }]})
+                        time.sleep(0.2)
+
+                def dialog_title_changes(reference: bytes, candidate: bytes) -> int:
+                    changed = 0
+                    for y in range(180):
+                        for x in range(200, 740):
+                            offset = (y * 1024 + x) * 3
+                            changed += sum(reference[offset + channel] !=
+                                           candidate[offset + channel]
+                                           for channel in range(3))
+                    return changed
+
+                def title_text_changes(reference: bytes, candidate: bytes) -> int:
+                    changed = 0
+                    for y in range(8, 38):
+                        for x in range(208, 480):
+                            offset = (y * 1024 + x) * 3
+                            changed += sum(reference[offset + channel] !=
+                                           candidate[offset + channel]
+                                           for channel in range(3))
+                    return changed
+
+                def wait_for_dialog(reference: bytes, filename: str) -> bytes:
+                    deadline = time.monotonic() + 5.0
+                    while True:
+                        candidate = screen(filename)
+                        if dialog_title_changes(reference, candidate) > 50000:
+                            return candidate
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                f"Common dialog did not render outside the probe window: {filename}")
+                        time.sleep(0.25)
+
+                def wait_for_dialog_title_change(reference: bytes, filename: str) -> bytes:
+                    deadline = time.monotonic() + 8.0
+                    while True:
+                        candidate = screen(filename)
+                        if title_text_changes(reference, candidate) > 100:
+                            return candidate
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                f"Expected common-dialog title did not render: {filename}")
+                        time.sleep(0.25)
+
+                def wait_for_app_dialog_return(previous_count: int, save: bool) -> str:
+                    marker = ("[MicaNT ComDlgTest] stage=101 value=" +
+                              ("1" if save else "0") + " flags=0")
+                    deadline = time.monotonic() + 8.0
+                    while time.monotonic() < deadline:
+                        serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                        if serial.count(marker) > previous_count:
+                            return serial
+                        time.sleep(0.05)
+                    raise RuntimeError("Common-dialog call did not return to the probe app")
+
+                press_dialog_key("ret", True)
+                press_dialog_key("ret", False)
+                open_dialog = wait_for_dialog(before, "comdlgtest-02-open-dialog.ppm")
+                # Let the dialog's child controls drain their WM_PAINT messages
+                # before retaining the visual artifact. The dialog can be
+                # detected from its title before a large file view is painted.
+                time.sleep(2.0)
+                open_dialog = screen("comdlgtest-02-open-dialog.ppm")
+                returns_before_open_cancel = serial_path.read_text(
+                    encoding="utf-8", errors="replace").count(
+                        "[MicaNT ComDlgTest] stage=101 value=0 flags=0")
+                press_dialog_key("esc", True)
+                press_dialog_key("esc", False)
+                wait_for_app_dialog_return(returns_before_open_cancel, False)
+                time.sleep(1.0)
+                after_open = screen("comdlgtest-03-open-dismissed.ppm")
+
+                press_dialog_key("s", True)
+                press_dialog_key("s", False)
+                save_dialog = wait_for_dialog_title_change(
+                    open_dialog, "comdlgtest-04-save-dialog.ppm")
+                time.sleep(4.0)
+                save_dialog = screen("comdlgtest-04-save-dialog.ppm")
+                returns_before_save_cancel = serial_path.read_text(
+                    encoding="utf-8", errors="replace").count(
+                        "[MicaNT ComDlgTest] stage=101 value=1 flags=0")
+                press_dialog_key("esc", True)
+                press_dialog_key("esc", False)
+                wait_for_app_dialog_return(returns_before_save_cancel, True)
+                time.sleep(1.0)
+                after_save = screen("comdlgtest-05-save-dismissed.ppm")
+
+                click_dialog_at(710, 205)
+                deadline = time.monotonic() + 8
+                serial = ""
+                while time.monotonic() < deadline:
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if "[MicaNT ReactOSApps] Process handle cleanup complete" in serial:
+                        break
+                    time.sleep(0.1)
+                if "[MicaNT ReactOSApps] Process handle cleanup complete" not in serial:
+                    raise RuntimeError("Common-dialog probe process did not clean up after closing its window")
+                if "[MicaNT ReactOSApps] Process terminated exit NTSTATUS=0\n" not in serial:
+                    raise RuntimeError("Common-dialog probe process did not terminate successfully")
+                print("Minimal Ring 3 client opened and dismissed Open and Save dialogs in QEMU, then exited cleanly.", flush=True)
+                return
             if app == "notepad" and os.environ.get("MICANT_REACTOS_NOTEPAD_DIALOG_TEST") == "1":
                 def press_key(key: str, down: bool) -> None:
                     execute("input-send-event", {"events": [{
@@ -3208,7 +3335,7 @@ def run_qemu(
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
-    if reactos_debug_image is not None and reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad"):
+    if reactos_debug_image is not None and reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad", "taskmgr", "comdlgtest"):
         raise RuntimeError("a diagnostic image override is limited to supported LuceOS application ports")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
@@ -3267,7 +3394,16 @@ def run_qemu(
         runtime_selftest=runtime_selftest,
         timer_selftest=timer_selftest,
     )
+    taskmgr_direct_markers = {
+        "[MicaNT Explorer] SEC_IMAGE process and CPL3 initial thread started",
+        "[MicaNT Explorer] Ring 3 entry reached; Win32k class registered",
+        "[MicaNT Explorer] First user-mode window created",
+    }
+    taskmgr_direct_expected = tuple(
+        marker for marker in EXPECTED_SERIAL if marker not in taskmgr_direct_markers
+    ) + ("[MicaNT ReactOSApps] Original AMD64 PE process started PID=",)
     expected = (
+        taskmgr_direct_expected if reactos_app == "taskmgr" else
         EXPECTED_SERIAL + ("[MicaNT ReactOSApps] Original AMD64 PE process started PID=",)
         if reactos_app else
         EXPECTED_TIMER_SELFTEST_SERIAL if timer_selftest else
@@ -3383,7 +3519,7 @@ def run_qemu(
                 raise RuntimeError(f"application bundle directory does not exist: {source}")
             target = esp / "ReactOSApps"
             target.mkdir()
-            if reactos_app in {"winver", "calc", "winmine", "mspaint", "notepad"} and reactos_debug_image is not None:
+            if reactos_app in {"winver", "calc", "winmine", "mspaint", "notepad", "taskmgr", "comdlgtest"} and reactos_debug_image is not None:
                 debug_image = reactos_debug_image.expanduser().resolve()
                 if not debug_image.is_file():
                     raise RuntimeError(
@@ -3391,6 +3527,8 @@ def run_qemu(
                 debug_pe = inspect_pe(debug_image, "WINDOWS_GUI", allow_imports=True)
                 debug_hash = hashlib.sha256(debug_image.read_bytes()).hexdigest()
                 shutil.copyfile(debug_image, target / f"{reactos_app}.exe")
+                if reactos_app == "comdlgtest":
+                    shutil.copyfile(debug_image, system32_dir / "comdlgtest.exe")
                 if diagnostics_dir is not None:
                     (diagnostics_dir / f"luceos-{reactos_app}-debug-image.json").write_text(
                         json.dumps({
@@ -4294,7 +4432,7 @@ def main() -> int:
     parser.add_argument("--reactos-apps-dir", type=Path)
     parser.add_argument("--reactos-app", choices=(
         "winver", "notepad", "calc", "winmine", "sol", "mspaint",
-        "regedit", "taskmgr", "wordpad", "cmd"))
+        "regedit", "taskmgr", "wordpad", "cmd", "comdlgtest"))
     parser.add_argument("--reactos-debug-image", type=Path,
                         help="replace only Calc after verifying the official bundle; diagnostic only")
     parser.add_argument("--doom-test", action="store_true",
@@ -4310,7 +4448,7 @@ def main() -> int:
 
     if bool(args.reactos_apps_dir) != bool(args.reactos_app):
         parser.error("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
-    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad"):
+    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad", "taskmgr", "comdlgtest"):
         parser.error("--reactos-debug-image is only valid with a supported LuceOS app port")
 
     if args.ovmf_code is None:

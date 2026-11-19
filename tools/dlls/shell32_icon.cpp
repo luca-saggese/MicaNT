@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 
 extern "C" {
 __declspec(dllimport) void* LoadImageW(void*, const wchar_t*, uint32_t,
@@ -14,6 +15,7 @@ __declspec(dllimport) void* LoadImageW(void*, const wchar_t*, uint32_t,
 __declspec(dllimport) void* CreateIconFromResourceEx(const uint8_t*, uint32_t,
     int32_t, uint32_t, int32_t, int32_t, uint32_t);
 __declspec(dllimport) int32_t DestroyIcon(void*);
+__declspec(dllimport) void* CopyIcon(void*);
 }
 
 namespace {
@@ -25,6 +27,9 @@ constexpr uint32_t kImageIcon = 1;
 constexpr uint32_t kLoadFromFile = 0x0010;
 constexpr uint32_t kGroupIconType = 14;
 constexpr size_t kMaxGroups = 256;
+constexpr uint32_t kDirectoryAttribute = 0x10u;
+void* g_genericFileIcon{};
+void* g_genericFolderIcon{};
 
 void write16(uint8_t* output, uint16_t value) noexcept {
     output[0] = static_cast<uint8_t>(value);
@@ -205,6 +210,51 @@ struct ShellFileInfoW {
     wchar_t typeName[80];
 };
 
+void* makeGenericFileIcon(bool folder) noexcept {
+    // Build a small 32-bit icon resource using the documented icon DIB layout.
+    // User32 validates/decodes the pixels and owns the resulting HICON.
+    constexpr uint32_t width = 16, height = 16;
+    constexpr size_t xorBytes = width * height * 4;
+    constexpr size_t andBytes = ((width + 31) / 32) * 4 * height;
+    std::array<uint8_t, 40 + xorBytes + andBytes> dib{};
+    write32(dib.data(), 40);
+    write32(dib.data() + 4, width);
+    write32(dib.data() + 8, height * 2);
+    write16(dib.data() + 12, 1);
+    write16(dib.data() + 14, 32);
+    write32(dib.data() + 20, xorBytes);
+    auto pixel = [&](uint32_t x, uint32_t y, uint8_t red, uint8_t green,
+                     uint8_t blue) noexcept {
+        const size_t offset = 40 + (height - 1 - y) * width * 4 + x * 4;
+        dib[offset] = blue; dib[offset + 1] = green;
+        dib[offset + 2] = red; dib[offset + 3] = 255;
+    };
+    if (folder) {
+        for (uint32_t y = 2; y < 15; ++y)
+            for (uint32_t x = 1; x < 15; ++x) pixel(x, y, 189, 129, 23);
+        for (uint32_t y = 3; y < 14; ++y)
+            for (uint32_t x = 2; x < 15; ++x) pixel(x, y, 232, 178, 54);
+        for (uint32_t y = 2; y < 4; ++y)
+            for (uint32_t x = 2; x < 8; ++x) pixel(x, y, 255, 221, 112);
+    } else {
+        for (uint32_t y = 1; y < 15; ++y)
+            for (uint32_t x = 3; x < 14; ++x) pixel(x, y, 115, 115, 115);
+        for (uint32_t y = 2; y < 14; ++y)
+            for (uint32_t x = 4; x < 13; ++x) pixel(x, y, 255, 255, 255);
+        for (uint32_t y = 6; y <= 12; y += 3)
+            for (uint32_t x = 6; x < (y == 12 ? 10u : 11u); ++x)
+                pixel(x, y, 87, 127, 173);
+    }
+    return CreateIconFromResourceEx(dib.data(), static_cast<uint32_t>(dib.size()),
+        1, 0x00030000u, width, height, 0);
+}
+
+void* genericFileIcon(bool folder) noexcept {
+    void*& cache = folder ? g_genericFolderIcon : g_genericFileIcon;
+    if (!cache) cache = makeGenericFileIcon(folder);
+    return cache ? CopyIcon(cache) : nullptr;
+}
+
 } // namespace
 
 extern "C" {
@@ -314,18 +364,27 @@ __declspec(dllexport) uint32_t PrivateExtractIconsA(const char* path,
 }
 
 __declspec(dllexport) uintptr_t SHGetFileInfoW(const wchar_t* path,
-    uint32_t, void* output, uint32_t outputBytes, uint32_t flags) noexcept {
+    uint32_t fileAttributes, void* output, uint32_t outputBytes,
+    uint32_t flags) noexcept {
     constexpr uint32_t kShgfiIcon = 0x00000100u;
     constexpr uint32_t kShgfiSmallIcon = 0x00000001u;
     constexpr uint32_t kShgfiDisplayName = 0x00000200u;
+    constexpr uint32_t kShgfiTypeName = 0x00000400u;
+    constexpr uint32_t kShgfiUseFileAttributes = 0x00000010u;
     if (!path || !*path || !output || outputBytes < sizeof(ShellFileInfoW) ||
-        !(flags & kShgfiIcon) || (flags & ~(kShgfiIcon | kShgfiSmallIcon | kShgfiDisplayName)))
+        !(flags & kShgfiIcon) ||
+        (flags & ~(kShgfiIcon | kShgfiSmallIcon | kShgfiDisplayName |
+                   kShgfiTypeName | kShgfiUseFileAttributes)))
         return 0;
     auto* info = static_cast<ShellFileInfoW*>(output);
     *info = {};
-    info->icon = loadIconPath(path, 0, (flags & kShgfiSmallIcon) ? 16u : 32u,
-                              (flags & kShgfiSmallIcon) ? 16u : 32u);
+    const uint32_t size = (flags & kShgfiSmallIcon) ? 16u : 32u;
+    const bool folder = (fileAttributes & kDirectoryAttribute) != 0;
+    info->icon = (flags & kShgfiUseFileAttributes)
+        ? genericFileIcon(folder) : loadIconPath(path, 0, size, size);
     if (!info->icon) return 0;
+    info->iconIndex = folder ? 3 : 0;
+    info->attributes = fileAttributes;
     if (flags & kShgfiDisplayName) {
         const wchar_t* leaf = path;
         for (const wchar_t* p = path; *p; ++p)
@@ -335,6 +394,14 @@ __declspec(dllexport) uintptr_t SHGetFileInfoW(const wchar_t* path,
             info->displayName[index] = leaf[index]; ++index;
         }
         info->displayName[index] = 0;
+    }
+    if (flags & kShgfiTypeName) {
+        const wchar_t* type = folder ? L"File folder" : L"File";
+        size_t index = 0;
+        while (type[index] && index + 1 < std::size(info->typeName)) {
+            info->typeName[index] = type[index]; ++index;
+        }
+        info->typeName[index] = 0;
     }
     return reinterpret_cast<uintptr_t>(info->icon);
 }

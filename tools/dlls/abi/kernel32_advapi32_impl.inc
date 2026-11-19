@@ -5,6 +5,7 @@
 #include <cwchar>
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/native_process_abi.hpp"
+#include "micant/shared/system_information.h"
 #include "micant/shared/system_time.hpp"
 #include "micant/um/subsystems/winbase/utf8_conversion.hpp"
 
@@ -13,6 +14,7 @@ static_assert(sizeof(void*) == 8);
 namespace { void PaintDebugTrace(uint32_t, uint32_t, uint32_t) noexcept; }
 
 extern "C" {
+void MicaKernel32ReleaseToolhelpSnapshot(void* handle) noexcept;
 
 
 __declspec(dllimport) int32_t __stdcall NtQuerySystemTime(int64_t* systemTime) noexcept;
@@ -28,6 +30,23 @@ __declspec(dllimport) int32_t __stdcall NtQueryVirtualMemory(
     void* process, const void* base, uint32_t informationClass,
     void* information, size_t informationLength, size_t* returnLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtOpenProcess(
+    void** process, uint32_t access, micant::ObjectAttributes* attributes,
+    micant::ClientId* clientId) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateMutant(
+    void** mutant, uint32_t access, micant::ObjectAttributes* attributes,
+    uint8_t initialOwner) noexcept;
+__declspec(dllimport) int32_t __stdcall NtReleaseMutant(
+    void* mutant, int32_t* previousCount) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateEvent(
+    void** event, uint32_t access, micant::ObjectAttributes* attributes,
+    uint32_t type, uint8_t initialState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtReadVirtualMemory(
+    void* process, const void* base, void* buffer, size_t size,
+    size_t* bytesRead) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQuerySystemInformation(
+    uint32_t informationClass, void* information, uint32_t length,
+    uint32_t* returnLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtCreateSection(
     void** section, uint32_t access, void* attributes, void* maximumSize,
     uint32_t protection, uint32_t allocationAttributes, void* file) noexcept;
@@ -45,7 +64,6 @@ __declspec(dllimport) int32_t __stdcall NtQueryInformationThread(
     void* thread, uint32_t informationClass, void* information,
     uint32_t informationLength, uint32_t* returnLength) noexcept;
 __declspec(dllimport) uint32_t __stdcall RtlNtStatusToDosError(int32_t status) noexcept;
-__declspec(dllimport) int32_t __stdcall NtCreateEvent(void** handle, uint32_t access, void* attributes, uint32_t type, uint8_t initialState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtSetEvent(void* handle, int32_t* previousState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtResetEvent(void* handle, int32_t* previousState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtWaitForSingleObject(void* handle, uint8_t alertable, const int64_t* timeout) noexcept;
@@ -73,6 +91,9 @@ __declspec(dllimport) int32_t __stdcall NtCreateUserProcess(
 __declspec(dllimport) int32_t __stdcall NtQueryInformationProcess(
     void* process, uint32_t informationClass, void* information,
     uint32_t informationLength, uint32_t* returnLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtSetInformationProcess(
+    void* process, uint32_t informationClass, const void* information,
+    uint32_t informationLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtQueryInformationThread(
     void* thread, uint32_t informationClass, void* information,
     uint32_t informationLength, uint32_t* returnLength) noexcept;
@@ -680,7 +701,6 @@ LUCE_KERNEL32_UNSUPPORTED(SetFilePointer)
 LUCE_KERNEL32_UNSUPPORTED(SetFileTime)
 LUCE_KERNEL32_UNSUPPORTED(SetHandleInformation)
 LUCE_KERNEL32_UNSUPPORTED(SetLocalTime)
-LUCE_KERNEL32_UNSUPPORTED(SetProcessAffinityMask)
 LUCE_KERNEL32_UNSUPPORTED(TerminateProcess)
 LUCE_KERNEL32_UNSUPPORTED(VirtualAlloc)
 LUCE_KERNEL32_UNSUPPORTED(VirtualFree)
@@ -1461,6 +1481,7 @@ struct Kernel32ProcessInformation {
 };
 static_assert(sizeof(Kernel32ProcessInformation) == 24);
 
+
 static bool CopyWideString(const wchar_t* input, wchar_t* output, size_t capacity,
                            size_t& length) noexcept {
     length = 0;
@@ -1744,6 +1765,251 @@ __declspec(dllexport) uint32_t __stdcall WaitForSingleObjectEx(
 __declspec(dllexport) uint32_t __stdcall WaitForSingleObject(
     void* handle, uint32_t milliseconds) noexcept {
     return WaitForSingleObjectEx(handle, milliseconds, 0);
+}
+
+__declspec(dllexport) void* __stdcall OpenProcess(
+    uint32_t desiredAccess, int32_t inheritHandle, uint32_t processId) noexcept {
+    if (!processId) { SetLastError(87); return nullptr; }
+    micant::ObjectAttributes attributes{};
+    attributes.length = sizeof(attributes);
+    if (inheritHandle) attributes.attributes = 2u;
+    micant::ClientId clientId{};
+    clientId.uniqueProcess = static_cast<micant::Handle>(processId);
+    void* process{};
+    const int32_t status = NtOpenProcess(&process, desiredAccess, &attributes, &clientId);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    return process;
+}
+
+__declspec(dllexport) int32_t __stdcall ReadProcessMemory(
+    void* process, const void* base, void* buffer, size_t size,
+    size_t* bytesRead) noexcept {
+    if (bytesRead) *bytesRead = 0;
+    if (!process || (!buffer && size)) { SetLastError(87); return 0; }
+    size_t completed{};
+    const int32_t status = NtReadVirtualMemory(process, base, buffer, size, &completed);
+    if (bytesRead) *bytesRead = completed;
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
+}
+
+struct Kernel32SystemInfo {
+    union { uint32_t dwOemId; struct { uint16_t wProcessorArchitecture, wReserved; }; };
+    uint32_t dwPageSize;
+    void* lpMinimumApplicationAddress;
+    void* lpMaximumApplicationAddress;
+    uintptr_t dwActiveProcessorMask;
+    uint32_t dwNumberOfProcessors;
+    uint32_t dwProcessorType;
+    uint32_t dwAllocationGranularity;
+    uint16_t wProcessorLevel, wProcessorRevision;
+};
+
+__declspec(dllexport) void __stdcall GetSystemInfo(Kernel32SystemInfo* output) noexcept {
+    if (!output) { SetLastError(87); return; }
+    micant::SystemBasicInformation basic{};
+    uint32_t returned{};
+    const int32_t status = NtQuerySystemInformation(0, &basic, sizeof(basic), &returned);
+    if (status < 0 || returned < sizeof(basic)) {
+        SetLastError(RtlNtStatusToDosError(status < 0 ? status : static_cast<int32_t>(0xC0000004u)));
+        return;
+    }
+    Kernel32SystemInfo value{};
+    value.wProcessorArchitecture = 9; // PROCESSOR_ARCHITECTURE_AMD64
+    value.dwPageSize = basic.pageSize;
+    value.lpMinimumApplicationAddress = reinterpret_cast<void*>(basic.minimumUserModeAddress);
+    value.lpMaximumApplicationAddress = reinterpret_cast<void*>(basic.maximumUserModeAddress);
+    value.dwActiveProcessorMask = basic.activeProcessorsAffinityMask;
+    value.dwNumberOfProcessors = static_cast<uint8_t>(basic.numberOfProcessors);
+    value.dwProcessorType = 8664;
+    value.dwAllocationGranularity = basic.allocationGranularity;
+    *output = value;
+}
+
+__declspec(dllexport) int32_t __stdcall GetExitCodeThread(
+    void* thread, uint32_t* exitCode) noexcept {
+    if (!thread || !exitCode) { SetLastError(87); return 0; }
+    micant::ThreadBasicInformation information{};
+    uint32_t returned{};
+    const int32_t status = NtQueryInformationThread(thread, 0, &information,
+        sizeof(information), &returned);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    *exitCode = static_cast<uint32_t>(information.exitStatus);
+    return 1;
+}
+
+__declspec(dllexport) int32_t __stdcall IsWow64Process(
+    void* process, int32_t* wow64Process) noexcept {
+    if (!process || !wow64Process) { SetLastError(87); return 0; }
+    micant::ProcessBasicInformation information{};
+    uint32_t returned{};
+    const int32_t status = NtQueryInformationProcess(process, 0, &information,
+        sizeof(information), &returned);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    // MicaNT currently creates AMD64 user processes only; it has no WoW64
+    // runtime, so every successfully queried process is native AMD64.
+    *wow64Process = 0;
+    return 1;
+}
+
+static uint32_t Kernel32PriorityClassToNative(uint32_t value) noexcept {
+    switch (value) {
+        case 0x00000040u: return 1; // IDLE_PRIORITY_CLASS
+        case 0x00000020u: return 2; // NORMAL_PRIORITY_CLASS
+        case 0x00000080u: return 3; // HIGH_PRIORITY_CLASS
+        case 0x00000100u: return 4; // REALTIME_PRIORITY_CLASS
+        case 0x00004000u: return 5; // BELOW_NORMAL_PRIORITY_CLASS
+        case 0x00008000u: return 6; // ABOVE_NORMAL_PRIORITY_CLASS
+        default: return 0;
+    }
+}
+
+static uint32_t Kernel32PriorityClassFromNative(uint8_t value) noexcept {
+    switch (value) {
+        case 1: return 0x00000040u;
+        case 2: return 0x00000020u;
+        case 3: return 0x00000080u;
+        case 4: return 0x00000100u;
+        case 5: return 0x00004000u;
+        case 6: return 0x00008000u;
+        default: return 0;
+    }
+}
+
+__declspec(dllexport) uint32_t __stdcall GetPriorityClass(void* process) noexcept {
+    if (!process) { SetLastError(87); return 0; }
+    micant::ProcessPriorityClassInformation information{};
+    uint32_t returned{};
+    const int32_t status = NtQueryInformationProcess(process,
+        static_cast<uint32_t>(micant::ProcessInformationClass::ProcessPriorityClass),
+        &information, sizeof(information), &returned);
+    if (status < 0 || returned != sizeof(information)) {
+        SetLastError(RtlNtStatusToDosError(status < 0 ? status : static_cast<int32_t>(0xC0000004u)));
+        return 0;
+    }
+    const uint32_t value = Kernel32PriorityClassFromNative(information.priorityClass);
+    if (!value) SetLastError(31);
+    return value;
+}
+
+__declspec(dllexport) int32_t __stdcall SetPriorityClass(
+    void* process, uint32_t priorityClass) noexcept {
+    const uint32_t nativeClass = Kernel32PriorityClassToNative(priorityClass);
+    if (!process || !nativeClass) { SetLastError(87); return 0; }
+    const micant::ProcessPriorityClassInformation information{
+        .foreground = 0, .priorityClass = static_cast<uint8_t>(nativeClass)};
+    const int32_t status = NtSetInformationProcess(process,
+        static_cast<uint32_t>(micant::ProcessInformationClass::ProcessPriorityClass),
+        &information, sizeof(information));
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
+}
+
+__declspec(dllexport) int32_t __stdcall GetProcessAffinityMask(
+    void* process, uintptr_t* processMask, uintptr_t* systemMask) noexcept {
+    if (!process || !processMask || !systemMask) { SetLastError(87); return 0; }
+    uintptr_t targetMask{};
+    uint32_t returned{};
+    int32_t status = NtQueryInformationProcess(process,
+        static_cast<uint32_t>(micant::ProcessInformationClass::ProcessAffinityMask),
+        &targetMask, sizeof(targetMask), &returned);
+    if (status < 0 || returned != sizeof(targetMask)) {
+        SetLastError(RtlNtStatusToDosError(status < 0 ? status : static_cast<int32_t>(0xC0000004u)));
+        return 0;
+    }
+    micant::SystemBasicInformation basic{};
+    returned = 0;
+    status = NtQuerySystemInformation(0, &basic, sizeof(basic), &returned);
+    if (status < 0 || returned < sizeof(basic)) {
+        SetLastError(RtlNtStatusToDosError(status < 0 ? status : static_cast<int32_t>(0xC0000004u)));
+        return 0;
+    }
+    *processMask = targetMask;
+    *systemMask = basic.activeProcessorsAffinityMask;
+    return 1;
+}
+
+__declspec(dllexport) int32_t __stdcall SetProcessAffinityMask(
+    void* process, uintptr_t processMask) noexcept {
+    if (!process || !processMask) { SetLastError(87); return 0; }
+    const int32_t status = NtSetInformationProcess(process,
+        static_cast<uint32_t>(micant::ProcessInformationClass::ProcessAffinityMask),
+        &processMask, sizeof(processMask));
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
+}
+
+__declspec(dllexport) wchar_t* __stdcall lstrcpyW(
+    wchar_t* destination, const wchar_t* source) noexcept {
+    if (!destination || !source) { SetLastError(87); return nullptr; }
+    wchar_t* result = destination;
+    do { *destination++ = *source; } while (*source++);
+    return result;
+}
+
+struct Kernel32SecurityAttributes {
+    uint32_t length;
+    void* securityDescriptor;
+    int32_t inheritHandle;
+};
+
+__declspec(dllexport) void* __stdcall CreateEventW(
+    const Kernel32SecurityAttributes* security, int32_t manualReset,
+    int32_t initialState, const wchar_t* name) noexcept {
+    if (name) { SetLastError(50); return nullptr; }
+    micant::ObjectAttributes attributes{};
+    micant::ObjectAttributes* attributesPointer = nullptr;
+    if (security) {
+        if (security->length < sizeof(Kernel32SecurityAttributes) ||
+            security->securityDescriptor) { SetLastError(50); return nullptr; }
+        attributes.attributes = security->inheritHandle ? micant::OBJ_INHERIT : 0;
+        attributesPointer = &attributes;
+    }
+    void* event{};
+    const int32_t status = NtCreateEvent(&event, 0x001F0003u,
+        attributesPointer, manualReset ? 0u : 1u, initialState != 0);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    return event;
+}
+
+__declspec(dllexport) void* __stdcall CreateMutexW(
+    const Kernel32SecurityAttributes* security, int32_t initialOwner,
+    const wchar_t* name) noexcept {
+    micant::ObjectAttributes attributes{};
+    micant::UnicodeString objectName{};
+    micant::ObjectAttributes* attributesPointer = (name || security) ? &attributes : nullptr;
+    if (name) {
+        size_t chars{};
+        while (name[chars] && chars < 128) ++chars;
+        if (!chars || chars >= 128 || chars * sizeof(wchar_t) > UINT16_MAX) {
+            SetLastError(123);
+            return nullptr;
+        }
+        objectName.length = static_cast<uint16_t>(chars * sizeof(wchar_t));
+        objectName.maximumLength = static_cast<uint16_t>((chars + 1) * sizeof(wchar_t));
+        objectName.buffer = name;
+        attributes.objectName = &objectName;
+        attributes.attributes |= micant::OBJ_CASE_INSENSITIVE | micant::OBJ_OPENIF;
+    }
+    if (security) {
+        if (security->length < sizeof(Kernel32SecurityAttributes) ||
+            security->securityDescriptor) { SetLastError(50); return nullptr; }
+        attributes.attributes = security->inheritHandle ? micant::OBJ_INHERIT : 0;
+        if (name) attributes.attributes |= micant::OBJ_CASE_INSENSITIVE | micant::OBJ_OPENIF;
+    }
+    void* mutant{};
+    const int32_t status = NtCreateMutant(&mutant, 0x001F0001u,
+        attributesPointer, initialOwner != 0);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    if (status == static_cast<int32_t>(micant::NtStatus::ObjectNameExists)) SetLastError(183);
+    return mutant;
+}
+
+__declspec(dllexport) int32_t __stdcall ReleaseMutex(void* mutant) noexcept {
+    if (!mutant) { SetLastError(87); return 0; }
+    const int32_t status = NtReleaseMutant(mutant, nullptr);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
 }
 
 __declspec(dllexport) int32_t __stdcall GetExitCodeProcess(
@@ -3563,6 +3829,9 @@ __declspec(dllimport) int32_t __stdcall NtQueryValueKey(
     void* keyHandle, micant::UnicodeString* valueName, uint32_t informationClass,
     void* information, size_t informationLength, size_t* resultLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtOpenProcessToken(void* process, uint32_t access, void** token) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryInformationToken(void* token, uint32_t informationClass, void* information, uint32_t length, uint32_t* returnLength) noexcept;
+__declspec(dllimport) int32_t __stdcall RtlNtStatusToDosError(int32_t status) noexcept;
 __declspec(dllimport) int32_t __stdcall NtCreateEvent(void** handle, uint32_t access, void* attributes, uint32_t type, uint8_t initialState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtSetEvent(void* handle, int32_t* previousState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtResetEvent(void* handle, int32_t* previousState) noexcept;
@@ -3679,6 +3948,9 @@ uint32_t Kernel32_WaitForMultipleObjectsEx(uint32_t nCount, const void* const* l
 
 int32_t Kernel32_CloseHandle(void* hObject) noexcept {
     const int32_t status = NtClose(hObject);
+#if defined(BUILD_SYSTEM32_KERNEL32_DLL)
+    if (status >= 0) MicaKernel32ReleaseToolhelpSnapshot(hObject);
+#endif
     if (status < 0) SetLastError(Win32ErrorFromNtStatus(status));
     return status >= 0;
 }
@@ -4288,6 +4560,109 @@ __declspec(dllexport) int32_t GetUserNameW(wchar_t* lpBuffer, uint32_t* pcbBuffe
 }
 __declspec(dllexport) uint8_t SystemFunction036(void* RandomBuffer, uint32_t RandomBufferLength) {
     return micant::um::winnt_kernel32_advapi32_abi::Advapi32_SystemFunction036(RandomBuffer, RandomBufferLength);
+}
+
+namespace {
+struct MicaTaskmgrSid { uint8_t revision, count, authority[6]; uint32_t subAuthority[1]; };
+bool taskmgrSidValid(const void* value) noexcept {
+    if (!value) return false;
+    const auto* sid = static_cast<const MicaTaskmgrSid*>(value);
+    return sid->revision == 1 && sid->count <= 8;
+}
+uint32_t taskmgrSidLength(const void* value) noexcept {
+    return taskmgrSidValid(value) ? 8u + static_cast<const MicaTaskmgrSid*>(value)->count * 4u : 0u;
+}
+}
+
+__declspec(dllexport) int32_t OpenProcessToken(void* process, uint32_t access, void** token) {
+    if (!token) { SetLastError(87); return 0; }
+    void* opened{};
+    const int32_t status = NtOpenProcessToken(process, access, &opened);
+    if (status < 0) { SetLastError(static_cast<uint32_t>(RtlNtStatusToDosError(status))); return 0; }
+    *token = opened;
+    return 1;
+}
+__declspec(dllexport) int32_t GetTokenInformation(void* token, uint32_t informationClass,
+    void* information, uint32_t length, uint32_t* returnLength) {
+    uint32_t required{};
+    const int32_t status = NtQueryInformationToken(token, informationClass, information, length, &required);
+    if (returnLength) *returnLength = required;
+    if (status < 0) { SetLastError(static_cast<uint32_t>(RtlNtStatusToDosError(status))); return 0; }
+    return 1;
+}
+__declspec(dllexport) int32_t AllocateAndInitializeSid(const void* authority, uint8_t count,
+    uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5,
+    uint32_t a6, uint32_t a7, void** output) {
+    if (!authority || !output || count > 8) { SetLastError(87); return 0; }
+    void* base{}; size_t bytes = 8u + static_cast<size_t>(count) * sizeof(uint32_t);
+    const int32_t status = NtAllocateVirtualMemory(reinterpret_cast<void*>(static_cast<intptr_t>(-1)),
+        &base, 0, &bytes, 0x3000u, 4u);
+    if (status < 0) { SetLastError(static_cast<uint32_t>(RtlNtStatusToDosError(status))); return 0; }
+    auto* sid = static_cast<MicaTaskmgrSid*>(base);
+    sid->revision = 1; sid->count = count;
+    for (size_t i = 0; i < 6; ++i) sid->authority[i] = static_cast<const uint8_t*>(authority)[i];
+    const uint32_t values[8] = {a0,a1,a2,a3,a4,a5,a6,a7};
+    for (uint8_t i = 0; i < count; ++i) sid->subAuthority[i] = values[i];
+    *output = sid;
+    return 1;
+}
+__declspec(dllexport) void* FreeSid(void* sid) {
+    if (sid) { size_t bytes{}; (void)NtFreeVirtualMemory(reinterpret_cast<void*>(static_cast<intptr_t>(-1)), &sid, &bytes, 0x8000u); }
+    return nullptr;
+}
+__declspec(dllexport) uint32_t GetLengthSid(void* sid) {
+    if (!taskmgrSidValid(sid)) { SetLastError(1337); return 0; }
+    return taskmgrSidLength(sid);
+}
+__declspec(dllexport) int32_t EqualSid(const void* left, const void* right) {
+    if (!taskmgrSidValid(left) || !taskmgrSidValid(right)) return 0;
+    const uint32_t length = taskmgrSidLength(left);
+    if (length != taskmgrSidLength(right)) return 0;
+    const auto* a = static_cast<const uint8_t*>(left); const auto* b = static_cast<const uint8_t*>(right);
+    for (uint32_t i = 0; i < length; ++i) if (a[i] != b[i]) return 0;
+    return 1;
+}
+__declspec(dllexport) int32_t CopySid(uint32_t size, void* destination, const void* source) {
+    if (!taskmgrSidValid(source) || !destination) { SetLastError(1337); return 0; }
+    const uint32_t length = taskmgrSidLength(source);
+    if (size < length) { SetLastError(122); return 0; }
+    auto* output = static_cast<uint8_t*>(destination); const auto* input = static_cast<const uint8_t*>(source);
+    for (uint32_t i = 0; i < length; ++i) output[i] = input[i];
+    return 1;
+}
+__declspec(dllexport) int32_t LookupPrivilegeValueW(const wchar_t*, const wchar_t* name, void* luid) {
+    if (!name || !luid) { SetLastError(87); return 0; }
+    const auto equal = [name](const wchar_t* expected) noexcept {
+        size_t i = 0; while (name[i] && expected[i] && name[i] == expected[i]) ++i;
+        return name[i] == expected[i];
+    };
+    const uint32_t id = equal(L"SeDebugPrivilege") ? 20u : equal(L"SeShutdownPrivilege") ? 19u :
+        equal(L"SeChangeNotifyPrivilege") ? 23u : 0u;
+    if (!id) { SetLastError(1313); return 0; }
+    auto* value = static_cast<uint32_t*>(luid); value[0] = id; value[1] = 0;
+    return 1;
+}
+__declspec(dllexport) int32_t AdjustTokenPrivileges(void*, int32_t, void*, uint32_t, void*, uint32_t*) {
+    SetLastError(120); return 0;
+}
+__declspec(dllexport) uint32_t GetSecurityInfo(void*, int32_t, uint32_t, void**, void**,
+    void**, void**, void**) { SetLastError(120); return 120; }
+__declspec(dllexport) int32_t LookupAccountSidW(const wchar_t*, void* rawSid, wchar_t* name,
+    uint32_t* nameCount, wchar_t* domain, uint32_t* domainCount, uint32_t* use) {
+    if (!taskmgrSidValid(rawSid) || !nameCount || !domainCount) { SetLastError(87); return 0; }
+    const auto* sid = static_cast<const MicaTaskmgrSid*>(rawSid);
+    const bool system = sid->count == 1 && sid->authority[5] == 5 && sid->subAuthority[0] == 18;
+    if (!system) { SetLastError(1332); return 0; }
+    constexpr wchar_t account[] = L"SYSTEM", authority[] = L"NT AUTHORITY";
+    constexpr uint32_t accountSize = sizeof(account) / sizeof(wchar_t), authoritySize = sizeof(authority) / sizeof(wchar_t);
+    if (!name || !domain || *nameCount < accountSize || *domainCount < authoritySize) {
+        *nameCount = accountSize; *domainCount = authoritySize; SetLastError(122); return 0;
+    }
+    for (uint32_t i = 0; i < accountSize; ++i) name[i] = account[i];
+    for (uint32_t i = 0; i < authoritySize; ++i) domain[i] = authority[i];
+    *nameCount = accountSize - 1; *domainCount = authoritySize - 1;
+    if (use) *use = 1;
+    return 1;
 }
 } // extern "C"
 #endif

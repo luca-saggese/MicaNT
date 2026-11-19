@@ -327,8 +327,8 @@ def main() -> int:
     parser.add_argument(
         "--reactos-app",
         choices=("winver", "notepad", "calc", "winmine", "sol",
-                 "mspaint", "regedit", "taskmgr", "wordpad", "cmd"),
-        help="launch one ReactOS app after Explorer and interact using QMP",
+                 "mspaint", "regedit", "taskmgr", "wordpad", "cmd", "comdlgtest"),
+        help="launch one ReactOS app directly from the kernel app profile and interact using QMP",
     )
     parser.add_argument(
         "--reactos-debug-image", type=Path,
@@ -384,7 +384,7 @@ def main() -> int:
             args.timeout = 180
     elif args.reactos_apps_dir is not None:
         parser.error("--reactos-apps-dir requires --reactos-app")
-    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad"):
+    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad", "taskmgr", "comdlgtest"):
         parser.error("--reactos-debug-image is only valid with a supported LuceOS app port")
     if args.reactos_app and (args.cmd_test or args.doom_test or args.taskmgr_selftest or
                              args.theme_test or args.textbox_test or args.process_memory_selftest or
@@ -540,6 +540,8 @@ def main() -> int:
                 "compositor_boot",
             ]
         )
+        if args.reactos_app == "comdlgtest":
+            run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "comdlgtest_boot"])
         if args.cmd_test:
             run([cmake, "--build", str(BUILD_DIR), "--config", "Release", "--target", "cmd_boot"])
         if args.doom_test:

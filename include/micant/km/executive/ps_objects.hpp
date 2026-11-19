@@ -29,6 +29,10 @@ struct ProcessSnapshotEntry {
     uintptr_t privateCommitPages{};
     uint64_t userTime100ns{};
     uint64_t kernelTime100ns{};
+    uint64_t readOperationCount{};
+    uint64_t writeOperationCount{};
+    uint64_t readTransferCount{};
+    uint64_t writeTransferCount{};
     size_t firstThreadIndex{};
     char16_t imageName[128]{};
     uint16_t imageNameLength{};

@@ -13,13 +13,78 @@ constexpr uint32_t EventModifyState = 0x0002;
 constexpr uint32_t EventAllAccess = 0x001F0003;
 ob::ObjectType eventType;
 ob::ObjectType timerType;
+ob::ObjectType mutantType;
 using Event = sync::detail::BootstrapEvent;
+
+struct NamedMutantEntry {
+    ob::ObjectHeader* object{};
+    char16_t name[128]{};
+};
+std::array<NamedMutantEntry, 64> namedMutants{};
+
+bool equalMutantName(const char16_t* left, const char16_t* right) noexcept {
+    for (size_t i = 0; i < 128; ++i) {
+        auto fold = [](char16_t c) { return c >= u'a' && c <= u'z' ? c - 32 : c; };
+        if (fold(left[i]) != fold(right[i])) return false;
+        if (!left[i]) return true;
+    }
+    return false;
+}
+
+ob::ObjectHeader* findNamedMutant(const char16_t* name) noexcept {
+    ob::detail::HandleTableGuard guard;
+    for (auto& entry : namedMutants) {
+        if (entry.object && equalMutantName(entry.name, name) && entry.object->tryAddReference())
+            return entry.object;
+    }
+    return nullptr;
+}
+
+NtStatus publishNamedMutant(const char16_t* name, ob::ObjectHeader* object) noexcept {
+    ob::detail::HandleTableGuard guard;
+    NamedMutantEntry* freeEntry{};
+    for (auto& entry : namedMutants) {
+        if (entry.object && equalMutantName(entry.name, name)) return NtStatus::ObjectNameCollision;
+        if (!entry.object && !freeEntry) freeEntry = &entry;
+    }
+    if (!freeEntry) return NtStatus::InsufficientResources;
+    size_t i{};
+    do { freeEntry->name[i] = name[i]; } while (name[i] && ++i < 127);
+    freeEntry->name[i] = 0;
+    object->addReference(); // The canonical object-name index owns a reference.
+    freeEntry->object = object;
+    return NtStatus::Success;
+}
+
+void unpublishNamedMutant(ob::ObjectHeader* object) noexcept {
+    bool release{};
+    {
+        ob::detail::HandleTableGuard guard;
+        for (auto& entry : namedMutants) {
+            if (entry.object == object) {
+                entry.object = nullptr;
+                entry.name[0] = 0;
+                release = true;
+                break;
+            }
+        }
+    }
+    if (release) ob::ObDereferenceObject(object);
+}
+
+void closeMutant(ob::ObjectHeader* object, Handle) {
+    if (object->handleCount.load(std::memory_order_relaxed) == 0) unpublishNamedMutant(object);
+}
 
 void deleteEvent(ob::ObjectHeader* header) { header->as<Event>()->~Event(); }
 void deleteTimer(ob::ObjectHeader* header) {
     auto* timer = header->as<timer::KTIMER>();
     if (!ke::clock_timer::cancelAndRemoveDpc(timer->deadline)) __builtin_trap();
     timer->~KTIMER();
+}
+void deleteMutant(ob::ObjectHeader* header) {
+    unpublishNamedMutant(header);
+    header->as<sync::detail::BootstrapMutant>()->~BootstrapMutant();
 }
 }
 
@@ -145,6 +210,100 @@ void initializeBootstrapEventServices() noexcept {
     timerType.typeId = ob::ObjectTypeId::Timer;
     timerType.deleteProcedure = deleteTimer;
     timerType.deferDelete = deferTimerDelete;
+    mutantType.typeId = ob::ObjectTypeId::Mutant;
+    mutantType.deleteProcedure = deleteMutant;
+    mutantType.closeProcedure = closeMutant;
+}
+
+NtStatus NtCreateMutant(Handle* out, uint32_t access, ObjectAttributes* attributes,
+                        bool initialOwner) {
+    constexpr uint32_t MutantAllAccess = 0x001F0001u;
+    if (!out) return NtStatus::InvalidParameter;
+    auto* current = ke::KeGetCurrentThread();
+    if (initialOwner && !current) return NtStatus::InvalidDeviceState;
+    uint32_t handleAttributes{};
+    char16_t capturedName[128]{};
+    bool named{};
+    if (attributes) {
+        auto* caller = ke::KeGetCurrentThread();
+        const auto mode = caller && caller->previousUserMode ? mm::UserMode : mm::KernelMode;
+        ObjectAttributes capturedAttributes{};
+        // NtCreateMutant is entered with a kernel-captured OBJECT_ATTRIBUTES
+        // from the syscall dispatcher. Only its nested UNICODE_STRING remains
+        // a user pointer and is probed below.
+        capturedAttributes = *attributes;
+        auto status = NtStatus::Success;
+        if (capturedAttributes.length != sizeof(ObjectAttributes) || capturedAttributes.rootDirectory ||
+            (capturedAttributes.attributes & ~(OBJ_INHERIT | OBJ_CASE_INSENSITIVE | OBJ_OPENIF)) ||
+            capturedAttributes.securityDescriptor || capturedAttributes.securityQualityOfService)
+            return NtStatus::NotImplemented;
+        handleAttributes = capturedAttributes.attributes & OBJ_INHERIT;
+        if (capturedAttributes.objectName) {
+            UnicodeString nameInfo{};
+            status = ex::ProbeForRead(capturedAttributes.objectName, sizeof(nameInfo), alignof(uint16_t), mode);
+            if (status != NtStatus::Success) return status;
+            status = ex::ExSafeCopyFromUser(&nameInfo, capturedAttributes.objectName, sizeof(nameInfo), mode);
+            if (status != NtStatus::Success) return status;
+            if (!nameInfo.buffer || !nameInfo.length || (nameInfo.length & 1) ||
+                nameInfo.length >= sizeof(capturedName)) return NtStatus::ObjectNameInvalid;
+            status = ex::ProbeForRead(nameInfo.buffer, nameInfo.length, alignof(char16_t), mode);
+            if (status != NtStatus::Success) return status;
+            status = ex::ExSafeCopyFromUser(capturedName, nameInfo.buffer, nameInfo.length, mode);
+            if (status != NtStatus::Success) return status;
+            const size_t chars = nameInfo.length / sizeof(char16_t);
+            for (size_t i = 0; i < chars; ++i) {
+                if (!capturedName[i] || capturedName[i] == u'\\' || capturedName[i] == u'/')
+                    return NtStatus::ObjectNameInvalid;
+            }
+            capturedName[chars] = 0;
+            named = true;
+        }
+    }
+    if (access & ~MutantAllAccess) return NtStatus::NotImplemented;
+    if (named) {
+        if (auto* existing = findNamedMutant(capturedName)) {
+            auto status = ob::detail::currentHandleTable().createHandle(existing, *out, access, handleAttributes);
+            ob::ObDereferenceObject(existing);
+            return status == NtStatus::Success ? NtStatus::ObjectNameExists : status;
+        }
+    }
+    void* body{};
+    ob::ObjectHeader* header{};
+    auto status = ob::ObCreateObject(ob::KernelMode, &mutantType, nullptr,
+        sizeof(sync::detail::BootstrapMutant), &body, &header);
+    if (status != NtStatus::Success) return status;
+    auto* mutant = new (body) sync::detail::BootstrapMutant(initialOwner);
+    if (named) {
+        status = publishNamedMutant(capturedName, header);
+        if (status == NtStatus::ObjectNameCollision) {
+            ob::ObDereferenceObject(header);
+            return NtCreateMutant(out, access, attributes, initialOwner);
+        }
+        if (status != NtStatus::Success) {
+            ob::ObDereferenceObject(header);
+            return status;
+        }
+    }
+    status = ob::detail::currentHandleTable().createHandle(header, *out, access,
+        handleAttributes);
+    if (status != NtStatus::Success && named) unpublishNamedMutant(header);
+    ob::ObDereferenceObject(header);
+    return status;
+}
+
+NtStatus NtReleaseMutant(Handle handle, int32_t* previousCount) {
+    ob::ObjectHeader* header{};
+    ob::HandleTable* table{};
+    Handle raw{};
+    auto status = ob::detail::resolveHandle(handle, table, raw);
+    if (status == NtStatus::Success)
+        status = ob::ObReferenceObjectByHandle(raw, *table, 0x0001u,
+            &mutantType, &header);
+    if (status != NtStatus::Success) return status;
+    auto* mutant = header->as<sync::detail::BootstrapMutant>();
+    status = mutant->release(previousCount);
+    ob::ObDereferenceObject(header);
+    return status;
 }
 
 NtStatus NtCreateTimer(Handle* out, uint32_t access, ObjectAttributes* attributes, uint32_t type) {
@@ -292,10 +451,13 @@ NtStatus NtWaitForSingleObject(Handle handle, bool alertable, LargeInteger* time
     }
     if (status != NtStatus::Success) return status;
     Event* waitObject{};
+    sync::detail::BootstrapMutant* waitMutant{};
     if (header->type == &eventType) {
         waitObject = header->as<Event>();
     } else if (header->type == &timerType) {
         waitObject = &header->as<timer::KTIMER>()->event;
+    } else if (header->type == &mutantType) {
+        waitMutant = header->as<sync::detail::BootstrapMutant>();
     } else if (ps::detail::isProcessObject(*header)) {
         waitObject = &header->as<ps::EProcess>()->terminationEvent();
     } else if (ps::detail::isThreadObject(*header)) {
@@ -325,7 +487,12 @@ NtStatus NtWaitForSingleObject(Handle handle, bool alertable, LargeInteger* time
     // them before a pending termination can be serviced.
     current->eventWaitCanTerminate = current->eventWaitUserMode &&
         ke::KeGetCurrentIrql() == ke::PASSIVE_LEVEL;
-    const auto result = waitObject->wait(poll, alertable, relativeTimeout);
+    NtStatus result{};
+    if (waitObject) {
+        result = waitObject->wait(poll, alertable, relativeTimeout);
+    } else {
+        result = waitMutant->wait(poll, alertable, relativeTimeout);
+    }
     // The wait object has unlinked its stack waiter before returning. Defer
     // termination until this syscall has also cleared the thread's wait
     // registration and released the Ob reference that pins the waited object.

@@ -24,6 +24,8 @@ extern "C" __declspec(dllexport) void* LoadMenuW(void*, const wchar_t*) noexcept
 extern "C" __declspec(dllexport) int32_t DestroyMenu(void*) noexcept;
 extern "C" __declspec(dllexport) int32_t DrawMenuBar(void*) noexcept;
 extern "C" __declspec(dllexport) void* GetMenu(void*) noexcept;
+extern "C" __declspec(dllexport) uint32_t WINAPI GetWindowThreadProcessId(
+    void*, uint32_t*);
 
 extern "C" __declspec(dllimport) int32_t __stdcall Beep(
     uint32_t frequency, uint32_t duration) noexcept;
@@ -31,6 +33,20 @@ extern "C" __declspec(dllimport) void* __stdcall LocalAlloc(uint32_t, size_t) no
 extern "C" __declspec(dllimport) void* __stdcall LocalLock(void*) noexcept;
 extern "C" __declspec(dllimport) int32_t __stdcall LocalUnlock(void*) noexcept;
 extern "C" __declspec(dllimport) void* __stdcall LocalFree(void*) noexcept;
+extern "C" __declspec(dllimport) void* __stdcall OpenProcess(
+    uint32_t, int32_t, uint32_t) noexcept;
+extern "C" __declspec(dllimport) int32_t __stdcall TerminateProcess(
+    void*, uint32_t) noexcept;
+extern "C" __declspec(dllimport) uint32_t __stdcall WaitForSingleObject(
+    void*, uint32_t) noexcept;
+extern "C" __declspec(dllimport) int32_t __stdcall CloseHandle(void*) noexcept;
+extern "C" __declspec(dllimport) int32_t __stdcall NtShutdownSystem(uint32_t) noexcept;
+extern "C" __declspec(dllimport) uint32_t __stdcall RtlNtStatusToDosError(int32_t) noexcept;
+extern "C" __declspec(dllimport) uint32_t __stdcall GetCurrentProcessId() noexcept;
+extern "C" __declspec(dllimport) uint32_t __stdcall GetCurrentThreadId() noexcept;
+extern "C" __declspec(dllimport) uint32_t __stdcall MicaGdi32GetResourceCount(uint32_t) noexcept;
+extern "C" __declspec(dllimport) int32_t __stdcall NtQueryInformationProcess(
+    void*, uint32_t, void*, uint32_t, uint32_t*) noexcept;
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
 extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
@@ -848,6 +864,9 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kDebugInputTrace);
 #endif
     MICA_WIN32K_PROC(MicaWin32kEnumWindows);
+    MICA_WIN32K_PROC(MicaWin32kGetClassNameW);
+    MICA_WIN32K_PROC(MicaWin32kGetWindowThreadProcessId);
+    MICA_WIN32K_PROC(MicaWin32kPostThreadMessageW);
     MICA_WIN32K_PROC(MicaWin32kEnumChildWindows);
     MICA_WIN32K_PROC(MicaWin32kGetDlgItem);
     MICA_WIN32K_PROC(MicaWin32kGetWindowTextW);
@@ -5095,6 +5114,22 @@ wchar_t* User32_CharLowerW(wchar_t* textOrCharacter) noexcept {
     return textOrCharacter;
 }
 
+wchar_t* User32_CharUpperW(wchar_t* textOrCharacter) noexcept {
+    const auto upper = [](wchar_t character) noexcept {
+        return character >= L'a' && character <= L'z'
+            ? static_cast<wchar_t>(character - (L'a' - L'A')) : character;
+    };
+    const uintptr_t value = reinterpret_cast<uintptr_t>(textOrCharacter);
+    if (value <= 0xFFFFu) {
+        return reinterpret_cast<wchar_t*>(static_cast<uintptr_t>(
+            upper(static_cast<wchar_t>(value))));
+    }
+    if (!textOrCharacter) return nullptr;
+    for (wchar_t* current = textOrCharacter; *current; ++current)
+        *current = upper(*current);
+    return textOrCharacter;
+}
+
 int32_t User32_SetWindowPos(void* hWnd, void* hWndInsertAfter, int32_t X, int32_t Y, int32_t cx, int32_t cy, uint32_t uFlags) noexcept {
     if (!hWnd) return 0;
     using Fn=int32_t (*)(void*,void*,int32_t,int32_t,int32_t,int32_t,uint32_t);
@@ -5678,6 +5713,46 @@ __declspec(dllexport) int32_t __stdcall IsWindow(void* window) {
 __declspec(dllexport) void* __stdcall GetParent(void* window) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetParent(window);
 }
+struct WindowSiblingContext { void* parent{}; void* windows[256]{}; uint32_t count{}; };
+static int32_t WINAPI CollectWindowSibling(void* window, intptr_t parameter) {
+    auto* context = reinterpret_cast<WindowSiblingContext*>(parameter);
+    if (!context || context->count >= std::size(context->windows)) return 0;
+    if (GetParent(window) == context->parent)
+        context->windows[context->count++] = window;
+    return 1;
+}
+__declspec(dllexport) void* WINAPI GetWindow(void* window, uint32_t command) {
+    if (!window) return nullptr;
+    constexpr uint32_t first = 0, last = 1, next = 2, previous = 3,
+                       owner = 4, child = 5;
+    if (command == owner) return GetParent(window);
+    if (command == child) {
+        WindowSiblingContext context{window};
+        (void)micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumChildWindows(
+            window, reinterpret_cast<void*>(CollectWindowSibling),
+            reinterpret_cast<intptr_t>(&context));
+        return context.count ? context.windows[0] : nullptr;
+    }
+    if (command > previous) return nullptr;
+    const void* parent = GetParent(window);
+    WindowSiblingContext context{const_cast<void*>(parent)};
+    if (parent) {
+        (void)micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumChildWindows(
+            const_cast<void*>(parent), reinterpret_cast<void*>(CollectWindowSibling),
+            reinterpret_cast<intptr_t>(&context));
+    } else {
+        (void)micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumWindows(
+            reinterpret_cast<void*>(CollectWindowSibling), reinterpret_cast<intptr_t>(&context));
+    }
+    for (uint32_t i = 0; i < context.count; ++i) {
+        if (context.windows[i] != window) continue;
+        if (command == first) return context.windows[0];
+        if (command == last) return context.windows[context.count - 1];
+        if (command == next) return i + 1 < context.count ? context.windows[i + 1] : nullptr;
+        if (command == previous) return i ? context.windows[i - 1] : nullptr;
+    }
+    return nullptr;
+}
 __declspec(dllexport) int32_t __stdcall DrawStateW(void* dc, void* brush,
     void* callback, intptr_t data, uintptr_t count, int32_t x, int32_t y,
     int32_t width, int32_t height, uint32_t flags) {
@@ -5781,8 +5856,241 @@ __declspec(dllexport) int32_t EnumWindows(int32_t (*lpEnumFunc)(void*, intptr_t)
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumWindows(
         reinterpret_cast<void*>(lpEnumFunc), lParam);
 }
+__declspec(dllexport) int32_t WINAPI PostThreadMessageW(uint32_t threadId,
+        uint32_t message, uintptr_t wParam, intptr_t lParam) {
+    using Fn = int32_t (*)(uint32_t, uint32_t, uintptr_t, intptr_t);
+    const auto fn = micant::um::winnt_user32_gdi32_imm32_abi::Win32kProc<Fn>(
+        "MicaWin32kPostThreadMessageW");
+    if (!fn) return 0;
+    return fn(threadId, message, wParam, lParam);
+}
+struct FindWindowContext { const wchar_t* className{}; const wchar_t* title{}; void* found{}; };
+static int32_t WINAPI FindWindowCallback(void* window, intptr_t parameter) {
+    auto* context = reinterpret_cast<FindWindowContext*>(parameter);
+    if (!context) return 0;
+    wchar_t value[256]{};
+    if (context->className) {
+        if (reinterpret_cast<uintptr_t>(context->className) <= 0xFFFFu ||
+            !micant::um::winnt_user32_gdi32_imm32_abi::User32_GetClassNameW(
+                window, value, static_cast<int32_t>(std::size(value)))) return 1;
+        size_t i = 0;
+        while (value[i] && context->className[i] && value[i] == context->className[i]) ++i;
+        if (value[i] != context->className[i]) return 1;
+    }
+    if (context->title) {
+        if (!micant::um::winnt_user32_gdi32_imm32_abi::User32_GetWindowTextW(
+                window, value, static_cast<int32_t>(std::size(value)))) return 1;
+        size_t i = 0;
+        while (value[i] && context->title[i] && value[i] == context->title[i]) ++i;
+        if (value[i] != context->title[i]) return 1;
+    }
+    context->found = window;
+    return 0;
+}
+__declspec(dllexport) void* WINAPI FindWindowW(const wchar_t* className,
+        const wchar_t* windowName) {
+    FindWindowContext context{className, windowName, nullptr};
+    (void)EnumWindows(FindWindowCallback, reinterpret_cast<intptr_t>(&context));
+    return context.found;
+}
+__declspec(dllexport) void* WINAPI GetShellWindow(void) {
+    return FindWindowW(L"Shell_TrayWnd", nullptr);
+}
+__declspec(dllexport) int32_t WINAPI EndTask(void* window, int32_t force,
+        int32_t wait) {
+    if (!window || !IsWindow(window)) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(1400);
+        return 0;
+    }
+    uint32_t processId{};
+    if (!GetWindowThreadProcessId(window, &processId) || !processId) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(1400);
+        return 0;
+    }
+    void* process = OpenProcess(0x00100001u /* SYNCHRONIZE | TERMINATE */,
+        0, processId);
+    if (!process) return 0;
+    if (!force) {
+        (void)micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+            window, 0x0010u /* WM_CLOSE */, 0, 0);
+        if (!wait) { (void)CloseHandle(process); return 1; }
+        const uint32_t result = WaitForSingleObject(process, 5000);
+        if (result == 0) { (void)CloseHandle(process); return 1; }
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(
+            result == 0x102u ? 1460u : 31u);
+        (void)CloseHandle(process);
+        return 0;
+    }
+    const int32_t terminated = TerminateProcess(process, 0);
+    if (terminated && wait) (void)WaitForSingleObject(process, 5000);
+    (void)CloseHandle(process);
+    return terminated;
+}
+__declspec(dllexport) int32_t WINAPI ExitWindowsEx(uint32_t flags,
+        uint32_t reason) {
+    (void)reason;
+    constexpr uint32_t ewxShutdown = 1;
+    constexpr uint32_t ewxReboot = 2;
+    constexpr uint32_t ewxForce = 4;
+    constexpr uint32_t ewxPowerOff = 8;
+    constexpr uint32_t ewxForceIfHung = 16;
+    constexpr uint32_t supported = ewxShutdown | ewxReboot | ewxForce |
+        ewxPowerOff | ewxForceIfHung;
+    if (flags & ~supported) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(87);
+        return 0;
+    }
+    if (!(flags & (ewxShutdown | ewxReboot | ewxPowerOff))) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(120);
+        return 0; // Session logoff needs the LuceOS session manager.
+    }
+    const uint32_t action = (flags & ewxReboot) ? 1u : 2u;
+    const int32_t status = NtShutdownSystem(action);
+    if (status < 0) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(
+            RtlNtStatusToDosError(status));
+        return 0;
+    }
+    return 1;
+}
+__declspec(dllexport) int32_t WINAPI LockWorkStation(void) {
+    // LuceOS has no secure desktop/session lock coordinator yet. Do not report
+    // a successful lock without switching input to an authenticated lock UI.
+    micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(120);
+    return 0;
+}
+__declspec(dllexport) int32_t WINAPI SendMessageTimeoutW(void* window,
+        uint32_t message, uintptr_t wParam, intptr_t lParam, uint32_t flags,
+        uint32_t timeout, uintptr_t* result) {
+    constexpr uint32_t supportedFlags = 0x0001u | 0x0002u | 0x0008u | 0x0020u;
+    if (!window || (flags & ~supportedFlags)) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(87);
+        return 0;
+    }
+    uint32_t processId{}, threadId = GetWindowThreadProcessId(window, &processId);
+    if (!threadId || processId != GetCurrentProcessId() ||
+        threadId != GetCurrentThreadId()) {
+        // There is no cross-thread send dispatcher yet. A synchronous call
+        // outside this UI thread cannot honor the timeout contract safely.
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(1460);
+        if (result) *result = 0;
+        (void)timeout;
+        return 0;
+    }
+    const intptr_t value = micant::um::winnt_user32_gdi32_imm32_abi::User32_SendMessageW(
+        window, message, wParam, lParam);
+    if (result) *result = static_cast<uintptr_t>(value);
+    return 1;
+}
 __declspec(dllexport) int32_t GetWindowTextW(void* hWnd, wchar_t* lpString, int32_t nMaxCount) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetWindowTextW(hWnd, lpString, nMaxCount);
+}
+__declspec(dllexport) uint32_t WINAPI GetWindowThreadProcessId(void* window,
+        uint32_t* processId) {
+    using Fn = uint32_t (*)(void*, uint32_t*);
+    const auto fn = micant::um::winnt_user32_gdi32_imm32_abi::Win32kProc<Fn>(
+        "MicaWin32kGetWindowThreadProcessId");
+    if (!fn) return 0;
+    return fn(window, processId);
+}
+__declspec(dllexport) int32_t WINAPI BringWindowToTop(void* window) {
+    if (!window) return 0;
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowPos(
+        window, reinterpret_cast<void*>(-1), 0, 0, 0, 0, 0x0001u | 0x0002u);
+}
+__declspec(dllexport) int32_t WINAPI OpenIcon(void* window) {
+    return ShowWindow(window, 9 /* SW_RESTORE */);
+}
+__declspec(dllexport) int32_t WINAPI ShowWindowAsync(void* window, int32_t command) {
+    return ShowWindow(window, command);
+}
+__declspec(dllexport) int32_t WINAPI SwitchToThisWindow(void* window, int32_t) {
+    if (!window) return 0;
+    (void)ShowWindow(window, 9);
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetForegroundWindow(window);
+}
+struct WindowLayoutContext {
+    void** windows{};
+    uint32_t count{};
+    uint32_t capacity{};
+    void* parent{};
+};
+static int32_t WINAPI CollectLayoutWindow(void* window, intptr_t parameter) {
+    auto* context = reinterpret_cast<WindowLayoutContext*>(parameter);
+    if (!context || !window || context->count >= context->capacity) return 1;
+    if (context->parent && GetParent(window) != context->parent) return 1;
+    context->windows[context->count++] = window;
+    return 1;
+}
+static uint32_t CollectLayoutWindows(void* parent, uint32_t count,
+        const void* const* supplied, void** output, uint32_t capacity) {
+    if (count) {
+        if (!supplied || count > capacity) return 0;
+        for (uint32_t i = 0; i < count; ++i) output[i] = const_cast<void*>(supplied[i]);
+        return count;
+    }
+    WindowLayoutContext context{output, 0, capacity, parent};
+    (void)EnumWindows(CollectLayoutWindow, reinterpret_cast<intptr_t>(&context));
+    return context.count;
+}
+__declspec(dllexport) uint32_t WINAPI CascadeWindows(void* parent, uint32_t,
+        const void*, uint32_t count, const void* const* supplied) {
+    void* windows[256]{};
+    const uint32_t total = CollectLayoutWindows(parent, count, supplied,
+        windows, static_cast<uint32_t>(std::size(windows)));
+    if (!total) return 0;
+    const int32_t screenWidth = micant::um::winnt_user32_gdi32_imm32_abi::User32_GetSystemMetrics(0);
+    const int32_t screenHeight = micant::um::winnt_user32_gdi32_imm32_abi::User32_GetSystemMetrics(1);
+    if (screenWidth <= 0 || screenHeight <= 0) return 0;
+    int32_t x = 0, y = 0;
+    const int32_t width = screenWidth * 2 / 3;
+    const int32_t height = screenHeight * 2 / 3;
+    const int32_t step = 24;
+    uint32_t arranged = 0;
+    for (uint32_t i = 0; i < total; ++i) {
+        if (ShowWindow(windows[i], 9) || IsWindow(windows[i])) {
+            if (micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowPos(
+                    windows[i], reinterpret_cast<void*>(-1), x, y,
+                    width, height, 0x0004u /* SWP_NOZORDER */)) ++arranged;
+        }
+        x += step; y += step;
+        if (x + width > screenWidth || y + height > screenHeight) x = y = 0;
+    }
+    return arranged;
+}
+__declspec(dllexport) uint32_t WINAPI TileWindows(void* parent, uint32_t,
+        const void* area, uint32_t count, const void* const* supplied) {
+    using Rect = micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect;
+    void* windows[256]{};
+    const uint32_t total = CollectLayoutWindows(parent, count, supplied,
+        windows, static_cast<uint32_t>(std::size(windows)));
+    if (!total) return 0;
+    Rect bounds{};
+    if (area) bounds = *static_cast<const Rect*>(area);
+    else bounds = {0, 0,
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_GetSystemMetrics(0),
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_GetSystemMetrics(1)};
+    uint32_t columns = 1;
+    while (static_cast<uint64_t>(columns) * columns < total) ++columns;
+    const uint32_t rows = (total + columns - 1) / columns;
+    if (!columns || !rows || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return 0;
+    uint32_t arranged = 0;
+    for (uint32_t i = 0; i < total; ++i) {
+        const uint32_t col = i % columns, row = i / columns;
+        const int32_t left = bounds.left + static_cast<int64_t>(col) *
+            (bounds.right - bounds.left) / columns;
+        const int32_t right = bounds.left + static_cast<int64_t>(col + 1) *
+            (bounds.right - bounds.left) / columns;
+        const int32_t top = bounds.top + static_cast<int64_t>(row) *
+            (bounds.bottom - bounds.top) / rows;
+        const int32_t bottom = bounds.top + static_cast<int64_t>(row + 1) *
+            (bounds.bottom - bounds.top) / rows;
+        (void)ShowWindow(windows[i], 9);
+        if (micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowPos(
+                windows[i], nullptr, left, top, right - left,
+                bottom - top, 0)) ++arranged;
+    }
+    return arranged;
 }
 __declspec(dllexport) int32_t SetWindowTextW(void* hWnd, const wchar_t* lpString) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowTextW(hWnd, lpString);
@@ -5825,6 +6133,9 @@ __declspec(dllexport) intptr_t GetWindowLongPtrW(void* hWnd, int32_t nIndex) {
 }
 __declspec(dllexport) wchar_t* CharLowerW(wchar_t* textOrCharacter) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_CharLowerW(textOrCharacter);
+}
+__declspec(dllexport) wchar_t* CharUpperW(wchar_t* textOrCharacter) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CharUpperW(textOrCharacter);
 }
 __declspec(dllexport) int32_t SetWindowPos(void* hWnd, void* hWndInsertAfter, int32_t X, int32_t Y, int32_t cx, int32_t cy, uint32_t uFlags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
@@ -5877,6 +6188,11 @@ __declspec(dllexport) void* MonitorFromWindow(void* hwnd, uint32_t dwFlags) {
 }
 __declspec(dllexport) int32_t EnumDisplaySettingsExW(const wchar_t* lpszDeviceName, uint32_t iModeNum, void* lpDevMode, uint32_t dwFlags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumDisplaySettingsExW(lpszDeviceName, iModeNum, lpDevMode, dwFlags);
+}
+__declspec(dllexport) int32_t WINAPI EnumDisplaySettingsW(
+        const wchar_t* deviceName, uint32_t modeNumber, void* devMode) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumDisplaySettingsExW(
+        deviceName, modeNumber, devMode, 0);
 }
 __declspec(dllexport) int32_t SetProcessDpiAwarenessContext(void* value) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetProcessDpiAwarenessContext(value);
@@ -7715,6 +8031,61 @@ __declspec(dllexport) uint32_t CheckMenuItem(void* handle, uint32_t item,
     state = (state & ~checked) | (check & checked);
     return previous;
 }
+__declspec(dllexport) int32_t CheckMenuRadioItem(void* handle, uint32_t first,
+        uint32_t last, uint32_t check, uint32_t flags) noexcept {
+    constexpr uint32_t byPosition = 0x0400u;
+    constexpr uint32_t checked = 0x0008u;
+    constexpr uint32_t radioCheck = 0x0004u;
+    LockGuard guard;
+    auto* menu = findMenu(handle);
+    if (!menu || first > last || (check < first || check > last)) return 0;
+    const bool positional = (flags & byPosition) != 0;
+    const int firstIndex = findItem(*menu, first, positional);
+    const int lastIndex = findItem(*menu, last, positional);
+    const int checkIndex = findItem(*menu, check, positional);
+    if (firstIndex < 0 || lastIndex < firstIndex || checkIndex < firstIndex ||
+        checkIndex > lastIndex) return 0;
+    for (int index = firstIndex; index <= lastIndex; ++index) {
+        auto& item = menu->items[index];
+        item.state = (item.state & ~checked) | (index == checkIndex ? checked : 0u);
+        if (index == checkIndex) item.type |= radioCheck;
+    }
+    return 1;
+}
+__declspec(dllexport) uint32_t GetMenuState(void* handle, uint32_t item,
+        uint32_t flags) noexcept {
+    constexpr uint32_t byPosition = 0x0400u;
+    constexpr uint32_t popup = 0x0010u;
+    LockGuard guard;
+    auto* menu = findMenu(handle);
+    if (!menu) return UINT32_MAX;
+    const int index = findItem(*menu, item, (flags & byPosition) != 0);
+    if (index < 0) return UINT32_MAX;
+    const auto& selected = menu->items[index];
+    uint32_t state = selected.state | selected.type;
+    if (selected.submenu) {
+        auto* submenu = findMenu(selected.submenu);
+        if (!submenu) return UINT32_MAX;
+        state = popup | submenu->count;
+    }
+    return state;
+}
+__declspec(dllexport) int32_t SetMenuDefaultItem(void* handle, uint32_t item,
+        uint32_t byPosition) noexcept {
+    constexpr uint32_t defaultState = 0x1000u;
+    LockGuard guard;
+    auto* menu = findMenu(handle);
+    if (!menu) return 0;
+    int selected = -1;
+    if (item != UINT32_MAX) {
+        selected = findItem(*menu, item, byPosition != 0);
+        if (selected < 0) return 0;
+    }
+    for (uint16_t i = 0; i < menu->count; ++i)
+        menu->items[i].state &= ~defaultState;
+    if (selected >= 0) menu->items[selected].state |= defaultState;
+    return 1;
+}
 __declspec(dllexport) void* GetSubMenu(void* handle, int position) noexcept {
     LockGuard guard;
     auto* menu = findMenu(handle);
@@ -8522,5 +8893,52 @@ int32_t MicaUser32FillRect(void* dc,
     auto fill = gdi ? reinterpret_cast<FillRectFn>(GetProcAddress(gdi, "FillRect")) : nullptr;
     return fill ? fill(dc, rect, brush) : 0;
 }
+}
+#endif
+
+#if defined(BUILD_SYSTEM32_USER32_DLL)
+namespace {
+struct GuiResourceCountContext { uint32_t processId{}; uint32_t count{}; };
+uint32_t QueryGuiProcessId(void* process) noexcept {
+    micant::ProcessBasicInformation information{};
+    if (NtQueryInformationProcess(process, 0, &information,
+            sizeof(information), nullptr) != 0) return 0;
+    const uintptr_t pid = static_cast<uintptr_t>(information.uniqueProcessId);
+    return pid <= UINT32_MAX ? static_cast<uint32_t>(pid) : 0;
+}
+int32_t WINAPI CountProcessWindow(void* window, intptr_t opaque) {
+    auto* context = reinterpret_cast<GuiResourceCountContext*>(opaque);
+    if (!context) return 0;
+    uint32_t owner{};
+    if (GetWindowThreadProcessId(window, &owner) && owner == context->processId) {
+        ++context->count;
+        (void)EnumChildWindows(window, reinterpret_cast<void*>(&CountProcessWindow), opaque);
+    }
+    return 1;
+}
+}
+extern "C" __declspec(dllexport) uint32_t WINAPI GetGuiResources(void* process,
+        uint32_t flags) {
+    if (!process || flags > 1) {
+        micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(87);
+        return 0;
+    }
+    const uint32_t processId = QueryGuiProcessId(process);
+    if (!processId) return 0;
+    if (flags == 0) {
+        if (processId != GetCurrentProcessId()) {
+            micant::um::winnt_user32_gdi32_imm32_abi::setThreadLastError(50);
+            return 0;
+        }
+        return MicaGdi32GetResourceCount(flags);
+    }
+    GuiResourceCountContext context{processId, 0};
+    (void)EnumWindows(&CountProcessWindow, reinterpret_cast<intptr_t>(&context));
+    if (processId == GetCurrentProcessId()) {
+        LockGuard guard;
+        for (const auto& menu : g_menus) if (menu.active) ++context.count;
+        if (g_popup.active) ++context.count;
+    }
+    return context.count;
 }
 #endif

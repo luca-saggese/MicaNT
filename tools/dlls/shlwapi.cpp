@@ -10,12 +10,38 @@
 #include <shlwapi.h>
 #include <cstdint>
 #include <cwchar>
+#include <iterator>
 
 extern "C" {
 __declspec(dllimport) DWORD WINAPI GetFileAttributesW(LPCWSTR);
 }
 
 namespace {
+
+bool write_number(wchar_t* output, size_t capacity, uint64_t value,
+                  unsigned decimals, const wchar_t* suffix) noexcept {
+    if (!output || !capacity) return false;
+    wchar_t digits[32]{};
+    size_t count = 0;
+    do { digits[count++] = static_cast<wchar_t>(L'0' + value % 10); value /= 10; }
+    while (value && count < std::size(digits));
+    while (count <= decimals) digits[count++] = L'0';
+    size_t used = 0;
+    for (size_t index = count; index; --index) {
+        if (decimals && index == decimals) {
+            if (used + 1 >= capacity) return false;
+            output[used++] = L'.';
+        }
+        if (used + 1 >= capacity) return false;
+        output[used++] = digits[index - 1];
+    }
+    while (*suffix) {
+        if (used + 1 >= capacity) return false;
+        output[used++] = *suffix++;
+    }
+    output[used] = L'\0';
+    return true;
+}
 
 template <typename Char>
 const Char* filename_part(const Char* path) noexcept {
@@ -251,6 +277,37 @@ __declspec(dllexport) void WINAPI PathRemoveExtensionA(LPSTR path) {
 
 __declspec(dllexport) void WINAPI PathRemoveExtensionW(LPWSTR path) {
     (void)remove_extension(path);
+}
+
+__declspec(dllexport) LPWSTR WINAPI StrFormatByteSizeW(LONGLONG bytes,
+        LPWSTR output, UINT outputChars) {
+    if (!output || !outputChars) return nullptr;
+    const bool negative = bytes < 0;
+    const uint64_t magnitude = negative
+        ? static_cast<uint64_t>(-(bytes + 1)) + 1u : static_cast<uint64_t>(bytes);
+    static constexpr const wchar_t* units[] = {
+        L" bytes", L" KB", L" MB", L" GB", L" TB", L" PB"};
+    uint64_t unit = 1;
+    size_t unitIndex = 0;
+    while (unitIndex + 1 < std::size(units) && magnitude >= unit * 1024u) {
+        unit *= 1024u;
+        ++unitIndex;
+    }
+    const unsigned decimals = unitIndex == 0 ? 0u : 2u;
+    const uint64_t scaled = decimals
+        ? (magnitude / unit) * 100u + ((magnitude % unit) * 100u + unit / 2u) / unit
+        : magnitude;
+    size_t offset = 0;
+    if (negative) {
+        if (outputChars < 2) { output[0] = L'\0'; return nullptr; }
+        output[offset++] = L'-';
+    }
+    if (!write_number(output + offset, outputChars - offset, scaled, decimals,
+            units[unitIndex])) {
+        output[0] = L'\0';
+        return nullptr;
+    }
+    return output;
 }
 
 } // extern "C"

@@ -109,6 +109,7 @@ inline constexpr uint32_t SSN_NtQueryDirectoryFile       = 0x0035;
 inline constexpr uint32_t SSN_NtQueryPerformanceCounter  = 0x0031;
 inline constexpr uint32_t SSN_NtYieldExecution           = 0x0046;
 inline constexpr uint32_t SSN_NtQueryInformationProcess  = 0x0019;
+inline constexpr uint32_t SSN_NtSetInformationProcess    = 0x0026;
 inline constexpr uint32_t SSN_NtQueryInformationThread   = MICANT_SSN_NT_QUERY_INFORMATION_THREAD;
 inline constexpr uint32_t SSN_NtAlertThread = MICANT_SSN_NT_ALERT_THREAD;
 inline constexpr uint32_t SSN_NtTestAlert = MICANT_SSN_NT_TEST_ALERT;
@@ -338,6 +339,15 @@ NtStatus NtCreateTimer(
     uint32_t timerType
 );
 
+NtStatus NtCreateMutant(
+    Handle* mutantHandle,
+    uint32_t desiredAccess,
+    ObjectAttributes* objectAttributes,
+    bool initialOwner
+);
+
+NtStatus NtReleaseMutant(Handle mutantHandle, int32_t* previousCount);
+
 NtStatus NtSetTimer(
     Handle timerHandle,
     LargeInteger* dueTime,
@@ -477,6 +487,13 @@ NtStatus NtQueryInformationProcess(
     void* processInformation,
     uint32_t processInformationLength,
     uint32_t* returnLength
+);
+
+NtStatus NtSetInformationProcess(
+    Handle processHandle,
+    ProcessInformationClass processInformationClass,
+    const void* processInformation,
+    uint32_t processInformationLength
 );
 
 NtStatus NtQueryInformationThread(

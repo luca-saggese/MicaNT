@@ -57,11 +57,13 @@ NtStatus NtQuerySystemInformation(
     uint32_t systemInformationLength,
     uint32_t* returnLength
 ) {
+    constexpr uint32_t systemBasicInformationClass = 0;
     constexpr uint32_t systemProcessInformationClass = 5;
     constexpr uint32_t systemPerformanceInformationClass = 2;
     constexpr uint32_t systemProcessorPerformanceInformationClass = 8;
     constexpr uint32_t systemMemoryAccountingClass = SystemMemoryAccountingInformationClass;
-    if (systemInformationClass != systemProcessInformationClass &&
+    if (systemInformationClass != systemBasicInformationClass &&
+        systemInformationClass != systemProcessInformationClass &&
         systemInformationClass != systemPerformanceInformationClass &&
         systemInformationClass != systemProcessorPerformanceInformationClass &&
         systemInformationClass != systemMemoryAccountingClass)
@@ -76,6 +78,38 @@ NtStatus NtQuerySystemInformation(
     const auto mode = mm::KernelMode;
 #endif
     NtStatus status = NtStatus::Success;
+
+    if (systemInformationClass == systemBasicInformationClass) {
+        constexpr uint32_t required = sizeof(SystemBasicInformation);
+        if (returnLength) {
+            status = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
+            if (status != NtStatus::Success) return status;
+            status = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
+            if (status != NtStatus::Success) return status;
+        }
+        if (systemInformationLength < required) return NtStatus::InfoLengthMismatch;
+        if (!systemInformation) return NtStatus::AccessViolation;
+        status = ex::ProbeForWrite(systemInformation, required, alignof(SystemBasicInformation), mode);
+        if (status != NtStatus::Success) return status;
+        const auto memory = mm::MmQuerySystemMemoryDiagnostics();
+        if (!memory.totalPhysicalPages || memory.totalPhysicalPages > UINT32_MAX)
+            return NtStatus::NotSupported;
+        SystemBasicInformation information{};
+        information.pageSize = static_cast<uint32_t>(mm::PageSize4KB);
+        information.numberOfPhysicalPages = static_cast<uint32_t>(memory.totalPhysicalPages);
+        information.lowestPhysicalPageNumber = 1;
+        information.highestPhysicalPageNumber = information.numberOfPhysicalPages;
+        information.allocationGranularity = 64 * 1024;
+        information.minimumUserModeAddress = 0x10000;
+        information.maximumUserModeAddress = 0x00007ffffffe0000ULL;
+        const auto processorSnapshot = km::perf::QueryProcessorPerformanceSnapshot();
+        const uint32_t processorCount = processorSnapshot.processorCount;
+        if (processorCount == 0 || processorCount > 64) return NtStatus::NotSupported;
+        information.activeProcessorsAffinityMask = processorCount == 64
+            ? UINT64_MAX : ((uint64_t{1} << processorCount) - 1);
+        information.numberOfProcessors = static_cast<int8_t>(processorCount);
+        return ex::ExSafeCopyToUser(systemInformation, &information, required, mode);
+    }
 
     if (systemInformationClass == systemMemoryAccountingClass) {
         constexpr uint32_t required = sizeof(SystemMemoryAccountingInformation);
@@ -282,6 +316,17 @@ NtStatus NtQuerySystemInformation(
             return NtStatus::NotSupported;
         }
         record->PrivatePageCount = snapshot[i].privateCommitPages * mm::PageSize4KB;
+        if (snapshot[i].readOperationCount > static_cast<uint64_t>(INT64_MAX) ||
+            snapshot[i].writeOperationCount > static_cast<uint64_t>(INT64_MAX) ||
+            snapshot[i].readTransferCount > static_cast<uint64_t>(INT64_MAX) ||
+            snapshot[i].writeTransferCount > static_cast<uint64_t>(INT64_MAX)) {
+            delete[] records; delete[] snapshot; delete[] threads;
+            return NtStatus::NotSupported;
+        }
+        record->ReadOperationCount = static_cast<int64_t>(snapshot[i].readOperationCount);
+        record->WriteOperationCount = static_cast<int64_t>(snapshot[i].writeOperationCount);
+        record->ReadTransferCount = static_cast<int64_t>(snapshot[i].readTransferCount);
+        record->WriteTransferCount = static_cast<int64_t>(snapshot[i].writeTransferCount);
         if (snapshot[i].userTime100ns > static_cast<uint64_t>(INT64_MAX) ||
             snapshot[i].kernelTime100ns > static_cast<uint64_t>(INT64_MAX)) {
             delete[] records; delete[] snapshot; delete[] threads;

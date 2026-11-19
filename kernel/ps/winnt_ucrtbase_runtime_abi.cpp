@@ -630,10 +630,39 @@ __declspec(dllexport) wchar_t* __cdecl wcschr(const wchar_t* string, wchar_t ch)
     }
 }
 
+__declspec(dllexport) wchar_t* __cdecl _ultow(unsigned long value,
+        wchar_t* output, int radix) {
+    if (!output || radix < 2 || radix > 36) { g_nativeErrno = 22; return nullptr; }
+    wchar_t reversed[32]{};
+    size_t count = 0;
+    do {
+        const unsigned digit = static_cast<unsigned>(value % static_cast<unsigned>(radix));
+        reversed[count++] = static_cast<wchar_t>(digit < 10 ? L'0' + digit : L'a' + digit - 10);
+        value /= static_cast<unsigned>(radix);
+    } while (value && count < sizeof(reversed) / sizeof(reversed[0]));
+    for (size_t index = 0; index < count; ++index)
+        output[index] = reversed[count - index - 1];
+    output[count] = L'\0';
+    return output;
+}
+
 __declspec(dllexport) int __cdecl wcscmp(const wchar_t* left, const wchar_t* right) {
     if (!left || !right) return left ? 1 : right ? -1 : 0;
     while (*left && *left == *right) { ++left; ++right; }
     return static_cast<int>(*left) - static_cast<int>(*right);
+}
+
+__declspec(dllexport) wchar_t* __cdecl wcsstr(const wchar_t* haystack,
+        const wchar_t* needle) {
+    if (!haystack || !needle) return nullptr;
+    if (!*needle) return const_cast<wchar_t*>(haystack);
+    for (const wchar_t* start = haystack; *start; ++start) {
+        const wchar_t* left = start;
+        const wchar_t* right = needle;
+        while (*left && *right && *left == *right) { ++left; ++right; }
+        if (!*right) return const_cast<wchar_t*>(start);
+    }
+    return nullptr;
 }
 
 __declspec(dllexport) wchar_t* __cdecl wcscat(wchar_t* destination, const wchar_t* source) {

@@ -59,3 +59,11 @@ extern "C" __attribute__((naked)) void ___chkstk_ms() noexcept {
         "testb $0, (%r11)\n"
         "retq\n");
 }
+
+#if defined(MICANT_EXPORT_KERNEL32_CHKSTK)
+// Existing AMD64 PE applications may import the MSVC spelling from
+// Kernel32. Reuse the same page-touch routine and publish the required
+// external symbol only in the Kernel32 image.
+extern "C" __declspec(dllexport) void Kernel32StackProbe()
+    asm("__chkstk") __attribute__((alias("___chkstk_ms")));
+#endif

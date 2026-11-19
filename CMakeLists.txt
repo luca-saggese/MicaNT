@@ -22,7 +22,7 @@ option(MICANT_BOOTSTRAP_AUDIO_RENDER_TEST "Launch a Ring 3 client and verify rea
 option(MICANT_BOOTSTRAP_AUDIO_CAPTURE_TEST "Launch a Ring 3 client and verify HDA ADC DMA in QEMU" OFF)
 option(MICANT_BOOTSTRAP_CMD_TEST "Launch cmd.exe for QEMU terminal verification" OFF)
 set(MICANT_BOOTSTRAP_REACTOS_APP "" CACHE STRING "Launch one verified original AMD64 ReactOS PE instead of Explorer")
-set_property(CACHE MICANT_BOOTSTRAP_REACTOS_APP PROPERTY STRINGS "" winver notepad calc winmine sol mspaint regedit taskmgr wordpad cmd)
+set_property(CACHE MICANT_BOOTSTRAP_REACTOS_APP PROPERTY STRINGS "" winver notepad calc winmine sol mspaint regedit taskmgr wordpad cmd comdlgtest)
 option(MICANT_COMPOSITOR_LOCAL_STATS "Emit aggregated compositor timing and repaint counters" OFF)
 option(MICANT_KERNEL_PERF_DIAGNOSTICS "Emit aggregated 5-second Ke scheduler/accounting diagnostics" OFF)
 option(MICANT_COMPOSITOR_DEBUG_HUD "Build the compositor debug HUD" OFF)
@@ -554,7 +554,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(comdlg32_boot PRIVATE
         -nostdlib -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase)
     target_link_libraries(comdlg32_boot PRIVATE
-        user32_boot gdi32_boot kernel32_boot ucrtbase_boot)
+        user32_boot gdi32_boot kernel32_boot ucrtbase_boot shell32_boot)
     set_target_properties(comdlg32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "comdlg32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -945,6 +945,18 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "textbox_probe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
 
+    add_executable(comdlgtest_boot EXCLUDE_FROM_ALL tools/comdlg_test_app.cpp)
+    target_compile_options(comdlgtest_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -O2)
+    target_link_options(comdlgtest_boot PRIVATE
+        -nostdlib -Wl,--subsystem,windows -Wl,-e,_start)
+    target_link_libraries(comdlgtest_boot PRIVATE user32_boot comdlg32_boot)
+    set_target_properties(comdlgtest_boot PROPERTIES
+        OUTPUT_NAME "comdlgtest"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
+
     # Native process memory report and dump utility. It reaches process and
     # virtual-memory services only through the existing NTDLL syscall ABI.
     add_executable(procdump_boot EXCLUDE_FROM_ALL tools/procdump_app.cpp)
@@ -1011,7 +1023,7 @@ if (MICANT_ENABLE_BAREMETAL)
         target_compile_definitions(ntoskrnl_core_baremetal PRIVATE MICANT_BOOTSTRAP_CMD_TEST)
     endif()
     if (MICANT_BOOTSTRAP_REACTOS_APP)
-        set(_micant_reactos_app_names winver notepad calc winmine sol mspaint regedit taskmgr wordpad cmd)
+        set(_micant_reactos_app_names winver notepad calc winmine sol mspaint regedit taskmgr wordpad cmd comdlgtest)
         if (NOT MICANT_BOOTSTRAP_REACTOS_APP IN_LIST _micant_reactos_app_names)
             message(FATAL_ERROR "Unsupported MICANT_BOOTSTRAP_REACTOS_APP: ${MICANT_BOOTSTRAP_REACTOS_APP}")
         endif()
@@ -1033,6 +1045,11 @@ if (MICANT_ENABLE_BAREMETAL)
             target_compile_definitions(comdlg32_boot PRIVATE
                 MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD_DIALOG_TRACE)
             target_link_libraries(comdlg32_boot PRIVATE win32k_boot)
+        elseif (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "comdlgtest")
+            target_compile_definitions(comdlg32_boot PRIVATE
+                MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST_TRACE)
+            target_link_libraries(comdlg32_boot PRIVATE win32k_boot)
+            target_link_libraries(comdlgtest_boot PRIVATE win32k_boot)
         endif()
     endif()
     if (MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
@@ -1438,12 +1455,14 @@ if (MICANT_ENABLE_BAREMETAL)
 
     add_library(kernel32_boot SHARED EXCLUDE_FROM_ALL
         tools/dlls/abi/kernel32_system32.cpp
+        tools/dlls/kernel32_toolhelp.cpp
         tools/dlls/native_stack_probe.cpp
         kernel/ex/freestanding_memory.cpp
     )
     target_compile_definitions(kernel32_boot PRIVATE
         MICANT_FREESTANDING_KERNEL32
         BUILD_SYSTEM32_KERNEL32_DLL
+        MICANT_EXPORT_KERNEL32_CHKSTK
     )
     if (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "mspaint")
         target_compile_definitions(kernel32_boot PRIVATE

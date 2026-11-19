@@ -167,6 +167,9 @@ struct GdiDcSelection {
     int32_t polyFillMode{1};
     int32_t stretchBltMode{1};
     MicaWin32kRect clip{};
+    MicaWin32kRect excluded[16]{};
+    uint8_t excludedCount{};
+    bool clipEmpty{};
     struct ClipState { uint32_t generation{}; MicaWin32kRect previous{}; bool occupied{}; } clips[16]{};
     uint32_t nextClipGeneration{1};
 };
@@ -288,7 +291,7 @@ bool GetGdiSurface(void* hdc, GdiSurfaceView& surface) noexcept {
             return false;
         surface.window = true;
     }
-    if (dc->clip.right <= dc->clip.left || dc->clip.bottom <= dc->clip.top)
+    if (!dc->clipEmpty && (dc->clip.right <= dc->clip.left || dc->clip.bottom <= dc->clip.top))
         dc->clip = {0, 0, static_cast<int32_t>(surface.width),
                     static_cast<int32_t>(surface.height)};
     return true;
@@ -307,9 +310,14 @@ bool WriteGdiPixel(void* hdc, int32_t x, int32_t y, uint32_t colorRef) noexcept 
     GdiSurfaceView surface{};
     if (!dc || !GetGdiSurface(hdc, surface) || x < 0 || y < 0 ||
         static_cast<uint32_t>(x) >= surface.width ||
-        static_cast<uint32_t>(y) >= surface.height || x < dc->clip.left ||
+        static_cast<uint32_t>(y) >= surface.height || dc->clipEmpty || x < dc->clip.left ||
         y < dc->clip.top || x >= dc->clip.right || y >= dc->clip.bottom)
         return false;
+    for (uint8_t i = 0; i < dc->excludedCount; ++i) {
+        const auto& excluded = dc->excluded[i];
+        if (x >= excluded.left && x < excluded.right && y >= excluded.top && y < excluded.bottom)
+            return false;
+    }
     uint32_t& destination = surface.pixels[static_cast<size_t>(y) * surface.stride +
                                             static_cast<uint32_t>(x)];
     const uint32_t source = GdiColorRefToPixel(colorRef);
@@ -731,12 +739,19 @@ int32_t Gdi32_FillRect(void* hdc, const void* rectangle, void* hbrush) noexcept 
         static_cast<int32_t>(surface.width)});
     const int32_t bottom = std::min({requested.bottom, dc->clip.bottom,
         static_cast<int32_t>(surface.height)});
-    if (right <= left || bottom <= top) return 1;
+    if (dc->clipEmpty || right <= left || bottom <= top) return 1;
     auto* pattern = brush->style == 3 ? FindGdiBitmap(brush->patternBitmap) : nullptr;
     if (brush->style == 3 && (!pattern || !pattern->pixels || !pattern->width || !pattern->height))
         return 0;
     for (int32_t y = top; y < bottom; ++y) {
         for (int32_t x = left; x < right; ++x) {
+            bool excludedPixel = false;
+            for (uint8_t i = 0; i < dc->excludedCount; ++i) {
+                const auto& excluded = dc->excluded[i];
+                if (x >= excluded.left && x < excluded.right &&
+                    y >= excluded.top && y < excluded.bottom) { excludedPixel = true; break; }
+            }
+            if (excludedPixel) continue;
             bool foreground = true;
             uint32_t pixel = GdiColorRefToPixel(brush->colorRef);
             if (brush->style == 2) {
@@ -1332,6 +1347,7 @@ int32_t Gdi32_TextOutW(void* hdc, int32_t x, int32_t y,
     if (!hdc || !text || count <= 0 || count > 4096) return 0;
     GdiDcSelection* dc = FindGdiDc(hdc, false);
     if (!dc || !dc->font || dc->backgroundMode != 1) return 0;
+    if (dc->clipEmpty) return 1;
     GdiBitmapSurface windowSurface{};
     GdiBitmapSurface* bitmap = FindGdiBitmap(dc->bitmap);
     if (!bitmap) {
@@ -1381,6 +1397,33 @@ int32_t Gdi32_MicaPushClipRect(void* hdc, const MicaWin32kRect* rectangle,
     *token = reinterpret_cast<void*>((static_cast<uintptr_t>(generation) << 5) |
                                      static_cast<uintptr_t>(slot + 1));
     return 1;
+}
+
+int32_t Gdi32_ExcludeClipRect(void* hdc, int32_t left, int32_t top,
+                              int32_t right, int32_t bottom) noexcept {
+    if (!hdc || right < left || bottom < top) return 0;
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0;
+    if (dc->clipEmpty) return 1;
+    const MicaWin32kRect clipped{
+        std::max(left, dc->clip.left), std::max(top, dc->clip.top),
+        std::min(right, dc->clip.right), std::min(bottom, dc->clip.bottom)};
+    if (clipped.right <= clipped.left || clipped.bottom <= clipped.top)
+        return dc->excludedCount ? 3 : 2;
+    if (clipped.left <= dc->clip.left && clipped.top <= dc->clip.top &&
+        clipped.right >= dc->clip.right && clipped.bottom >= dc->clip.bottom) {
+        dc->clipEmpty = true;
+        return 1;
+    }
+    for (uint8_t i = 0; i < dc->excludedCount; ++i) {
+        const auto& existing = dc->excluded[i];
+        if (existing.left == clipped.left && existing.top == clipped.top &&
+            existing.right == clipped.right && existing.bottom == clipped.bottom)
+            return 3;
+    }
+    if (dc->excludedCount == std::size(dc->excluded)) return 0;
+    dc->excluded[dc->excludedCount++] = clipped;
+    return 3;
 }
 
 int32_t Gdi32_MicaPopClipRect(void* hdc, void* token) noexcept {
@@ -1707,6 +1750,11 @@ __declspec(dllexport) int32_t DeleteEnhMetaFile(void*) { return 0; }
 __declspec(dllexport) int32_t SaveDC(void*) { return 0; }
 __declspec(dllexport) int32_t RestoreDC(void*, int32_t) { return 0; }
 __declspec(dllexport) int32_t IntersectClipRect(void*, int32_t, int32_t, int32_t, int32_t) { return 0; }
+__declspec(dllexport) int32_t ExcludeClipRect(void* hdc, int32_t left, int32_t top,
+        int32_t right, int32_t bottom) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_ExcludeClipRect(
+        hdc, left, top, right, bottom);
+}
 __declspec(dllexport) int32_t EnumFontFamiliesW(void*, const wchar_t*, void*, intptr_t) { return 0; }
 __declspec(dllexport) void* SelectObject(void* hdc, void* h) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SelectObject(hdc, h);
@@ -1716,6 +1764,24 @@ __declspec(dllexport) int32_t DeleteObject(void* ho) {
 }
 __declspec(dllexport) void MicaGdi32ForgetDcState(void* hdc) {
     micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_ForgetDcState(hdc);
+}
+__declspec(dllexport) uint32_t MicaGdi32GetResourceCount(uint32_t flags) noexcept {
+    if (flags != 0) return 0;
+    uint32_t count = 0;
+    for (const auto& font : micant::um::winnt_user32_gdi32_imm32_abi::g_gdiFonts)
+        if (font.active && !font.stock) ++count;
+    for (const auto& bitmap : micant::um::winnt_user32_gdi32_imm32_abi::g_gdiBitmaps)
+        if (bitmap.bitmap) ++count;
+    for (const auto& dc : micant::um::winnt_user32_gdi32_imm32_abi::g_gdiDcs)
+        if (dc.dc) ++count;
+    {
+        micant::um::winnt_user32_gdi32_imm32_abi::GdiBrushGuard guard;
+        for (const auto& brush : micant::um::winnt_user32_gdi32_imm32_abi::g_gdiBrushes)
+            if (brush.active && !brush.stock) ++count;
+    }
+    for (const auto& pen : micant::um::winnt_user32_gdi32_imm32_abi::g_gdiPens)
+        if (pen.active && !pen.stock) ++count;
+    return count;
 }
 __declspec(dllexport) void* CreateFontIndirectW(const micant::um::winnt_user32_gdi32_imm32_abi::GdiLogFontW* logical) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateFontIndirectW(logical);

@@ -520,8 +520,16 @@ enum class ProcessInformationClass : uint32_t {
     ProcessRaisePriority = 6,
     ProcessDebugPort = 7,
     ProcessExceptionPort = 8,
-    ProcessAccessToken = 9
+    ProcessAccessToken = 9,
+    ProcessPriorityClass = 18,
+    ProcessAffinityMask = 21
 };
+
+struct ProcessPriorityClassInformation {
+    uint8_t foreground{};
+    uint8_t priorityClass{2};
+};
+static_assert(sizeof(ProcessPriorityClassInformation) == 2);
 
 struct ProcessBasicInformation {
     NtStatus exitStatus{NtStatus::Success};

@@ -135,7 +135,9 @@ enum {
     MICANT_WIN32K_OP_GET_WINDOW_MENU,
     MICANT_WIN32K_OP_ADJUST_WINDOW_RECT,
     MICANT_WIN32K_OP_DEBUG_INPUT_TRACE,
-    MICANT_WIN32K_OP_SET_FOREGROUND_WINDOW
+    MICANT_WIN32K_OP_SET_FOREGROUND_WINDOW,
+    MICANT_WIN32K_OP_GET_WINDOW_THREAD_PROCESS_ID,
+    MICANT_WIN32K_OP_POST_THREAD_MESSAGE
 };
 
 enum {
@@ -269,6 +271,9 @@ MICANT_WIN32K_API void* MicaWin32kGetDlgItem(void*, int32_t);
 MICANT_WIN32K_API int32_t MicaWin32kTrackMouseEvent(
     void*, uint32_t, uint32_t, uint32_t*, uint32_t*);
 MICANT_WIN32K_API int32_t MicaWin32kGetClassNameW(void*, wchar_t*, int32_t);
+MICANT_WIN32K_API uint32_t MicaWin32kGetWindowThreadProcessId(void*, uint32_t*);
+MICANT_WIN32K_API int32_t MicaWin32kPostThreadMessageW(uint32_t, uint32_t,
+    uintptr_t, intptr_t);
 MICANT_WIN32K_API int32_t MicaWin32kEnumChildWindows(
     void*, void*, intptr_t);
 MICANT_WIN32K_API int32_t MicaWin32kEnableWindow(void*, int32_t,

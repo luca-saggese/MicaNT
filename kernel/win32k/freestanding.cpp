@@ -20,7 +20,7 @@ namespace {
 // the desktop shell starts. Keep the table bounded while leaving room for
 // the independently started Ring 3 terminal and later applications.
 constexpr size_t kClassCapacity = 1024;
-constexpr size_t kMessageCapacity = 256;
+constexpr size_t kMessageCapacity = 2048;
 constexpr uint64_t kHandleTag = 0x4D4E570000000000ULL;
 constexpr uint32_t kWmQuit = 0x0012;
 constexpr uint32_t kWmMove = 0x0003;
@@ -219,6 +219,7 @@ struct Window {
     int32_t dirtyLeft{}, dirtyTop{}, dirtyRight{}, dirtyBottom{};
     uint16_t classAtom{};
     uint64_t ownerProcessId{};
+    uint64_t ownerThreadId{};
     uint64_t zOrder{};
     bool active{}, visible{}, iconic{}, maximized{};
     bool hasTaskbarButtonBounds{};
@@ -269,6 +270,7 @@ struct QueuedMessage {
     uint32_t message{}, time{};
     int32_t x{}, y{};
     uint64_t ownerProcessId{};
+    uint64_t ownerThreadId{};
     bool active{};
 };
 
@@ -831,6 +833,38 @@ bool enqueue(const QueuedMessage& message) noexcept {
             return true;
         }
     }
+    // The queue is shared by all process windows. A burst of independent
+    // paint notifications or pointer motion must not make keyboard and button
+    // input disappear. Paint is an invalidation hint and mouse motion is
+    // coalescible; preserve every non-coalescible message by reclaiming one
+    // of those slots when the bounded queue is full.
+    const bool criticalInput = message.message == 0x0100u || // WM_KEYDOWN
+        message.message == 0x0101u || // WM_KEYUP
+        message.message == 0x0102u || // WM_CHAR
+        message.message == 0x0200u || // WM_MOUSEMOVE
+        message.message == 0x0201u || // WM_LBUTTONDOWN
+        message.message == 0x0202u || // WM_LBUTTONUP
+        message.message == 0x0204u || // WM_RBUTTONDOWN
+        message.message == 0x0205u || // WM_RBUTTONUP
+        message.message == 0x0207u || // WM_MBUTTONDOWN
+        message.message == 0x0208u;   // WM_MBUTTONUP
+    if (criticalInput) {
+        for (const uint32_t discardable : {0x0200u, kWmPaint}) {
+            for (auto& slot : g_messages) {
+                if (!slot.active || slot.message != discardable) continue;
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+                MicantNetbootSerialWrite("[MicaNT ComDlgInput] queue reclaimed msg=");
+                MicantNetbootSerialWriteNumber(discardable);
+                MicantNetbootSerialWrite(" for=");
+                MicantNetbootSerialWriteNumber(message.message);
+                MicantNetbootSerialWrite("\r\n");
+#endif
+                slot = message;
+                slot.active = true;
+                return true;
+            }
+        }
+    }
     return false;
 }
 
@@ -922,7 +956,8 @@ bool enqueueWindowMessage(const Window& window, uint32_t message,
         .hwnd = window.handle, .wParam = wParam, .lParam = lParam,
         .message = message, .time = ++g_messageTime,
         .x = x, .y = y,
-        .ownerProcessId = window.ownerProcessId, .active = true});
+        .ownerProcessId = window.ownerProcessId,
+        .ownerThreadId = window.ownerThreadId, .active = true});
 }
 
 bool setFocusedWindow(Window* window) noexcept {
@@ -1120,6 +1155,8 @@ bool messageMatches(const QueuedMessage& message,
     const uint32_t minimum = static_cast<uint32_t>(request.args[1]);
     const uint32_t maximum = static_cast<uint32_t>(request.args[2]);
     if (message.ownerProcessId != ownerProcessId ||
+        (message.ownerThreadId && (!ke::KeGetCurrentThread() ||
+            message.ownerThreadId != ke::KeGetCurrentThread()->tid)) ||
         (minimum && message.message < minimum) ||
         (maximum && message.message > maximum)) return false;
     if (!requestedWindow || requestedWindow == message.hwnd) return true;
@@ -1227,6 +1264,8 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         window.height = static_cast<int32_t>(height);
         window.classAtom = windowClass->atom;
         window.ownerProcessId = ownerProcessId;
+        if (auto* currentThread = ke::KeGetCurrentThread())
+            window.ownerThreadId = currentThread->tid;
         window.zOrder = nextZOrder();
         window.windowProcedure = windowClass->windowProcedure;
         window.visible = (window.style & 0x10000000u) != 0;
@@ -1368,13 +1407,13 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::ObjectNameNotFound;
         }
         case MICANT_WIN32K_OP_GET_CLASS_NAME: {
-            const auto* window = findWindow(request.args[0], ownerProcessId);
+            const auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             const uint32_t capacity = static_cast<uint32_t>(request.args[1]);
             if (!capacity) return NtStatus::InvalidParameter;
             const WindowClass* windowClass{};
             for (const auto& candidate : g_classes) {
-                if (candidate.active && candidate.ownerProcessId == ownerProcessId &&
+                if (candidate.active && candidate.ownerProcessId == window->ownerProcessId &&
                     candidate.atom == window->classAtom) {
                     windowClass = &candidate;
                     break;
@@ -1388,6 +1427,13 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 request.text[index] = windowClass->name[index];
             request.text[copied] = 0;
             request.result = copied;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_GET_WINDOW_THREAD_PROCESS_ID: {
+            const auto* window = findWindowAny(request.args[0]);
+            if (!window) return NtStatus::InvalidHandle;
+            request.result = window->ownerThreadId;
+            request.args[1] = window->ownerProcessId;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_ENUM_CHILD_WINDOWS: {
@@ -1887,7 +1933,9 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_POST_MESSAGE: {
-            if (request.args[0] && !findWindow(request.args[0], ownerProcessId)) {
+            const Window* target = request.args[0]
+                ? findWindowAny(request.args[0]) : nullptr;
+            if (request.args[0] && !target) {
                 return NtStatus::InvalidHandle;
             }
             const QueuedMessage message{
@@ -1898,10 +1946,37 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 .time = ++g_messageTime,
                 .x = 0,
                 .y = 0,
-                .ownerProcessId = ownerProcessId,
+                .ownerProcessId = target ? target->ownerProcessId : ownerProcessId,
+                .ownerThreadId = target ? target->ownerThreadId :
+                    (ke::KeGetCurrentThread() ? ke::KeGetCurrentThread()->tid : 0),
                 .active = true,
             };
             if (!enqueue(message)) return NtStatus::InsufficientResources;
+            request.result = 1;
+            return NtStatus::Success;
+        }
+        case MICANT_WIN32K_OP_POST_THREAD_MESSAGE: {
+            const auto targetThreadId = static_cast<micant::Handle>(request.args[0]);
+            uint64_t interruptFlags{};
+            __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(interruptFlags) : : "memory");
+            auto* targetThread = ke::detail::findClientThread(targetThreadId);
+            if (!targetThread || !targetThread->owningProcess) {
+                if (interruptFlags & (uint64_t{1} << 9))
+                    __asm__ __volatile__("sti" : : : "memory");
+                return NtStatus::InvalidCid;
+            }
+            const auto targetProcessId = targetThread->pid;
+            const bool queued = enqueue(QueuedMessage{
+                    .hwnd = 0, .wParam = request.args[2],
+                    .lParam = static_cast<int64_t>(request.args[3]),
+                    .message = static_cast<uint32_t>(request.args[1]),
+                    .time = ++g_messageTime,
+                    .ownerProcessId = static_cast<uint64_t>(targetProcessId),
+                    .ownerThreadId = static_cast<uint64_t>(targetThreadId),
+                    .active = true});
+            if (interruptFlags & (uint64_t{1} << 9))
+                __asm__ __volatile__("sti" : : : "memory");
+            if (!queued) return NtStatus::InsufficientResources;
             request.result = 1;
             return NtStatus::Success;
         }
@@ -1914,10 +1989,21 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             return enqueue(QueuedMessage{
                 .wParam = request.args[0], .message = kWmQuit,
                 .time = ++g_messageTime, .ownerProcessId = ownerProcessId,
+                .ownerThreadId = static_cast<uint64_t>(ke::KeGetCurrentThread()
+                    ? ke::KeGetCurrentThread()->tid : 0),
                 .active = true}) ? NtStatus::Success : NtStatus::InsufficientResources;
         case MICANT_WIN32K_OP_PEEK_MESSAGE:
         case MICANT_WIN32K_OP_GET_MESSAGE:
             if (dequeue(request, ownerProcessId)) {
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+                MicantNetbootSerialWrite("[MicaNT ComDlgInput] dequeue msg=");
+                MicantNetbootSerialWriteNumber(request.messageId);
+                MicantNetbootSerialWrite(" hwnd=");
+                MicantNetbootSerialWriteNumber(static_cast<uint32_t>(request.messageHwnd));
+                MicantNetbootSerialWrite(" owner=");
+                MicantNetbootSerialWriteNumber(static_cast<uint32_t>(ownerProcessId));
+                MicantNetbootSerialWrite("\r\n");
+#endif
                 request.result = 1;
                 return NtStatus::Success;
             }
@@ -1993,6 +2079,27 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             MicantNetbootSerialWrite("[MicaNT Notepad] debug hash=");
             MicantNetbootSerialWriteNumber(request.args[1]);
             MicantNetbootSerialWrite(" chars=");
+            MicantNetbootSerialWriteNumber(request.args[2]);
+            MicantNetbootSerialWrite("\r\n");
+            request.result = 1;
+            return NtStatus::Success;
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+            if (request.args[0] >= 200) {
+                MicantNetbootSerialWrite("[MicaNT comdlg32] stage=");
+                MicantNetbootSerialWriteNumber(request.args[0]);
+                MicantNetbootSerialWrite(" hash=");
+                MicantNetbootSerialWriteNumber(request.args[1]);
+                MicantNetbootSerialWrite(" chars=");
+                MicantNetbootSerialWriteNumber(request.args[2]);
+                MicantNetbootSerialWrite("\r\n");
+                request.result = 1;
+                return NtStatus::Success;
+            }
+            MicantNetbootSerialWrite("[MicaNT ComDlgTest] stage=");
+            MicantNetbootSerialWriteNumber(request.args[0]);
+            MicantNetbootSerialWrite(" value=");
+            MicantNetbootSerialWriteNumber(request.args[1]);
+            MicantNetbootSerialWrite(" flags=");
             MicantNetbootSerialWriteNumber(request.args[2]);
             MicantNetbootSerialWrite("\r\n");
             request.result = 1;
@@ -2359,6 +2466,21 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     if (moved || !oldMouseValid) markCursorChanged();
     auto* target = topmostVisibleWindow(x, y);
     const int32_t hitTest = target ? hitTestWindow(*target, x, y) : 0;
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+    if ((event.buttons & 0x03u) != 0) {
+        MicantNetbootSerialWrite("[MicaNT ComDlgInput] mouse x=");
+        MicantNetbootSerialWriteNumber(static_cast<uint32_t>(x));
+        MicantNetbootSerialWrite(" y=");
+        MicantNetbootSerialWriteNumber(static_cast<uint32_t>(y));
+        MicantNetbootSerialWrite(" buttons=");
+        MicantNetbootSerialWriteNumber(event.buttons);
+        MicantNetbootSerialWrite(" target=");
+        MicantNetbootSerialWriteNumber(target ? static_cast<uint32_t>(target->handle) : 0);
+        MicantNetbootSerialWrite(" hit=");
+        MicantNetbootSerialWriteNumber(static_cast<uint32_t>(hitTest));
+        MicantNetbootSerialWrite("\r\n");
+    }
+#endif
     const uint64_t oldCursorHitWindow = g_cursorHitWindow;
     const int32_t oldCursorHitTest = g_cursorHitTest;
     auto* oldHover = findWindowAny(oldCursorHitWindow);
@@ -2657,6 +2779,15 @@ bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
         target = findWindowAny(g_foregroundWindow);
     if (!target || !target->visible || target->iconic || !event.virtualKey) return false;
     const bool down = (event.flags & 0x01u) != 0;
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+    MicantNetbootSerialWrite("[MicaNT ComDlgInput] key vk=");
+    MicantNetbootSerialWriteNumber(event.virtualKey);
+    MicantNetbootSerialWrite(" down=");
+    MicantNetbootSerialWriteNumber(down ? 1u : 0u);
+    MicantNetbootSerialWrite(" target=");
+    MicantNetbootSerialWriteNumber(static_cast<uint32_t>(target->handle));
+    MicantNetbootSerialWrite("\r\n");
+#endif
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
     if (event.virtualKey == 0x75u || event.virtualKey == 0x76u) {
         MicantNetbootSerialWrite("[MicaNT CalcKeyRoute] vk=");
@@ -2670,8 +2801,16 @@ bool dispatchKeyboardInput(const MicaWin32kKeyboardEvent& event) noexcept {
 #endif
     const uint64_t lParam = (static_cast<uint64_t>(event.sequence & 0xFFu) << 16) |
                             (down ? 1u : ((1u << 30) | (1u << 31)));
-    if (!enqueueWindowMessage(*target, down ? kWmKeyDown : kWmKeyUp,
-                              event.virtualKey, static_cast<int64_t>(lParam))) return false;
+    const bool keyQueued = enqueueWindowMessage(*target,
+        down ? kWmKeyDown : kWmKeyUp, event.virtualKey, static_cast<int64_t>(lParam));
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+    MicantNetbootSerialWrite("[MicaNT ComDlgInput] key queued=");
+    MicantNetbootSerialWriteNumber(keyQueued ? 1u : 0u);
+    MicantNetbootSerialWrite(" owner=");
+    MicantNetbootSerialWriteNumber(static_cast<uint32_t>(target->ownerProcessId));
+    MicantNetbootSerialWrite("\r\n");
+#endif
+    if (!keyQueued) return false;
     if (down && event.character) {
         if (!enqueueWindowMessage(*target, kWmChar, event.character,
                                   static_cast<int64_t>(lParam))) return false;

@@ -324,6 +324,24 @@ int32_t MicaWin32kGetClassNameW(void* window, wchar_t* output, int32_t capacity)
     return static_cast<int32_t>(count);
 }
 
+uint32_t MicaWin32kGetWindowThreadProcessId(void* window, uint32_t* processId) {
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(window);
+    if (!request(MICANT_WIN32K_OP_GET_WINDOW_THREAD_PROCESS_ID, value)) return 0;
+    if (processId) *processId = static_cast<uint32_t>(value.args[1]);
+    return static_cast<uint32_t>(value.result);
+}
+
+int32_t MicaWin32kPostThreadMessageW(uint32_t threadId, uint32_t message,
+    uintptr_t wParam, intptr_t lParam) {
+    MicaWin32kRequest value{};
+    value.args[0] = threadId;
+    value.args[1] = message;
+    value.args[2] = wParam;
+    value.args[3] = static_cast<uint64_t>(lParam);
+    return request(MICANT_WIN32K_OP_POST_THREAD_MESSAGE, value) && value.result;
+}
+
 int32_t MicaWin32kEnumChildWindows(void* parent, void* callback,
     intptr_t parameter) {
     if (!parent || !callback) return 0;

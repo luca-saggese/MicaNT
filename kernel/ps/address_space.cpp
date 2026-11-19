@@ -8,6 +8,7 @@
 #include "micant/km/executive/probe.hpp"
 #include "micant/km/executive/section.hpp"
 #include "micant/km/executive/ps_objects.hpp"
+#include "micant/km/executive/perf_taskmgr.hpp"
 #include "micant/km/executive/io_file.hpp"
 #include "micant/shared/context.hpp"
 #include "micant/shared/native_nt_api.hpp"
@@ -471,12 +472,30 @@ NtStatus EProcess::attachThread(ke::KThread& thread) noexcept {
         (thread.state != ke::ThreadState::Initialized && thread.state != ke::ThreadState::Ready))
         return NtStatus::InvalidParameter;
     thread.owningProcess = this;
+    constexpr uint32_t priorities[] = {0, 4, 8, 13, 24, 6, 10};
+    if (processPriorityClass_ < std::size(priorities))
+        thread.priority = priorities[processPriorityClass_];
     thread.directoryTableBase = getDirectoryTableBase();
     thread.processNext = threads_;
     threads_ = &thread;
     ++attachedThreads_;
     if (objectHeader_) objectHeader_->addReference();
     return NtStatus::Success;
+}
+
+void EProcess::setProcessPriorityClass(uint8_t priorityClass) noexcept {
+    constexpr uint32_t priorities[] = {0, 4, 8, 13, 24, 6, 10};
+    if (!priorityClass || priorityClass >= std::size(priorities)) return;
+    processPriorityClass_ = priorityClass;
+    auto& scheduler = ke::PriorityScheduler::get();
+    for (auto* thread = threads_; thread; thread = thread->processNext) {
+        const bool queued = thread->readyQueued && scheduler.removeReadyThread(thread);
+        thread->priority = priorities[priorityClass];
+        if (queued) {
+            thread->state = ke::ThreadState::Ready;
+            if (!scheduler.readyKThread(thread)) __builtin_trap();
+        }
+    }
 }
 
 NtStatus EProcess::referenceAddressSpaceForAttach(uintptr_t& directoryTableBase,
@@ -2868,17 +2887,21 @@ NtStatus NtQueryInformationProcess(Handle handle, ProcessInformationClass inform
     __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     NtStatus result = NtStatus::Success;
     const bool queryVm = informationClass == ProcessInformationClass::ProcessVmCounters;
+    const bool queryPriority = informationClass == ProcessInformationClass::ProcessPriorityClass;
+    const bool queryAffinity = informationClass == ProcessInformationClass::ProcessAffinityMask;
     const uint32_t required = queryVm
         ? (length == sizeof(ProcessVmCountersEx) ? sizeof(ProcessVmCountersEx)
                                                  : sizeof(ProcessVmCounters))
+        : queryPriority ? sizeof(ProcessPriorityClassInformation)
+        : queryAffinity ? sizeof(uintptr_t)
         : sizeof(ProcessBasicInformation);
     if (returnLength) result = ex::ProbeForWrite(returnLength, sizeof(*returnLength), alignof(uint32_t), mode);
-    if (result == NtStatus::Success && !queryVm &&
+    if (result == NtStatus::Success && !queryVm && !queryPriority && !queryAffinity &&
         informationClass != ProcessInformationClass::ProcessBasicInformation)
         result = NtStatus::InvalidInfoClass;
     if (result == NtStatus::Success &&
         (queryVm ? (length != sizeof(ProcessVmCounters) && length != sizeof(ProcessVmCountersEx))
-                 : length < required))
+         : queryPriority || queryAffinity ? length != required : length < required))
         result = NtStatus::InfoLengthMismatch;
     if (result == NtStatus::Success) result = ex::ProbeForWrite(information, required, alignof(uintptr_t), mode);
     ps::EProcess* process{};
@@ -2925,12 +2948,22 @@ NtStatus NtQueryInformationProcess(Handle handle, ProcessInformationClass inform
                     result = ex::ExSafeCopyToUser(information, &counters, sizeof(counters), mode);
                 }
             }
+        } else if (queryPriority) {
+            ProcessPriorityClassInformation value{};
+            value.priorityClass = process->processPriorityClass();
+            result = ex::ExSafeCopyToUser(information, &value, sizeof(value), mode);
+        } else if (queryAffinity) {
+            const uintptr_t value = process->processAffinityMask();
+            result = ex::ExSafeCopyToUser(information, &value, sizeof(value), mode);
         } else {
             ProcessBasicInformation basic{};
             basic.exitStatus = process->exitStatus();
             basic.pebBaseAddress = process->userPebAddress();
-            basic.affinityMask = 1;
-            basic.basePriority = ke::PRIORITY_NORMAL;
+            basic.affinityMask = process->processAffinityMask();
+            constexpr int32_t basePriorities[] = {0, 4, 8, 13, 24, 6, 10};
+            const auto priorityClass = process->processPriorityClass();
+            basic.basePriority = priorityClass < std::size(basePriorities)
+                ? basePriorities[priorityClass] : ke::PRIORITY_NORMAL;
             basic.uniqueProcessId = process->processId();
             basic.inheritedFromUniqueProcessId = process->inheritedFromProcessId();
             result = ex::ExSafeCopyToUser(information, &basic, sizeof(basic), mode);
@@ -2939,6 +2972,72 @@ NtStatus NtQueryInformationProcess(Handle handle, ProcessInformationClass inform
     if (returnLength && (result == NtStatus::Success || result == NtStatus::InfoLengthMismatch)) {
         const auto copy = ex::ExSafeCopyToUser(returnLength, &required, sizeof(required), mode);
         if (copy != NtStatus::Success) result = copy;
+    }
+    if (reference) ob::ObDereferenceObject(reference);
+    if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+    return result;
+}
+
+NtStatus NtSetInformationProcess(Handle handle, ProcessInformationClass informationClass,
+                                 const void* information, uint32_t length) {
+    auto* current = ke::KeGetCurrentThread();
+    const auto mode = current && current->previousUserMode ? mm::UserMode : mm::KernelMode;
+    uint64_t flags{};
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    const bool setPriority = informationClass == ProcessInformationClass::ProcessPriorityClass;
+    const bool setAffinity = informationClass == ProcessInformationClass::ProcessAffinityMask;
+    const uint32_t required = setPriority ? sizeof(ProcessPriorityClassInformation)
+        : sizeof(uintptr_t);
+    NtStatus result = NtStatus::Success;
+    if (!setPriority && !setAffinity) result = NtStatus::InvalidInfoClass;
+    if (result == NtStatus::Success && length != required) result = NtStatus::InfoLengthMismatch;
+    if (result == NtStatus::Success)
+        result = ex::ProbeForRead(information, required,
+            setPriority ? alignof(ProcessPriorityClassInformation) : alignof(uintptr_t), mode);
+
+    ProcessPriorityClassInformation priority{};
+    uintptr_t affinity{};
+    if (result == NtStatus::Success) {
+        result = setPriority
+            ? ex::ExSafeCopyFromUser(&priority, information, sizeof(priority), mode)
+            : ex::ExSafeCopyFromUser(&affinity, information, sizeof(affinity), mode);
+    }
+    if (result == NtStatus::Success && setPriority &&
+        (priority.foreground > 1 || priority.priorityClass < 1 || priority.priorityClass > 6))
+        result = NtStatus::InvalidParameter;
+
+    ps::EProcess* process{};
+    ob::ObjectHeader* reference{};
+    if (result == NtStatus::Success) {
+        result = handle == InvalidHandleValue
+            ? ps::detail::referenceCurrentProcess(process, reference)
+            : ps::detail::referenceProcessHandle(handle, 0x0200u, process, reference);
+    }
+    if (result == NtStatus::Success && setPriority && priority.priorityClass == 4) {
+        auto* caller = current ? current->owningProcess : nullptr;
+        se::FreestandingAccessToken* token{};
+        ob::ObjectHeader* tokenReference{};
+        if (!caller || caller->referencePrimaryToken(token, tokenReference) != NtStatus::Success ||
+            !token || (token->EnabledPrivileges & (uint64_t{1} << 14)) == 0) {
+            if (tokenReference) ob::ObDereferenceObject(tokenReference);
+            result = NtStatus::PrivilegeNotHeld;
+        } else {
+            ob::ObDereferenceObject(tokenReference);
+        }
+    }
+    if (result == NtStatus::Success && setAffinity) {
+        const auto snapshot = km::perf::QueryProcessorPerformanceSnapshot();
+        if (!snapshot.processorCount || snapshot.processorCount > 64)
+            result = NtStatus::NotSupported;
+        else {
+            const uintptr_t activeMask = snapshot.processorCount == 64
+                ? UINT64_MAX : ((uintptr_t{1} << snapshot.processorCount) - 1);
+            if (!affinity || (affinity & ~activeMask)) result = NtStatus::InvalidParameter;
+        }
+    }
+    if (result == NtStatus::Success) {
+        if (setPriority) process->setProcessPriorityClass(priority.priorityClass);
+        else process->setProcessAffinityMask(affinity);
     }
     if (reference) ob::ObDereferenceObject(reference);
     if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");

@@ -323,5 +323,76 @@ private:
     Waiter* head_{nullptr};
     Waiter* tail_{nullptr};
 };
+
+// Single-BSP mutant used by native object handles. Ownership and recursion
+// are protected by interrupt exclusion; the availability event provides the
+// scheduler wait/cancellation path used by the dispatcher.
+class BootstrapMutant {
+public:
+    explicit BootstrapMutant(bool initialOwner) noexcept
+        : available_(false, !initialOwner) {
+        if (initialOwner) {
+            if (auto* current = ke::KeGetCurrentThread()) {
+                ownerThread_ = current;
+                ownerThreadId_ = current->tid;
+                recursionCount_ = 1;
+            }
+        }
+    }
+    BootstrapMutant(const BootstrapMutant&) = delete;
+    BootstrapMutant& operator=(const BootstrapMutant&) = delete;
+
+    [[nodiscard]] NtStatus wait(bool poll, bool alertable,
+                                uint64_t timeout100ns) noexcept {
+        auto* current = ke::KeGetCurrentThread();
+        if (!current) return NtStatus::InvalidDeviceState;
+        uint64_t flags{};
+        __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+        if (ownerThreadId_ == current->tid) {
+            if (recursionCount_ == UINT32_MAX) {
+                if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+                return NtStatus::MutantLimitExceeded;
+            }
+            ++recursionCount_;
+            if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+            return NtStatus::Success;
+        }
+        if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+        const NtStatus status = available_.wait(poll, alertable, timeout100ns);
+        if (status != NtStatus::Success) return status;
+        __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+        ownerThread_ = current;
+        ownerThreadId_ = current->tid;
+        recursionCount_ = 1;
+        if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+        return NtStatus::Success;
+    }
+
+    [[nodiscard]] NtStatus release(int32_t* previousCount) noexcept {
+        auto* current = ke::KeGetCurrentThread();
+        if (!current) return NtStatus::InvalidDeviceState;
+        uint64_t flags{};
+        __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+        if (ownerThreadId_ != current->tid || !recursionCount_) {
+            if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+            return NtStatus::MutantNotOwned;
+        }
+        const uint32_t oldCount = recursionCount_;
+        if (--recursionCount_ == 0) {
+            ownerThread_ = nullptr;
+            ownerThreadId_ = 0;
+            (void)available_.set();
+        }
+        if (previousCount) *previousCount = static_cast<int32_t>(oldCount);
+        if (flags & (uint64_t{1} << 9)) __asm__ __volatile__("sti" : : : "memory");
+        return NtStatus::Success;
+    }
+
+private:
+    BootstrapEvent available_;
+    ke::KThread* ownerThread_{};
+    uint64_t ownerThreadId_{};
+    uint32_t recursionCount_{};
+};
 }
 #endif

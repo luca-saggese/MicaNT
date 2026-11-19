@@ -328,6 +328,10 @@ struct ProcessObjectFactory {
             entry.peakWorkingSetBytes = peakResidentPages <= SIZE_MAX / mm::PageSize4KB
                 ? peakResidentPages * mm::PageSize4KB : SIZE_MAX;
             entry.privateCommitPages = process->addressSpace_.getPrivateCommitPages();
+            entry.readOperationCount = process->readOperationCount();
+            entry.writeOperationCount = process->writeOperationCount();
+            entry.readTransferCount = process->readTransferCount();
+            entry.writeTransferCount = process->writeTransferCount();
         }
         return NtStatus::Success;
     }

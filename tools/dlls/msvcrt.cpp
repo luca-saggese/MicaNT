@@ -53,6 +53,7 @@ void lockExit() noexcept {
     while (__atomic_exchange_n(&g_exitLock, 1, __ATOMIC_ACQUIRE))
         __asm__ __volatile__("pause");
 }
+
 void unlockExit() noexcept { __atomic_store_n(&g_exitLock, 0, __ATOMIC_RELEASE); }
 
 bool initializeProcessData() noexcept {
@@ -749,6 +750,17 @@ double x87Modf(double x,double* integral) noexcept {
     const unsigned fractional=1075-e; const uint64_t mask=(uint64_t{1}<<fractional)-1;
     const double whole=fromBits(bits&~mask); if(integral)*integral=whole; return x-whole;
 }
+}
+// MSVCRT's assertion helper is a process-terminating failure path. ReactOS
+// Notepad imports it for its standard assert macro; do not let a failed
+// assertion return into the application as if it succeeded.
+[[noreturn]] __declspec(dllexport) void __cdecl _assert(
+    const char* expression, const char* filename, unsigned line) noexcept {
+    (void)expression;
+    (void)filename;
+    (void)line;
+    (void)NtTerminateProcess(nullptr, static_cast<int32_t>(0xC0000420u));
+    for (;;) __asm__ __volatile__("pause");
 }
 __declspec(dllexport) int __cdecl _isnan(double x) noexcept { return isNanValue(x)?1:0; }
 __declspec(dllexport) int __cdecl _finite(double x) noexcept { return isFiniteValue(x)?1:0; }

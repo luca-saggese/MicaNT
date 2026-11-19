@@ -10,6 +10,7 @@
 #include "micant/shared/context.hpp"
 #include "micant/um/native/pe.hpp"
 #include <array>
+#include <atomic>
 #include <memory>
 #include <string_view>
 
@@ -80,6 +81,28 @@ public:
     }
     [[nodiscard]] NtStatus exitStatus() const noexcept { return exitStatus_; }
     [[nodiscard]] size_t activeThreadCount() const noexcept;
+    [[nodiscard]] uintptr_t processAffinityMask() const noexcept { return processAffinityMask_; }
+    void setProcessAffinityMask(uintptr_t mask) noexcept { processAffinityMask_ = mask; }
+    [[nodiscard]] uint8_t processPriorityClass() const noexcept { return processPriorityClass_; }
+    void setProcessPriorityClass(uint8_t priorityClass) noexcept;
+    void accountFileIo(bool write, uint64_t bytes) noexcept {
+        auto& operations = write ? writeOperationCount_ : readOperationCount_;
+        auto& transfers = write ? writeTransferCount_ : readTransferCount_;
+        auto addSaturated = [](std::atomic<uint64_t>& target, uint64_t delta) noexcept {
+            uint64_t value = target.load(std::memory_order_relaxed);
+            for (;;) {
+                const uint64_t next = value > UINT64_MAX - delta ? UINT64_MAX : value + delta;
+                if (target.compare_exchange_weak(value, next,
+                        std::memory_order_relaxed, std::memory_order_relaxed)) break;
+            }
+        };
+        addSaturated(operations, 1);
+        addSaturated(transfers, bytes);
+    }
+    [[nodiscard]] uint64_t readOperationCount() const noexcept { return readOperationCount_.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t writeOperationCount() const noexcept { return writeOperationCount_.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t readTransferCount() const noexcept { return readTransferCount_.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t writeTransferCount() const noexcept { return writeTransferCount_.load(std::memory_order_relaxed); }
 #if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
     // The Ob reference held by a waiter keeps this resident until wait returns.
     [[nodiscard]] sync::detail::BootstrapEvent& terminationEvent() noexcept { return terminationEvent_; }
@@ -119,6 +142,12 @@ private:
     bool deferredProcessing_{false};
     bool systemProcess_{false};
     NtStatus exitStatus_{NtStatus::Pending};
+    uintptr_t processAffinityMask_{1};
+    uint8_t processPriorityClass_{2};
+    std::atomic<uint64_t> readOperationCount_{0};
+    std::atomic<uint64_t> writeOperationCount_{0};
+    std::atomic<uint64_t> readTransferCount_{0};
+    std::atomic<uint64_t> writeTransferCount_{0};
 #if defined(MICANT_BAREMETAL) && (defined(_M_X64) || defined(__x86_64__))
     sync::detail::BootstrapEvent terminationEvent_{true};
 #endif

@@ -72,7 +72,8 @@ alignas(16) micant::boot::UefiKernelHandoffV8 g_kernelBootHandoff{};
     !defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) && \
     !defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) && \
     !defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) && \
-    !defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD)
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD) && \
+    !defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
 namespace micant::km::hid {
 void DebugValidateInputQueues(const char* stage) noexcept;
 }
@@ -3377,7 +3378,8 @@ bool launchTextboxProbeProcess() noexcept {
     defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD) || \
-    defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD)
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
 bool launchReactosAppProcess() noexcept {
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER)
     constexpr auto imageName = u"winver.exe";
@@ -3397,11 +3399,18 @@ bool launchReactosAppProcess() noexcept {
     constexpr auto imageName = u"taskmgr.exe";
 #elif defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD)
     constexpr auto imageName = u"cmd.exe";
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+    constexpr auto imageName = u"comdlgtest.exe";
 #else
     constexpr auto imageName = u"wordpad.exe";
 #endif
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+    return launchUserImageProcess(imageName, g_reactosAppProcessHandle,
+        g_reactosAppProcessId);
+#else
     return launchUserImageProcess(imageName, g_reactosAppProcessHandle,
         g_reactosAppProcessId, false, nullptr, true);
+#endif
 }
 #endif
 
@@ -3816,6 +3825,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const auto readStatus = io::IoReadFileHandle(static_cast<Handle>(first), useCurrentOffset,
             useCurrentOffset ? 0 : static_cast<uint64_t>(byteOffset.quadPart),
             staging.get(), length, &bytesRead, ioStatusAddress);
+        if (canBlock && (readStatus == NtStatus::Success || bytesRead != 0))
+            readThread->owningProcess->accountFileIo(false, bytesRead);
         if (enableReadInterrupts) __asm__ __volatile__("cli" : : : "memory");
         if (canBlock && readThread->terminationRequested && readThread->serviceTermination) {
             auto terminate = readThread->serviceTermination;
@@ -3903,6 +3914,8 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const auto writeStatus = io::IoWriteFileHandle(static_cast<Handle>(first), useCurrentOffset,
             useCurrentOffset ? 0 : static_cast<uint64_t>(byteOffset.quadPart),
             staging.get(), length, &bytesWritten);
+        if (writeStatus == NtStatus::Success || bytesWritten != 0)
+            issuingThread->owningProcess->accountFileIo(true, bytesWritten);
         if (enableWriteInterrupts) __asm__ __volatile__("cli" : : : "memory");
         if (issuingThread->terminationRequested && issuingThread->serviceTermination) {
             auto terminate = issuingThread->serviceTermination;
@@ -4480,6 +4493,19 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         return status(sys::NtAlertThread(static_cast<Handle>(first)));
     if (number == sys::SSN_NtTestAlert)
         return status(sys::NtTestAlert());
+    if (number == sys::SSN_NtSetInformationProcess) {
+        __asm__ __volatile__("swapgs" : : : "memory");
+        __asm__ __volatile__("movw $0x18, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        const bool canSchedule = hal::amd64::bootstrapSchedulerClockActive();
+        if (canSchedule) __asm__ __volatile__("sti" : : : "memory");
+        const auto result = sys::NtSetInformationProcess(static_cast<Handle>(first),
+            static_cast<ProcessInformationClass>(second), reinterpret_cast<const void*>(args.third),
+            static_cast<uint32_t>(args.fourth));
+        if (canSchedule) __asm__ __volatile__("cli" : : : "memory");
+        __asm__ __volatile__("movw $0x2b, %%ax; movw %%ax, %%ds; movw %%ax, %%es" : : : "rax", "memory");
+        __asm__ __volatile__("swapgs" : : : "memory");
+        return status(result);
+    }
     if (number == sys::SSN_NtQueryInformationProcess || number == sys::SSN_NtQueryInformationThread ||
         number == sys::SSN_NtQueryInformationToken ||
         number == sys::SSN_NtReadVirtualMemory) {
@@ -4641,6 +4667,31 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         const auto copy = ex::ExSafeCopyToUser(reinterpret_cast<void*>(first), &handle, sizeof(handle));
         if (copy != NtStatus::Success) sys::NtClose(handle);
         return status(copy);
+    }
+    if (number == sys::SSN_NtCreateMutant) {
+        ObjectAttributes attributes{};
+        if ((args.third && ex::ExSafeCopyFromUser(&attributes,
+                reinterpret_cast<const void*>(args.third), sizeof(attributes)) != NtStatus::Success) ||
+            ex::ProbeForWrite(reinterpret_cast<void*>(first), sizeof(Handle), 1) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        Handle handle{};
+        const auto result = sys::NtCreateMutant(&handle, static_cast<uint32_t>(second),
+            args.third ? &attributes : nullptr, (args.fourth & 0xffu) != 0);
+        if (result != NtStatus::Success && result != NtStatus::ObjectNameExists) return status(result);
+        const auto copy = ex::ExSafeCopyToUser(reinterpret_cast<void*>(first), &handle, sizeof(handle));
+        if (copy != NtStatus::Success) (void)sys::NtClose(handle);
+        return status(copy == NtStatus::Success ? result : copy);
+    }
+    if (number == sys::SSN_NtReleaseMutant) {
+        if (second && ex::ProbeForWrite(reinterpret_cast<void*>(second),
+                sizeof(int32_t), alignof(int32_t)) != NtStatus::Success)
+            return status(NtStatus::AccessViolation);
+        int32_t previousCount{};
+        const auto result = sys::NtReleaseMutant(static_cast<Handle>(first),
+            second ? &previousCount : nullptr);
+        if (result != NtStatus::Success || !second) return status(result);
+        return status(ex::ExSafeCopyToUser(reinterpret_cast<void*>(second),
+            &previousCount, sizeof(previousCount)));
     }
     if (number == sys::SSN_NtSetEvent) {
         if (second && ex::ProbeForWrite(reinterpret_cast<void*>(second), sizeof(int32_t), 1) != NtStatus::Success)
@@ -5543,6 +5594,7 @@ void pollKeyboardInput() noexcept {
     publishCompositorSurfacesInCompositorSpace();
     if (!waitForCompositorPresentation(clockActive ? 1000u : 0u))
         stopWithError("[MicaNT Compositor] Initial cursor frame timed out\r\n");
+#if !defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
     MicantRenderBootStatus("Compositor frame visible; starting Explorer...");
     serialWrite("[MicaNT Win32k] Cursor presented before Explorer startup\r\n");
     if (!launchExplorerProcess())
@@ -5552,6 +5604,10 @@ void pollKeyboardInput() noexcept {
         stopWithError("[MicaNT Explorer] Desktop presentation timed out\r\n");
     MicantRenderBootStatus("Desktop presented; continuing shell startup...");
     serialWrite("[MicaNT Explorer] Visible desktop presented; shell startup continues\r\n");
+#else
+    MicantRenderBootStatus("Compositor ready; launching Task Manager directly...");
+    serialWrite("[MicaNT Taskmgr] Explorer startup skipped; launching app directly\r\n");
+#endif
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINVER) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) || \
@@ -5561,8 +5617,9 @@ void pollKeyboardInput() noexcept {
     defined(MICANT_BOOTSTRAP_REACTOS_APP_REGEDIT) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR) || \
     defined(MICANT_BOOTSTRAP_REACTOS_APP_WORDPAD) || \
-    defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD)
-    serialWrite("[MicaNT ReactOSApps] Launching original AMD64 PE after Explorer\r\n");
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_CMD) || \
+    defined(MICANT_BOOTSTRAP_REACTOS_APP_COMDLGTEST)
+    serialWrite("[MicaNT ReactOSApps] Launching original AMD64 PE\r\n");
     if (!launchReactosAppProcess())
         stopWithError("[MicaNT ReactOSApps] Original AMD64 PE launch failed\r\n");
     serialWrite("[MicaNT ReactOSApps] Original AMD64 PE process started PID=");

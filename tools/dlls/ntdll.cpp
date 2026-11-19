@@ -1642,6 +1642,11 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtCreateThreadEx(
     __asm__ __volatile__("movq %rcx, %r10\n\tmovq $0xbd, %rax\n\tsyscall\n\tret\n\t");
 }
 
+__attribute__((naked)) __declspec(dllexport) int32_t NtOpenProcessToken(
+    void*, uint32_t, void**) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovq $0xbe, %rax\n\tsyscall\n\tret\n\t");
+}
+
 __attribute__((naked)) __declspec(dllexport) int32_t NtQueryInformationProcess(
     void*, uint32_t, void*, uint32_t, uint32_t*) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovq $0x19, %rax\n\tsyscall\n\tret\n\t");
@@ -1830,6 +1835,28 @@ __attribute__((naked)) __declspec(dllexport) uint64_t NtShutdownSystem(uint32_t 
 #endif
 }
 
+__declspec(dllexport) int32_t __stdcall NtSetSystemPowerState(
+        uint32_t action, uint32_t minimumState, uint32_t flags) noexcept {
+    constexpr uint32_t powerActionHibernate = 3;
+    constexpr uint32_t powerActionShutdown = 4;
+    constexpr uint32_t powerActionShutdownReset = 5;
+    constexpr uint32_t powerActionShutdownOff = 6;
+    constexpr uint32_t systemPowerWorking = 1;
+    constexpr uint32_t systemPowerHibernate = 5;
+    constexpr uint32_t systemPowerShutdown = 6;
+    if (action > 7 || minimumState < systemPowerWorking ||
+        minimumState > systemPowerShutdown || flags != 0 ||
+        (action == powerActionHibernate && minimumState != systemPowerHibernate) ||
+        ((action == powerActionShutdown || action == powerActionShutdownReset ||
+          action == powerActionShutdownOff) && minimumState != systemPowerShutdown))
+        return static_cast<int32_t>(0xC000000Du); // STATUS_INVALID_PARAMETER
+    if (action == powerActionShutdown || action == powerActionShutdownReset ||
+        action == powerActionShutdownOff)
+        return static_cast<int32_t>(NtShutdownSystem(
+            action == powerActionShutdownReset ? 1u : 2u));
+    return static_cast<int32_t>(0xC0000002u); // STATUS_NOT_IMPLEMENTED: no Po sleep transition.
+}
+
 __attribute__((naked)) __declspec(dllexport) uint64_t NtQuerySystemInformation(
     uint32_t /*infoClass*/,
     void* /*infoBuffer*/,
@@ -1921,6 +1948,16 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtSetValueKey(
 __attribute__((naked)) __declspec(dllexport) int32_t NtCreateEvent(
     void** /*handle*/, uint32_t /*access*/, void* /*attributes*/, uint32_t /*type*/, uint8_t /*initial*/) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x48, %eax\n\tsyscall\n\tret\n\t");
+}
+
+__attribute__((naked)) __declspec(dllexport) int32_t NtCreateMutant(
+    void** /*handle*/, uint32_t /*access*/, void* /*attributes*/, uint8_t /*initialOwner*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0xb2, %eax\n\tsyscall\n\tretq\n");
+}
+
+__attribute__((naked)) __declspec(dllexport) int32_t NtReleaseMutant(
+    void* /*handle*/, int32_t* /*previousCount*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x1d, %eax\n\tsyscall\n\tretq\n");
 }
 
 __attribute__((naked)) __declspec(dllexport) int32_t NtSetEvent(
@@ -2352,12 +2389,11 @@ __declspec(dllexport) int32_t NtQueryVolumeInformationFile(
     return micant::STATUS_NOT_SUPPORTED;
 }
 
-/** @brief Sets process information selected by ProcessInformationClass.
- *  ProcessInformation is an input structure whose layout depends on the class.
- *  This export does not mutate process state and returns STATUS_NOT_SUPPORTED.
- */
-__declspec(dllexport) int32_t NtSetInformationProcess(void*, uint32_t, const void*, uint32_t) noexcept {
-    return micant::STATUS_NOT_SUPPORTED;
+/** @brief Sets the supported native process information classes via syscall. */
+__attribute__((naked)) __declspec(dllexport) int32_t NtSetInformationProcess(
+    void* /*process*/, uint32_t /*informationClass*/, const void* /*information*/,
+    uint32_t /*length*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x26, %eax\n\tsyscall\n\tretq\n");
 }
 
 /** @brief Sets filesystem volume metadata for a file or volume handle.

@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstring>
 #include "micant/shared/ntdef.hpp"
+#include "micant/shared/dos_device_map.hpp"
 #include "micant/shared/ntstatus.hpp"
 
 namespace micant::km::ob_baremetal {
@@ -308,10 +309,14 @@ public:
         createDevice("\\Device\\Harddisk1\\Partition3", FILE_DEVICE_DISK); // Ubuntu Root Ext4
 
         // 3. Symbolic Link Mappings (Win32 Drive Letters)
-        createSymbolicLink("\\DosDevices\\C:", "\\Device\\Harddisk0\\Partition2"); // MICA_SYS Root
-        createSymbolicLink("\\DosDevices\\D:", "\\Device\\Harddisk0\\Partition3"); // MICA_DATA High-Cap
-        createSymbolicLink("\\DosDevices\\E:", "\\Device\\Harddisk1\\Partition2"); // Ubuntu Boot Ext4 RO
-        createSymbolicLink("\\DosDevices\\Z:", "\\Device\\Harddisk0\\Partition1"); // MICA_ESP
+        for (const auto& mapping : micant::shared::BareMetalDosDeviceMappings) {
+            char linkPath[32] = "\\DosDevices\\";
+            size_t linkLength = sizeof("\\DosDevices\\") - 1;
+            for (const char* cursor = mapping.driveName; *cursor; ++cursor)
+                linkPath[linkLength++] = *cursor;
+            linkPath[linkLength] = '\0';
+            createSymbolicLink(linkPath, mapping.targetName);
+        }
 
         // 4. Hardware Peripheral Devices
         createDevice("\\Device\\NetworkAdapter0", FILE_DEVICE_NETWORK);     // Intel I210-AT (8086:1533)

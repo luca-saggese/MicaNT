@@ -58,6 +58,14 @@ __declspec(dllimport) uint32_t GetLastError();
 __declspec(dllimport) int32_t MultiByteToWideChar(uint32_t, uint32_t,
     const char*, int32_t, wchar_t*, int32_t);
 __declspec(dllimport) int32_t CreateDirectoryW(const wchar_t*, void*);
+struct ShellStartupInfoW { uint32_t cb; wchar_t* reserved; wchar_t* desktop; wchar_t* title;
+    uint32_t x,y,xSize,ySize,xCountChars,yCountChars,fillAttribute,flags;
+    uint16_t showWindow,reserved2Size; uint8_t* reserved2;
+    void* standardInput; void* standardOutput; void* standardError; };
+struct ShellProcessInformation { void* process; void* thread; uint32_t processId; uint32_t threadId; };
+__declspec(dllimport) int32_t __stdcall CreateProcessW(const wchar_t*, wchar_t*, void*, void*,
+    int32_t, uint32_t, void*, const wchar_t*, ShellStartupInfoW*, ShellProcessInformation*);
+__declspec(dllimport) int32_t __stdcall CloseHandle(void*);
 }
 
 namespace {
@@ -201,12 +209,99 @@ intptr_t __stdcall ShellAboutWindowProc(void* window, uint32_t message,
 }
 
 extern "C" {
-__declspec(dllexport) void* WINAPI ShellExecuteW(
-    void*, const wchar_t*, const wchar_t*, const wchar_t*, const wchar_t*, int32_t) noexcept {
-    // This port has no registered verb/association service yet. Do not claim
-    // that a requested document or command was launched.
-    SetLastError(120); // ERROR_CALL_NOT_IMPLEMENTED
-    return reinterpret_cast<void*>(static_cast<intptr_t>(31)); // SE_ERR_NOASSOC
+struct ShellExecuteInfoW {
+    uint32_t cbSize, fMask;
+    void* hwnd;
+    const wchar_t* lpVerb;
+    const wchar_t* lpFile;
+    const wchar_t* lpParameters;
+    const wchar_t* lpDirectory;
+    int32_t nShow;
+    void* hInstApp;
+    void* lpIDList;
+    const wchar_t* lpClass;
+    void* hkeyClass;
+    uint32_t dwHotKey;
+    void* iconOrMonitor;
+    void* hProcess;
+};
+static int32_t launchShellTarget(const wchar_t* file, const wchar_t* parameters,
+        const wchar_t* directory, uint32_t show, void** process) noexcept {
+    if (process) *process = nullptr;
+    if (!file || !*file) { SetLastError(87); return 0; }
+    wchar_t command[256]{};
+    size_t n = 0;
+    for (const wchar_t* p = file; *p; ++p) {
+        if (n + 2 >= std::size(command)) { SetLastError(206); return 0; }
+        command[n++] = *p;
+    }
+    if (parameters && *parameters) {
+        command[n++] = L' ';
+        for (const wchar_t* p = parameters; *p; ++p) {
+            if (n + 2 >= std::size(command)) { SetLastError(206); return 0; }
+            command[n++] = *p;
+        }
+    }
+    ShellStartupInfoW startup{};
+    startup.cb = sizeof(startup);
+    startup.showWindow = static_cast<uint16_t>(show);
+    ShellProcessInformation info{};
+    if (!CreateProcessW(file, command, nullptr, nullptr, 0, 0, nullptr,
+            directory, &startup, &info)) return 0;
+    if (process) *process = info.process;
+    else (void)CloseHandle(info.process);
+    (void)CloseHandle(info.thread);
+    SetLastError(0);
+    return 1;
+}
+__declspec(dllexport) int32_t WINAPI ShellExecuteExW(ShellExecuteInfoW* info) noexcept {
+    constexpr uint32_t supportedMask = 0x00000040u | 0x00000100u | 0x00000400u;
+    if (!info || info->cbSize < sizeof(ShellExecuteInfoW) || !info->lpFile ||
+        (info->fMask & ~supportedMask) || info->lpIDList || info->lpClass ||
+        info->hkeyClass || info->dwHotKey) {
+        SetLastError(info ? 50 : 87);
+        return 0;
+    }
+    if (info->lpVerb && *info->lpVerb &&
+        !((*info->lpVerb == L'o' || *info->lpVerb == L'O') &&
+          (info->lpVerb[1] == L'p' || info->lpVerb[1] == L'P') &&
+          (info->lpVerb[2] == L'e' || info->lpVerb[2] == L'E') &&
+          (info->lpVerb[3] == L'n' || info->lpVerb[3] == L'N') && !info->lpVerb[4])) {
+        SetLastError(1155); // no association/verb handler
+        return 0;
+    }
+    void* process{};
+    if (!launchShellTarget(info->lpFile, info->lpParameters, info->lpDirectory,
+            static_cast<uint32_t>(info->nShow),
+            (info->fMask & 0x00000040u) ? &process : nullptr)) return 0;
+    info->hInstApp = reinterpret_cast<void*>(33);
+    info->hProcess = process;
+    return 1;
+}
+__declspec(dllexport) void* WINAPI ShellExecuteW(void*, const wchar_t* verb,
+        const wchar_t* file, const wchar_t* parameters, const wchar_t* directory,
+        int32_t show) noexcept {
+    if (verb && *verb && !((*verb == L'o' || *verb == L'O') &&
+        (verb[1] == L'p' || verb[1] == L'P') && (verb[2] == L'e' || verb[2] == L'E') &&
+        (verb[3] == L'n' || verb[3] == L'N') && !verb[4])) {
+        SetLastError(1155);
+        return reinterpret_cast<void*>(31);
+    }
+    return reinterpret_cast<void*>(launchShellTarget(file, parameters, directory,
+        static_cast<uint32_t>(show), nullptr) ? 33 : 2);
+}
+
+__declspec(dllexport) int32_t WINAPI Shell_NotifyIconW(uint32_t operation,
+        void* notificationData) noexcept {
+    // Notification icons belong to the Explorer notification-area service.
+    // This isolated Taskmgr profile intentionally boots without Explorer, so
+    // accepting NIM_ADD here would claim visibility that the shell cannot give.
+    if (!notificationData || operation > 4) {
+        SetLastError(87);
+        return 0;
+    }
+    SetLastError(120); // ERROR_CALL_NOT_IMPLEMENTED: no tray service is running.
+    return 0;
 }
 
 __declspec(dllexport) void WINAPI DragAcceptFiles(void* window, int32_t accept) noexcept {
