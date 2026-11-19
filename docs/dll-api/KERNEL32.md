@@ -10,6 +10,12 @@ all Windows 11 exports have been inventoried.
 | --- | --- | --- | --- |
 | `GetCurrentProcessId` | `processthreadsapi.h` | IMPLEMENTED | Reads the calling process ID from the current TEB. Returns zero only if the TEB is unavailable; it no longer substitutes a fixed PID. |
 | `GetCurrentThreadId` | `processthreadsapi.h` | IMPLEMENTED | Reads the calling thread ID from the current TEB. Returns zero only if the TEB is unavailable; it no longer substitutes a fixed TID. |
+| `CreateEventW`, `CreateEventExW` | `synchapi.h` | PARTIAL | Unnamed events use native event handles through NTDLL. Named events and security attributes return `ERROR_CALL_NOT_IMPLEMENTED`. |
+| `SetEvent`, `ResetEvent`, `WaitForSingleObject`, `WaitForSingleObjectEx`, `CloseHandle` | `synchapi.h`, `handleapi.h` | PARTIAL | Dispatch to native syscalls. `WaitForMultipleObjectsEx` supports one handle; larger sets fail with `ERROR_INVALID_PARAMETER`. |
+| `VirtualAlloc`, `VirtualFree` | `memoryapi.h` | PARTIAL | Use native process-memory syscalls for the current process and return mapped errors. |
+| `LoadLibraryW`, `LoadLibraryExW`, `FreeLibrary` | `libloaderapi.h` | UNSUPPORTED | Return failure until loader reference counting and module loading/unloading are implemented. |
+| `SwitchToThread` | `processthreadsapi.h` | IMPLEMENTED | Uses `NtYieldExecution` and reports whether the kernel scheduled another thread. |
+| `SetThreadDescription` | `processthreadsapi.h` | UNSUPPORTED | Returns `E_NOTIMPL`. |
 
 The direct staging source name `tools/dlls/kernel32.cpp` now includes the same
 per-DLL ABI implementation used by `kernel32_boot`. Stage builds link the
@@ -21,7 +27,7 @@ standard handles and used incomplete syscall argument lists.
 
 | DLL | Reference exports | Current exports | Documented | Implemented in batch | Runtime verified | Unsupported | Missing |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `kernel32.dll` — current image | TBD | 147 | 2 | 2 | 0 | TBD | TBD |
+| `kernel32.dll` — current image | TBD | 147 | 16 | 12 | 0 | 4 | TBD |
 
 Both the CMake target and an equivalent direct stage compile were linked. The
 export count was read from the generated PE. Runtime behavior is not counted

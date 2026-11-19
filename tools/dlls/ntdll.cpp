@@ -1928,6 +1928,11 @@ __attribute__((naked)) __declspec(dllexport) int32_t NtSetEvent(
     __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x4e, %eax\n\tsyscall\n\tret\n\t");
 }
 
+__attribute__((naked)) __declspec(dllexport) int32_t NtResetEvent(
+    void* /*handle*/, int32_t* /*previous*/) noexcept {
+    __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x4f, %eax\n\tsyscall\n\tret\n\t");
+}
+
 __attribute__((naked)) __declspec(dllexport) int32_t NtWaitForSingleObject(
     void* /*handle*/, uint8_t /*alertable*/, int64_t* /*timeout*/) noexcept {
     __asm__ __volatile__("movq %rcx, %r10\n\tmovl $0x04, %eax\n\tsyscall\n\tret\n\t");

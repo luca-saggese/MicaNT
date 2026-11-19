@@ -26,6 +26,12 @@ __declspec(dllimport) int32_t __stdcall NtQueryVirtualMemory(
     void* process, const void* base, uint32_t informationClass,
     void* information, size_t informationLength, size_t* returnLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateEvent(void** handle, uint32_t access, void* attributes, uint32_t type, uint8_t initialState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtSetEvent(void* handle, int32_t* previousState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtResetEvent(void* handle, int32_t* previousState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtWaitForSingleObject(void* handle, uint8_t alertable, const int64_t* timeout) noexcept;
+__declspec(dllimport) int32_t __stdcall NtAllocateVirtualMemory(void* process, void** base, uint64_t zeroBits, size_t* size, uint32_t type, uint32_t protect) noexcept;
+__declspec(dllimport) int32_t __stdcall NtFreeVirtualMemory(void* process, void** base, size_t* size, uint32_t type) noexcept;
 __declspec(dllimport) int32_t __stdcall NtDuplicateObject(
     void* sourceProcess, void* sourceHandle, void* targetProcess,
     void** targetHandle, uint32_t desiredAccess, uint32_t handleAttributes,
@@ -3078,6 +3084,7 @@ extern "C" int __stdcall DllMainCRTStartup(void*, unsigned long, void*) noexcept
 }
 
 extern "C" {
+__declspec(dllexport) void __stdcall SetLastError(uint32_t error) noexcept;
 __declspec(dllimport) int32_t __stdcall NtQueryPerformanceCounter(
     int64_t* counter, int64_t* frequency) noexcept;
 __declspec(dllimport) int32_t __stdcall NtDelayExecution(
@@ -3089,15 +3096,31 @@ __declspec(dllimport) int32_t __stdcall NtQueryValueKey(
     void* keyHandle, micant::UnicodeString* valueName, uint32_t informationClass,
     void* information, size_t informationLength, size_t* resultLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateEvent(void** handle, uint32_t access, void* attributes, uint32_t type, uint8_t initialState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtSetEvent(void* handle, int32_t* previousState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtResetEvent(void* handle, int32_t* previousState) noexcept;
+__declspec(dllimport) int32_t __stdcall NtWaitForSingleObject(void* handle, uint8_t alertable, const int64_t* timeout) noexcept;
+__declspec(dllimport) int32_t __stdcall NtAllocateVirtualMemory(void* process, void** base, uint64_t zeroBits, size_t* size, uint32_t type, uint32_t protect) noexcept;
+__declspec(dllimport) int32_t __stdcall NtFreeVirtualMemory(void* process, void** base, size_t* size, uint32_t type) noexcept;
 }
 
 namespace micant::um::winnt_kernel32_advapi32_abi {
 
 namespace {
 uint32_t g_lastError = ERROR_SUCCESS_OFFICIAL;
+uint32_t Win32ErrorFromNtStatus(int32_t status) noexcept {
+    switch (static_cast<uint32_t>(status)) {
+        case 0xC0000008U: return 6;
+        case 0xC000000DU: return 87;
+        case 0xC0000022U: return 5;
+        case 0xC000009AU: return 8;
+        case 0xC00000BBU: return 50;
+        default: return 31;
+    }
+}
+}
 
-WinNtEventHandleObject g_eventPool[32]{};
-uint32_t g_eventPoolNext = 0;
+namespace {
 
 struct AdvapiRegistryKey { void* handle{}; wchar_t path[512]{}; bool active{}; };
 AdvapiRegistryKey g_regKeyPool[32]{};
@@ -3141,23 +3164,12 @@ uint64_t Kernel32_GetTickCount64() noexcept {
     return *shared;
 }
 
-void* Kernel32_CreateEventExW(void* /*lpEventAttributes*/, const wchar_t* lpName, uint32_t dwFlags, uint32_t /*dwDesiredAccess*/) noexcept {
-    WinNtEventHandleObject* ev = &g_eventPool[(g_eventPoolNext++) & 31U];
-    ev->magic       = 0x4D4E544556454E54ULL;
-    ev->manualReset = (dwFlags & 0x00000001U) ? 1 : 0;
-    ev->signaled    = (dwFlags & 0x00000002U) ? 1 : 0;
-    ev->waitCount   = 0;
-    if (lpName) {
-        size_t i = 0;
-        while (lpName[i] != L'\0' && i + 1 < 64) {
-            ev->name[i] = lpName[i];
-            ++i;
-        }
-        ev->name[i] = L'\0';
-    } else {
-        ev->name[0] = L'\0';
-    }
-    return ev;
+void* Kernel32_CreateEventExW(void* attributes, const wchar_t* lpName, uint32_t dwFlags, uint32_t desiredAccess) noexcept {
+    if (attributes || lpName || (dwFlags & ~3U) != 0) { SetLastError(120); return nullptr; }
+    void* handle{};
+    const int32_t status = NtCreateEvent(&handle, desiredAccess, nullptr, (dwFlags & 1U) ? 0U : 1U, static_cast<uint8_t>((dwFlags & 2U) != 0));
+    if (status < 0 || !handle) { SetLastError(Win32ErrorFromNtStatus(status)); return nullptr; }
+    return handle;
 }
 
 void* Kernel32_CreateEventW(void* lpEventAttributes, int32_t bManualReset, int32_t bInitialState, const wchar_t* lpName) noexcept {
@@ -3166,33 +3178,26 @@ void* Kernel32_CreateEventW(void* lpEventAttributes, int32_t bManualReset, int32
 }
 
 int32_t Kernel32_SetEvent(void* hEvent) noexcept {
-    if (!hEvent) return 0;
-    auto* ev = static_cast<WinNtEventHandleObject*>(hEvent);
-    if (ev->magic != 0x4D4E544556454E54ULL) return 0;
-    ev->signaled = 1;
-    return 1;
+    const int32_t status = NtSetEvent(hEvent, nullptr);
+    if (status < 0) SetLastError(Win32ErrorFromNtStatus(status));
+    return status >= 0;
 }
 
 int32_t Kernel32_ResetEvent(void* hEvent) noexcept {
-    if (!hEvent) return 0;
-    auto* ev = static_cast<WinNtEventHandleObject*>(hEvent);
-    if (ev->magic != 0x4D4E544556454E54ULL) return 0;
-    ev->signaled = 0;
-    return 1;
+    const int32_t status = NtResetEvent(hEvent, nullptr);
+    if (status < 0) SetLastError(Win32ErrorFromNtStatus(status));
+    return status >= 0;
 }
 
-uint32_t Kernel32_WaitForSingleObjectEx(void* hHandle, uint32_t /*dwMilliseconds*/, int32_t /*bAlertable*/) noexcept {
-    if (!hHandle) return 0xFFFFFFFFU;
-    auto* ev = static_cast<WinNtEventHandleObject*>(hHandle);
-    if (ev->magic != 0x4D4E544556454E54ULL) return WAIT_OBJECT_0_OFFICIAL;
-    ev->waitCount++;
-    if (ev->signaled) {
-        if (!ev->manualReset) {
-            ev->signaled = 0;
-        }
-        return WAIT_OBJECT_0_OFFICIAL;
-    }
-    return WAIT_TIMEOUT_OFFICIAL;
+uint32_t Kernel32_WaitForSingleObjectEx(void* hHandle, uint32_t milliseconds, int32_t alertable) noexcept {
+    const int64_t interval = -static_cast<int64_t>(milliseconds) * 10000;
+    const int64_t* timeout = milliseconds == UINT32_MAX ? nullptr : &interval;
+    const int32_t status = NtWaitForSingleObject(hHandle, static_cast<uint8_t>(alertable != 0), timeout);
+    if (status == 0) return WAIT_OBJECT_0_OFFICIAL;
+    if (static_cast<uint32_t>(status) == 0x102U) return WAIT_TIMEOUT_OFFICIAL;
+    if (static_cast<uint32_t>(status) == 0x101U) return 0xC0U;
+    SetLastError(Win32ErrorFromNtStatus(status));
+    return 0xFFFFFFFFU;
 }
 
 uint32_t Kernel32_WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds) noexcept {
@@ -3200,33 +3205,38 @@ uint32_t Kernel32_WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds) no
 }
 
 uint32_t Kernel32_WaitForMultipleObjectsEx(uint32_t nCount, const void* const* lpHandles, int32_t /*bWaitAll*/, uint32_t dwMilliseconds, int32_t bAlertable) noexcept {
-    if (nCount == 0 || !lpHandles) return 0xFFFFFFFFU;
+    if (nCount != 1 || !lpHandles) { SetLastError(87); return 0xFFFFFFFFU; }
     return Kernel32_WaitForSingleObjectEx(const_cast<void*>(lpHandles[0]), dwMilliseconds, bAlertable);
 }
 
 int32_t Kernel32_CloseHandle(void* hObject) noexcept {
-    if (!hObject) return 0;
-    auto* ev = static_cast<WinNtEventHandleObject*>(hObject);
-    if (ev->magic == 0x4D4E544556454E54ULL) {
-        ev->magic = 0;
-    }
-    return 1;
+    const int32_t status = NtClose(hObject);
+    if (status < 0) SetLastError(Win32ErrorFromNtStatus(status));
+    return status >= 0;
 }
 
-void* Kernel32_VirtualAlloc(void* /*lpAddress*/, size_t dwSize, uint32_t /*flAllocationType*/, uint32_t /*flProtect*/) noexcept {
-    if (dwSize == 0 || dwSize > sizeof(g_virtualAllocArena)) return nullptr;
-    ByteZero(g_virtualAllocArena, dwSize);
-    return g_virtualAllocArena;
+void* Kernel32_VirtualAlloc(void* address, size_t size, uint32_t allocationType, uint32_t protect) noexcept {
+    if (!size) { SetLastError(87); return nullptr; }
+    size_t regionSize = size;
+    const int32_t status = NtAllocateVirtualMemory(reinterpret_cast<void*>(static_cast<intptr_t>(-1)), &address, 0, &regionSize, allocationType, protect);
+    if (status < 0) { SetLastError(Win32ErrorFromNtStatus(status)); return nullptr; }
+    return address;
 }
 
-int32_t Kernel32_VirtualFree(void* lpAddress, size_t /*dwSize*/, uint32_t dwFreeType) noexcept {
-    if (!lpAddress) return 0;
-    return (dwFreeType == MEM_RELEASE_OFFICIAL) ? 1 : 0;
+int32_t Kernel32_VirtualFree(void* lpAddress, size_t size, uint32_t freeType) noexcept {
+    if (!lpAddress || (freeType == MEM_RELEASE_OFFICIAL && size != 0)) { SetLastError(87); return 0; }
+    const int32_t status = NtFreeVirtualMemory(reinterpret_cast<void*>(static_cast<intptr_t>(-1)), &lpAddress, &size, freeType);
+    if (status < 0) SetLastError(Win32ErrorFromNtStatus(status));
+    return status >= 0;
 }
 
-void* Kernel32_LoadLibraryExW(const wchar_t* lpLibFileName, void* /*hFile*/, uint32_t /*dwFlags*/) noexcept {
-    if (!lpLibFileName) return nullptr;
-    return reinterpret_cast<void*>(static_cast<uintptr_t>(0x00007FF810000000ULL));
+void* Kernel32_LoadLibraryExW(const wchar_t* lpLibFileName, void* hFile, uint32_t flags) noexcept {
+    if (!lpLibFileName || hFile || flags) { SetLastError(87); return nullptr; }
+    // Returning a loaded base without incrementing its loader reference count
+    // would make a later FreeLibrary unsafe. Until the loader owns reference
+    // counts and disk-backed loading, report the operation as unsupported.
+    SetLastError(120);
+    return nullptr;
 }
 
 void* Kernel32_LoadLibraryW(const wchar_t* lpLibFileName) noexcept {
@@ -3364,7 +3374,8 @@ void* Kernel32_GetProcAddress(void* hModule, const char* lpProcName) noexcept {
 }
 
 int32_t Kernel32_FreeLibrary(void* hLibModule) noexcept {
-    return hLibModule ? 1 : 0;
+    SetLastError(hLibModule ? 120U : 6U);
+    return 0;
 }
 
 #if defined(MICANT_FREESTANDING_KERNEL32)
@@ -3381,7 +3392,10 @@ void Kernel32_Sleep(uint32_t milliseconds) noexcept {
     const int64_t interval = -static_cast<int64_t>(milliseconds) * 10000;
     (void)NtDelayExecution(0, &interval);
 }
-int32_t Kernel32_SwitchToThread() noexcept { return 1; }
+int32_t Kernel32_SwitchToThread() noexcept {
+    const int32_t status = NtYieldExecution();
+    return status >= 0 && static_cast<uint32_t>(status) != 0x40000024U;
+}
 uint32_t Kernel32_GetCurrentProcessId() noexcept {
     uintptr_t teb{};
     __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
@@ -3394,7 +3408,7 @@ uint32_t Kernel32_GetCurrentThreadId() noexcept {
 }
 uint32_t Kernel32_GetLastError() noexcept { return g_lastError; }
 void Kernel32_SetLastError(uint32_t dwErrCode) noexcept { g_lastError = dwErrCode; }
-int32_t Kernel32_SetThreadDescription(void* /*hThread*/, const wchar_t* /*lpThreadDescription*/) noexcept { return 0; }
+int32_t Kernel32_SetThreadDescription(void* /*hThread*/, const wchar_t* /*lpThreadDescription*/) noexcept { return static_cast<int32_t>(0x80004001U); }
 
 
 // advapi32.dll implementations
