@@ -1,6 +1,6 @@
 /**
  * @file refs_driver.cpp
- * @brief Sovereign Clean-Room Resilient File System (ReFS v3.x) Kernel Driver (refs.sys) for MicaNT.
+ * Luce OS Clean-Room Resilient File System (ReFS v3.x) Kernel Driver (refs.sys) for MicaNT.
  *
  * Freestanding ISO C++23. Clean-Room NT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

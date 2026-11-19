@@ -3524,7 +3524,8 @@ int32_t Advapi32_RegQueryValueExW(void* hKey, const wchar_t* lpValueName, uint32
     return ERROR_SUCCESS_OFFICIAL;
 }
 
-int32_t Advapi32_RegGetValueW(void* hkey, const wchar_t* /*lpSubKey*/, const wchar_t* lpValue, uint32_t /*dwFlags*/, uint32_t* pdwType, void* pvData, uint32_t* pcbData) noexcept {
+int32_t Advapi32_RegGetValueW(void* hkey, const wchar_t* lpSubKey, const wchar_t* lpValue, uint32_t dwFlags, uint32_t* pdwType, void* pvData, uint32_t* pcbData) noexcept {
+    if ((lpSubKey && *lpSubKey) || dwFlags != 0) return 120;
     return Advapi32_RegQueryValueExW(hkey, lpValue, nullptr, pdwType, static_cast<uint8_t*>(pvData), pcbData);
 }
 
@@ -3542,25 +3543,16 @@ int32_t Advapi32_RegCloseKey(void* hKey) noexcept {
 }
 
 int32_t Advapi32_GetUserNameW(wchar_t* lpBuffer, uint32_t* pcbBuffer) noexcept {
-    constexpr wchar_t kUser[] = L"MicaNTPlayer";
-    constexpr uint32_t kLen = sizeof(kUser) / sizeof(wchar_t);
-    if (!pcbBuffer) return 0;
-    if (lpBuffer && *pcbBuffer >= kLen) {
-        ByteCopy(lpBuffer, kUser, sizeof(kUser));
-    }
-    *pcbBuffer = kLen;
-    return 1;
+    (void)lpBuffer;
+    (void)pcbBuffer;
+    Kernel32_SetLastError(120); // ERROR_CALL_NOT_IMPLEMENTED
+    return 0;
 }
 
 uint8_t Advapi32_SystemFunction036(void* RandomBuffer, uint32_t RandomBufferLength) noexcept {
-    if (!RandomBuffer && RandomBufferLength > 0) return 0;
-    auto* bytes = static_cast<uint8_t*>(RandomBuffer);
-    uint32_t state = 0xA55A3C69U;
-    for (uint32_t i = 0; i < RandomBufferLength; ++i) {
-        state = state * 1664525U + 1013904223U;
-        bytes[i] = static_cast<uint8_t>((state >> 16) & 0xFFU);
-    }
-    return 1;
+    (void)RandomBuffer;
+    (void)RandomBufferLength;
+    return 0;
 }
 
 #if !defined(BUILD_SYSTEM32_STANDALONE_DLL)

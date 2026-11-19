@@ -2,7 +2,7 @@
 
 /**
  * @file wsus.hpp
- * @brief Sovereign Windows Server Update Services (WSUS 10.0 / MS-WUSP) Subsystem.
+ * Luce OS Windows Server Update Services (WSUS 10.0 / MS-WUSP) Subsystem.
  *
  * Clean-room implementation of the Microsoft Windows Server Update Services engine,
  * featuring MS-WUSP SOAP XML wire protocol (ClientWebService & ReportingWebService),

@@ -1,6 +1,6 @@
 /**
  * @file bench_app.cpp
- * @brief Sovereign Ring 3 Hardware Benchmark Utility for MicaNT Cutler Edition.
+ * Luce OS Ring 3 Hardware Benchmark Utility for MicaNT Cutler Edition.
  *
  * Freestanding ISO C++23. Runs entirely in User-Mode Ring 3 (CPL=3).
  * Evaluates bare-metal silicon performance on Supermicro X11SSH-F:

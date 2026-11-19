@@ -1,6 +1,6 @@
 /**
  * @file ntdll.cpp
- * @brief Sovereign NT Layer DLL (ntdll.dll) for MicaNT System32.
+ * Luce OS NT Layer DLL (ntdll.dll) for MicaNT System32.
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  * Native x64 system call trampolines and runtime library exports.

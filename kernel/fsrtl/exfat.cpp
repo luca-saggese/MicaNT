@@ -1,6 +1,6 @@
 /**
  * @file exfat.cpp
- * @brief Sovereign Clean-Room Extended FAT (exFAT) File System Runtime Subsystem (exfat.sys / ExfatDriver).
+ * Luce OS Clean-Room Extended FAT (exFAT) File System Runtime Subsystem (exfat.sys / ExfatDriver).
  *
  * Clean-Room ISO C++23. Sovereign MicaNT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

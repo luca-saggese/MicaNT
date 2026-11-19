@@ -141,7 +141,7 @@ alignas(128)  static AhciCommandTable s_ahciCmdTable;      // Slot 0 Command Tab
 alignas(4096) static uint8_t s_ahciDmaBuffer[65536];       // 64 KB DMA Transfer Buffer
 
 /**
- * @brief Sovereign Bare-Metal AHCI SATA Controller & disk storage engine.
+ * Luce OS Bare-Metal AHCI SATA Controller & disk storage engine.
  */
 class BareMetalAhciController {
 public:

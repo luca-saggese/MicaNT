@@ -1,6 +1,6 @@
 /**
  * @file gui_common.hpp
- * @brief Sovereign Ring 3 Graphical Window Presentation Primitives for MicaNT System32.
+ * Luce OS Ring 3 Graphical Window Presentation Primitives for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Provides 32-bpp BGRA pixel canvas, bitmap font typography, window frame styling,

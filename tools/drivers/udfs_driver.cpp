@@ -1,6 +1,6 @@
 /**
  * @file udfs_driver.cpp
- * @brief Sovereign Clean-Room Universal Disk Format (UDFS / ECMA-167 / OSTA UDF) Kernel Driver (udfs.sys) for MicaNT.
+ * Luce OS Clean-Room Universal Disk Format (UDFS / ECMA-167 / OSTA UDF) Kernel Driver (udfs.sys) for MicaNT.
  *
  * Freestanding ISO C++23. Clean-Room NT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

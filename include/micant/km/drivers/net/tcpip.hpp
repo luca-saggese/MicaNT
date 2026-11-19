@@ -3135,7 +3135,7 @@ private:
 };
 
 /**
- * @brief Sovereign Bare-Metal Remote Executive Console Daemon.
+ * Luce OS Bare-Metal Remote Executive Console Daemon.
  * Provides remote administration, kernel vitals telemetry, and system diagnostics
  * over TCP (Port 23 / 8080) directly in Ring 0.
  */

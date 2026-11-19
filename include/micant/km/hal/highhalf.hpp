@@ -85,7 +85,7 @@ struct HighHalfHandoverContext64 {
 };
 
 /**
- * @brief Sovereign High-Half Canonical 64-bit Paging Engine (Unit #96).
+ * Luce OS High-Half Canonical 64-bit Paging Engine (Unit #96).
  * Handles clean-room higher-half mirroring, LPB pointer translation, and firmware handover.
  */
 class HighHalfPagingEngine64 {

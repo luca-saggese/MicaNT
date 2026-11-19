@@ -1,6 +1,6 @@
 /**
  * @file lusrmgr_app.cpp
- * @brief Sovereign Ring 3 Local Users and Groups (lusrmgr.msc) for MicaNT System32.
+ * Luce OS Ring 3 Local Users and Groups (lusrmgr.msc) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

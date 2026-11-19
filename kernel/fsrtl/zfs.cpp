@@ -1,6 +1,6 @@
 /**
  * @file zfs.cpp
- * @brief Sovereign Clean-Room ZFS (Zettabyte File System) Kernel Driver Subsystem (zfs.sys / ZfsDriver).
+ * Luce OS Clean-Room ZFS (Zettabyte File System) Kernel Driver Subsystem (zfs.sys / ZfsDriver).
  *
  * Clean-Room ISO C++23. Sovereign MicaNT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

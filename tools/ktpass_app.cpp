@@ -1,6 +1,6 @@
 /**
  * @file ktpass_app.cpp
- * @brief Sovereign Ring 3 Kerberos Keytab Generator & SPN Configurator (ktpass) for MicaNT System32.
+ * Luce OS Ring 3 Kerberos Keytab Generator & SPN Configurator (ktpass) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).

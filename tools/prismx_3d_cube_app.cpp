@@ -1,6 +1,6 @@
 /**
  * @file prismx_3d_cube_app.cpp
- * @brief Sovereign Freestanding 3D Graphics Application for MicaNT Bare Metal.
+ * Luce OS Freestanding 3D Graphics Application for MicaNT Bare Metal.
  *
  * Renders the PrismX 3D rotating crystal octahedron with perspective neon floor
  * and planar raytraced reflection directly to a 32-bpp BGRA surface, then presents

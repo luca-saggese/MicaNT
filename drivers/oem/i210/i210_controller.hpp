@@ -145,7 +145,7 @@ using ReceiveFrameCallback = void(*)(void* context, const uint8_t* frame,
                                      size_t length) noexcept;
 
 /**
- * @brief Sovereign Bare-Metal Intel I210 Gigabit Ethernet Controller Driver.
+ * Luce OS Bare-Metal Intel I210 Gigabit Ethernet Controller Driver.
  */
 class BareMetalI210Driver {
 private:

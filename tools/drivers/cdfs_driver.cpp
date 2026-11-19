@@ -1,6 +1,6 @@
 /**
  * @file cdfs_driver.cpp
- * @brief Sovereign Clean-Room CD-ROM File System (CDFS / ISO 9660 / Joliet) Kernel Driver (cdfs.sys) for MicaNT.
+ * Luce OS Clean-Room CD-ROM File System (CDFS / ISO 9660 / Joliet) Kernel Driver (cdfs.sys) for MicaNT.
  *
  * Freestanding ISO C++23. Clean-Room NT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

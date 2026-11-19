@@ -1,6 +1,6 @@
 /**
  * @file ntfs_driver.cpp
- * @brief Sovereign Clean-Room New Technology File System (NTFS) Kernel Driver (ntfs.sys) for MicaNT.
+ * Luce OS Clean-Room New Technology File System (NTFS) Kernel Driver (ntfs.sys) for MicaNT.
  *
  * Freestanding ISO C++23. Clean-Room NT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

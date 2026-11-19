@@ -1,6 +1,6 @@
 /**
  * @file ppm.cpp
- * @brief Sovereign Clean-Room Windows NT Processor Power Management (PPM) Executive Implementation
+ * Luce OS Clean-Room Windows NT Processor Power Management (PPM) Executive Implementation
  *
  * Connects the Intel Speed Shift (HWP) class driver to the NT Object Manager namespace
  * (\Device\Processor0..\Device\Processor7), I/O Manager IRP packet hierarchy, and the

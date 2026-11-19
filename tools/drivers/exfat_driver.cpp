@@ -1,6 +1,6 @@
 /**
  * @file exfat_driver.cpp
- * @brief Sovereign Clean-Room Extended FAT (exFAT) Kernel Driver (exfat.sys) for MicaNT.
+ * Luce OS Clean-Room Extended FAT (exFAT) Kernel Driver (exfat.sys) for MicaNT.
  *
  * Freestanding ISO C++23. Clean-Room NT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

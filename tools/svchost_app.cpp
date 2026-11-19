@@ -1,6 +1,6 @@
 /**
  * @file svchost_app.cpp
- * @brief Sovereign Ring 3 Generic Host Process for Win32 Services (svchost.exe).
+ * Luce OS Ring 3 Generic Host Process for Win32 Services (svchost.exe).
  *
  * Freestanding ISO C++23. Clean-Room design. Zero proprietary headers.
  * Executed in User-Mode Ring 3 (CPL=3).

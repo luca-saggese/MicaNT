@@ -2,7 +2,7 @@
 
 /**
  * @file cdfs.hpp
- * @brief Sovereign Clean-Room CD-ROM / DVD / Blu-ray File System (CDFS / UDFS) Driver Subsystem for MicaNT.
+ * Luce OS Clean-Room CD-ROM / DVD / Blu-ray File System (CDFS / UDFS) Driver Subsystem for MicaNT.
  *
  * Implements standard optical media file systems:
  * - ISO 9660 Level 1 / Level 2 Volume Descriptors & 2048-Byte Logical Sector Sizing

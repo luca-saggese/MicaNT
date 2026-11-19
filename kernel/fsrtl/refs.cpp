@@ -1,6 +1,6 @@
 /**
  * @file refs.cpp
- * @brief Sovereign Clean-Room Resilient File System (ReFS v3.x) Runtime Subsystem.
+ * Luce OS Clean-Room Resilient File System (ReFS v3.x) Runtime Subsystem.
  *
  * Clean-Room ISO C++23. Sovereign MicaNT Kernel Architecture.
  * Executed in Kernel-Mode Ring 0 / Ring 1.

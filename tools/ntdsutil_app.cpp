@@ -1,6 +1,6 @@
 /**
  * @file ntdsutil_app.cpp
- * @brief Sovereign Ring 3 Active Directory Database Maintenance Utility (ntdsutil) for MicaNT System32.
+ * Luce OS Ring 3 Active Directory Database Maintenance Utility (ntdsutil) for MicaNT System32.
  *
  * Clean-Room ISO C++23. Freestanding. Zero CRT dependencies.
  * Executed in User-Mode Ring 3 (CPL=3).
