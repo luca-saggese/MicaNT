@@ -267,6 +267,7 @@ SYSTEM32_SERVICES = [
 
 KNOWN_DLLS = [
     ("tools/dlls/ntdll.cpp", "build/ntdll.dll", "ntdll.dll"),
+    ("tools/dlls/abi/bcrypt_system32.cpp", "build/bcrypt.dll", "bcrypt.dll"),
     ("tools/dlls/ucrtbase.cpp", "build/ucrtbase.dll", "ucrtbase.dll"),
     ("tools/dlls/ws2_32.cpp", "build/ws2_32.dll", "ws2_32.dll"),
     ("tools/dlls/dnsapi.cpp", "build/dnsapi.dll", "dnsapi.dll"),
@@ -472,6 +473,8 @@ def run_local_build():
         if name == "ntdll.dll":
             # Rebuild when the no-entry link policy itself changes.
             runtime_dependencies.append("scripts/stage_micant.py")
+        if name == "bcrypt.dll":
+            runtime_dependencies.append("tools/dlls/abi/bcrypt_crypt32_secur32_wintrust_impl.inc")
         if name == "kernel32.dll":
             runtime_dependencies.extend((
                 "tools/dlls/abi/kernel32_advapi32_impl.inc",
@@ -522,7 +525,7 @@ def run_local_build():
             "-nostdlib",
             "-Iinclude",
             "-Wl,--entry=" if name == "ntdll.dll" else
-                ("-Wl,-e,DllMainCRTStartup" if name == "kernel32.dll" else "-Wl,-e,DllMain"),
+                ("-Wl,-e,DllMainCRTStartup" if name in ("kernel32.dll", "bcrypt.dll") else "-Wl,-e,DllMain"),
             "-Wl,--subsystem,native",
             "-O2",
         ]
@@ -532,6 +535,14 @@ def run_local_build():
                           "-fno-stack-protector", "-mno-red-zone"))
         if name == "ntdll.dll":
             c_cmd.extend(("-fuse-ld=lld", "-Wl,--out-implib,build/libntdll.dll.a"))
+        if name == "bcrypt.dll":
+            c_cmd.extend(("-std=c++23", "-ffreestanding", "-fno-builtin",
+                          "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics",
+                          "-fno-stack-protector", "-mno-red-zone",
+                          "-ffunction-sections", "-fdata-sections",
+                          "-DBUILD_SYSTEM32_STANDALONE_DLL", "-DBUILD_SYSTEM32_BCRYPT_DLL",
+                          "-Wl,--gc-sections", src,
+                          "kernel/ex/freestanding_memory.cpp", "-o", out_path))
         if name == "kernel32.dll":
             c_cmd.extend(("-std=c++23", "-ffreestanding", "-fno-builtin",
                           "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics",

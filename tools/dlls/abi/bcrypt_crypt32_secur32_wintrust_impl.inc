@@ -11,19 +11,16 @@
 
 namespace micant::um::winnt_bcrypt_crypt32_secur32_wintrust_abi {
 
-namespace {
-uint64_t g_hashAccum = 0xCBF29CE484222325ULL;
-} // namespace
-
 // --- 1. bcrypt.dll implementations (10 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_BCRYPT_DLL)
 NTSTATUS BCrypt_BCryptOpenAlgorithmProvider(void** phAlgorithm, const wchar_t* pszAlgId, const wchar_t* /*pszImplementation*/, uint32_t /*dwFlags*/) noexcept {
     if (!phAlgorithm || !pszAlgId) return STATUS_INVALID_PARAMETER;
-    *phAlgorithm = reinterpret_cast<void*>(0x0000000042435201ULL);
-    return STATUS_SUCCESS;
+    *phAlgorithm = nullptr;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS BCrypt_BCryptCloseAlgorithmProvider(void* hAlgorithm, uint32_t /*dwFlags*/) noexcept {
-    return hAlgorithm ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+    return hAlgorithm ? STATUS_NOT_SUPPORTED : STATUS_INVALID_HANDLE;
 }
 
 NTSTATUS BCrypt_BCryptGenRandom(void* hAlgorithm, uint8_t* pbBuffer, uint32_t cbBuffer, uint32_t dwFlags) noexcept {
@@ -31,51 +28,34 @@ NTSTATUS BCrypt_BCryptGenRandom(void* hAlgorithm, uint8_t* pbBuffer, uint32_t cb
     if (!hAlgorithm && (dwFlags & BCRYPT_USE_SYSTEM_PREFERRED_RNG_OFFICIAL) == 0) {
         return STATUS_INVALID_HANDLE;
     }
-    uint64_t state = 0x9E3779B97F4A7C15ULL;
-    for (uint32_t i = 0; i < cbBuffer; ++i) {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        pbBuffer[i] = static_cast<uint8_t>((state * 0x2545F4914F6CDD1DULL) >> 56);
-    }
-    return STATUS_SUCCESS;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS BCrypt_BCryptCreateHash(void* hAlgorithm, void** phHash, uint8_t* /*pbHashObject*/, uint32_t /*cbHashObject*/, const uint8_t* /*pbSecret*/, uint32_t /*cbSecret*/, uint32_t /*dwFlags*/) noexcept {
     if (!hAlgorithm || !phHash) return STATUS_INVALID_PARAMETER;
-    g_hashAccum = 0xCBF29CE484222325ULL;
-    *phHash = reinterpret_cast<void*>(0x0000000042435202ULL);
-    return STATUS_SUCCESS;
+    *phHash = nullptr;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS BCrypt_BCryptHashData(void* hHash, const uint8_t* pbInput, uint32_t cbInput, uint32_t /*dwFlags*/) noexcept {
-    if (!hHash || !pbInput) return STATUS_INVALID_PARAMETER;
-    for (uint32_t i = 0; i < cbInput; ++i) {
-        g_hashAccum ^= pbInput[i];
-        g_hashAccum *= 0x100000001B3ULL;
-    }
-    return STATUS_SUCCESS;
+    if (!hHash || (!pbInput && cbInput)) return STATUS_INVALID_PARAMETER;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS BCrypt_BCryptFinishHash(void* hHash, uint8_t* pbOutput, uint32_t cbOutput, uint32_t /*dwFlags*/) noexcept {
     if (!hHash || !pbOutput || cbOutput == 0) return STATUS_INVALID_PARAMETER;
-    for (uint32_t i = 0; i < cbOutput; ++i) {
-        pbOutput[i] = static_cast<uint8_t>((g_hashAccum >> ((i % 8) * 8)) ^ (i * 0x5AU));
-    }
-    return STATUS_SUCCESS;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS BCrypt_BCryptDestroyHash(void* hHash) noexcept {
-    return hHash ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+    return hHash ? STATUS_NOT_SUPPORTED : STATUS_INVALID_HANDLE;
 }
 
 NTSTATUS BCrypt_BCryptEncrypt(void* /*hKey*/, const uint8_t* pbInput, uint32_t cbInput, void* /*pPaddingInfo*/, uint8_t* /*pbIV*/, uint32_t /*cbIV*/, uint8_t* pbOutput, uint32_t cbOutput, uint32_t* pcbResult, uint32_t /*dwFlags*/) noexcept {
     if (!pcbResult) return STATUS_INVALID_PARAMETER;
-    *pcbResult = cbInput;
-    if (pbOutput && pbInput && cbOutput >= cbInput) {
-        for (uint32_t i = 0; i < cbInput; ++i) pbOutput[i] = pbInput[i] ^ 0xA5U;
-    }
-    return STATUS_SUCCESS;
+    *pcbResult = 0;
+    if (!pbInput || !pbOutput || cbInput == 0 || cbOutput == 0) return STATUS_INVALID_PARAMETER;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS BCrypt_BCryptDecrypt(void* hKey, const uint8_t* pbInput, uint32_t cbInput, void* pPaddingInfo, uint8_t* pbIV, uint32_t cbIV, uint8_t* pbOutput, uint32_t cbOutput, uint32_t* pcbResult, uint32_t dwFlags) noexcept {
@@ -84,10 +64,12 @@ NTSTATUS BCrypt_BCryptDecrypt(void* hKey, const uint8_t* pbInput, uint32_t cbInp
 
 NTSTATUS BCrypt_BCryptDeriveKeyPBKDF2(void* /*hPrf*/, const uint8_t* /*pbPassword*/, uint32_t /*cbPassword*/, const uint8_t* /*pbSalt*/, uint32_t /*cbSalt*/, uint64_t /*cIterations*/, uint8_t* pbDerivedKey, uint32_t cbDerivedKey, uint32_t /*dwFlags*/) noexcept {
     if (!pbDerivedKey || cbDerivedKey == 0) return STATUS_INVALID_PARAMETER;
-    return BCrypt_BCryptGenRandom(nullptr, pbDerivedKey, cbDerivedKey, BCRYPT_USE_SYSTEM_PREFERRED_RNG_OFFICIAL);
+    return STATUS_NOT_SUPPORTED;
 }
+#endif
 
 // --- 2. crypt32.dll implementations (10 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_CRYPT32_DLL)
 void* Crypt32_CertOpenSystemStoreW(uintptr_t /*hProv*/, const wchar_t* szSubsystemProtocol) noexcept {
     if (!szSubsystemProtocol) return nullptr;
     return reinterpret_cast<void*>(0x0000000043525401ULL);
@@ -140,8 +122,10 @@ int32_t Crypt32_CryptProtectData(WinNtDataBlob* pDataIn, const wchar_t* /*szData
 int32_t Crypt32_CryptUnprotectData(WinNtDataBlob* pDataIn, wchar_t** /*ppszDataDescr*/, WinNtDataBlob* pOptionalEntropy, void* pvReserved, void* pPromptStruct, uint32_t dwFlags, WinNtDataBlob* pDataOut) noexcept {
     return Crypt32_CryptProtectData(pDataIn, nullptr, pOptionalEntropy, pvReserved, pPromptStruct, dwFlags, pDataOut);
 }
+#endif
 
 // --- 3. secur32.dll implementations (8 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_SECUR32_DLL)
 int32_t Secur32_AcquireCredentialsHandleW(const wchar_t* /*pszPrincipal*/, const wchar_t* /*pszPackage*/, uint32_t /*fCredentialUse*/, void* /*pvLogonId*/, void* /*pAuthData*/, void* /*pGetKeyFn*/, void* /*pvGetKeyArgument*/, WinNtSecHandle* phCredential, void* /*ptsExpiry*/) noexcept {
     if (!phCredential) return static_cast<int32_t>(0x80090305U);
     phCredential->dwLower = 0x5343484E0001ULL;
@@ -198,8 +182,10 @@ uint8_t Secur32_GetUserNameExW(uint32_t /*NameFormat*/, wchar_t* lpNameBuffer, u
     *nSize = kChars - 1;
     return 1;
 }
+#endif
 
 // --- 4. wintrust.dll implementations (4 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_WINTRUST_DLL)
 int32_t Wintrust_WinVerifyTrust(void* /*hwnd*/, const void* pgActionID, void* pWVTData) noexcept {
     if (!pgActionID || !pWVTData) return static_cast<int32_t>(0x800B0100U); // TRUST_E_NOSIGNATURE
     return 0; // ERROR_SUCCESS (Verified)
@@ -216,6 +202,7 @@ void* Wintrust_WTHelperProvDataFromStateData(void* hStateData) noexcept {
 void* Wintrust_WTHelperGetProvSignerFromChain(void* pProvData, uint32_t /*idxSigner*/, int32_t /*fCounterSigner*/, uint32_t /*idxCounterSigner*/) noexcept {
     return pProvData ? reinterpret_cast<void*>(0x0000000057545002ULL) : nullptr;
 }
+#endif
 
 #if !defined(BUILD_SYSTEM32_STANDALONE_DLL)
 void WinNtBCryptCrypt32Secur32WintrustCoordinator::initialize() noexcept {
