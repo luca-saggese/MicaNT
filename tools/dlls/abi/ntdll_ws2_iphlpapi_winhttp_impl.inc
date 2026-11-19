@@ -12,13 +12,16 @@
 namespace micant::um::winnt_ntdll_ws2_iphlpapi_winhttp_abi {
 
 namespace {
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_WS2_32_DLL)
 thread_local int32_t g_lastWsaError = 0;
 uintptr_t g_nextSocketHandle = 0x2000ULL;
 uint8_t   g_socketLoopbackBuf[4096]{};
 size_t    g_socketLoopbackLen = 0;
+#endif
 } // namespace
 
 // --- 1. ntdll.dll implementations (18 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_NTDLL_DLL)
 NTSTATUS Ntdll_RtlGetVersion(WinNtOsVersionInfoExW* lpVersionInformation) noexcept {
     if (!lpVersionInformation) return STATUS_INVALID_PARAMETER;
     lpVersionInformation->dwMajorVersion = 10;
@@ -142,8 +145,10 @@ NTSTATUS Ntdll_NtFreeVirtualMemory(void* /*processHandle*/, void** baseAddress, 
     *baseAddress = nullptr;
     return STATUS_SUCCESS;
 }
+#endif
 
 // --- 2. ws2_32.dll implementations (18 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_WS2_32_DLL)
 int32_t Ws2_WSAStartup(uint16_t wVersionRequested, WinNtWsaData* lpWSAData) noexcept {
     if (!lpWSAData) return 10014; // WSAEFAULT
     *lpWSAData = WinNtWsaData{};
@@ -236,17 +241,14 @@ int32_t Ws2_getaddrinfo(const char* /*pNodeName*/, const char* /*pServiceName*/,
 }
 
 void Ws2_freeaddrinfo(WinNtAddrInfoA* /*pAddrInfo*/) noexcept {}
+#endif
 
 // --- 3. iphlpapi.dll implementations (6 functions) ---
-uint32_t Iphlpapi_GetAdaptersAddresses(uint32_t /*family*/, uint32_t /*flags*/, void* /*reserved*/, void* adapterAddresses, uint32_t* sizePointer) noexcept {
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_IPHLPAPI_DLL)
+uint32_t Iphlpapi_GetAdaptersAddresses(uint32_t /*family*/, uint32_t /*flags*/, void* /*reserved*/, void* /*adapterAddresses*/, uint32_t* sizePointer) noexcept {
     if (!sizePointer) return 87U;
-    if (!adapterAddresses || *sizePointer < 128U) {
-        *sizePointer = 128U;
-        return 111U; // ERROR_BUFFER_OVERFLOW
-    }
-    std::memset(adapterAddresses, 0, 128U);
-    *sizePointer = 128U;
-    return 0U; // NO_ERROR
+    *sizePointer = 0;
+    return 50U; // ERROR_NOT_SUPPORTED until adapter enumeration is connected.
 }
 
 uint32_t Iphlpapi_GetAdaptersInfo(void* adapterInfo, uint32_t* sizePointer) noexcept {
@@ -255,25 +257,27 @@ uint32_t Iphlpapi_GetAdaptersInfo(void* adapterInfo, uint32_t* sizePointer) noex
 
 uint32_t Iphlpapi_GetBestInterfaceEx(const void* /*destAddr*/, uint32_t* bestIfIndex) noexcept {
     if (!bestIfIndex) return 87U;
-    *bestIfIndex = 1U;
-    return 0U;
+    *bestIfIndex = 0;
+    return 50U;
 }
 
 uint32_t Iphlpapi_GetIfTable2(void** table) noexcept {
     if (!table) return 87U;
-    *table = std::calloc(1, 64);
-    return 0U;
+    *table = nullptr;
+    return 50U;
 }
 
-void Iphlpapi_FreeMibTable(void* memory) noexcept {
-    if (memory) std::free(memory);
-}
+void Iphlpapi_FreeMibTable(void* /*memory*/) noexcept {}
 
-uint32_t Iphlpapi_GetNetworkParams(void* fixedInfo, uint32_t* pOutBufLen) noexcept {
-    return Iphlpapi_GetAdaptersAddresses(AF_INET_OFFICIAL, 0, nullptr, fixedInfo, pOutBufLen);
+uint32_t Iphlpapi_GetNetworkParams(void* /*fixedInfo*/, uint32_t* pOutBufLen) noexcept {
+    if (!pOutBufLen) return 87U;
+    *pOutBufLen = 0;
+    return 50U;
 }
+#endif
 
 // --- 4. winhttp.dll implementations (10 functions) ---
+#if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_WINHTTP_DLL)
 void* WinHttp_WinHttpOpen(const wchar_t* /*pszAgentW*/, uint32_t /*dwAccessType*/, const wchar_t* /*pszProxyW*/, const wchar_t* /*pszProxyBypassW*/, uint32_t /*dwFlags*/) noexcept {
     return reinterpret_cast<void*>(0x0000000057480001ULL);
 }
@@ -328,6 +332,7 @@ int32_t WinHttp_WinHttpSetOption(void* hInternet, uint32_t /*dwOption*/, const v
 int32_t WinHttp_WinHttpCloseHandle(void* hInternet) noexcept {
     return hInternet != nullptr ? 1 : 0;
 }
+#endif
 
 #if !defined(BUILD_SYSTEM32_STANDALONE_DLL)
 void WinNtNtdllWs2IphlpapiWinHttpCoordinator::initialize() noexcept {
