@@ -12,7 +12,7 @@
 
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
-extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
+extern "C" int32_t DllMain(void*, unsigned long, void*) noexcept { return 1; }
 #endif
 
 namespace micant::um::winnt_user32_gdi32_imm32_abi {
@@ -88,60 +88,41 @@ template <typename T> T Win32kProc(const char* name) noexcept {
 }
 
 
-struct WinNtWindowState {
-    uint64_t  magic{0x4D4E5448574E4431ULL}; // "MNTHWD1"
-    int32_t   width{3840};
-    int32_t   height{2160};
-    intptr_t  userData{0};
-    void*     imc{reinterpret_cast<void*>(static_cast<uintptr_t>(0x00000000000E0100ULL))};
-    uint32_t  pendingMessages{1};
-} g_primaryWindow{};
-
-int32_t g_activePixelFormat = 1;
-int32_t g_imeOpenStatus = 0;
-intptr_t AuditWindowProc(void*,uint32_t message,uintptr_t,intptr_t) noexcept {
-    return message == 0x0081 ? 1 : 0;
-}
 } // namespace
 
 
 // imm32.dll implementations
 void* Imm32_ImmGetContext(void* hWnd) noexcept {
-    return hWnd ? g_primaryWindow.imc : nullptr;
+    (void)hWnd;
+    return nullptr;
 }
 
-int32_t Imm32_ImmReleaseContext(void* hWnd, void* /*hIMC*/) noexcept {
-    return hWnd ? 1 : 0;
-}
-
-void* Imm32_ImmAssociateContext(void* hWnd, void* hIMC) noexcept {
-    if (!hWnd) return nullptr;
-    void* prev = g_primaryWindow.imc;
-    g_primaryWindow.imc = hIMC;
-    return prev;
-}
-
-int32_t Imm32_ImmAssociateContextEx(void* hWnd, void* hIMC, uint32_t /*dwFlags*/) noexcept {
-    if (!hWnd) return 0;
-    g_primaryWindow.imc = hIMC;
-    return 1;
-}
-
-int32_t Imm32_ImmGetCompositionStringW(void* /*hIMC*/, uint32_t /*dwIndex*/, void* /*lpBuf*/, uint32_t /*dwBufLen*/) noexcept {
+int32_t Imm32_ImmReleaseContext(void* /*hWnd*/, void* /*hIMC*/) noexcept {
     return 0;
 }
 
-int32_t Imm32_ImmSetCompositionWindow(void* hIMC, const void* lpCompForm) noexcept {
-    return (hIMC && lpCompForm) ? 1 : 0;
+void* Imm32_ImmAssociateContext(void* /*hWnd*/, void* /*hIMC*/) noexcept {
+    return nullptr;
+}
+
+int32_t Imm32_ImmAssociateContextEx(void* /*hWnd*/, void* /*hIMC*/, uint32_t /*dwFlags*/) noexcept {
+    return 0;
+}
+
+int32_t Imm32_ImmGetCompositionStringW(void* /*hIMC*/, uint32_t /*dwIndex*/, void* /*lpBuf*/, uint32_t /*dwBufLen*/) noexcept {
+    return -2; // IMM_ERROR_GENERAL: no composition context provider is connected.
+}
+
+int32_t Imm32_ImmSetCompositionWindow(void* /*hIMC*/, const void* /*lpCompForm*/) noexcept {
+    return 0;
 }
 
 int32_t Imm32_ImmGetOpenStatus(void* /*hIMC*/) noexcept {
-    return g_imeOpenStatus;
+    return 0;
 }
 
-int32_t Imm32_ImmSetOpenStatus(void* /*hIMC*/, int32_t fOpen) noexcept {
-    g_imeOpenStatus = fOpen;
-    return 1;
+int32_t Imm32_ImmSetOpenStatus(void* /*hIMC*/, int32_t /*fOpen*/) noexcept {
+    return 0;
 }
 
 } // namespace micant::um::winnt_user32_gdi32_imm32_abi
