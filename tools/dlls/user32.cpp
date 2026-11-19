@@ -18,6 +18,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdarg>
+
+extern "C" __declspec(dllexport) void* LoadMenuW(void*, const wchar_t*) noexcept;
+extern "C" __declspec(dllexport) int32_t DestroyMenu(void*) noexcept;
+extern "C" __declspec(dllexport) int32_t DrawMenuBar(void*) noexcept;
 
 extern "C" __declspec(dllimport) int32_t __stdcall Beep(
     uint32_t frequency, uint32_t duration) noexcept;
@@ -46,6 +51,10 @@ int32_t User32_EndPaint(void*, const WinNtPaintStruct*) noexcept;
 void drawAttachedWindowScrollBars(void*, void*) noexcept;
 intptr_t User32_SendMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
 int32_t User32_DestroyWindow(void*) noexcept;
+int32_t User32_GetSystemMetrics(int32_t) noexcept;
+void cleanupUserTimers(void*) noexcept;
+extern "C" void MicaUser32ModalWindowDestroyed(void*) noexcept;
+void User32_DebugTrace(uint32_t, uint32_t, uint32_t) noexcept;
 void* User32_SetFocus(void*) noexcept;
 void* User32_GetFocus() noexcept;
 intptr_t User32_GetWindowLongPtrW(void*, int32_t) noexcept;
@@ -175,7 +184,7 @@ constexpr uint32_t kBsOwnerDraw = 11u;
 constexpr uint32_t kWsGroup = 0x00020000u;
 constexpr uint32_t kEsPassword = 0x00000020u;
 constexpr uint32_t kEsReadOnly = 0x00000800u;
-constexpr uint32_t kEsUnsupportedMask = 0x000037DFu;
+constexpr uint32_t kEsUnsupportedMask = 0x000017DFu;
 constexpr uint32_t kEsControlMask = 0x00003FFFu;
 constexpr uint32_t kVkBack = 0x08u;
 constexpr uint32_t kWmChar = 0x0102u;
@@ -827,7 +836,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kGetClientRect);
     MICA_WIN32K_PROC(MicaWin32kGetWindowRect);
     MICA_WIN32K_PROC(MicaWin32kAdjustWindowRectEx);
-#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) || defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
     MICA_WIN32K_PROC(MicaWin32kDebugInputTrace);
 #endif
     MICA_WIN32K_PROC(MicaWin32kEnumWindows);
@@ -1058,12 +1067,19 @@ struct RegisteredClassIcons {
     void* large{};
     void* small{};
     void* cursor{};
+    void* instance{};
+    const wchar_t* menuName{};
     winuser::IconHandleTable::Lease largeLease{};
     winuser::IconHandleTable::Lease smallLease{};
     winuser::IconHandleTable::Lease cursorLease{};
 };
 RegisteredClassIcons g_registeredClassIcons[64]{};
-struct RegisteredWindowClass { void* window{}; RegisteredClassIcons* icons{}; };
+struct RegisteredWindowClass {
+    void* window{};
+    RegisteredClassIcons* icons{};
+    void* ownedMenu{};
+    bool ownsMenu{};
+};
 RegisteredWindowClass g_registeredWindowClasses[128]{};
 RegisteredWindowClass* findRegisteredWindowClass(void* hwnd) noexcept {
     for (auto& entry : g_registeredWindowClasses)
@@ -1619,11 +1635,19 @@ uint16_t User32_RegisterClassExW(const void* lpWndClassEx) noexcept {
         iconSlot->name[classNameLength] = 0;
         iconSlot->large = wc->icon; iconSlot->small = wc->smallIcon;
         iconSlot->cursor = wc->cursor;
+        iconSlot->instance = wc->instance;
+        iconSlot->menuName = wc->menuName;
         iconSlot->largeLease = std::move(classLargeLease);
         iconSlot->smallLease = std::move(classSmallLease);
         iconSlot->cursorLease = std::move(classCursorLease);
     }
     return atom;
+}
+
+void User32_DebugTrace(uint32_t stage, uint32_t value, uint32_t flags) noexcept {
+    using TraceFn = void (*)(uint32_t, uint32_t, uint32_t);
+    if (const auto trace = Win32kProc<TraceFn>("MicaWin32kDebugInputTrace"))
+        trace(stage, value, flags);
 }
 
 bool isClassName(const wchar_t* candidate, const wchar_t* expected) noexcept {
@@ -1663,6 +1687,15 @@ void* User32_CreateWindowExW(
     void* hMenu,
     void* hInstance,
     void* lpParam) noexcept {
+    constexpr int32_t kUseDefault = INT32_MIN; // CW_USEDEFAULT
+    if (!hWndParent) {
+        const int32_t screenWidth = std::max(320, User32_GetSystemMetrics(0));
+        const int32_t screenHeight = std::max(240, User32_GetSystemMetrics(1));
+        if (X == kUseDefault) X = 48;
+        if (Y == kUseDefault) Y = 48;
+        if (nWidth == kUseDefault) nWidth = std::max(240, screenWidth - 96);
+        if (nHeight == kUseDefault) nHeight = std::max(180, screenHeight - 96);
+    }
     if (isClassName(lpClassName, L"BUTTON")) {
         const uint32_t type = dwStyle & kBsTypeMask;
         if (!isSupportedButtonType(type)) {
@@ -1687,6 +1720,16 @@ void* User32_CreateWindowExW(
         registerBuiltinClass(L"SCROLLBAR", reinterpret_cast<void*>(&User32_ScrollBarWndProc));
     }
     using Fn = void* (*)(uint32_t,const wchar_t*,const wchar_t*,uint32_t,int32_t,int32_t,int32_t,int32_t,void*,void*,void*,void*);
+    RegisteredClassIcons* registeredClass = findRegisteredClassIcons(lpClassName);
+    void* classMenu = nullptr;
+    bool ownsClassMenu = false;
+    if (!(dwStyle & 0x40000000u /* WS_CHILD */) && !hMenu &&
+        registeredClass && registeredClass->menuName) {
+        classMenu = LoadMenuW(registeredClass->instance, registeredClass->menuName);
+        if (!classMenu) return nullptr;
+        hMenu = classMenu;
+        ownsClassMenu = true;
+    }
     auto fn=Win32kProc<Fn>("MicaWin32kCreateWindowExW");
     void* hwnd = fn ? fn(dwExStyle,lpClassName,lpWindowName,dwStyle,X,Y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam) : nullptr;
     if (hwnd) {
@@ -1702,22 +1745,25 @@ void* User32_CreateWindowExW(
             using DestroyFn = int32_t (*)(void*);
             if (const auto destroy = Win32kProc<DestroyFn>("MicaWin32kDestroyWindow"))
                 (void)destroy(hwnd);
+            if (ownsClassMenu) (void)DestroyMenu(classMenu);
             setThreadLastError(8); // ERROR_NOT_ENOUGH_MEMORY / create rejected.
             return nullptr;
         }
         if (User32_SendMessageW(hwnd, 0x0001u /* WM_CREATE */, 0,
                 reinterpret_cast<intptr_t>(&create)) == -1) {
             (void)User32_DestroyWindow(hwnd);
+            if (ownsClassMenu) (void)DestroyMenu(classMenu);
             setThreadLastError(8);
             return nullptr;
         }
         constexpr uint32_t kWsCaption = 0x00C00000u;
-        if (!hWndParent && (dwStyle & kWsCaption) == kWsCaption)
+        if (!(dwStyle & 0x40000000u /* WS_CHILD */) &&
+            (dwStyle & kWsCaption) == kWsCaption)
             (void)publishCaptionTitleSurface(hwnd, lpWindowName);
-        if (auto* icons = findRegisteredClassIcons(lpClassName)) {
+        if (auto* icons = registeredClass) {
             for (auto& entry : g_registeredWindowClasses) {
                 if (entry.window) continue;
-                entry = {hwnd, icons};
+                entry = {hwnd, icons, classMenu, ownsClassMenu};
                 break;
             }
             const auto applyDefault = [&](uint32_t type, void* icon) noexcept {
@@ -1734,6 +1780,9 @@ void* User32_CreateWindowExW(
             applyDefault(1, icons->large);
             applyDefault(0, icons->small);
         }
+        if (classMenu) (void)DrawMenuBar(hwnd);
+    } else if (ownsClassMenu) {
+        (void)DestroyMenu(classMenu);
     }
     return hwnd;
 }
@@ -1791,6 +1840,8 @@ int32_t User32_DestroyWindow(void* hWnd) noexcept {
             trace(40, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hWnd)), 0);
     }
     if (destroyed) {
+        cleanupUserTimers(hWnd);
+        MicaUser32ModalWindowDestroyed(hWnd);
         MicaUser32MenuWindowDestroyed(hWnd);
         {
             ButtonLockGuard guard(g_buttonLock);
@@ -1802,7 +1853,12 @@ int32_t User32_DestroyWindow(void* hWnd) noexcept {
             }
         }
         winuser::ProcessWindowIcons().remove(hWnd);
-        if (auto* entry = findRegisteredWindowClass(hWnd)) *entry = {};
+        void* ownedMenu = nullptr;
+        if (auto* entry = findRegisteredWindowClass(hWnd)) {
+            if (entry->ownsMenu) ownedMenu = entry->ownedMenu;
+            *entry = {};
+        }
+        if (ownedMenu) (void)DestroyMenu(ownedMenu);
     }
     return destroyed;
 }
@@ -1994,12 +2050,20 @@ void notifyButtonClicked(void* hwnd) noexcept {
         const bool traceCalcButton = copy.id == 1036u || copy.id == 1052u ||
             copy.id == 1057u || copy.id == 1071u || copy.id == 1073u;
         using TraceFn = void (*)(uint32_t, uint32_t, uint32_t);
-        const auto trace = traceCalcButton
+        const bool traceWinMineDialogButton =
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+            copy.id == 1u || copy.id == 2u;
+#else
+            false;
+#endif
+        const auto trace = traceCalcButton || traceWinMineDialogButton
             ? Win32kProc<TraceFn>("MicaWin32kDebugInputTrace") : nullptr;
-        if (trace) trace(3, static_cast<uint32_t>(copy.id), 0);
+        if (trace) trace(traceCalcButton ? 3u : 122u,
+                         static_cast<uint32_t>(copy.id),
+                         static_cast<uint32_t>(copy.parent != nullptr));
         const intptr_t result = User32_SendMessageW(copy.parent, kWmCommand,
             command, reinterpret_cast<intptr_t>(hwnd));
-        if (trace) trace(4, static_cast<uint32_t>(copy.id),
+        if (trace) trace(traceCalcButton ? 4u : 123u, static_cast<uint32_t>(copy.id),
                          static_cast<uint32_t>(result));
     }
 }
@@ -3844,6 +3908,8 @@ intptr_t User32_EditWndProc(void* hwnd, uint32_t message,
                     repaint = changed = true;
                 }
             } else if (wParam >= 0x20u && wParam <= 0xFFFFu &&
+                       (!(edit->style & 0x00002000u) ||
+                        (wParam >= L'0' && wParam <= L'9')) &&
                        edit->length < std::size(edit->text) - 1) {
                 edit->text[edit->length++] = static_cast<wchar_t>(wParam);
                 edit->text[edit->length] = L'\0';
@@ -4123,12 +4189,57 @@ int32_t User32_PeekMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin,
     return 1;
 }
 
+struct UserTimer { void* hwnd{}; uintptr_t id{}; uint32_t interval{}; uint64_t due100ns{}; };
+std::array<UserTimer, 64> g_userTimers{};
+int32_t User32_PostMessageW(void*, uint32_t, uintptr_t, intptr_t) noexcept;
+uint64_t userSystemTime100ns() noexcept {
+    micant::LargeInteger now{};
+    return micant::native_nt::NtQuerySystemTime(&now) == micant::NtStatus::Success
+        ? static_cast<uint64_t>(now.QuadPart) : 0;
+}
+void pumpUserTimers() noexcept {
+    const uint64_t now = userSystemTime100ns();
+    if (!now) return;
+    for (auto& timer : g_userTimers) {
+        if (!timer.hwnd || now < timer.due100ns) continue;
+        timer.due100ns = now + static_cast<uint64_t>(timer.interval) * 10000u;
+        (void)User32_PostMessageW(timer.hwnd, 0x0113u /* WM_TIMER */, timer.id, 0);
+    }
+}
+void cleanupUserTimers(void* hwnd) noexcept {
+    for (auto& timer : g_userTimers) if (timer.hwnd == hwnd) timer = {};
+}
+uintptr_t User32_SetTimer(void* hwnd, uintptr_t id, uint32_t interval,
+                          void* callback) noexcept {
+    if (!hwnd || callback) { setThreadLastError(87); return 0; }
+    if (interval < 10) interval = 10;
+    if (interval > 0x7fffffffu) interval = 0x7fffffffu;
+    UserTimer* slot = nullptr;
+    for (auto& timer : g_userTimers) {
+        if (timer.hwnd == hwnd && timer.id == id) { slot = &timer; break; }
+        if (!timer.hwnd && !slot) slot = &timer;
+    }
+    if (!slot) { setThreadLastError(8); return 0; }
+    if (!id) id = reinterpret_cast<uintptr_t>(slot);
+    *slot = {hwnd, id, interval, userSystemTime100ns() +
+        static_cast<uint64_t>(interval) * 10000u};
+    return id;
+}
+int32_t User32_KillTimer(void* hwnd, uintptr_t id) noexcept {
+    if (!hwnd || !id) return 0;
+    for (auto& timer : g_userTimers) if (timer.hwnd == hwnd && timer.id == id) {
+        timer = {}; return 1;
+    }
+    return 0;
+}
+
 int32_t User32_GetMessageW(WinNtMsg* lpMsg, void* hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax) noexcept {
     if (!lpMsg) return -1;
     using Fn=int32_t (*)(MicaWin32kMessage*,void*,uint32_t,uint32_t);
     auto fn=Win32kProc<Fn>("MicaWin32kGetMessageW");
     if (!fn) return -1;
     for (;;) {
+        pumpUserTimers();
         updateAnimatedCursor();
         MicaWin32kMessage msg{};
         const int32_t result = fn(&msg,hWnd,wMsgFilterMin,wMsgFilterMax);
@@ -4178,6 +4289,10 @@ intptr_t User32_DispatchMessageW(const WinNtMsg* lpMsg) noexcept {
     MicaWin32kMessage msg{lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam,lpMsg->time,{lpMsg->pt.x,lpMsg->pt.y}};
     const intptr_t result = fn ? fn(&msg)
         : User32_DefWindowProcW(lpMsg->hwnd,lpMsg->message,lpMsg->wParam,lpMsg->lParam);
+    // Resizing replaces a top-level compositor surface. Recreate the reserved
+    // menu band over that surface before returning to the application's loop.
+    // DrawMenuBar is a no-op for windows without an attached menu.
+    if (lpMsg->message == 0x0005u) (void)DrawMenuBar(lpMsg->hwnd);
     if (lpMsg->message == 0x0020u && result == 0) {
         constexpr uint32_t HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11, HTTOP = 12;
         constexpr uint32_t HTTOPLEFT = 13, HTTOPRIGHT = 14, HTBOTTOM = 15;
@@ -4666,6 +4781,7 @@ int32_t User32_MoveWindow(void* window, int32_t x, int32_t y, int32_t width,
         setThreadLastError(1400);
         return 0;
     }
+    (void)DrawMenuBar(window);
     if (repaint) {
         (void)User32_InvalidateRect(window, nullptr, 1);
         (void)User32_UpdateWindow(window);
@@ -4900,8 +5016,13 @@ int32_t User32_EnableScrollBar(void* hwnd, uint32_t nBar,
 extern "C" {
 __declspec(dllexport) int32_t LoadStringW(void* instance, uint32_t stringId,
                                            wchar_t* buffer, int32_t capacity) {
-    return micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadStringW(
+    const int32_t result = micant::um::winnt_user32_gdi32_imm32_abi::User32_LoadStringW(
         instance, stringId, buffer, capacity);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+    if (!result) micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(
+        92, stringId, static_cast<uint32_t>(capacity));
+#endif
+    return result;
 }
 __declspec(dllexport) void* CreateIconFromResourceEx(
     const uint8_t* bits, uint32_t size, int32_t isIcon, uint32_t version,
@@ -4995,10 +5116,24 @@ __declspec(dllexport) uintptr_t SetClassLongPtrA(void* hwnd, int32_t index, uint
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetClassLongPtrW(hwnd, index, value);
 }
 __declspec(dllexport) uint16_t RegisterClassExW(const void* lpWndClassEx) {
-    return micant::um::winnt_user32_gdi32_imm32_abi::User32_RegisterClassExW(lpWndClassEx);
+    const uint16_t result = micant::um::winnt_user32_gdi32_imm32_abi::User32_RegisterClassExW(lpWndClassEx);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+    if (!result && lpWndClassEx) {
+        const auto* cls = static_cast<const MicaWin32kWindowClassEx*>(lpWndClassEx);
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(90,
+            cls->className ? static_cast<uint32_t>(cls->className[0]) : 0,
+            cls->cbSize);
+    }
+#endif
+    return result;
 }
 __declspec(dllexport) void* CreateWindowExW(uint32_t dwExStyle, const wchar_t* lpClassName, const wchar_t* lpWindowName, uint32_t dwStyle, int32_t X, int32_t Y, int32_t nWidth, int32_t nHeight, void* hWndParent, void* hMenu, void* hInstance, void* lpParam) {
-    return micant::um::winnt_user32_gdi32_imm32_abi::User32_CreateWindowExW(dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam);
+    void* result = micant::um::winnt_user32_gdi32_imm32_abi::User32_CreateWindowExW(dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+    if (!result) micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(91,
+        lpClassName ? static_cast<uint32_t>(lpClassName[0]) : 0, dwStyle);
+#endif
+    return result;
 }
 __declspec(dllexport) int32_t DestroyWindow(void* hWnd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_DestroyWindow(hWnd);
@@ -5263,9 +5398,6 @@ __declspec(dllexport) int32_t GetSystemMetrics(int32_t index) {
 __declspec(dllexport) void* MonitorFromWindow(void* hwnd, uint32_t dwFlags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_MonitorFromWindow(hwnd, dwFlags);
 }
-__declspec(dllexport) int32_t GetMonitorInfoW(void* hMonitor, void* lpmi) {
-    return micant::um::winnt_user32_gdi32_imm32_abi::User32_GetMonitorInfoW(hMonitor, lpmi);
-}
 __declspec(dllexport) int32_t EnumDisplaySettingsExW(const wchar_t* lpszDeviceName, uint32_t iModeNum, void* lpDevMode, uint32_t dwFlags) {
     return micant::um::winnt_user32_gdi32_imm32_abi::User32_EnumDisplaySettingsExW(lpszDeviceName, iModeNum, lpDevMode, dwFlags);
 }
@@ -5347,6 +5479,310 @@ __declspec(dllexport) int32_t MessageBeep(uint32_t type) {
 // int __stdcall TranslateAcceleratorW(HWND window, HACCEL table, LPMSG message);
 // HACCEL __stdcall CreateAcceleratorTableW(LPACCEL entries, int count);
 // BOOL __stdcall DestroyAcceleratorTable(HACCEL table);
+
+struct ModalDialogState { void* hwnd; intptr_t result; bool ended; };
+static ModalDialogState g_modalDialogs[8]{};
+extern "C" void MicaUser32ModalWindowDestroyed(void* hwnd) noexcept {
+    for (auto& modal : g_modalDialogs) if (modal.hwnd == hwnd) modal.ended = true;
+}
+__declspec(dllexport) void* __stdcall CreateDialogParamW(void*, const wchar_t*,
+    void*, void*, intptr_t) noexcept;
+
+__declspec(dllexport) int32_t __stdcall SetRect(
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* rect,
+    int32_t left, int32_t top, int32_t right, int32_t bottom) noexcept {
+    if (!rect) return 0;
+    *rect = {left, top, right, bottom};
+    return 1;
+}
+__declspec(dllexport) int32_t __stdcall PtInRect(
+    const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* rect,
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtPoint point) noexcept {
+    return rect && point.x >= rect->left && point.x < rect->right &&
+        point.y >= rect->top && point.y < rect->bottom;
+}
+__declspec(dllexport) int32_t __stdcall IntersectRect(
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* dst,
+    const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* a,
+    const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* b) noexcept {
+    if (!dst || !a || !b) return 0;
+    const int32_t left = std::max(a->left, b->left);
+    const int32_t top = std::max(a->top, b->top);
+    const int32_t right = std::min(a->right, b->right);
+    const int32_t bottom = std::min(a->bottom, b->bottom);
+    if (left >= right || top >= bottom) { *dst = {}; return 0; }
+    *dst = {left, top, right, bottom};
+    return 1;
+}
+__declspec(dllexport) int32_t __stdcall AdjustWindowRect(
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* rect,
+    uint32_t style, int32_t menu) noexcept {
+    return AdjustWindowRectEx(rect, style, menu, 0);
+}
+extern "C" __declspec(dllimport) void* __stdcall CreateDIBSection(
+    void*, const void*, uint32_t, void**, void*, uint32_t);
+extern "C" __declspec(dllimport) void* __stdcall FindResourceExW(
+    void*, const wchar_t*, const wchar_t*, uint16_t) noexcept;
+extern "C" __declspec(dllimport) void* __stdcall LoadResource(void*, void*) noexcept;
+extern "C" __declspec(dllimport) void* __stdcall LockResource(void*) noexcept;
+extern "C" __declspec(dllimport) uint32_t __stdcall SizeofResource(void*, void*) noexcept;
+extern "C" __declspec(dllimport) uint16_t __stdcall GetUserDefaultUILanguage() noexcept;
+__declspec(dllexport) void* __stdcall LoadBitmapW(void* instance,
+    const wchar_t* name) noexcept {
+    if (!instance || !name) return nullptr;
+    const auto type = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(2));
+    void* resource = FindResourceExW(instance, type, name, GetUserDefaultUILanguage());
+    void* loaded = resource ? LoadResource(instance, resource) : nullptr;
+    const auto* bytes = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+    const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;
+    if (!bytes || size < 40) return nullptr;
+    uint32_t headerSize{}, compression{}, colorsUsed{};
+    int32_t width{}, signedHeight{}; uint16_t planes{}, bitCount{};
+    __builtin_memcpy(&headerSize, bytes, 4);
+    if (headerSize < 40 || headerSize > size) return nullptr;
+    __builtin_memcpy(&width, bytes + 4, 4); __builtin_memcpy(&signedHeight, bytes + 8, 4);
+    __builtin_memcpy(&planes, bytes + 12, 2); __builtin_memcpy(&bitCount, bytes + 14, 2);
+    __builtin_memcpy(&compression, bytes + 16, 4); __builtin_memcpy(&colorsUsed, bytes + 32, 4);
+    if (width <= 0 || signedHeight == 0 || signedHeight == INT32_MIN || planes != 1 ||
+        (bitCount != 1 && bitCount != 4 && bitCount != 8 && bitCount != 24 && bitCount != 32) || compression)
+        return nullptr;
+    const uint32_t height = static_cast<uint32_t>(signedHeight < 0 ? -signedHeight : signedHeight);
+    const uint64_t rowBytes = ((uint64_t(width) * bitCount + 31) / 32) * 4;
+    const uint32_t paletteCount = bitCount <= 8 ? (colorsUsed ? colorsUsed : 1u << bitCount) : 0;
+    const uint64_t pixelOffset = uint64_t(headerSize) + uint64_t(paletteCount) * 4;
+    if (width > 4096 || height > 4096 || uint64_t(width) * height > 16u * 1024u * 1024u ||
+        pixelOffset > size || rowBytes * height > size - pixelOffset) return nullptr;
+    struct DibInfo { uint32_t size; int32_t width, height; uint16_t planes, bits;
+        uint32_t compression, imageSize; int32_t xppm, yppm; uint32_t used, important; } info{
+        40, width, -static_cast<int32_t>(height), 1, 32, 0,
+        static_cast<uint32_t>(uint64_t(width) * height * 4), 0, 0, 0, 0};
+    void* pixels = nullptr;
+    void* bitmap = CreateDIBSection(nullptr, &info, 0, &pixels, nullptr, 0);
+    if (!bitmap || !pixels) return nullptr;
+    const auto* palette = bytes + headerSize;
+    auto* output = static_cast<uint8_t*>(pixels);
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint32_t sy = signedHeight > 0 ? height - 1 - y : y;
+        const auto* row = bytes + pixelOffset + uint64_t(sy) * rowBytes;
+        for (int32_t x = 0; x < width; ++x) {
+            uint8_t r{}, g{}, b{};
+            if (bitCount == 32) { b=row[x*4]; g=row[x*4+1]; r=row[x*4+2]; }
+            else if (bitCount == 24) { b=row[x*3]; g=row[x*3+1]; r=row[x*3+2]; }
+            else {
+                const uint32_t index = bitCount == 8 ? row[x] : bitCount == 4
+                    ? ((x & 1) ? row[x/2] & 15 : row[x/2] >> 4)
+                    : ((row[x/(8/bitCount)] >> (8-bitCount-(x%(8/bitCount))*bitCount)) & ((1u<<bitCount)-1));
+                if (index >= paletteCount) { (void)DeleteObject(bitmap); return nullptr; }
+                b=palette[index*4]; g=palette[index*4+1]; r=palette[index*4+2];
+            }
+            const size_t o=(static_cast<size_t>(y)*width+x)*4;
+            output[o]=b; output[o+1]=g; output[o+2]=r; output[o+3]=0xff;
+        }
+    }
+    return bitmap;
+}
+
+__declspec(dllexport) intptr_t __stdcall DialogBoxParamW(void* instance,
+    const wchar_t* name, void* owner, void* proc, intptr_t init) noexcept {
+    ModalDialogState* state = nullptr;
+    for (auto& candidate : g_modalDialogs) if (!candidate.hwnd) { state = &candidate; break; }
+    if (!state) { micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(120, 1, 0); return -1; }
+    void* dialog = CreateDialogParamW(instance, name, owner, proc, init);
+    if (!dialog) {
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(120, 2,
+            static_cast<uint32_t>(reinterpret_cast<uintptr_t>(name)));
+        return -1;
+    }
+    micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(120, 3, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dialog)));
+    *state = {dialog, -1, false};
+    if (owner) (void)EnableWindow(owner, 0);
+    (void)ShowWindow(dialog, 5);
+    (void)UpdateWindow(dialog);
+    micant::um::winnt_user32_gdi32_imm32_abi::WinNtMsg msg{};
+    while (!state->ended) {
+        const int32_t got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got <= 0) { state->result = -1; state->ended = true; break; }
+        (void)TranslateMessage(&msg);
+        (void)DispatchMessageW(&msg);
+    }
+    const intptr_t result = state->result;
+    if (IsWindow(dialog)) (void)DestroyWindow(dialog);
+    if (owner) (void)EnableWindow(owner, 1);
+    *state = {};
+    return result;
+}
+__declspec(dllexport) int32_t __stdcall EndDialog(void* dialog,
+    intptr_t result) noexcept {
+    for (auto& state : g_modalDialogs) if (state.hwnd == dialog) {
+        state.result = result;
+        state.ended = true;
+        return 1;
+    }
+    return 0;
+}
+__declspec(dllexport) uintptr_t __stdcall SetTimer(void* hwnd, uintptr_t id,
+    uint32_t interval, void* callback) noexcept {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_SetTimer(hwnd, id, interval, callback);
+}
+__declspec(dllexport) int32_t __stdcall KillTimer(void* hwnd, uintptr_t id) noexcept {
+    return micant::um::winnt_user32_gdi32_imm32_abi::User32_KillTimer(hwnd, id);
+}
+__declspec(dllexport) int32_t __stdcall GetDlgItemInt(void* dialog, int32_t id,
+    int32_t* translated, int32_t signedValue) noexcept {
+    if (translated) *translated = 0;
+    wchar_t text[64]{};
+    const uint32_t length = GetDlgItemTextW(dialog, id, text, 64);
+    if (!length) return 0;
+    uint32_t pos = 0; bool negative = false;
+    if (signedValue && (text[pos] == L'+' || text[pos] == L'-')) negative = text[pos++] == L'-';
+    if (pos == length) return 0;
+    uint64_t value = 0;
+    for (; pos < length; ++pos) {
+        if (text[pos] < L'0' || text[pos] > L'9') return 0;
+        value = value * 10 + static_cast<uint32_t>(text[pos] - L'0');
+        if (value > (negative ? 2147483648ull : 0xffffffffull)) return 0;
+    }
+    if (translated) *translated = 1;
+    return negative ? static_cast<uint32_t>(-static_cast<int64_t>(value)) : static_cast<uint32_t>(value);
+}
+__declspec(dllexport) int32_t __stdcall SetDlgItemInt(void* dialog, int32_t id,
+    uint32_t value, int32_t signedValue) noexcept {
+    wchar_t text[16]{}; wchar_t reverse[11]{}; size_t n = 0;
+    const int32_t signedNumber = static_cast<int32_t>(value);
+    const bool negative = signedValue && signedNumber < 0;
+    uint32_t magnitude = negative ? 0u - value : value;
+    do { reverse[n++] = static_cast<wchar_t>(L'0' + magnitude % 10); magnitude /= 10; } while (magnitude && n < 10);
+    size_t out = 0; if (negative) text[out++] = L'-';
+    while (n) text[out++] = reverse[--n];
+    text[out] = 0;
+    return SetDlgItemTextW(dialog, id, text);
+}
+__declspec(dllexport) int32_t __stdcall RedrawWindow(void* hwnd,
+    const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* rect,
+    void* region, uint32_t flags) noexcept {
+    constexpr uint32_t invalidate = 0x0001, erase = 0x0004, updateNow = 0x0100;
+    constexpr uint32_t supported = 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400 | 0x0800;
+    if (!hwnd || region || (flags & ~supported)) return 0;
+    if ((flags & invalidate) && !InvalidateRect(hwnd, rect, (flags & erase) != 0)) return 0;
+    if (flags & updateNow) return UpdateWindow(hwnd);
+    return 1;
+}
+
+struct WinmineAccelEntry { uint8_t flags; uint16_t key, command; };
+struct WinmineAccelTable { void* handle{}; uint16_t count{}; WinmineAccelEntry entries[64]{}; };
+static WinmineAccelTable g_winmineAccelTables[8]{};
+__declspec(dllexport) void* __stdcall LoadAcceleratorsW(void* instance,
+    const wchar_t* name) noexcept {
+    if (!instance || !name) return nullptr;
+    const auto type = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(9));
+    void* resource = FindResourceExW(instance, type, name, GetUserDefaultUILanguage());
+    void* loaded = resource ? LoadResource(instance, resource) : nullptr;
+    const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+    const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;
+    if (!data || !size || size % 8 || size / 8 > 64) return nullptr;
+    WinmineAccelTable* table = nullptr;
+    for (auto& slot : g_winmineAccelTables) if (!slot.handle) { table = &slot; break; }
+    if (!table) return nullptr;
+    table->handle = reinterpret_cast<void*>(table);
+    table->count = static_cast<uint16_t>(size / 8);
+    for (uint16_t i = 0; i < table->count; ++i) {
+        const auto* item = data + i * 8;
+        table->entries[i] = {item[0], static_cast<uint16_t>(item[2] | item[3] << 8),
+            static_cast<uint16_t>(item[4] | item[5] << 8)};
+        if (item[0] & ~(0x01u|0x02u|0x04u|0x08u|0x10u|0x80u)) { *table = {}; return nullptr; }
+    }
+    return table->handle;
+}
+__declspec(dllexport) int32_t __stdcall TranslateAcceleratorW(void* hwnd,
+    void* handle, micant::um::winnt_user32_gdi32_imm32_abi::WinNtMsg* message) noexcept {
+    if (!hwnd || !handle || !message ||
+        (message->message != 0x0100u && message->message != 0x0104u)) return 0;
+    WinmineAccelTable* table = nullptr;
+    for (auto& slot : g_winmineAccelTables) if (slot.handle == handle) { table = &slot; break; }
+    if (!table) return 0;
+    constexpr uint8_t down = 0x80;
+    const bool shift = (micant::um::winnt_user32_gdi32_imm32_abi::g_threadKeyboardState[0x10] & down) != 0;
+    const bool control = (micant::um::winnt_user32_gdi32_imm32_abi::g_threadKeyboardState[0x11] & down) != 0;
+    const bool alt = message->message == 0x0104u ||
+        (micant::um::winnt_user32_gdi32_imm32_abi::g_threadKeyboardState[0x12] & down) != 0;
+    for (uint16_t i = 0; i < table->count; ++i) {
+        const auto& entry = table->entries[i];
+        if ((entry.flags & 1) && entry.key != message->wParam) continue;
+        if (!(entry.flags & 1) && entry.key != (message->wParam & 0xffu)) continue;
+        if (((entry.flags & 4) != 0) != shift || ((entry.flags & 8) != 0) != control ||
+            ((entry.flags & 16) != 0) != alt) continue;
+        (void)SendMessageW(hwnd, 0x0111u /* WM_COMMAND */, entry.command, 0);
+        return 1;
+    }
+    return 0;
+}
+__declspec(dllexport) int32_t __stdcall DestroyAcceleratorTable(void* handle) noexcept {
+    for (auto& slot : g_winmineAccelTables) if (slot.handle == handle) { slot = {}; return 1; }
+    return 0;
+}
+
+__declspec(dllexport) int32_t __stdcall GetSysColor(int32_t index) noexcept {
+    static constexpr uint32_t colors[31] = {
+        0x00c8c8c8,0x00f0f0f0,0x00646464,0x00ffffff,0x00f0f0f0,0x00ffffff,
+        0x00000000,0x00f0f0f0,0x00000000,0x00000000,0x00f0f0f0,0x00000000,
+        0x00d77800,0x00ffffff,0x00c8c8c8,0x00f0f0f0,0x00646464,0x00a0a0a0,
+        0x00f0f0f0,0x00ffffff,0x00f0f0f0,0x00000000,0x00f0f0f0,0x00f0f0f0,
+        0x00f0f0f0,0x00a0a0a0,0x00f0f0f0,0x00000000,0x00f0f0f0,0x00f0f0f0,
+        0x00ffffff};
+    return index >= 0 && index < 31 ? static_cast<int32_t>(colors[index]) : 0;
+}
+__declspec(dllexport) void* __stdcall GetSysColorBrush(int32_t index) noexcept {
+    static void* brushes[31]{};
+    if (index < 0 || index >= 31) return nullptr;
+    if (!brushes[index]) brushes[index] = CreateSolidBrush(static_cast<uint32_t>(GetSysColor(index)));
+    return brushes[index];
+}
+__declspec(dllexport) void* __stdcall MonitorFromRect(
+    const micant::um::winnt_user32_gdi32_imm32_abi::WinNtRect* rect,
+    uint32_t flags) noexcept {
+    if (!rect || flags > 2) return nullptr;
+    const int32_t width = GetSystemMetrics(0), height = GetSystemMetrics(1);
+    const bool intersects = rect->right > 0 && rect->bottom > 0 && rect->left < width && rect->top < height;
+    if (!intersects && flags == 0) return nullptr;
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(0x00010001u));
+}
+__declspec(dllexport) int32_t __stdcall GetMonitorInfoW(void* monitor, void* output) noexcept {
+    if (reinterpret_cast<uintptr_t>(monitor) != 0x00010001u || !output) return 0;
+    auto* info = static_cast<uint32_t*>(output);
+    if (info[0] < 40) return 0;
+    auto* rects = reinterpret_cast<int32_t*>(info + 1);
+    rects[0] = rects[1] = 0; rects[2] = GetSystemMetrics(0); rects[3] = GetSystemMetrics(1);
+    rects[4] = rects[5] = 0; rects[6] = rects[2]; rects[7] = rects[3];
+    info[9] = 1;
+    return 1;
+}
+__declspec(dllexport) int32_t __cdecl wsprintfW(wchar_t* output,
+    const wchar_t* format, ...) noexcept {
+    if (!output || !format) return 0;
+    va_list args; va_start(args, format);
+    size_t out = 0;
+    for (size_t i = 0; format[i] && out < 32760; ++i) {
+        if (format[i] != L'%') { output[out++] = format[i]; continue; }
+        const wchar_t spec = format[++i];
+        if (!spec) break;
+        if (spec == L'%') { output[out++] = L'%'; continue; }
+        if (spec == L's') {
+            const wchar_t* value = va_arg(args, const wchar_t*);
+            if (!value) value = L"(null)";
+            while (*value && out < 32760) output[out++] = *value++;
+        } else if (spec == L'c') output[out++] = static_cast<wchar_t>(va_arg(args, int));
+        else if (spec == L'u' || spec == L'd' || spec == L'i' || spec == L'x' || spec == L'X') {
+            int64_t signedValue = 0; uint64_t value;
+            if (spec == L'd' || spec == L'i') { signedValue = va_arg(args, int); value = signedValue < 0 ? -signedValue : signedValue; }
+            else value = spec == L'u' ? va_arg(args, unsigned int) : va_arg(args, unsigned int);
+            wchar_t digits[32]{}; size_t count = 0; const uint32_t base = (spec == L'x' || spec == L'X') ? 16 : 10;
+            do { uint32_t digit = value % base; digits[count++] = static_cast<wchar_t>(digit < 10 ? L'0'+digit : (spec == L'X' ? L'A' : L'a')+digit-10); value /= base; } while (value && count < 31);
+            if (signedValue < 0) output[out++] = L'-';
+            while (count && out < 32760) output[out++] = digits[--count];
+        } else { va_end(args); output[out] = 0; return -1; }
+    }
+    va_end(args); output[out] = 0; return static_cast<int32_t>(out);
+}
 } // extern "C"
 #include <algorithm>
 #include <cstddef>
@@ -5577,6 +6013,11 @@ intptr_t dialogWindowProcedure(void* window, uint32_t message,
     if (message == 0x0081u /* WM_NCCREATE */) return 1;
     if (procedure) {
         const intptr_t result = procedure(window, message, wParam, lParam);
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+        if (message == 0x0111u)
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(
+                124, static_cast<uint32_t>(wParam), static_cast<uint32_t>(result));
+#endif
         if (result) return result;
     }
     const intptr_t result = DefWindowProcW(window, message, wParam, lParam);
@@ -6459,6 +6900,7 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
     const wchar_t* templateName, void* parent, void* dialogProc,
     intptr_t initParam) noexcept {
     if (!instance || !templateName || !dialogProc) {
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 1, 0);
         uint32_t error = 87;
         __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
         return nullptr;
@@ -6469,7 +6911,10 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
     void* loaded = resource ? LoadResource(instance, resource) : nullptr;
     const auto* data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
     const uint32_t size = loaded ? SizeofResource(instance, resource) : 0;
-    if (!data || size < 24) return nullptr;
+    if (!data || size < 24) {
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 2, size);
+        return nullptr;
+    }
     MenuResourceCursor cursor{data, data + size};
     uint16_t version{}, signature{}, itemCount{}, xRaw{}, yRaw{}, widthRaw{}, heightRaw{};
     uint32_t helpId{}, exStyle{}, style{};
@@ -6481,6 +6926,7 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
         !readMenuWord(cursor, heightRaw) || itemCount > 256) {
         uint32_t error = 13;
         __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 3, size);
         return nullptr;
     }
     wchar_t menuName[kTextCapacity]{}, className[kTextCapacity]{}, caption[kTextCapacity]{};
@@ -6488,14 +6934,20 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
     bool hasMenuOrdinal{}, hasClassOrdinal{};
     if (!readDialogField(cursor, menuName, menuOrdinal, hasMenuOrdinal) ||
         !readDialogField(cursor, className, classOrdinal, hasClassOrdinal) ||
-        !readMenuText(cursor, caption)) return nullptr;
+        !readMenuText(cursor, caption)) {
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 6, size);
+        return nullptr;
+    }
     uint16_t pointSize{};
     if (style & 0x00000040u /* DS_SETFONT */) {
         uint16_t weight{}; uint8_t italic{}, charset{};
         wchar_t face[kTextCapacity]{}; uintptr_t ignoredOrdinal{}; bool ignoredIsOrdinal{};
         if (!readMenuWord(cursor, pointSize) || !readMenuWord(cursor, weight) ||
             !readDialogByte(cursor, italic) || !readDialogByte(cursor, charset) ||
-            !readDialogField(cursor, face, ignoredOrdinal, ignoredIsOrdinal)) return nullptr;
+            !readDialogField(cursor, face, ignoredOrdinal, ignoredIsOrdinal)) {
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 7, size);
+            return nullptr;
+        }
         (void)weight; (void)italic; (void)charset;
     }
     alignDialogDword(cursor);
@@ -6520,13 +6972,17 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
         outerRect.right <= outerRect.left || outerRect.bottom <= outerRect.top) {
         uint32_t error = 87;
         __asm__ __volatile__("movl %0, %%gs:0x68" : : "r"(error) : "memory");
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 4, static_cast<uint32_t>(style));
         return nullptr;
     }
     width = outerRect.right - outerRect.left;
     height = outerRect.bottom - outerRect.top;
     void* window = CreateWindowExW(exStyle, kDialogClass, caption, style,
         x, y, width, height, parent, nullptr, instance, nullptr);
-    if (!window) return nullptr;
+    if (!window) {
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 5, static_cast<uint32_t>(style));
+        return nullptr;
+    }
     (void)SetWindowLongPtrW(window, kDwlpDlgProc,
         reinterpret_cast<intptr_t>(callback));
     void* firstFocus = nullptr;
@@ -6538,17 +6994,20 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
             !readDialogDword(cursor, itemStyle) || !readMenuWord(cursor, itemX) ||
             !readMenuWord(cursor, itemY) || !readMenuWord(cursor, itemWidth) ||
             !readMenuWord(cursor, itemHeight) || !readDialogDword(cursor, controlId)) {
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 8, itemIndex);
             (void)DestroyWindow(window); return nullptr;
         }
         wchar_t controlClass[kTextCapacity]{}, text[kTextCapacity]{};
         uintptr_t classId{}, textId{}; bool classIsOrdinal{}, textIsOrdinal{};
         if (!readDialogField(cursor, controlClass, classId, classIsOrdinal) ||
             !readDialogField(cursor, text, textId, textIsOrdinal)) {
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 9, itemIndex);
             (void)DestroyWindow(window); return nullptr;
         }
         uint16_t extraBytes{};
         if (!readMenuWord(cursor, extraBytes) || cursor.current > cursor.end ||
             static_cast<size_t>(cursor.end - cursor.current) < extraBytes) {
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 10, itemIndex);
             (void)DestroyWindow(window); return nullptr;
         }
         cursor.current += extraBytes;
@@ -6561,7 +7020,10 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
                 case 0x83: classPointer = L"ListBox"; break;
                 case 0x84: classPointer = L"ScrollBar"; break;
                 case 0x85: classPointer = L"ComboBox"; break;
-                default: (void)DestroyWindow(window); return nullptr;
+                default:
+                    micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 11,
+                        static_cast<uint32_t>(classId));
+                    (void)DestroyWindow(window); return nullptr;
             }
         }
         const wchar_t* controlText = textIsOrdinal
@@ -6573,7 +7035,10 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
             (static_cast<int32_t>(itemHeight) * 15) / 8,
             window, reinterpret_cast<void*>(static_cast<uintptr_t>(controlId)),
             instance, nullptr);
-        if (!control) { (void)DestroyWindow(window); return nullptr; }
+        if (!control) {
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 12, itemIndex);
+            (void)DestroyWindow(window); return nullptr;
+        }
         if (!firstFocus && (itemStyle & 0x00010000u) /* WS_TABSTOP */ &&
             !(itemStyle & 0x08000000u /* WS_DISABLED */)) firstFocus = control;
         (void)itemHelp;
@@ -6585,6 +7050,8 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
         menu = LoadMenuW(instance, menuName);
     }
     if ((hasMenuOrdinal || menuName[0]) && (!menu || !SetMenu(window, menu))) {
+        micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 13,
+            static_cast<uint32_t>(menu != nullptr));
         (void)DestroyWindow(window);
         if (menu) (void)DestroyMenu(menu);
         return nullptr;

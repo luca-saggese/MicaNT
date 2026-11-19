@@ -682,6 +682,19 @@ __declspec(dllexport) int32_t __stdcall lstrlenW(const wchar_t* text) noexcept {
     while (text[length] && length < static_cast<size_t>(INT32_MAX)) ++length;
     return static_cast<int32_t>(length);
 }
+__declspec(dllexport) wchar_t* __stdcall lstrcpynW(
+    wchar_t* destination, const wchar_t* source, int32_t capacity) noexcept {
+    if (!destination || !source || capacity < 0) {
+        SetLastError(87);
+        return nullptr;
+    }
+    if (capacity == 0) return destination;
+    int32_t index = 0;
+    for (; index + 1 < capacity && source[index]; ++index)
+        destination[index] = source[index];
+    destination[index] = L'\0';
+    return destination;
+}
 
 __declspec(dllexport) int32_t __stdcall DuplicateHandle(
     void* sourceProcess, void* sourceHandle, void* targetProcess,

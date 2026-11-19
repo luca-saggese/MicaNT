@@ -1663,6 +1663,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                 !(child.flags & MICANT_COMPOSITOR_SURFACE_VISIBLE)) continue;
             const MicaCompositorSurfaceInfo* ancestor = &child;
             for (size_t depth = 0; ancestor && ancestor->parentWindow &&
+                 (ancestor->style & kWsChild) &&
                  depth < metadata.surfaceEntryCount; ++depth) {
                 const uint64_t parentHandle = ancestor->parentWindow;
                 ancestor = nullptr;

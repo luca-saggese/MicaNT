@@ -2213,6 +2213,107 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
             # judging its first frame.
             time.sleep(5.0 if app == "calc" else 1.5)
             before = screen(f"reactos-{app}-01-window-before-input.ppm")
+            if app == "winmine" and os.environ.get("MICANT_REACTOS_WINMINE_INTERACTION_TEST") == "1":
+                # QEMU initializes the PS/2 absolute cursor at the middle of
+                # the 1024x768 scanout; relative deltas must be based there.
+                pointer_x = 512
+                pointer_y = 384
+
+                def move_to(x: int, y: int) -> None:
+                    nonlocal pointer_x, pointer_y
+                    for axis_name, distance in (("x", x - pointer_x), ("y", y - pointer_y)):
+                        while distance:
+                            step = max(-64, min(64, distance))
+                            execute("input-send-event", {"events": [{
+                                "type": "rel", "data": {"axis": axis_name, "value": step},
+                            }]})
+                            time.sleep(0.04)
+                            distance -= step
+                    pointer_x, pointer_y = x, y
+                    time.sleep(0.2)
+
+                def click_at(x: int, y: int) -> None:
+                    move_to(x, y)
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "btn", "data": {"button": "left", "down": down},
+                        }]})
+                        time.sleep(0.35)
+                    time.sleep(0.4)
+
+                def press_key(key: str) -> None:
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "key", "data": {
+                                "down": down, "key": {"type": "qcode", "data": key},
+                            },
+                        }]})
+                        time.sleep(0.15)
+
+                def region_difference(left: bytes, right: bytes,
+                                      x0: int, y0: int, x1: int, y1: int) -> int:
+                    return sum(
+                        left[(y * 1024 + x) * 3:(y * 1024 + x + 1) * 3] !=
+                        right[(y * 1024 + x) * 3:(y * 1024 + x + 1) * 3]
+                        for y in range(y0, y1) for x in range(x0, x1)
+                    )
+
+                # Beginner's first opened square is guaranteed safe. Reset
+                # through the visible menu; synthetic function keys use a
+                # separate keyboard path.
+                click_at(14, 84)
+                opened = screen("reactos-winmine-02-after-safe-cell.ppm")
+                if region_difference(before, opened, 4, 72, 154, 225) < 24:
+                    raise RuntimeError("WinMine safe-cell click did not reveal a board tile")
+
+                click_at(30, 56)  # Options menu.
+                menu_open = screen("reactos-winmine-03-options-menu.ppm")
+                if region_difference(opened, menu_open, 0, 50, 260, 330) < 80:
+                    raise RuntimeError("WinMine Options menu did not open")
+                click_at(28, 87)  # New game.
+                reset = screen("reactos-winmine-04-after-new.ppm")
+                if region_difference(opened, reset, 4, 72, 154, 225) < 24:
+                    raise RuntimeError("WinMine Options > New did not reset the board")
+
+                click_at(30, 56)  # Options menu.
+                click_at(45, 227)  # Advanced difficulty.
+                advanced = screen("reactos-winmine-05-advanced.ppm")
+                if region_difference(reset, advanced, 150, 70, 420, 400) < 128:
+                    raise RuntimeError("WinMine Advanced menu command did not resize the board")
+                menu_ink = sum(
+                    advanced[(y * 1024 + x) * 3] < 128 and
+                    advanced[(y * 1024 + x) * 3 + 1] < 128 and
+                    advanced[(y * 1024 + x) * 3 + 2] < 128
+                    for y in range(46, 69) for x in range(4, 220)
+                )
+                if menu_ink < 24:
+                    raise RuntimeError("WinMine menu bar disappeared after resizing the board")
+                click_at(30, 56)
+                click_at(45, 276)  # Custom game.
+                screen("reactos-winmine-06-custom-dialog.ppm")
+                click_at(115, 219)  # Custom dialog Cancel.
+                screen("reactos-winmine-07-after-custom.ppm")
+                click_at(101, 56)  # Info menu.
+                click_at(118, 82)  # Fastest Times.
+                screen("reactos-winmine-08-fastest-times.ppm")
+                click_at(140, 226)  # Fastest Times OK.
+                screen("reactos-winmine-09-after-times.ppm")
+
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if serial.count("[MicaNT WinMine] stage=120 value=3") < 2:
+                    raise RuntimeError("WinMine Custom or Fastest Times dialog did not create")
+                if ("[MicaNT WinMine] stage=122 value=2" not in serial or
+                        "[MicaNT WinMine] stage=124 value=2" not in serial or
+                        "[MicaNT WinMine] stage=122 value=1" not in serial or
+                        "[MicaNT WinMine] stage=124 value=1" not in serial):
+                    raise RuntimeError("WinMine modal Cancel/OK button commands were not dispatched")
+                if "[MicaNT ReactOSApps] Process handle cleanup complete" in serial:
+                    raise RuntimeError("WinMine exited during QMP gameplay interaction")
+                print(
+                    "LuceOS WinMine QMP interaction passed: safe cell opened, Options > New reset the game, "
+                    "Options > Advanced expanded the board; Custom Cancel and Fastest Times OK dispatched.",
+                    flush=True)
+                return
             if app == "calc" and (
                     os.environ.get("MICANT_REACTOS_CALC_INTERACTION_TEST") == "1" or
                     os.environ.get("MICANT_REACTOS_CALC_ENABLE_TEST") == "1" or
@@ -2972,8 +3073,8 @@ def run_qemu(
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
-    if reactos_debug_image is not None and reactos_app not in ("calc", "winver"):
-        raise RuntimeError("a diagnostic image override is limited to Calc or winver")
+    if reactos_debug_image is not None and reactos_app not in ("calc", "winver", "winmine"):
+        raise RuntimeError("a diagnostic image override is limited to Calc, winver or WinMine")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
@@ -3147,7 +3248,7 @@ def run_qemu(
                 raise RuntimeError(f"application bundle directory does not exist: {source}")
             target = esp / "ReactOSApps"
             target.mkdir()
-            if reactos_app in {"winver", "calc"} and reactos_debug_image is not None:
+            if reactos_app in {"winver", "calc", "winmine"} and reactos_debug_image is not None:
                 debug_image = reactos_debug_image.expanduser().resolve()
                 if not debug_image.is_file():
                     raise RuntimeError(
@@ -4075,8 +4176,8 @@ def main() -> int:
 
     if bool(args.reactos_apps_dir) != bool(args.reactos_app):
         parser.error("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
-    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver"):
-        parser.error("--reactos-debug-image is only valid with --reactos-app calc or winver")
+    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine"):
+        parser.error("--reactos-debug-image is only valid with --reactos-app calc, winver or winmine")
 
     if args.ovmf_code is None:
         parser.error("--ovmf-code or MICANT_OVMF_CODE is required")

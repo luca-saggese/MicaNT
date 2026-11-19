@@ -284,6 +284,7 @@ KNOWN_DLLS = [
     ("tools/dlls/shell32.cpp", "build/shell32.dll", "shell32.dll"),
     ("tools/dlls/shlwapi.cpp", "build/shlwapi.dll", "shlwapi.dll"),
     ("tools/dlls/ole32.cpp", "build/ole32.dll", "ole32.dll"),
+    ("tools/dlls/winmm.cpp", "build/winmm.dll", "winmm.dll"),
     ("tools/dlls/oleaut32.cpp", "build/oleaut32.dll", "oleaut32.dll"),
     ("tools/dlls/version.cpp", "build/version.dll", "version.dll"),
 ]

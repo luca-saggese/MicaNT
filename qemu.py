@@ -332,7 +332,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--reactos-debug-image", type=Path,
-        help="diagnostic-only local image for Calc or the LuceOS winver port; never compatibility evidence",
+        help="diagnostic-only local image for a LuceOS app build; never compatibility evidence",
     )
     parser.add_argument(
         "--doom-test", action="store_true",
@@ -384,8 +384,8 @@ def main() -> int:
             args.timeout = 180
     elif args.reactos_apps_dir is not None:
         parser.error("--reactos-apps-dir requires --reactos-app")
-    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver"):
-        parser.error("--reactos-debug-image is only valid with --reactos-app calc or winver")
+    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine"):
+        parser.error("--reactos-debug-image is only valid with --reactos-app calc, winver or winmine")
     if args.reactos_app and (args.cmd_test or args.doom_test or args.taskmgr_selftest or
                              args.theme_test or args.textbox_test or args.process_memory_selftest or
                              args.network_test or args.usb_test or

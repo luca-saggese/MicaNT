@@ -346,7 +346,7 @@ uint64_t g_themeGeneration{};
 Window* findWindowAny(uint64_t handle) noexcept;
 
 int32_t frameInset(const Window& window) noexcept {
-    if (window.parent || (window.style & kWsChild)) return 0;
+    if (window.style & kWsChild) return 0;
     constexpr size_t windowStyleIndex = 14u * MICANT_THEME_STATE_COUNT;
     const auto& style = g_themeSnapshot.styles[windowStyleIndex];
     const int32_t themedWidth =
@@ -363,7 +363,7 @@ int32_t frameInset(const Window& window) noexcept {
 }
 
 int32_t captionHeight(const Window& window) noexcept {
-    if (window.parent || (window.style & kWsChild) || !(window.style & kWsCaption))
+    if ((window.style & kWsChild) || !(window.style & kWsCaption))
         return 0;
     constexpr size_t headerbarIndex = 13u * MICANT_THEME_STATE_COUNT;
     const auto& headerbar = g_themeSnapshot.styles[headerbarIndex];
@@ -372,6 +372,10 @@ int32_t captionHeight(const Window& window) noexcept {
         headerbar.minHeight >= 24 && headerbar.minHeight <= 96)
         return headerbar.minHeight;
     return 28;
+}
+
+int32_t menuHeight(const Window& window) noexcept {
+    return !(window.style & kWsChild) && window.menu ? kMenuBarHeight : 0;
 }
 
 bool adjustWindowRect(MicaWin32kRect& rect, uint32_t style, bool hasMenu) noexcept {
@@ -409,7 +413,7 @@ bool windowScreenOrigin(const Window& window, int64_t& screenX,
             return false;
         screenX += frameInset(*parent);
         screenY += frameInset(*parent) + captionHeight(*parent) +
-            (!parent->parent && parent->menu ? kMenuBarHeight : 0);
+            menuHeight(*parent);
         current = parent;
     }
     return false;
@@ -566,9 +570,10 @@ void markWindowClientDamage(Window& window, int64_t left, int64_t top,
                             int64_t right, int64_t bottom) noexcept {
     const int64_t frame = frameInset(window);
     const int64_t caption = captionHeight(window);
+    const int64_t menu = menuHeight(window);
     const int64_t clientWidth = std::max<int64_t>(1, window.width - frame * 2);
     const int64_t clientHeight = std::max<int64_t>(1,
-        window.height - frame * 2 - caption);
+        window.height - frame * 2 - caption - menu);
     left = std::clamp<int64_t>(left, 0, clientWidth);
     top = std::clamp<int64_t>(top, 0, clientHeight);
     right = std::clamp<int64_t>(right, 0, clientWidth);
@@ -592,9 +597,9 @@ void markWindowClientDamage(Window& window, int64_t left, int64_t top,
     int64_t screenX{}, screenY{};
     if (!windowScreenOrigin(window, screenX, screenY)) return;
     markDamageRect(screenX + frame + left,
-        screenY + frame + caption + top,
+        screenY + frame + caption + menu + top,
         screenX + frame + right,
-        screenY + frame + caption + bottom);
+        screenY + frame + caption + menu + bottom);
 }
 
 bool beginWindowWriter(Window& window, uint64_t processId) noexcept {
@@ -742,12 +747,13 @@ Window* findWindowAny(uint64_t handle) noexcept {
 
 Window* rootWindow(Window* window) noexcept {
     for (size_t depth = 0; window && window->parent &&
+         (window->style & kWsChild) &&
          depth < g_windows.capacity(); ++depth) {
         auto* parent = findWindowAny(window->parent);
         if (!parent || parent->ownerProcessId != window->ownerProcessId) break;
         window = parent;
     }
-    return window->parent ? nullptr : window;
+    return window;
 }
 
 bool ensureCompositorSlot(Window& window) noexcept {
@@ -774,9 +780,12 @@ bool ensureCompositorSlot(Window& window) noexcept {
 uint64_t visibleOrder(const Window& window) noexcept {
     auto* root = rootWindow(const_cast<Window*>(&window));
     const uint64_t rootOrder = root ? root->zOrder : window.zOrder;
-    const bool child = root && root != &window;
-    return rootOrder <= (UINT32_MAX - 1u) / 2u
-        ? rootOrder * 2u + (child ? 1u : 0u) : UINT32_MAX;
+    uint32_t depth = 0;
+    for (auto* current = &window; current && current != root &&
+         (current->style & kWsChild) && depth < 255u;
+         current = findWindowAny(current->parent)) ++depth;
+    return rootOrder <= (UINT32_MAX - 255u) / 256u
+        ? rootOrder * 256u + depth : UINT32_MAX;
 }
 
 bool belongsToWindow(const Window* window, uint64_t ancestorHandle) noexcept {
@@ -844,7 +853,11 @@ Window* topmostVisibleWindow(int32_t x, int32_t y) noexcept {
         // the hit instead; a disabled top-level window remains a hit target.
         if ((window.style & kWsDisabled) &&
             (window.parent || (window.style & kWsChild))) continue;
-        if (!topmost || visibleOrder(window) > visibleOrder(*topmost)) topmost = &window;
+        const uint64_t order = visibleOrder(window);
+        const uint64_t topmostOrder = topmost ? visibleOrder(*topmost) : 0;
+        if (!topmost || order > topmostOrder ||
+            (order == topmostOrder && window.zOrder > topmost->zOrder))
+            topmost = &window;
     }
     return topmost;
 }
@@ -862,7 +875,8 @@ Window* topmostVisibleWindow() noexcept {
 Window* topmostVisibleTopLevelWindow() noexcept {
     Window* topmost{};
     for (auto& window : g_windows) {
-        if (!window.active || !window.visible || window.iconic || window.parent) continue;
+        if (!window.active || !window.visible || window.iconic ||
+            (window.style & kWsChild)) continue;
         if (!topmost || window.zOrder > topmost->zOrder) topmost = &window;
     }
     return topmost;
@@ -1027,7 +1041,7 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
         constexpr int32_t HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
         const int64_t minWidth = 160 + frameInset(*window) * 2;
         const int64_t minHeight = 100 + frameInset(*window) * 2 +
-                                  captionHeight(*window);
+                                  captionHeight(*window) + menuHeight(*window);
         constexpr int64_t maxExtent = 16384;
         const bool moveLeft = gesture.hitTest == HTLEFT ||
             gesture.hitTest == HTTOPLEFT || gesture.hitTest == HTBOTTOMLEFT;
@@ -1083,7 +1097,7 @@ bool updatePointerGesture(int32_t x, int32_t y) noexcept {
         const uint32_t clientWidth = static_cast<uint32_t>(
             std::max(1, newWidth - frame * 2));
         const uint32_t clientHeight = static_cast<uint32_t>(
-            std::max(1, newHeight - frame * 2 - caption));
+            std::max(1, newHeight - frame * 2 - caption - menuHeight(*window)));
         const uint32_t packedSize = (clientHeight & 0xFFFFu) << 16 |
                                     (clientWidth & 0xFFFFu);
         (void)enqueueLatestWindowMessage(*window, kWmSize, 0,
@@ -1215,7 +1229,7 @@ NtStatus createWindow(MicaWin32kRequest& request, uint64_t ownerProcessId) noexc
         // for composition and painting. ShowWindow cannot be relied on to
         // assign the slot or invalidate it: callers may create an already-
         // visible window and enter their message loop directly.
-        if (window.visible && !window.parent) {
+        if (window.visible && !(window.style & kWsChild)) {
             if (freeMessageSlots() < 5 || !ensureCompositorSlot(window) ||
                 !activateWindow(&window) ||
                 !enqueueWindowMessage(window, kWmPaint, 0, 0)) {
@@ -1509,7 +1523,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 if (!windowScreenOrigin(window, originX, originY)) continue;
                 const int32_t localX = g_mouseX - static_cast<int32_t>(originX) - frameInset(window);
                 const int32_t localY = g_mouseY - static_cast<int32_t>(originY) -
-                    frameInset(window) - captionHeight(window);
+                    frameInset(window) - captionHeight(window) - menuHeight(window);
                 const bool nonClient = (window.mouseTrackingFlags & kTmeNonClient) != 0;
                 const uint32_t message = nonClient ? kWmNcMouseHover : kWmMouseHover;
                 const int64_t position = nonClient
@@ -1543,9 +1557,10 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 return NtStatus::InvalidParameter;
             const int32_t frame = frameInset(*window);
             const int32_t caption = captionHeight(*window);
+            const int32_t menu = menuHeight(*window);
             const int32_t clientWidth = std::max(1, window->width - frame * 2);
             const int32_t clientHeight = std::max(1,
-                window->height - frame * 2 - caption);
+                window->height - frame * 2 - caption - menu);
             const int32_t rootFrame = frameInset(*root);
             const int32_t rootCaption = captionHeight(*root);
             const int32_t rootClientWidth = std::max(1,
@@ -1594,6 +1609,8 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             request.rect = {static_cast<int32_t>(clientX), static_cast<int32_t>(clientY),
                 static_cast<int32_t>(clientX + clientWidth),
                 static_cast<int32_t>(clientY + clientHeight)};
+            if (window == root) request.rect.top += menu;
+            if (window == root) request.rect.bottom += menu;
             return NtStatus::Success;
         }
         case MICANT_WIN32K_OP_SET_LIQUID_GLASS: {
@@ -1693,7 +1710,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_DESTROY_WINDOW: {
             auto* window = findWindow(request.args[0], ownerProcessId);
             if (!window) return NtStatus::InvalidHandle;
-            if (!window->parent && window->surface.sectionReference) {
+            if (rootWindow(window) == window && window->surface.sectionReference) {
                 if (!g_releaseCompositorSurface) return NtStatus::DeviceNotReady;
                 const auto releaseStatus = g_releaseCompositorSurface(window->surface, true);
                 if (releaseStatus != NtStatus::Success) return releaseStatus;
@@ -1755,7 +1772,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             auto* window = findWindowAny(request.args[0]);
             if (!window) return NtStatus::InvalidHandle;
             const int32_t command = static_cast<int32_t>(request.args[1]);
-            if (command && !window->parent && !ensureCompositorSlot(*window))
+            if (command && !(window->style & kWsChild) && !ensureCompositorSlot(*window))
                 return NtStatus::InsufficientResources;
             const bool wasVisible = window->visible;
             const bool wasIconic = window->iconic;
@@ -1771,7 +1788,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             window->iconic = minimize;
             if (window->visible && !window->iconic) {
                 window->zOrder = nextZOrder();
-                if (!window->parent) (void)activateWindow(window);
+                if (!(window->style & kWsChild)) (void)activateWindow(window);
             } else if (belongsToWindow(findWindowAny(g_focusedWindow), window->handle)) {
                 if (auto* focus = findWindowAny(g_focusedWindow))
                     (void)enqueueWindowMessage(*focus, 0x0008u, 0, 0);
@@ -1795,7 +1812,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         }
         case MICANT_WIN32K_OP_SET_TASKBAR_BUTTON_BOUNDS: {
             auto* window = findWindowAny(request.args[0]);
-            if (!window || window->parent) return NtStatus::InvalidHandle;
+            if (!window || (window->style & kWsChild)) return NtStatus::InvalidHandle;
             const auto& bounds = request.rect;
             if (bounds.left < 0 || bounds.top < 0 ||
                 bounds.right > g_screenWidth || bounds.bottom > g_screenHeight ||
@@ -1843,7 +1860,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             window->height = static_cast<int32_t>(height);
             if (request.args[6] == 0) {
                 window->zOrder = nextZOrder();
-                if (!window->parent) g_foregroundWindow = window->handle;
+                if (!(window->style & kWsChild)) g_foregroundWindow = window->handle;
             }
             if (window->x != oldX || window->y != oldY) {
                 const uint32_t packedPosition =
@@ -1908,8 +1925,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             if (request.operation == MICANT_WIN32K_OP_GET_CLIENT_RECT) {
                 const int32_t frame = frameInset(*window);
                 const int32_t caption = captionHeight(*window);
-                const int32_t menu = (!window->parent && window->menu)
-                    ? kMenuBarHeight : 0;
+                const int32_t menu = menuHeight(*window);
                 request.rect = {0, 0,
                     window->width > frame * 2 ? window->width - frame * 2 : 1,
                     window->height > frame * 2 + caption + menu
@@ -1947,6 +1963,16 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             MicantNetbootSerialWrite("\r\n");
             request.result = 1;
             return NtStatus::Success;
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+            MicantNetbootSerialWrite("[MicaNT WinMine] stage=");
+            MicantNetbootSerialWriteNumber(request.args[0]);
+            MicantNetbootSerialWrite(" value=");
+            MicantNetbootSerialWriteNumber(request.args[1]);
+            MicantNetbootSerialWrite(" flags=");
+            MicantNetbootSerialWriteNumber(request.args[2]);
+            MicantNetbootSerialWrite("\r\n");
+            request.result = 1;
+            return NtStatus::Success;
 #else
             return NtStatus::NotImplemented;
 #endif
@@ -1959,7 +1985,7 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
                 MICANT_WIN32K_ENUM_BATCH_CAPACITY);
             size_t ordinal = 0;
             for (const auto& window : g_windows) {
-                if (!window.active || window.parent) continue;
+                if (!window.active || (window.style & kWsChild)) continue;
                 if (ordinal++ < first) continue;
                 if (request.result == capacity) break;
                 request.windowHandles[request.result++] = window.handle;
@@ -2209,7 +2235,7 @@ void releaseProcess(uint64_t ownerProcessId) noexcept {
         for (auto& window : g_windows) {
             if (!window.active || window.ownerProcessId != ownerProcessId) continue;
             markWindowBounds(window);
-            if (!window.parent && window.surface.sectionReference &&
+            if (rootWindow(&window) == &window && window.surface.sectionReference &&
                 g_releaseCompositorSurface) {
                 // Ps has already removed the terminating process's views.
                 if (g_releaseCompositorSurface(window.surface, false) == NtStatus::Success)
@@ -2441,8 +2467,8 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
             const uint32_t clientWidth = static_cast<uint32_t>(
                 captured->width > frame * 2 ? captured->width - frame * 2 : 1);
             const uint32_t clientHeight = static_cast<uint32_t>(
-                captured->height > frame * 2 + caption
-                    ? captured->height - frame * 2 - caption : 1);
+                captured->height > frame * 2 + caption + menuHeight(*captured)
+                    ? captured->height - frame * 2 - caption - menuHeight(*captured) : 1);
             const uint32_t packedSize =
                 (clientHeight & 0xFFFFu) << 16 | (clientWidth & 0xFFFFu);
             (void)enqueueWindowMessage(*captured, kWmSize,
@@ -2496,10 +2522,12 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
     // caption before publishing WM_MOUSEMOVE / button messages to the app.
     const int32_t clientFrame = frameInset(*routeTarget);
     const int32_t clientCaption = captionHeight(*routeTarget);
+        const int32_t clientMenu = menuHeight(*routeTarget);
     int64_t routeX{}, routeY{};
     if (!windowScreenOrigin(*routeTarget, routeX, routeY)) return false;
     const auto localX64 = static_cast<int64_t>(x) - routeX - clientFrame;
-    const auto localY64 = static_cast<int64_t>(y) - routeY - clientFrame - clientCaption;
+    const auto localY64 = static_cast<int64_t>(y) - routeY - clientFrame -
+        clientCaption - clientMenu;
     const uint32_t localX = static_cast<uint32_t>(localX64) & 0xFFFFu;
     const uint32_t localY = static_cast<uint32_t>(localY64) & 0xFFFFu;
     const int64_t packedPoint = static_cast<int64_t>((localY << 16) | localX);
@@ -2664,7 +2692,7 @@ void publishCompositorSurfaces() noexcept {
     size_t childEntryCount = 0;
     for (const auto& candidate : g_windows) {
         if (!candidate.active) continue;
-        if (candidate.parent) {
+        if (candidate.style & kWsChild) {
             ++childEntryCount;
         } else if (candidate.compositorSlot != UINT32_MAX) {
             rootEntryCount = std::max(rootEntryCount,
@@ -2725,7 +2753,7 @@ void publishCompositorSurfaces() noexcept {
         info = {};
         const Window* windowPointer = nullptr;
         for (const auto& candidate : g_windows)
-            if (candidate.active && !candidate.parent &&
+            if (candidate.active && !(candidate.style & kWsChild) &&
                 candidate.compositorSlot == index) {
                 windowPointer = &candidate;
                 break;
@@ -2816,7 +2844,8 @@ void publishCompositorSurfaces() noexcept {
     // rectangles as metadata layers so the compositor's existing child overlay
     // pass can restore their pixels after the root client is drawn.
     for (const auto& window : g_windows) {
-        if (!window.active || !window.parent || !window.visible ||
+        if (!window.active || !window.parent || !(window.style & kWsChild) ||
+            !window.visible ||
             !hasVisibleAncestors(window)) continue;
         auto* root = rootWindow(const_cast<Window*>(&window));
         if (!root || root->compositorSlot >= rootEntryCount ||

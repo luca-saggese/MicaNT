@@ -567,6 +567,23 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
 
+    # Separate runtime PE required by applications importing winmm.dll.
+    add_library(winmm_boot SHARED EXCLUDE_FROM_ALL tools/dlls/winmm.cpp)
+    target_compile_definitions(winmm_boot PRIVATE
+        MICANT_NATIVE_USERMODE BUILD_SYSTEM32_STANDALONE_DLL BUILD_SYSTEM32_WINMM_DLL)
+    target_compile_options(winmm_boot PRIVATE
+        -ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics
+        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone
+        -ffunction-sections -fdata-sections -O2)
+    target_link_options(winmm_boot PRIVATE
+        -nostdlib -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
+        -Wl,--gc-sections)
+    target_link_libraries(winmm_boot PRIVATE kernel32_boot)
+    set_target_properties(winmm_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "winmm"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+
     # OLE Automation owns BSTR and VARIANT entry points; keep these exports in
     # oleaut32.dll instead of the mixed COM/OLE declaration header.
     add_library(oleaut32_boot SHARED EXCLUDE_FROM_ALL tools/dlls/oleaut32.cpp)
@@ -998,6 +1015,9 @@ if (MICANT_ENABLE_BAREMETAL)
         if (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "calc")
             target_compile_definitions(user32_boot PRIVATE
                 MICANT_BOOTSTRAP_REACTOS_APP_CALC)
+        elseif (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "winmine")
+            target_compile_definitions(user32_boot PRIVATE
+                MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
         endif()
     endif()
     if (MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
@@ -1483,7 +1503,7 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "msvcrt_probe" SUFFIX ".exe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot oleaut32_boot shlwapi_boot version_boot bcrypt_boot secur32_boot wintrust_boot iphlpapi_boot
+        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot winmm_boot oleaut32_boot shlwapi_boot version_boot bcrypt_boot secur32_boot wintrust_boot iphlpapi_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)

@@ -176,11 +176,13 @@ uint32_t Winmm_timeKillEvent(uint32_t uTimerID) noexcept {
 }
 
 int32_t Winmm_PlaySoundW(const wchar_t* /*pszSound*/, void* /*hmod*/, uint32_t /*fdwSound*/) noexcept {
-    return 1;
+    // WinMM's waveform endpoint is not connected to the native HDA Ring 3
+    // client yet. Report failure until a real PCM submission succeeds.
+    return 0;
 }
 
 uint32_t Winmm_waveOutGetNumDevs() noexcept {
-    return 1U;
+    return 0U;
 }
 
 #if !defined(BUILD_SYSTEM32_STANDALONE_DLL)

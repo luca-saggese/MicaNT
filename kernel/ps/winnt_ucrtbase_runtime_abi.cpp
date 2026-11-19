@@ -29,6 +29,7 @@ __declspec(dllimport) int32_t __stdcall NtReadFile(
     void* file, void* event, void* apcRoutine, void* apcContext,
     void* ioStatus, void* buffer, uint32_t length,
     void* byteOffset, uint32_t* key) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQuerySystemTime(int64_t* systemTime) noexcept;
 }
 
 namespace {
@@ -290,8 +291,15 @@ static int g_nativeArgc{};
 static char* g_nativeArgv[257]{};
 static char* g_nativeAcmdln{};
 static char** g_nativeEnvironment{};
+static wchar_t** g_nativeWEnvironment{};
+static bool g_nativeWEnvironmentInitialized{};
 static int g_nativeArgvMode{};
 static bool g_nativeArgvInitialized{};
+static int g_nativeWArgc{};
+static wchar_t* g_nativeWArgv[257]{};
+static wchar_t* g_nativeWcmdln{};
+static int g_nativeWArgvMode{};
+static bool g_nativeWArgvInitialized{};
 static bool g_nativeEnvironmentInitialized{};
 static micant::ucrt::OnExitTable g_nativeOnExitTable{};
 static bool g_nativeOnExitInitialized{};
@@ -378,8 +386,90 @@ static int32_t initializeNarrowArgv() noexcept {
     return 0;
 }
 
+static int32_t initializeWideArgv() noexcept {
+    if (g_nativeWArgvInitialized) return 0;
+    if (g_nativeWArgvMode == 2) {
+        g_nativeWArgc = 0;
+        g_nativeWArgv[0] = nullptr;
+        g_nativeWArgvInitialized = true;
+        return 0;
+    }
+    micant::shared::native_process::UnicodeString64 commandLine{};
+    if (!micant::shared::native_process::currentCommandLine(commandLine) &&
+        !micant::shared::native_process::currentImagePath(commandLine)) return 22;
+    if ((commandLine.Length & 1u) || commandLine.Length > 65534u) return 7;
+    const size_t units = commandLine.Length / sizeof(char16_t);
+    auto* raw = static_cast<wchar_t*>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(
+        (units + 1) * sizeof(wchar_t)));
+    auto* parsed = static_cast<wchar_t*>(micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(
+        (units + 1) * sizeof(wchar_t)));
+    if (!raw || !parsed) {
+        if (raw) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(raw);
+        if (parsed) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(parsed);
+        return 12;
+    }
+    for (size_t i = 0; i < units; ++i) raw[i] = static_cast<wchar_t>(commandLine.Buffer[i]);
+    raw[units] = L'\0';
+    for (size_t i = 0; i <= units; ++i) parsed[i] = raw[i];
+    g_nativeWcmdln = raw;
+    wchar_t* read = parsed;
+    wchar_t* write = parsed;
+    while (*read) {
+        while (*read == L' ' || *read == L'\t') ++read;
+        if (!*read) break;
+        if (g_nativeWArgc == 256) {
+            micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(parsed);
+            g_nativeWcmdln = nullptr;
+            return 7;
+        }
+        g_nativeWArgv[g_nativeWArgc++] = write;
+        bool quoted = false;
+        while (*read) {
+            if ((*read == L' ' || *read == L'\t') && !quoted) break;
+            size_t slashes{};
+            while (*read == L'\\') { ++slashes; ++read; }
+            if (*read == L'"') {
+                for (size_t i = 0; i < slashes / 2; ++i) *write++ = L'\\';
+                if (slashes & 1) { *write++ = L'"'; ++read; }
+                else {
+                    ++read;
+                    if (quoted && *read == L'"') { *write++ = L'"'; ++read; }
+                    else quoted = !quoted;
+                }
+                continue;
+            }
+            while (slashes--) *write++ = L'\\';
+            if (!*read || ((*read == L' ' || *read == L'\t') && !quoted)) break;
+            *write++ = *read++;
+        }
+        *write++ = L'\0';
+        while (*read == L' ' || *read == L'\t') ++read;
+    }
+    g_nativeWArgv[g_nativeWArgc] = nullptr;
+    g_nativeWArgvInitialized = true;
+    return 0;
+}
+
 __declspec(dllexport) int* __cdecl _errno() {
     return &g_nativeErrno;
+}
+__declspec(dllexport) int64_t __cdecl _time64(int64_t* output) noexcept {
+    int64_t systemTime{};
+    if (NtQuerySystemTime(&systemTime) < 0 || systemTime < 116444736000000000ll) {
+        g_nativeErrno = 22;
+        return -1;
+    }
+    const int64_t unixTime = (systemTime - 116444736000000000ll) / 10000000ll;
+    if (output) *output = unixTime;
+    return unixTime;
+}
+static uint32_t g_nativeRandSeed = 1;
+__declspec(dllexport) int __cdecl rand(void) noexcept {
+    g_nativeRandSeed = g_nativeRandSeed * 214013u + 2531011u;
+    return static_cast<int>((g_nativeRandSeed >> 16) & 0x7fffu);
+}
+__declspec(dllexport) void __cdecl srand(unsigned int seed) noexcept {
+    g_nativeRandSeed = seed;
 }
 
 __declspec(dllexport) int* __cdecl __p__commode() {
@@ -404,6 +494,62 @@ __declspec(dllexport) char*** __cdecl __p___argv() {
 __declspec(dllexport) char** __cdecl __p__acmdln() {
     if (initializeNarrowArgv() != 0) return nullptr;
     return &g_nativeAcmdln;
+}
+
+__declspec(dllexport) int* __cdecl __p___wargc() {
+    return initializeWideArgv() == 0 ? &g_nativeWArgc : nullptr;
+}
+__declspec(dllexport) wchar_t*** __cdecl __p___wargv() {
+    if (initializeWideArgv() != 0) return nullptr;
+    static wchar_t** argv = g_nativeWArgv;
+    return &argv;
+}
+__declspec(dllexport) wchar_t** __cdecl __p__wcmdln() {
+    return initializeWideArgv() == 0 ? &g_nativeWcmdln : nullptr;
+}
+
+static int32_t initializeWideEnvironment() noexcept {
+    if (g_nativeWEnvironmentInitialized) return 0;
+    char16_t* source{};
+    if (!micant::shared::native_process::currentEnvironment(source)) {
+        g_nativeErrno = 22; return 22;
+    }
+    size_t units{}, entries{}; bool ended{};
+    while (units < 32768) {
+        if (!source[units] && units + 1 < 32768 && !source[units + 1]) {
+            units += 2; ended = true; break;
+        }
+        if (!source[units]) ++entries;
+        ++units;
+    }
+    if (!ended || entries > SIZE_MAX / sizeof(wchar_t*) - 1 ||
+        units > SIZE_MAX / sizeof(wchar_t)) {
+        g_nativeErrno = ended ? 12 : 7; return g_nativeErrno;
+    }
+    auto** environment = static_cast<wchar_t**>(
+        micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc((entries + 1) * sizeof(wchar_t*)));
+    auto* text = static_cast<wchar_t*>(
+        micant::ucrt::winnt_ucrtbase_abi::Ucrt_malloc(units * sizeof(wchar_t)));
+    if (!environment || !text) {
+        if (environment) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(environment);
+        if (text) micant::ucrt::winnt_ucrtbase_abi::Ucrt_free(text);
+        g_nativeErrno = 12; return 12;
+    }
+    size_t entry{}, offset{};
+    for (size_t i = 0; i < units; ++i) {
+        text[i] = static_cast<wchar_t>(source[i]);
+        if (i == offset && i < units - 1 && source[i]) environment[entry++] = text + i;
+        if (!source[i]) offset = i + 1;
+    }
+    environment[entry] = nullptr;
+    g_nativeWEnvironment = environment;
+    g_nativeWEnvironmentInitialized = true;
+    return 0;
+}
+__declspec(dllexport) wchar_t*** __cdecl __p__wenviron() {
+    if (initializeWideEnvironment() != 0) return nullptr;
+    static wchar_t** environment = g_nativeWEnvironment;
+    return &environment;
 }
 
 static int32_t initializeNarrowEnvironment() noexcept {
@@ -1576,11 +1722,24 @@ __declspec(dllexport) int32_t __cdecl _configure_narrow_argv(int32_t mode) {
     if (g_nativeArgvInitialized) { g_nativeErrno = 22; return 22; }
     g_nativeArgvMode = mode; return 0;
 }
+__declspec(dllexport) int32_t __cdecl _configure_wide_argv(int32_t mode) {
+    if (mode < 0 || mode > 2 || g_nativeWArgvInitialized) {
+        g_nativeErrno = 22; return 22;
+    }
+    g_nativeWArgvMode = mode;
+    return 0;
+}
 __declspec(dllexport) int32_t __cdecl _initialize_narrow_environment() {
     return initializeNarrowEnvironment();
 }
+__declspec(dllexport) int32_t __cdecl _initialize_wide_environment() {
+    return initializeWideEnvironment();
+}
 __declspec(dllexport) char** __cdecl _get_initial_narrow_environment() {
     return initializeNarrowEnvironment() == 0 ? g_nativeEnvironment : nullptr;
+}
+__declspec(dllexport) wchar_t** __cdecl _get_initial_wide_environment() {
+    return initializeWideEnvironment() == 0 ? g_nativeWEnvironment : nullptr;
 }
 __declspec(dllexport) int32_t __cdecl _crt_atexit(micant::ucrt::OnExitRoutine function) {
     if (!function) { g_nativeErrno = 22; return 22; }
