@@ -79,7 +79,6 @@ void SyscallDispatcher::initializeStandardTable() {
     internal::PrismXDXCoreComAbiInitializeExecutiveSubsystem();
     internal::PrismXVulkan1OpenGL32SixteenDllSealInitializeExecutiveSubsystem();
     internal::WinNtKernel32Advapi32InitializeExecutiveSubsystem();
-    internal::WinNtUser32Gdi32Imm32InitializeExecutiveSubsystem();
     internal::WinNtOle32DwmapiWinmmSealInitializeExecutiveSubsystem();
 
     // 1. NtAllocateVirtualMemory (SSN: 0x0018)

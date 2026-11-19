@@ -111,7 +111,7 @@ struct Horizon115System32Complete40DllIatSealReport {
     uint32_t winntCoreSystem32DllCount{0};     // 20 Core WinNT System32 DLLs
     uint32_t prismxDirectXSystem32DllCount{0}; // 20 DirectX/Multimedia System32 DLLs
     uint32_t totalSystem32PeDllCount{0};       // 40 Total System32 PE32+ DLLs
-    uint32_t totalWinNtCoreExports{0};         // 217 Exported Win32/NT Entry Points
+    uint32_t totalWinNtCoreExports{0};         // Kernel-owned and validated PE exports
     uint32_t snappedPe32PlusIatEntries{0};
     uint32_t totalHorizons{115};
     uint32_t totalKernelUnits{87};

@@ -273,8 +273,6 @@ KNOWN_DLLS = [
     ("tools/dlls/winhttp.cpp", "build/winhttp.dll", "winhttp.dll"),
     ("tools/dlls/kernel32.cpp", "build/kernel32.dll", "kernel32.dll"),
     ("tools/dlls/kernelbase.cpp", "build/kernelbase.dll", "kernelbase.dll"),
-    ("tools/dlls/user32.cpp", "build/user32.dll", "user32.dll"),
-    ("tools/dlls/gdi32.cpp", "build/gdi32.dll", "gdi32.dll"),
     ("tools/dlls/advapi32.cpp", "build/advapi32.dll", "advapi32.dll"),
     ("tools/dlls/comctl32.cpp", "build/comctl32.dll", "comctl32.dll"),
     ("tools/dlls/comdlg32.cpp", "build/comdlg32.dll", "comdlg32.dll"),
@@ -286,9 +284,9 @@ KNOWN_DLLS = [
 
 WINDOWING_DLLS = [
     ("kernel/ps/winnt_win32k_server.cpp", "win32k.dll", "MICANT_WIN32K_EXPORTS", False),
-    ("kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp", "user32.dll", "BUILD_SYSTEM32_USER32_DLL", True),
-    ("kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp", "gdi32.dll", "BUILD_SYSTEM32_GDI32_DLL", True),
-    ("kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp", "imm32.dll", "BUILD_SYSTEM32_IMM32_DLL", True),
+    ("tools/dlls/gdi32.cpp", "gdi32.dll", "BUILD_SYSTEM32_GDI32_DLL", True),
+    ("tools/dlls/user32.cpp", "user32.dll", "BUILD_SYSTEM32_USER32_DLL", True),
+    ("tools/dlls/imm32.cpp", "imm32.dll", "BUILD_SYSTEM32_IMM32_DLL", True),
 ]
 
 DRIVER_STUBS = [
@@ -607,25 +605,24 @@ def run_local_build():
 
     for src, dll_name, export_def, imports_win32k in WINDOWING_DLLS[1:]:
         dll_path = os.path.join(windowing_dir, dll_name)
+        import_library = os.path.join(windowing_dir, f"lib{dll_name}.a")
         cmd = [
             "clang++", "-target", "x86_64-w64-mingw32", "-std=c++23", "-O2",
             "-Iinclude", "-DBUILD_SYSTEM32_STANDALONE_DLL", f"-D{export_def}",
             "-shared", "-static", "-fno-rtti", "-fno-threadsafe-statics",
             "-fno-use-cxa-atexit", "-ffunction-sections", "-fdata-sections",
             "-Wl,--gc-sections", "-Wl,-e,DllMain",
+            f"-Wl,--out-implib,{import_library}",
         ]
         link_win32k = False
         if imports_win32k:
             cmd.append("-DMICANT_WIN32K_IMPORTS")
             link_win32k = True
-        sources = [src]
-        if dll_name == "user32.dll":
-            # The PE DLL must include the canonical menu subsystem alongside
-            # the User32 client ABI; CMake's in-tree target already does this.
-            sources.append("kernel/ps/winnt_user32_menu_abi.cpp")
-        cmd.extend([*sources, "-o", dll_path])
+        cmd.extend([src, "-o", dll_path])
         if link_win32k:
             cmd.append(win32k_implib)
+        if dll_name == "user32.dll":
+            cmd.append(os.path.join(windowing_dir, "libgdi32.dll.a"))
         r = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"[FATAL] {dll_name} build failed:\n{r.stderr}")

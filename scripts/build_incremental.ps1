@@ -115,7 +115,6 @@ try {
         @{ Src = "kernel/io/prism_dxcore_adapter_factory_com_abi.cpp";      Obj = "io_prism_dxcore_adapter_factory_com_abi.o" },
         @{ Src = "kernel/io/prism_vulkan1_opengl32_16dll_seal.cpp";         Obj = "io_prism_vulkan1_opengl32_16dll_seal.o" },
         @{ Src = "kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp";      Obj = "ps_winnt_kernel32_advapi32_system32_abi.o" },
-        @{ Src = "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp";     Obj = "ps_winnt_user32_gdi32_imm32_system32_abi.o" },
         @{ Src = "kernel/ps/winnt_ole32_dwmapi_winmm_system32_seal.cpp";    Obj = "ps_winnt_ole32_dwmapi_winmm_system32_seal.o" },
         @{ Src = "kernel/ps/winnt_ntdll_ws2_iphlpapi_winhttp_abi.cpp";      Obj = "ps_winnt_ntdll_ws2_iphlpapi_winhttp_abi.o" },
         @{ Src = "kernel/se/winnt_bcrypt_crypt32_secur32_wintrust_abi.cpp"; Obj = "se_winnt_bcrypt_crypt32_secur32_wintrust_abi.o" },
@@ -162,9 +161,9 @@ try {
         @{ Name = "kernel32.dll";       Src = "kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp";         Def = "BUILD_SYSTEM32_KERNEL32_DLL" },
         @{ Name = "advapi32.dll";       Src = "kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp";         Def = "BUILD_SYSTEM32_ADVAPI32_DLL" },
         @{ Name = "win32k.dll";          Src = "kernel/ps/winnt_win32k_server.cpp";                       Def = "MICANT_WIN32K_EXPORTS" },
-        @{ Name = "user32.dll";         Src = "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp";        Def = "BUILD_SYSTEM32_USER32_DLL"; ImportWin32k = $true },
-        @{ Name = "gdi32.dll";          Src = "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp";        Def = "BUILD_SYSTEM32_GDI32_DLL";  ImportWin32k = $true },
-        @{ Name = "imm32.dll";          Src = "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp";        Def = "BUILD_SYSTEM32_IMM32_DLL";  ImportWin32k = $true },
+        @{ Name = "gdi32.dll";          Src = "tools/dlls/gdi32.cpp";         Def = "BUILD_SYSTEM32_GDI32_DLL";  ImportWin32k = $true },
+        @{ Name = "user32.dll";         Src = "tools/dlls/user32.cpp";        Def = "BUILD_SYSTEM32_USER32_DLL"; ImportWin32k = $true; ImportGdi32 = $true },
+        @{ Name = "imm32.dll";          Src = "tools/dlls/imm32.cpp";         Def = "BUILD_SYSTEM32_IMM32_DLL";  ImportWin32k = $true },
         @{ Name = "ole32.dll";          Src = "kernel/ps/winnt_ole32_dwmapi_winmm_system32_seal.cpp";       Def = "BUILD_SYSTEM32_OLE32_DLL" },
         @{ Name = "dwmapi.dll";         Src = "kernel/ps/winnt_ole32_dwmapi_winmm_system32_seal.cpp";       Def = "BUILD_SYSTEM32_DWMAPI_DLL" },
         @{ Name = "winmm.dll";          Src = "kernel/ps/winnt_ole32_dwmapi_winmm_system32_seal.cpp";       Def = "BUILD_SYSTEM32_WINMM_DLL" },
@@ -207,17 +206,26 @@ try {
         $dllPath = Join-Path $sys32Dir $dll.Name
         $srcPath = Join-Path $repoRoot $dll.Src
         $win32kLibPath = Join-Path $sys32Dir $(if ($isMsvc) { "win32k.lib" } else { "libwin32k.dll.a" })
+        $gdi32LibPath = Join-Path $sys32Dir $(if ($isMsvc) { "gdi32.lib" } else { "libgdi32.dll.a" })
         $staleWin32kImport = $dll.ImportWin32k -and (Test-Path $win32kLibPath) -and ((Get-Item $win32kLibPath).LastWriteTimeUtc -gt (Get-Item $dllPath -ErrorAction SilentlyContinue).LastWriteTimeUtc)
-        if ($Force -or -not (Test-Path $dllPath) -or $staleWin32kImport -or ((Get-Item $srcPath).LastWriteTimeUtc -gt (Get-Item $dllPath -ErrorAction SilentlyContinue).LastWriteTimeUtc)) {
+        $staleGdi32Import = $dll.ImportGdi32 -and (Test-Path $gdi32LibPath) -and ((Get-Item $gdi32LibPath).LastWriteTimeUtc -gt (Get-Item $dllPath -ErrorAction SilentlyContinue).LastWriteTimeUtc)
+        if ($Force -or -not (Test-Path $dllPath) -or $staleWin32kImport -or $staleGdi32Import -or ((Get-Item $srcPath).LastWriteTimeUtc -gt (Get-Item $dllPath -ErrorAction SilentlyContinue).LastWriteTimeUtc)) {
             $extraArgs = @()
             $importDefinitions = @()
             if ($dll.Name -eq "win32k.dll") {
                 if ($isMsvc) { $extraArgs += "-Wl,/IMPLIB:$win32kLibPath" }
                 else { $extraArgs += "-Wl,--out-implib,$win32kLibPath" }
+            } elseif ($dll.Name -eq "gdi32.dll") {
+                if ($isMsvc) { $extraArgs += "-Wl,/IMPLIB:$gdi32LibPath" }
+                else { $extraArgs += "-Wl,--out-implib,$gdi32LibPath" }
             } elseif ($dll.ImportWin32k) {
                 $importDefinitions += "-DMICANT_WIN32K_IMPORTS"
                 if ($isMsvc) { $extraArgs += $win32kLibPath }
                 else { $extraArgs += @("-L$sys32Dir", "-lwin32k") }
+            }
+            if ($dll.ImportGdi32) {
+                if ($isMsvc) { $extraArgs += $gdi32LibPath }
+                else { $extraArgs += @("-L$sys32Dir", "-lgdi32") }
             }
             $runtimeFlags = @()
             if ($dll.Name -in @("win32k.dll", "user32.dll", "gdi32.dll", "imm32.dll") -and -not $isMsvc) { $runtimeFlags += "-static" }

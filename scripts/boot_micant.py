@@ -2277,7 +2277,87 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
                         for y in range(74, 92) for x in range(60, 330)
                     )
 
+                def wait_for_lcd_change(reference: bytes, name: str,
+                                        timeout: float = 8.0) -> bytes:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline:
+                        frame = screen(name)
+                        if lcd_changed(reference, frame):
+                            return frame
+                        time.sleep(0.2)
+                    raise RuntimeError(
+                        f"ReactOS Calc LCD did not update after input ({name})"
+                    )
+
+                def button_command_count(control_id: int) -> int:
+                    serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                    marker = f"[MicaNT CalcButton] stage=4 id={control_id} flags="
+                    return serial.count(marker)
+
+                def wait_for_button_command(control_id: int, previous_count: int,
+                                            timeout: float = 8.0) -> int:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline:
+                        count = button_command_count(control_id)
+                        if count > previous_count:
+                            return count
+                        time.sleep(0.1)
+                    raise RuntimeError(
+                        f"ReactOS Calc button {control_id} WM_COMMAND did not return"
+                    )
+
+                def wait_for_lcd_match(reference: bytes, name: str,
+                                       timeout: float = 8.0) -> bytes:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline:
+                        frame = screen(name)
+                        difference = sum(
+                            frame[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3] !=
+                            reference[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]
+                            for y in range(74, 92) for x in range(60, 330)
+                        )
+                        if difference <= 64:
+                            return frame
+                        time.sleep(0.2)
+                    raise RuntimeError(
+                        f"ReactOS Calc LCD did not return to the expected value ({name})"
+                    )
+
+                def caption_difference(left: bytes, right: bytes) -> int:
+                    return sum(
+                        left[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3] !=
+                        right[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]
+                        for y in range(8, 38) for x in range(54, 310)
+                    )
+
+                def wait_for_caption_change(reference: bytes, name: str,
+                                            timeout: float = 8.0) -> bytes:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline:
+                        frame = screen(name)
+                        if caption_difference(reference, frame) > 24:
+                            return frame
+                        time.sleep(0.25)
+                    raise RuntimeError(
+                        "ReactOS Calc source diagnostic did not receive WM_COMMAND "
+                        f"({name}); its caption did not change"
+                    )
+
                 clamp_pointer_to_origin()
+
+                if os.environ.get("MICANT_REACTOS_CALC_SOURCE_DEBUG_TEST") == "1":
+                    click_at(132, 248)  # 1
+                    after_one_command = wait_for_caption_change(
+                        before, "reactos-calc-debug-01-after-one-command.ppm")
+                    click_at(299, 128)  # C
+                    after_clear_command = wait_for_caption_change(
+                        after_one_command,
+                        "reactos-calc-debug-02-after-clear-command.ppm")
+                    print(
+                        "ReactOS Calc source diagnostic: the original mouse path changed "
+                        "the app caption after the 1 and C WM_COMMANDs; inspect retained "
+                        "screenshots for the command IDs.", flush=True)
+                    return
 
                 if os.environ.get("MICANT_REACTOS_CALC_ENABLE_TEST") == "1":
                     # Octal disables 8 and 9; Decimal re-enables them. ReactOS
@@ -2347,31 +2427,49 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
                     return
 
                 # Exercise the actual owner-draw buttons, not keyboard focus.
+                first_one_count = button_command_count(1036)
                 click_at(132, 248)  # 1
-                time.sleep(0.3)
-                after_one = screen("reactos-calc-02-after-one.ppm")
+                wait_for_button_command(1036, first_one_count)
+                after_one = wait_for_lcd_change(
+                    before, "reactos-calc-02-after-one.ppm")
+                clear_count = button_command_count(1071)
                 click_at(299, 128)  # C
-                after_clear = screen("reactos-calc-03-after-clear.ppm")
-                if not lcd_changed(before, after_one):
-                    raise RuntimeError("ReactOS Calc button 1 did not change the display")
-                if not lcd_changed(after_one, after_clear):
-                    raise RuntimeError("ReactOS Calc C button did not clear the display")
+                wait_for_button_command(1071, clear_count)
+                after_clear = wait_for_lcd_change(
+                    after_one, "reactos-calc-03-after-clear.ppm")
+                lcd_difference_from_zero = sum(
+                    after_clear[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3] !=
+                    before[(y * 1024 + x) * 3:(y * 1024 + x) * 3 + 3]
+                    for y in range(74, 92) for x in range(60, 330)
+                )
+                if lcd_difference_from_zero > 64:
+                    raise RuntimeError(
+                        "ReactOS Calc C command changed the display but did not restore zero"
+                    )
+                first_one_count = button_command_count(1036)
                 click_at(132, 248)  # 1
+                wait_for_button_command(1036, first_one_count)
+                back_count = button_command_count(1073)
                 click_at(148, 128)  # Back
-                time.sleep(0.35)
-                after_back = screen("reactos-calc-04-after-back.ppm")
-                if not lcd_changed(after_clear, after_back):
-                    raise RuntimeError("ReactOS Calc Back button did not change the display")
+                wait_for_button_command(1073, back_count)
+                after_back = wait_for_lcd_match(
+                    after_clear, "reactos-calc-04-after-back.ppm")
+                one_count = button_command_count(1036)
                 click_at(132, 248)  # 1
-                for name, x, y in (
-                        ("after-plus", 268, 282),
-                        ("after-second-one", 132, 248),
-                        ("after-equals", 313, 282)):
-                    click_at(x, y)
-                    time.sleep(0.35)
-                    screen(f"reactos-calc-{name}.ppm")
-                time.sleep(0.4)
-                after_calculation = screen("reactos-calc-02-after-1-plus-1.ppm")
+                wait_for_button_command(1036, one_count)
+                after_calculation_start = wait_for_lcd_change(
+                    after_back, "reactos-calc-05-after-first-one.ppm")
+                plus_count = button_command_count(1052)
+                click_at(268, 282)  # +
+                wait_for_button_command(1052, plus_count)
+                second_one_count = button_command_count(1036)
+                click_at(132, 248)  # second 1
+                wait_for_button_command(1036, second_one_count)
+                equals_count = button_command_count(1057)
+                click_at(313, 282)  # =
+                wait_for_button_command(1057, equals_count)
+                after_calculation = wait_for_lcd_change(
+                    after_calculation_start, "reactos-calc-02-after-1-plus-1.ppm")
                 # The LCD sits at screen coordinates x=60..330, y=74..92 in
                 # this deterministic ReactOS standard-layout fixture. Count
                 # dark glyph pixels away from its recessed border; a window
@@ -2853,6 +2951,7 @@ def run_qemu(
     doom_test: bool = False,
     reactos_apps_dir: Path | None = None,
     reactos_app: str | None = None,
+    reactos_debug_image: Path | None = None,
     crash_dump_selftest: bool = False,
     resolution: tuple[int, int] | None = None,
     usb_ehci_test: bool = False,
@@ -2864,6 +2963,8 @@ def run_qemu(
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
+    if reactos_debug_image is not None and reactos_app != "calc":
+        raise RuntimeError("a diagnostic ReactOS image override is limited to Calc")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
@@ -3066,6 +3167,29 @@ def run_qemu(
                 if digest != record.get("sha256") or record.get("machine") != "0x8664":
                     raise RuntimeError(f"ReactOS bundle PE verification failed for {name}")
                 shutil.copy2(app, target / name)
+            if reactos_debug_image is not None:
+                debug_image = reactos_debug_image.expanduser().resolve()
+                if not debug_image.is_file():
+                    raise RuntimeError(
+                        f"diagnostic ReactOS Calc PE does not exist: {debug_image}")
+                debug_pe = inspect_pe(debug_image, "WINDOWS_GUI", allow_imports=True)
+                debug_hash = hashlib.sha256(debug_image.read_bytes()).hexdigest()
+                shutil.copyfile(debug_image, target / "calc.exe")
+                if diagnostics_dir is not None:
+                    (diagnostics_dir / "reactos-calc-debug-image.json").write_text(
+                        json.dumps({
+                            "role": "diagnostic-only; not compatibility evidence",
+                            "source": str(debug_image),
+                            "sha256": debug_hash,
+                            "machine": "AMD64" if debug_pe["machine"] == 0x8664 else
+                                       f"0x{debug_pe['machine']:04x}",
+                            "subsystem": "WINDOWS_GUI",
+                        }, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                print(
+                    "Staged diagnostic ReactOS Calc source build (not original compatibility PE): "
+                    f"{debug_hash}", flush=True)
         # The crash recovery service only opens this directory after restart;
         # the fatal path itself writes to the dedicated reserved partition.
         (esp / "Windows" / "Minidump").mkdir(parents=True)
@@ -3903,6 +4027,8 @@ def main() -> int:
     parser.add_argument("--reactos-app", choices=(
         "winver", "notepad", "calc", "winmine", "sol", "mspaint",
         "regedit", "taskmgr", "wordpad", "cmd"))
+    parser.add_argument("--reactos-debug-image", type=Path,
+                        help="replace only Calc after verifying the official bundle; diagnostic only")
     parser.add_argument("--doom-test", action="store_true",
                         help="launch doom.exe, play E1M1 with QMP, and retain scanout screenshots")
     parser.add_argument("--process-memory-selftest", action="store_true")
@@ -3916,6 +4042,8 @@ def main() -> int:
 
     if bool(args.reactos_apps_dir) != bool(args.reactos_app):
         parser.error("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
+    if args.reactos_debug_image is not None and args.reactos_app != "calc":
+        parser.error("--reactos-debug-image is only valid with --reactos-app calc")
 
     if args.ovmf_code is None:
         parser.error("--ovmf-code or MICANT_OVMF_CODE is required")
@@ -3947,6 +4075,7 @@ def main() -> int:
             args.doom_test,
             args.reactos_apps_dir,
             args.reactos_app,
+            args.reactos_debug_image,
             args.crash_dump_selftest,
             tuple(int(part) for part in args.resolution.split("x"))
                 if args.resolution else None,

@@ -18698,40 +18698,6 @@ static void Test_Horizon110_WinNT_Kernel32_And_Advapi32_System32_PE32Plus_DLL_AB
 }
 
 // ============================================================================
-// Suite 327: Horizon 111 (Kernel Unit #83) - Sovereign WinNT Core User-Mode
-// System32 DLLs (user32.dll, gdi32.dll & imm32.dll) Official PE32+ Exports,
-// Win32 HWND/HDC/HMONITOR, PeekMessageW Game Loop, 8000Hz WM_INPUT & IMM32
-// ============================================================================
-static void Test_Horizon111_WinNT_User32_Gdi32_And_Imm32_System32_PE32Plus_DLL_ABI() {
-    std::cout << "\n[TEST] Suite 327: Horizon 111 - Sovereign WinNT Core System32 DLLs (user32.dll, gdi32.dll & imm32.dll) Official PE32+ Exports...\n";
-
-    micant::um::winnt_user32_gdi32_imm32_abi::InitializeWinNtUser32Gdi32Imm32Subsystem();
-    const auto rep = micant::um::winnt_user32_gdi32_imm32_abi::WinNtUser32Gdi32Imm32Coordinator::instance().runUser32Gdi32Imm32Audit();
-
-    std::cout << "  [Horizon 111 WinNT Core System32: user32.dll (26 Exports) + gdi32.dll (14 Exports) + imm32.dll (8 Exports) + 8000Hz WM_INPUT]\n"
-              << "    HWND=0x" << std::hex << reinterpret_cast<uintptr_t>(rep.createdHwnd)
-              << " | HMONITOR=0x" << reinterpret_cast<uintptr_t>(rep.associatedHMonitor) << std::dec
-              << " | Client=" << rep.clientWidth << "x" << rep.clientHeight
-              << " | RawInput8kHz=" << (rep.rawInput8000HzMouseVerified ? "YES" : "NO")
-              << " | IMEGuard=" << (rep.imm32GameImeDisableVerified ? "YES" : "NO") << "\n";
-    TEST_ASSERT(rep.user32ExportCount == 26u &&
-                rep.gdi32ExportCount == 14u &&
-                rep.imm32ExportCount == 8u &&
-                rep.createdHwnd != nullptr &&
-                rep.createdHdc != nullptr &&
-                rep.associatedHMonitor == reinterpret_cast<void*>(static_cast<uintptr_t>(0x00010001ULL)) &&
-                rep.clientWidth == 3840 &&
-                rep.clientHeight == 2160 &&
-                rep.peekMessagePumpVerified &&
-                rep.rawInput8000HzMouseVerified &&
-                rep.gdiPixelFormatSwapBuffersVerified &&
-                rep.imm32GameImeDisableVerified,
-                "WinNT user32.dll, gdi32.dll, and imm32.dll System32 PE32+ exports, HWND/HDC/HMONITOR, and 8000Hz WM_INPUT must verify cleanly");
-
-    std::cout << "[TEST] Suite 327: Horizon 111 - Sovereign WinNT Core System32 DLLs (user32.dll, gdi32.dll & imm32.dll) Official PE32+ Exports PASSED.\n";
-}
-
-// ============================================================================
 // Suite 328: Horizon 112 (Kernel Unit #84) - Sovereign WinNT Core User-Mode
 // System32 DLLs (ole32.dll, dwmapi.dll & winmm.dll) Official PE32+ Exports +
 // Complete 24-DLL System32 Ecosystem Seal (8 WinNT Core + 16 DirectX/Media)
@@ -18778,7 +18744,7 @@ static void Test_Horizon112_WinNT_Ole32_Dwmapi_WinMM_And_24_System32_DLL_Seal() 
               << "    WinNTCoreDLLs=" << verifiedDiskDlls << "/" << rep.winntCoreSystem32DllCount
               << " | DirectXDLLs=" << rep.prismxDirectXSystem32DllCount
               << " | TotalSystem32DLLs=" << rep.totalSystem32PeDllCount
-              << " | CoreExports=" << rep.totalWinNtCoreExports
+              << " | KernelOwnedCoreExports=" << rep.kernelOwnedWinNtExports
               << " | Horizons=" << rep.totalHorizons
               << " | Units=" << rep.totalKernelUnits
               << " | Suites=" << rep.totalTestSuites << " (+PrismX " << rep.prismxStandaloneSuites << "/40)\n";
@@ -18790,7 +18756,7 @@ static void Test_Horizon112_WinNT_Ole32_Dwmapi_WinMM_And_24_System32_DLL_Seal() 
                 rep.winntCoreSystem32DllCount == 8u &&
                 rep.prismxDirectXSystem32DllCount == 16u &&
                 rep.totalSystem32PeDllCount == 24u &&
-                rep.totalWinNtCoreExports == 104u &&
+                rep.kernelOwnedWinNtExports == 56u &&
                 rep.totalHorizons == 112u &&
                 rep.totalKernelUnits == 84u &&
                 rep.totalTestSuites == 328u &&
@@ -18932,7 +18898,7 @@ static void Test_Horizon115_WinNT_Shell32_DbgHelp_Version_PE32Plus_IAT_Loader_An
               << "    WinNTCoreDLLs=" << verifiedDiskDlls << "/" << rep.winntCoreSystem32DllCount
               << " | DirectXDLLs=" << rep.prismxDirectXSystem32DllCount
               << " | TotalSystem32DLLs=" << rep.totalSystem32PeDllCount
-              << " | CoreExports=" << rep.totalWinNtCoreExports
+              << " | KernelOwnedCoreExports=" << rep.kernelOwnedWinNtExports
               << " | SnappedIAT=" << rep.snappedPe32PlusIatEntries
               << " | Horizons=" << rep.totalHorizons
               << " | Units=" << rep.totalKernelUnits
@@ -18946,7 +18912,7 @@ static void Test_Horizon115_WinNT_Shell32_DbgHelp_Version_PE32Plus_IAT_Loader_An
                 rep.winntCoreSystem32DllCount == 20u &&
                 rep.prismxDirectXSystem32DllCount == 20u &&
                 rep.totalSystem32PeDllCount == 40u &&
-                rep.totalWinNtCoreExports == 217u &&
+                rep.kernelOwnedWinNtExports == 169u &&
                 rep.snappedPe32PlusIatEntries == 6u &&
                 rep.totalHorizons == 115u &&
                 rep.totalKernelUnits == 87u &&
@@ -19092,7 +19058,7 @@ static void Test_Horizon118_WinNT_Msvcp140_Pdata_SEH_Unwind_And_44_DLL_Seal() {
                 rep.winntCoreAndCrtSystem32DllCount == 24u &&
                 rep.prismxDirectXSystem32DllCount == 20u &&
                 rep.totalSystem32PeDllCount == 44u &&
-                rep.totalWinNtAndCrtExports == 263u &&
+                rep.totalWinNtAndCrtExports == 215u &&
                 rep.totalHorizons == 118u &&
                 rep.totalKernelUnits == 90u &&
                 rep.totalTestSuites == 334u &&

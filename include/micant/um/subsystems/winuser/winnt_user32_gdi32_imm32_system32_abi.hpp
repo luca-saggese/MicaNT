@@ -99,39 +99,4 @@ struct WinNtRawInputPacket {
     WinNtRawMouse       mouse{};
 };
 
-struct Horizon111User32Gdi32Imm32AuditReport {
-    uint32_t user32ExportCount{0};
-    uint32_t gdi32ExportCount{0};
-    uint32_t imm32ExportCount{0};
-    void*    createdHwnd{nullptr};
-    void*    createdHdc{nullptr};
-    void*    associatedHMonitor{nullptr};
-    int32_t  clientWidth{0};
-    int32_t  clientHeight{0};
-    bool     peekMessagePumpVerified{false};
-    bool     rawInput8000HzMouseVerified{false};
-    bool     gdiPixelFormatSwapBuffersVerified{false};
-    bool     imm32GameImeDisableVerified{false};
-};
-
-class WinNtUser32Gdi32Imm32Coordinator {
-public:
-    static WinNtUser32Gdi32Imm32Coordinator& instance() noexcept {
-        static WinNtUser32Gdi32Imm32Coordinator s_inst;
-        return s_inst;
-    }
-
-    void initialize() noexcept;
-    [[nodiscard]] bool isInitialized() const noexcept { return m_initialized; }
-
-    [[nodiscard]] Horizon111User32Gdi32Imm32AuditReport runUser32Gdi32Imm32Audit() noexcept;
-
-private:
-    WinNtUser32Gdi32Imm32Coordinator() = default;
-    bool m_initialized{false};
-    Horizon111User32Gdi32Imm32AuditReport m_cachedReport{};
-};
-
-void InitializeWinNtUser32Gdi32Imm32Subsystem() noexcept;
-
 } // namespace micant::um::winnt_user32_gdi32_imm32_abi

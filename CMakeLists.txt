@@ -174,9 +174,8 @@ add_library(ntoskrnl_core STATIC
     ${NTOSKRNL_SUBSYSTEM_SOURCES}
 )
 
-# Win32 user APIs are independent user-mode PE DLLs. Keep their implementation
-# out of ntoskrnl_core; each DLL is built from the shared ABI source with only
-# its own export surface enabled.
+# Win32 user APIs are independent user-mode PE DLLs. Keep them out of
+# ntoskrnl_core and compile each DLL from its own implementation file.
 if(WIN32)
     # The window manager has one process-wide state owner. User32 resolves this
     # DLL at runtime so it never embeds a private copy of TitanWin32kSubsystem.
@@ -191,19 +190,18 @@ if(WIN32)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/system32"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/system32")
 
-    foreach(_dll IN ITEMS USER32 GDI32 IMM32)
-        string(TOLOWER "${_dll}" _dll_lower)
-        add_library(micant_${_dll_lower} SHARED
-            kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp)
-        add_dependencies(micant_${_dll_lower} micant_win32k)
-        target_compile_definitions(micant_${_dll_lower} PRIVATE
-            BUILD_SYSTEM32_${_dll}_DLL BUILD_SYSTEM32_STANDALONE_DLL MICANT_WIN32K_IMPORTS)
-        target_link_libraries(micant_${_dll_lower} PRIVATE micant_win32k)
+    foreach(_dll IN ITEMS user32 gdi32 imm32)
+        add_library(micant_${_dll} SHARED
+            tools/dlls/${_dll}.cpp)
+        add_dependencies(micant_${_dll} micant_win32k)
+        target_compile_definitions(micant_${_dll} PRIVATE
+            BUILD_SYSTEM32_STANDALONE_DLL MICANT_WIN32K_IMPORTS)
+        target_link_libraries(micant_${_dll} PRIVATE micant_win32k)
         if(MINGW)
-            target_link_options(micant_${_dll_lower} PRIVATE -static)
+            target_link_options(micant_${_dll} PRIVATE -static)
         endif()
-        set_target_properties(micant_${_dll_lower} PROPERTIES
-            OUTPUT_NAME "${_dll_lower}"
+        set_target_properties(micant_${_dll} PROPERTIES
+            OUTPUT_NAME "${_dll}"
             PREFIX ""
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/system32"
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/system32")
@@ -441,14 +439,17 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
 
     foreach(_client IN ITEMS user32 gdi32 imm32)
-        string(TOUPPER "${_client}" _client_upper)
         add_library(${_client}_boot SHARED EXCLUDE_FROM_ALL
-            kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp
+            tools/dlls/${_client}.cpp
         )
         target_compile_definitions(${_client}_boot PRIVATE
             BUILD_SYSTEM32_STANDALONE_DLL
-            "BUILD_SYSTEM32_${_client_upper}_DLL" MICANT_WIN32K_IMPORTS
+            MICANT_WIN32K_IMPORTS
         )
+        if(_client STREQUAL "user32")
+            target_compile_definitions(${_client}_boot PRIVATE
+                BUILD_SYSTEM32_USER32_DLL)
+        endif()
         if(_client STREQUAL "user32" OR _client STREQUAL "gdi32")
             target_compile_definitions(${_client}_boot PRIVATE MICANT_NATIVE_USERMODE)
         endif()
@@ -968,7 +969,6 @@ if (MICANT_ENABLE_BAREMETAL)
     # User32 owns per-process icon pixels and file-backed icon loading through
     # the native file/memory system calls. Those operations remain in Ring 3.
     target_link_libraries(user32_boot PRIVATE ntdll_boot kernel32_boot gdi32_boot uxtheme_boot)
-    target_sources(user32_boot PRIVATE kernel/ps/winnt_user32_menu_abi.cpp)
     target_compile_definitions(user32_boot PRIVATE MICANT_GDI32_IMPORTS MICANT_UXTHEME_IMPORTS)
     target_link_libraries(gdi32_boot PRIVATE ntdll_boot)
 

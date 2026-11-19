@@ -197,14 +197,13 @@ Horizon112System32Complete24DllSealReport WinNtOle32DwmapiWinmmSealCoordinator::
     rep.winmmExportCount   = 8;
 
     auto k32Rep = winnt_kernel32_advapi32_abi::WinNtKernel32Advapi32Coordinator::instance().runKernel32Advapi32Audit();
-    auto u32Rep = winnt_user32_gdi32_imm32_abi::WinNtUser32Gdi32Imm32Coordinator::instance().runUser32Gdi32Imm32Audit();
-
     rep.winntCoreSystem32DllCount     = 8;  // kernel32, advapi32, user32, gdi32, imm32, ole32, dwmapi, winmm
     rep.prismxDirectXSystem32DllCount = 16; // dxgi, d3d12, d3d11, d3d9, fxc47, xinput1_4, xaudio2_9, dinput8, d2d1, dwrite, dcomp, mfplat, mfreadwrite, dxcore, vulkan-1, opengl32
     rep.totalSystem32PeDllCount       = rep.winntCoreSystem32DllCount + rep.prismxDirectXSystem32DllCount; // 24
-    rep.totalWinNtCoreExports         = k32Rep.kernel32ExportCount + k32Rep.advapi32ExportCount +
-                                        u32Rep.user32ExportCount + u32Rep.gdi32ExportCount + u32Rep.imm32ExportCount +
-                                        rep.ole32ExportCount + rep.dwmapiExportCount + rep.winmmExportCount; // 104
+    // This kernel-owned compatibility seal does not execute Ring 3 User32,
+    // GDI32 or IMM32 code; those DLLs are built and tested separately.
+    rep.kernelOwnedWinNtExports       = k32Rep.kernel32ExportCount + k32Rep.advapi32ExportCount +
+                                        rep.ole32ExportCount + rep.dwmapiExportCount + rep.winmmExportCount;
     rep.totalHorizons                 = 112;
     rep.totalKernelUnits              = 84;
     rep.totalTestSuites               = 328;

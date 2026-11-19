@@ -46,22 +46,18 @@ def variants() -> tuple[Variant, ...]:
     for dll in ("USER32", "GDI32", "IMM32"):
         result.append(Variant(
             f"{dll.lower()}_boot",
-            "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp",
-            ("BUILD_SYSTEM32_STANDALONE_DLL",
-             f"BUILD_SYSTEM32_{dll}_DLL", "MICANT_WIN32K_IMPORTS"),
+            f"tools/dlls/{dll.lower()}.cpp",
+            ("BUILD_SYSTEM32_STANDALONE_DLL", "MICANT_WIN32K_IMPORTS"),
         ))
     result.extend((
         Variant("micant_win32k", "kernel/ps/winnt_win32k_server.cpp",
                 ("BUILD_SYSTEM32_STANDALONE_DLL", "MICANT_WIN32K_EXPORTS")),
-        Variant("micant_user32", "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp",
-                ("BUILD_SYSTEM32_STANDALONE_DLL", "BUILD_SYSTEM32_USER32_DLL",
-                 "MICANT_WIN32K_IMPORTS")),
-        Variant("micant_gdi32", "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp",
-                ("BUILD_SYSTEM32_STANDALONE_DLL", "BUILD_SYSTEM32_GDI32_DLL",
-                 "MICANT_WIN32K_IMPORTS")),
-        Variant("micant_imm32", "kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp",
-                ("BUILD_SYSTEM32_STANDALONE_DLL", "BUILD_SYSTEM32_IMM32_DLL",
-                 "MICANT_WIN32K_IMPORTS")),
+        Variant("micant_user32", "tools/dlls/user32.cpp",
+                ("BUILD_SYSTEM32_STANDALONE_DLL", "MICANT_WIN32K_IMPORTS")),
+        Variant("micant_gdi32", "tools/dlls/gdi32.cpp",
+                ("BUILD_SYSTEM32_STANDALONE_DLL", "MICANT_WIN32K_IMPORTS")),
+        Variant("micant_imm32", "tools/dlls/imm32.cpp",
+                ("BUILD_SYSTEM32_STANDALONE_DLL", "MICANT_WIN32K_IMPORTS")),
     ))
     for source in (
         "tools/explorer_shell_app.cpp",

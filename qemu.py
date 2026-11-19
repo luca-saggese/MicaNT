@@ -331,6 +331,10 @@ def main() -> int:
         help="launch one original ReactOS PE after Explorer and interact using QMP",
     )
     parser.add_argument(
+        "--reactos-debug-image", type=Path,
+        help="diagnostic-only replacement image for ReactOS Calc; never used as compatibility evidence",
+    )
+    parser.add_argument(
         "--doom-test", action="store_true",
         help="run real doom.exe in the guest, play E1M1 with QMP, and retain screenshots",
     )
@@ -380,6 +384,8 @@ def main() -> int:
             args.timeout = 180
     elif args.reactos_apps_dir is not None:
         parser.error("--reactos-apps-dir requires --reactos-app")
+    if args.reactos_debug_image is not None and args.reactos_app != "calc":
+        parser.error("--reactos-debug-image is only valid with --reactos-app calc")
     if args.reactos_app and (args.cmd_test or args.doom_test or args.taskmgr_selftest or
                              args.theme_test or args.textbox_test or args.process_memory_selftest or
                              args.network_test or args.usb_test or
@@ -632,6 +638,11 @@ def main() -> int:
                 "--reactos-apps-dir", str(args.reactos_apps_dir.expanduser().resolve()),
                 "--reactos-app", args.reactos_app,
             ])
+            if args.reactos_debug_image is not None:
+                boot_command.extend([
+                    "--reactos-debug-image",
+                    str(args.reactos_debug_image.expanduser().resolve()),
+                ])
             if not args.headless:
                 boot_command.append("--interactive")
         elif args.crash_dump_selftest:

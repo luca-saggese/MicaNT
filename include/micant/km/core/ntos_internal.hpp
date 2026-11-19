@@ -260,9 +260,6 @@ void PrismXVulkan1OpenGL32SixteenDllSealInitializeExecutiveSubsystem() noexcept;
 // Sovereign WinNT Core User-Mode System32 DLLs: kernel32.dll & advapi32.dll Official PE32+ Exports (kernel/ps/winnt_kernel32_advapi32_system32_abi.cpp)
 void WinNtKernel32Advapi32InitializeExecutiveSubsystem() noexcept;
 
-// Sovereign WinNT Core User-Mode System32 DLLs: user32.dll, gdi32.dll & imm32.dll Official PE32+ Exports (kernel/ps/winnt_user32_gdi32_imm32_system32_abi.cpp)
-void WinNtUser32Gdi32Imm32InitializeExecutiveSubsystem() noexcept;
-
 // Sovereign WinNT Core User-Mode System32 DLLs: ole32.dll, dwmapi.dll & winmm.dll Official PE32+ Exports + 24-DLL System32 Seal (kernel/ps/winnt_ole32_dwmapi_winmm_system32_seal.cpp)
 void WinNtOle32DwmapiWinmmSealInitializeExecutiveSubsystem() noexcept;
 

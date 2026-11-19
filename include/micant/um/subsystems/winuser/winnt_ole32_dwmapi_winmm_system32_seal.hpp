@@ -13,7 +13,6 @@
 
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/ntstatus.hpp"
-#include "micant/um/subsystems/winuser/winnt_user32_gdi32_imm32_system32_abi.hpp"
 
 namespace micant::um::winnt_ole32_dwmapi_winmm_seal {
 
@@ -46,7 +45,7 @@ struct Horizon112System32Complete24DllSealReport {
     uint32_t winntCoreSystem32DllCount{0};     // 8: kernel32, advapi32, user32, gdi32, imm32, ole32, dwmapi, winmm
     uint32_t prismxDirectXSystem32DllCount{0}; // 16: dxgi, d3d12, d3d11, d3d9, fxc47, xinput1_4, xaudio2_9, dinput8, d2d1, dwrite, dcomp, mfplat, mfreadwrite, dxcore, vulkan-1, opengl32
     uint32_t totalSystem32PeDllCount{0};       // 24 total PE32+ .dll binaries
-    uint32_t totalWinNtCoreExports{0};
+    uint32_t kernelOwnedWinNtExports{0};
     uint32_t totalHorizons{0};                 // 112
     uint32_t totalKernelUnits{0};              // 84
     uint32_t totalTestSuites{0};               // 328

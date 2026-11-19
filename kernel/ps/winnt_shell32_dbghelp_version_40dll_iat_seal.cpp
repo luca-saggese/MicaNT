@@ -310,10 +310,10 @@ Horizon115System32Complete40DllIatSealReport WinNtShell32DbgHelpVersion40DllSeal
     rep.winntCoreSystem32DllCount     = 20; // 8 (H110-112) + 4 (H113: ntdll/ws2_32/iphlpapi/winhttp) + 4 (H114: bcrypt/crypt32/secur32/wintrust) + 4 (H115: shell32/shlwapi/dbghelp/version)
     rep.prismxDirectXSystem32DllCount = 20; // 16 (H101-109) + 4 (Suite 41: d3d10_1/dsound/ddraw/mf)
     rep.totalSystem32PeDllCount       = rep.winntCoreSystem32DllCount + rep.prismxDirectXSystem32DllCount; // 40
-    rep.totalWinNtCoreExports         = h112.totalWinNtCoreExports +
+    rep.totalWinNtCoreExports         = h112.kernelOwnedWinNtExports +
                                         h113.ntdllExportCount + h113.ws2ExportCount + h113.iphlpapiExportCount + h113.winhttpExportCount +
                                         h114.bcryptExportCount + h114.crypt32ExportCount + h114.secur32ExportCount + h114.wintrustExportCount +
-                                        rep.shell32ExportCount + rep.shlwapiExportCount + rep.dbghelpExportCount + rep.versionExportCount; // 217
+                                        rep.shell32ExportCount + rep.shlwapiExportCount + rep.dbghelpExportCount + rep.versionExportCount; // 169
     rep.totalHorizons                 = 115;
     rep.totalKernelUnits              = 87;
     rep.totalTestSuites               = 331;
