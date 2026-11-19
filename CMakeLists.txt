@@ -670,7 +670,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(uxtheme_boot PRIVATE
         -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
     )
-    target_link_libraries(uxtheme_boot PRIVATE win32k_boot gdi32_boot)
+    target_link_libraries(uxtheme_boot PRIVATE win32k_boot gdi32_boot kernel32_boot ntdll_boot ucrtbase_boot)
     set_target_properties(uxtheme_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "uxtheme"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -1051,8 +1051,8 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "taskmgr_probe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
-    # The compositor is an independent, import-free Ring 3 image. Its shared
-    # section views are installed by the kernel before either process starts.
+    # UxTheme owns GTK theme loading and is initialized by the compositor before
+    # the first shared frame is presented.
     add_executable(compositor_boot EXCLUDE_FROM_ALL
         tools/compositor_app.cpp tools/liquid_glass_effect.cpp)
     target_compile_options(compositor_boot PRIVATE
@@ -1061,6 +1061,7 @@ if (MICANT_ENABLE_BAREMETAL)
     )
     target_compile_definitions(compositor_boot PRIVATE MICANT_COMPOSITOR_DEBUG_HUD=$<BOOL:${MICANT_COMPOSITOR_DEBUG_HUD}>)
     target_compile_definitions(compositor_boot PRIVATE MICANT_NATIVE_USERMODE)
+    target_compile_definitions(compositor_boot PRIVATE MICANT_UXTHEME_IMPORTS)
     if (MICANT_COMPOSITOR_LOCAL_STATS)
         target_compile_definitions(compositor_boot PRIVATE MICANT_COMPOSITOR_LOCAL_STATS=1)
     endif()
@@ -1208,7 +1209,7 @@ if (MICANT_ENABLE_BAREMETAL)
         PREFIX "" OUTPUT_NAME "iphlpapi"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
-    target_link_libraries(compositor_boot PRIVATE ntdll_boot)
+    target_link_libraries(compositor_boot PRIVATE ntdll_boot uxtheme_boot)
 
     # User32 owns per-process icon pixels and file-backed icon loading through
     # the native file/memory system calls. Those operations remain in Ring 3.

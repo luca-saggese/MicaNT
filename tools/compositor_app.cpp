@@ -1,4 +1,5 @@
 #include "micant/shared/compositor_surface.h"
+#include "micant/shared/native_uxtheme_api.h"
 #include "micant/shared/font8x8.hpp"
 #include "micant/shared/ntdef.hpp"
 #include "micant/shared/pixel_composite.h"
@@ -11,6 +12,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+extern "C" void* __stdcall CreateThread(void*, size_t,
+    uint32_t (__stdcall *)(void*), void*, uint32_t, uint32_t*);
+extern "C" int32_t __stdcall CloseHandle(void*);
 
 #ifndef MICANT_COMPOSITOR_LOCAL_STATS
 #define MICANT_COMPOSITOR_LOCAL_STATS 0
@@ -417,6 +422,26 @@ void buildAnimationFrames(const MicaCompositorMetadataStore& metadata,
 void print(const char* text, size_t length) noexcept {
     (void)micant::sys::invokeUserService(0x25,
         reinterpret_cast<uint64_t>(text), length);
+}
+
+uint32_t __stdcall initializeThemeWorker(void*) noexcept {
+    const int32_t status = MicaUxThemeInitialize();
+    if (status == 1) {
+        constexpr char loaded[] = "[MicaNT Compositor] UxTheme loaded active GTK profile and caption assets\r\n";
+        print(loaded, sizeof(loaded) - 1);
+    } else {
+        constexpr char failed[] = "[MicaNT Compositor] UxTheme GTK load failed at stage ";
+        print(failed, sizeof(failed) - 1);
+        char digits[10]{};
+        size_t count{};
+        uint32_t value = status < 0 ? 0u : static_cast<uint32_t>(status);
+        do { digits[count++] = static_cast<char>('0' + value % 10u); value /= 10u; }
+        while (value && count < sizeof(digits));
+        while (count) print(&digits[--count], 1);
+        constexpr char suffix[] = "; base theme remains active\r\n";
+        print(suffix, sizeof(suffix) - 1);
+    }
+    return 0;
 }
 
 uint64_t performanceMilliseconds() noexcept {
@@ -2662,6 +2687,13 @@ extern "C" void _start() noexcept {
                 constexpr char presented[] = "[MicaNT Compositor] First shared frame presented\r\n";
                 print(presented, sizeof(presented) - 1);
                 firstPresentationReported = true;
+                void* themeThread = CreateThread(nullptr, 0,
+                    initializeThemeWorker, nullptr, 0, nullptr);
+                if (themeThread) (void)CloseHandle(themeThread);
+                else {
+                    constexpr char failed[] = "[MicaNT Compositor] Could not start UxTheme loader thread\r\n";
+                    print(failed, sizeof(failed) - 1);
+                }
             }
             if (frameWasPresented) {
 #if MICANT_COMPOSITOR_LOCAL_STATS

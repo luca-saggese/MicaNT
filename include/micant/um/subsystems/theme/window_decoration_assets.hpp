@@ -5,12 +5,32 @@
 #include "micant/shared/theme_snapshot.h"
 #include "micant/um/subsystems/imaging/bmp_png_decoder.hpp"
 #include "micant/um/subsystems/imaging/native_image_allocator.hpp"
-#include <windows.h>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <span>
+
+#ifndef _WINDOWS_
+using HANDLE = void*;
+using DWORD = uint32_t;
+using BOOL = int32_t;
+struct LARGE_INTEGER { int64_t QuadPart; };
+inline constexpr DWORD GENERIC_READ = 0x80000000u;
+inline constexpr DWORD FILE_SHARE_READ = 1u;
+inline constexpr DWORD OPEN_EXISTING = 3u;
+inline constexpr DWORD FILE_ATTRIBUTE_NORMAL = 0x80u;
+inline constexpr DWORD ERROR_HANDLE_EOF = 38u;
+#define INVALID_HANDLE_VALUE reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1))
+extern "C" {
+__declspec(dllimport) HANDLE __stdcall CreateFileW(const wchar_t*, DWORD, DWORD,
+    void*, DWORD, DWORD, HANDLE);
+__declspec(dllimport) BOOL __stdcall GetFileSizeEx(HANDLE, LARGE_INTEGER*);
+__declspec(dllimport) BOOL __stdcall ReadFile(HANDLE, void*, DWORD, DWORD*, void*);
+__declspec(dllimport) DWORD __stdcall GetLastError();
+__declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE);
+}
+#endif
 
 namespace micant::um::theme {
 

@@ -70,6 +70,13 @@ MICANT_UXTHEME_API void* WINAPI BeginBufferedAnimation(void*, void*, const void*
 MICANT_UXTHEME_API int32_t WINAPI EndBufferedAnimation(void*, int32_t);
 MICANT_UXTHEME_API int32_t WINAPI BufferedPaintStopAllAnimations(void*);
 
+/* MicaNT theme service extensions. The compositor owns initialization and
+   selection; UxTheme loads GTK packages and publishes them through Win32k. */
+MICANT_UXTHEME_API int32_t WINAPI MicaUxThemeInitialize(void);
+MICANT_UXTHEME_API int32_t WINAPI MicaUxThemeSelectProfile(const char* profile);
+MICANT_UXTHEME_API int32_t WINAPI MicaUxThemeGetCurrentProfile(char* buffer, size_t capacity);
+MICANT_UXTHEME_API int32_t WINAPI MicaUxThemePublishSnapshot(const void* snapshot);
+
 #ifdef __cplusplus
 }
 #endif

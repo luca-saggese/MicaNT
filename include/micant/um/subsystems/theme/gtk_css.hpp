@@ -100,7 +100,10 @@ public:
                 continue;
             }
 
-            std::array<CssSelector, kMaxSelectorsPerRule> selectors{};
+            // Keep the selector scratch space off the thread stack. The full
+            // selector record is sizeable and this parser runs on a small
+            // user thread during compositor startup.
+            std::vector<CssSelector> selectors;
             size_t selectorCount{};
             const auto selectorStatus = parseSelectorGroup(selectors, selectorCount);
             if (selectorStatus != CssStatus::Success)
@@ -190,7 +193,7 @@ private:
         destination[count] = '\0';
         return true;
     }
-    CssStatus parseSelectorGroup(std::array<CssSelector, kMaxSelectorsPerRule>& selectors,
+    CssStatus parseSelectorGroup(std::vector<CssSelector>& selectors,
                                  size_t& count) noexcept {
         count = 0;
         size_t segmentStart = position_;
@@ -207,8 +210,9 @@ private:
                 while (first < last && isSpace(input_[first])) ++first;
                 while (last > first && isSpace(input_[last - 1])) --last;
                 if (first == last) return CssStatus::Malformed;
-                if (count == selectors.size()) return CssStatus::LimitExceeded;
-                const auto status = parseSelectorText(input_.substr(first, last - first), selectors[count]);
+                if (count == kMaxSelectorsPerRule) return CssStatus::LimitExceeded;
+                selectors.emplace_back();
+                const auto status = parseSelectorText(input_.substr(first, last - first), selectors.back());
                 if (status != CssStatus::Success) return status;
                 ++count;
                 if (c == '{') return CssStatus::Success;

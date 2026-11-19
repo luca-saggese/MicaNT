@@ -1306,6 +1306,7 @@ uint32_t Win32ErrorFromNtStatus(int32_t status) noexcept {
     switch (static_cast<uint32_t>(status)) {
         case 0xC0000008u: return 6;   // ERROR_INVALID_HANDLE
         case 0xC000000Du: return 87;  // ERROR_INVALID_PARAMETER
+        case 0xC0000011u: return 38;  // ERROR_HANDLE_EOF
         case 0xC0000022u: return 5;   // ERROR_ACCESS_DENIED
         case 0xC0000034u: return 2;   // ERROR_FILE_NOT_FOUND
         case 0xC000003Au: return 3;   // ERROR_PATH_NOT_FOUND
@@ -3578,6 +3579,7 @@ uint32_t Win32ErrorFromNtStatus(int32_t status) noexcept {
     switch (static_cast<uint32_t>(status)) {
         case 0xC0000008U: return 6;
         case 0xC000000DU: return 87;
+        case 0xC0000011U: return 38;
         case 0xC0000022U: return 5;
         case 0xC000009AU: return 8;
         case 0xC00000BBU: return 50;

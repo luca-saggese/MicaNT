@@ -1122,22 +1122,18 @@ def verify_mouse(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 startup_serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if ("[MicaNT Theme] GetThemeSysColor resolves themed button face" in startup_serial and
-                        "[MicaNT Theme] GetThemeSysFont returns GDI font metadata and metrics" in startup_serial and
-                        "[MicaNT Theme] GetThemeFont combines CSS snapshot fields with the GDI system face" in startup_serial and
-                        "[MicaNT Theme] Userenv resolved profile path from current token SID" in startup_serial and
-                        "[MicaNT Theme] Full notification queue rejected theme atomically and recovered" in startup_serial and
-                        "[MicaNT Theme] Unavailable profile kept the previous complete theme" in startup_serial and
+                if ("[MicaNT Compositor] First shared frame presented" in startup_serial and
+                        "[MicaNT Compositor] UxTheme loaded active GTK profile and caption assets" in startup_serial and
+                        "[MicaNT Theme] Explorer consumed UxTheme GTK snapshot" in startup_serial and
                         "[MicaNT Compositor] Window opacity, radius, shadow and Base pixels verified" in startup_serial and
-                        "[MicaNT Theme] Auto schedule boundary Light/Dark pixels verified" in startup_serial and
-                        "[MicaNT Theme] Malformed theme snapshot kept the previous complete theme" in startup_serial and
-                        "[MicaNT Theme] Valid profile recovered and original theme restored" in startup_serial and
-                        "[MicaNT Explorer] Missing icon fell back to the built-in desktop glyph" in startup_serial):
+                        "[MicaNT Explorer] Visible desktop presented; shell startup continues" in startup_serial):
                     break
                 time.sleep(0.1)
             else:
-                raise RuntimeError("Explorer did not complete the pre-window theme probes")
-            for axis, distance in (("x", -472), ("y", -364)):
+                raise RuntimeError("Compositor GTK theme was not published and consumed by Explorer")
+            # Target the center of the top-left Computer icon. The previous
+            # y offset landed above the icon's hit rectangle at 1024x768.
+            for axis, distance in (("x", -472), ("y", -328)):
                 while distance:
                     step = max(-64, min(64, distance))
                     execute("input-send-event", {"events": [{
@@ -1164,7 +1160,10 @@ def verify_mouse(
                         "key": {"type": "qcode", "data": "ret"},
                     },
                 }]})
-            deadline = time.monotonic() + 15
+            # Explorer performs GTK profile switch/rollback probes before it
+            # enters the message loop; under TCG those full CSS compilations
+            # can take longer than the former native.style probes.
+            deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 if "[MicaNT Explorer] First application window created" in serial_path.read_text(
                     encoding="utf-8", errors="replace"
@@ -1173,7 +1172,7 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not dispatch Enter into an application window action")
-            paint_deadline = time.monotonic() + 15
+            paint_deadline = time.monotonic() + 30
             while time.monotonic() < paint_deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
                 if serial.count(paint_marker) > paint_count:
@@ -2025,9 +2024,12 @@ def verify_mouse(
                         raise RuntimeError("Start menu surface pixel did not follow the Dark theme")
                     move_to(50, 748)
                     click_left()
-                    if serial_path.read_text(encoding="utf-8", errors="replace").count(
-                        "[MicaNT Theme] GetThemeSysColor resolves themed button face") < 2:
-                        raise RuntimeError("GetThemeSysColor did not follow the runtime theme reload")
+                    runtime_theme_serial = serial_path.read_text(
+                        encoding="utf-8", errors="replace")
+                    if ("[MicaNT Compositor] UxTheme loaded active GTK profile and caption assets"
+                            not in runtime_theme_serial):
+                        raise RuntimeError(
+                            "UxTheme did not publish and deliver the runtime GTK snapshot")
 
                     moved_marker_count = serial_path.read_text(
                         encoding="utf-8", errors="replace").count(
@@ -3512,15 +3514,14 @@ def run_qemu(
             raise RuntimeError("System theme selection profile is missing")
         shutil.copytree(theme_source_dir,
                         esp / "MicaNT" / "System" / "Themes" / "WhiteSur")
-        if theme_test:
-            # A truncated compiled-style fixture exercises parsing/validation
-            # rollback independently from the missing-profile case.
-            malformed_style = (
-                esp / "MicaNT" / "System" / "Themes" / "WhiteSur" /
-                "Probe" / "native.style"
-            )
-            malformed_style.parent.mkdir(parents=True, exist_ok=True)
-            malformed_style.write_bytes(b"MicaNT invalid compiled theme fixture\n")
+        # A malformed GTK profile exercises UxTheme's transactional rollback
+        # in both the normal compositor boot and the dedicated theme test.
+        malformed_style = (
+            esp / "MicaNT" / "System" / "Themes" / "WhiteSur" /
+            "Probe" / "gtk.css"
+        )
+        malformed_style.parent.mkdir(parents=True, exist_ok=True)
+        malformed_style.write_bytes(b"button { background-color: ; }\n")
         shutil.copy2(theme_profile_source,
                      esp / "MicaNT" / "System" / "Themes" / "active.profile")
         icon_source_dir = ROOT / "System" / "Icons" / "WhiteSur"

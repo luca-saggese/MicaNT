@@ -1,8 +1,254 @@
 #include "micant/um/subsystems/winuser/uxtheme.hpp"
+#include "micant/um/subsystems/theme/native_theme.hpp"
+#include "micant/um/subsystems/theme/window_decoration_assets.hpp"
+#include "micant/shared/native_nt_api.hpp"
+
+#include <cstdlib>
+#include <new>
+#include <__verbose_abort>
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+[[noreturn]] void __libcpp_verbose_abort(const char*, ...) noexcept {
+    // STL contract failures are fatal in this freestanding Ring 3 DLL; never
+    // continue with corrupted parser or image-decoder state.
+    for (;;) __asm__ __volatile__("pause" ::: "memory");
+}
+_LIBCPP_END_NAMESPACE_STD
+
+namespace {
+using namespace micant::um::theme;
+
+constexpr size_t kCssCapacity = kMaxCssBytes;
+uint8_t g_cssBytes[kCssCapacity]{};
+MicaThemeSnapshot g_candidateSnapshot{};
+MicaThemeSnapshot g_activeSnapshot{};
+MicaThemeCaptionImageSet g_candidateImages{};
+MicaThemeCaptionImageSet g_activeImages{};
+char g_activeProfile[96]{};
+uint32_t g_themeLoadLock{};
+bool g_themeInitialized{};
+
+struct ThemeLoadGuard {
+    ThemeLoadGuard() noexcept {
+        while (__atomic_exchange_n(&g_themeLoadLock, 1u, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    ~ThemeLoadGuard() noexcept {
+        __atomic_store_n(&g_themeLoadLock, 0u, __ATOMIC_RELEASE);
+    }
+};
+
+bool append(wchar_t* path, size_t capacity, size_t& cursor,
+            const wchar_t* suffix) noexcept {
+    for (size_t index = 0; suffix[index]; ++index) {
+        if (cursor + 1 >= capacity) return false;
+        path[cursor++] = suffix[index];
+    }
+    path[cursor] = L'\0';
+    return true;
+}
+
+bool appendSystemRoot(wchar_t* path, size_t capacity, size_t& cursor) noexcept {
+    const auto* shared = reinterpret_cast<const micant::KUserSharedData*>(
+        micant::UserSharedDataAddress);
+    size_t length = 0;
+    while (length < std::size(shared->ntSystemRoot) && shared->ntSystemRoot[length]) ++length;
+    if (length < 3 || length >= capacity || shared->ntSystemRoot[1] != u':' ||
+        shared->ntSystemRoot[2] != u'\\') return false;
+    for (; cursor < length; ++cursor)
+        path[cursor] = static_cast<wchar_t>(shared->ntSystemRoot[cursor]);
+    path[cursor] = L'\0';
+    return true;
+}
+
+int32_t readFile(const wchar_t* path, void* output, size_t capacity,
+                 size_t& bytesRead) noexcept {
+    bytesRead = 0;
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return 40;
+    LARGE_INTEGER fileSize{};
+    if (!GetFileSizeEx(file, &fileSize)) {
+        CloseHandle(file);
+        return 41;
+    }
+    if (fileSize.QuadPart <= 0) {
+        CloseHandle(file);
+        return 42;
+    }
+    if (static_cast<uint64_t>(fileSize.QuadPart) > capacity) {
+        CloseHandle(file);
+        return 43;
+    }
+    const size_t expected = static_cast<size_t>(fileSize.QuadPart);
+    while (bytesRead < expected) {
+        const DWORD request = static_cast<DWORD>(expected - bytesRead > 65536
+            ? 65536 : expected - bytesRead);
+        DWORD chunkRead{};
+        if (!ReadFile(file, static_cast<uint8_t*>(output) + bytesRead,
+                      request, &chunkRead, nullptr) || chunkRead != request) {
+            CloseHandle(file);
+            bytesRead = 0;
+            return 44;
+        }
+        bytesRead += static_cast<size_t>(chunkRead);
+    }
+    if (!bytesRead) {
+        CloseHandle(file);
+        bytesRead = 0;
+        return 42;
+    }
+    CloseHandle(file);
+    return 1;
+}
+
+bool resolveProfile(const char* requested, char (&profile)[96]) noexcept {
+    size_t length{};
+    if (requested) {
+        while (requested[length] && length < sizeof(profile) - 1) {
+            profile[length] = requested[length];
+            ++length;
+        }
+        if (requested[length]) return false;
+    } else {
+        wchar_t path[512]{};
+        size_t cursor{};
+        if (!appendSystemRoot(path, std::size(path), cursor) ||
+            !append(path, std::size(path), cursor, L"\\System\\Themes\\active.profile"))
+            return false;
+        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        LARGE_INTEGER fileSize{};
+        DWORD bytes{};
+        const bool readOk = GetFileSizeEx(file, &fileSize) && fileSize.QuadPart > 0 &&
+            fileSize.QuadPart < static_cast<int64_t>(sizeof(profile)) &&
+            ReadFile(file, profile, static_cast<DWORD>(fileSize.QuadPart), &bytes, nullptr) &&
+            bytes == static_cast<DWORD>(fileSize.QuadPart);
+        CloseHandle(file);
+        if (!readOk) return false;
+        length = bytes;
+    }
+    while (length && (profile[length - 1] == '\r' || profile[length - 1] == '\n' ||
+                       profile[length - 1] == ' ' || profile[length - 1] == '\t')) --length;
+    size_t first{};
+    while (first < length && (profile[first] == ' ' || profile[first] == '\t')) ++first;
+    if (first) {
+        for (size_t index = first; index < length; ++index) profile[index - first] = profile[index];
+        length -= first;
+    }
+    if (!length || length > 80) return false;
+    bool previousSlash = true;
+    size_t segmentLength{};
+    bool segmentDots = true;
+    for (size_t index = 0; index < length; ++index) {
+        const char value = profile[index];
+        if (value == '/') {
+            if (previousSlash || !segmentLength || (segmentLength == 2 && segmentDots)) return false;
+            previousSlash = true;
+            segmentLength = 0;
+            segmentDots = true;
+            continue;
+        }
+        if (!((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+              (value >= '0' && value <= '9') || value == '_' || value == '-')) return false;
+        previousSlash = false;
+        segmentDots = false;
+        ++segmentLength;
+    }
+    if (previousSlash || (segmentLength == 2 && segmentDots)) return false;
+    profile[length] = '\0';
+    return true;
+}
+
+int32_t loadGtkTheme(const char* requested) noexcept {
+    ThemeLoadGuard guard;
+    char profile[96]{};
+    if (!resolveProfile(requested, profile)) return 2;
+    wchar_t directory[512]{};
+    size_t cursor{};
+    if (!appendSystemRoot(directory, std::size(directory), cursor) ||
+        !append(directory, std::size(directory), cursor, L"\\System\\Themes\\")) return 3;
+    for (size_t index = 0; profile[index]; ++index) {
+        if (cursor + 1 >= std::size(directory)) return 3;
+        directory[cursor++] = profile[index] == '/' ? L'\\' : static_cast<wchar_t>(profile[index]);
+    }
+    directory[cursor] = L'\0';
+    wchar_t cssPath[512]{};
+    size_t cssCursor{};
+    while (cssCursor <= cursor) { cssPath[cssCursor] = directory[cssCursor]; ++cssCursor; }
+    // Reuse the directory terminator when appending the filename; retaining
+    // it would make CreateFileW open the directory rather than gtk.css.
+    cssCursor = cursor;
+    if (!append(cssPath, std::size(cssPath), cssCursor, L"\\gtk.css")) return 3;
+    size_t cssLength{};
+    const int32_t cssReadStatus = readFile(cssPath, g_cssBytes,
+                                           sizeof(g_cssBytes), cssLength);
+    if (cssReadStatus != 1) return cssReadStatus;
+
+    CompiledCss parsed{};
+    CssParseError parseError{};
+    if (compileGtkCss(std::string_view(reinterpret_cast<const char*>(g_cssBytes), cssLength),
+                      parsed, &parseError) != CssStatus::Success) return 5;
+    NativeTheme nativeTheme{};
+    if (!buildNativeTheme(parsed, nativeTheme, {36, 36, 36, 255}, {})) return 6;
+    g_candidateSnapshot = makeThemeSnapshot(nativeTheme);
+    if (!MicaThemeSnapshotIsValid(&g_candidateSnapshot, sizeof(g_candidateSnapshot))) return 7;
+
+    micant::um::theme::LoadWhiteSurCaptionImages(g_candidateImages, directory,
+        std::string_view(profile).find("Dark") != std::string_view::npos);
+    if (!MicaWin32kSetThemeSnapshot(&g_candidateSnapshot, &g_candidateImages)) return 8;
+
+    g_activeSnapshot = g_candidateSnapshot;
+    g_activeImages = g_candidateImages;
+    for (size_t index = 0; index < sizeof(g_activeProfile); ++index)
+        g_activeProfile[index] = profile[index];
+    g_themeInitialized = true;
+    return 1;
+}
+}
+
+void* operator new(size_t size) {
+    return malloc(size ? size : 1);
+}
+void operator delete(void* block) noexcept {
+    free(block);
+}
+void operator delete(void* block, size_t) noexcept { ::operator delete(block); }
 
 extern "C" {
 
 bool DllMain(void*, unsigned long, void*) noexcept { return true; }
+
+__declspec(dllexport) int32_t WINAPI MicaUxThemeInitialize(void) noexcept {
+    return loadGtkTheme(nullptr);
+}
+__declspec(dllexport) int32_t WINAPI MicaUxThemeSelectProfile(const char* profile) noexcept {
+    if (!profile) return 0;
+    return loadGtkTheme(profile);
+}
+__declspec(dllexport) int32_t WINAPI MicaUxThemeGetCurrentProfile(
+        char* buffer, size_t capacity) noexcept {
+    if (!buffer || !capacity) return 0;
+    char persistedProfile[96]{};
+    const char* current = g_themeInitialized ? g_activeProfile : persistedProfile;
+    if (!g_themeInitialized && !resolveProfile(nullptr, persistedProfile)) return 0;
+    size_t length{};
+    while (length < sizeof(g_activeProfile) && current[length]) ++length;
+    if (length + 1 > capacity) return 0;
+    for (size_t index = 0; index <= length; ++index) buffer[index] = current[index];
+    return static_cast<int32_t>(length);
+}
+__declspec(dllexport) int32_t WINAPI MicaUxThemePublishSnapshot(
+        const void* input) noexcept {
+    ThemeLoadGuard guard;
+    if (!input) return 0;
+    const auto& snapshot = *static_cast<const MicaThemeSnapshot*>(input);
+    if (!MicaThemeSnapshotIsValid(&snapshot, sizeof(snapshot)) ||
+        !MicaWin32kSetThemeSnapshot(&snapshot, &g_activeImages)) return 0;
+    g_activeSnapshot = snapshot;
+    return 1;
+}
 
 __declspec(dllexport) void* WINAPI OpenThemeData(void* hwnd, const wchar_t* classList) noexcept {
     return micant::uxtheme::OpenThemeData(hwnd, classList);

@@ -657,7 +657,7 @@ def main() -> int:
             boot_command.append("--interactive")
         elif args.usb_test:
             boot_command.append("--verify-usb-input")
-        elif (not args.process_memory_selftest and not args.resolution and
+        elif (not args.theme_test and not args.process_memory_selftest and not args.resolution and
               not args.cmd_test and not args.doom_test):
             boot_command.append("--verify-input")
         if args.process_memory_selftest:

@@ -23,7 +23,6 @@
 #include "micant/shared/native_nt_api.hpp"
 #include "micant/shared/system_time.hpp"
 #include "micant/shared/theme_snapshot.h"
-#include "micant/um/subsystems/theme/window_decoration_assets.hpp"
 #include "micant/shared/native_uxtheme_api.h"
 #include "gui_common.hpp"
 #define MICANT_USERENV_NO_EXPORT_REGISTRATION
@@ -94,8 +93,6 @@ struct ShellState {
     MicaThemeSnapshot themeCandidate{};
     MicaThemeSnapshot themeVerify{};
     MicaThemeSnapshot themeRollbackProbe{};
-    MicaThemeCaptionImageSet visualThemeCaptionImages{};
-    MicaThemeCaptionImageSet themeCandidateCaptionImages{};
     bool visualThemeReady{};
     char themeProfile[96]{};
     bool themeAuto{};
@@ -1094,7 +1091,7 @@ void verifyThemeChangeQueueRollback() noexcept {
     ++g.themeCandidate.version;
     const bool malformedSnapshotRejected =
         !MicaThemeSnapshotIsValid(&g.themeCandidate, sizeof(g.themeCandidate)) &&
-        !MicaWin32kSetThemeSnapshot(&g.themeCandidate) &&
+        !MicaUxThemePublishSnapshot(&g.themeCandidate) &&
         MicaWin32kGetThemeSnapshot(&g.themeVerify) &&
         std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
                     sizeof(g.themeRollbackProbe)) == 0;
@@ -1122,7 +1119,7 @@ void verifyThemeChangeQueueRollback() noexcept {
     wchar_t stylePath[512]{};
     size_t stylePathCursor = 0;
     constexpr wchar_t styleSuffix[] =
-        L"\\System\\Themes\\WhiteSur\\Probe\\native.style";
+        L"\\System\\Themes\\WhiteSur\\Probe\\gtk.css";
     const bool stylePathBuilt = appendSystemRoot(stylePath, std::size(stylePath),
         stylePathCursor) && appendWide(stylePath, std::size(stylePath),
         stylePathCursor, styleSuffix, std::size(styleSuffix) - 1);
@@ -1139,8 +1136,8 @@ void verifyThemeChangeQueueRollback() noexcept {
         std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
                     sizeof(g.themeRollbackProbe)) == 0;
     PrintLine(malformedFileRollback
-        ? "[MicaNT Theme] Malformed compiled-style file kept the previous complete theme"
-        : "[MicaNT Theme] Malformed compiled-style file rollback probe failed");
+        ? "[MicaNT Theme] Malformed GTK CSS kept the previous complete theme"
+        : "[MicaNT Theme] Malformed GTK CSS rollback probe failed");
 
     loadActiveVisualTheme("WhiteSur/../Light");
     const bool traversalProfileRejected =
@@ -1149,7 +1146,7 @@ void verifyThemeChangeQueueRollback() noexcept {
         std::memcmp(&g.themeVerify, &g.themeRollbackProbe,
                     sizeof(g.themeRollbackProbe)) == 0;
     PrintLine(traversalProfileRejected
-        ? "[MicaNT Theme] Traversal profile path kept the previous complete theme"
+        ? "[MicaNT Theme] Traversal profile kept the previous complete theme"
         : "[MicaNT Theme] Traversal profile rejection changed the active theme");
 }
 
@@ -1188,345 +1185,26 @@ bool readBoundedFile(const wchar_t* path, void* buffer, size_t capacity,
 }
 
 void loadActiveVisualTheme(const char* selectedProfile = nullptr) noexcept {
-    const bool hadPrevious = g.visualThemeReady;
-    const auto restorePreviousSnapshot = [&]() noexcept {
-        if (hadPrevious) (void)MicaWin32kSetThemeSnapshot(
-            &g.visualTheme, &g.visualThemeCaptionImages);
-    };
-    wchar_t path[512]{};
-    size_t cursor = 0, profileBytes = 0;
-    char profile[96]{};
-    if (selectedProfile) {
-        while (selectedProfile[profileBytes] && profileBytes < sizeof(profile) - 1) {
-            profile[profileBytes] = selectedProfile[profileBytes];
-            ++profileBytes;
-        }
-        if (selectedProfile[profileBytes]) return;
-    } else {
-        if (!appendSystemRoot(path, std::size(path), cursor) ||
-            !appendWide(path, std::size(path), cursor,
-                        L"\\System\\Themes\\active.profile", 29) ||
-            !readBoundedFile(path, profile, sizeof(profile) - 1, profileBytes)) {
-            PrintLine("[MicaNT Theme] Active profile could not be read");
-            return;
-        }
-    }
-    while (profileBytes && (profile[profileBytes - 1] == '\r' ||
-                            profile[profileBytes - 1] == '\n' ||
-                            profile[profileBytes - 1] == ' ' ||
-                            profile[profileBytes - 1] == '\t')) --profileBytes;
-    size_t first = 0;
-    while (first < profileBytes && (profile[first] == ' ' || profile[first] == '\t')) ++first;
-    if (first) {
-        for (size_t i = first; i < profileBytes; ++i) profile[i - first] = profile[i];
-        profileBytes -= first;
-    }
-    if (!profileBytes || profileBytes > 80) {
-        PrintLine("[MicaNT Theme] Active profile length rejected");
+    if (!selectedProfile &&
+        !MicaUxThemeGetCurrentProfile(g.themeProfile, sizeof(g.themeProfile)))
+        return; // The compositor's asynchronous initial GTK load is still in progress.
+    if ((selectedProfile && MicaUxThemeSelectProfile(selectedProfile) != 1) ||
+        !MicaWin32kGetThemeSnapshot(&g.themeCandidate) ||
+        !MicaThemeSnapshotIsValid(&g.themeCandidate, sizeof(g.themeCandidate))) {
         return;
     }
-    size_t separators = 0;
-    for (size_t i = 0; i < profileBytes; ++i) {
-        const char c = profile[i];
-        if (c == '/') { ++separators; continue; }
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_' || c == '-')) {
-            PrintLine("[MicaNT Theme] Active profile path rejected");
-            return;
-        }
-    }
-    if (separators != 1) {
-        PrintLine("[MicaNT Theme] Active profile format rejected");
-        return;
-    }
-    cursor = 0;
-    if (!appendSystemRoot(path, std::size(path), cursor) ||
-        !appendWide(path, std::size(path), cursor, L"\\System\\Themes\\", 15)) return;
-    for (size_t i = 0; i < profileBytes; ++i) {
-        if (cursor + 1 >= std::size(path)) return;
-        path[cursor++] = profile[i] == '/' ? L'\\' : static_cast<wchar_t>(profile[i]);
-    }
-    if (!appendWide(path, std::size(path), cursor, L"\\native.style", 13)) return;
-    MicaThemeSnapshot& candidate = g.themeCandidate;
-    std::memset(&candidate, 0, sizeof(candidate));
-    size_t styleBytes = 0;
-    if (!readBoundedFile(path, &candidate, sizeof(candidate), styleBytes)) {
-        PrintLine("[MicaNT Theme] Compiled style snapshot could not be read");
-        return;
-    }
-    if (!MicaThemeSnapshotIsValid(&candidate, styleBytes)) {
-        PrintLine("[MicaNT Theme] Compiled style snapshot rejected");
-        return;
-    }
-    if (cursor < 13) return;
-    cursor -= 13;
-    path[cursor] = L'\0';
-    bool dark = false;
-    for (size_t index = 0; index + 3 < profileBytes; ++index)
-        if (profile[index] == 'D' && profile[index + 1] == 'a' &&
-            profile[index + 2] == 'r' && profile[index + 3] == 'k') dark = true;
-    micant::um::theme::LoadWhiteSurCaptionImages(
-        g.themeCandidateCaptionImages, path, dark);
-    if (!appendWide(path, std::size(path), cursor, L"\\native.style", 13)) return;
-    if (!MicaWin32kSetThemeSnapshot(&candidate, &g.themeCandidateCaptionImages)) {
-        PrintLine("[MicaNT Theme] Win32k rejected the style snapshot");
-        return;
-    }
-    MicaThemeSnapshot& published = g.themeVerify;
-    if (!MicaWin32kGetThemeSnapshot(&published) ||
-        std::memcmp(&candidate, &published, sizeof(candidate)) != 0) {
-        restorePreviousSnapshot();
-        PrintLine("[MicaNT Theme] Win32k theme snapshot round-trip failed");
-        return;
-    }
-    const auto& button = candidate.styles[0];
-    uint32_t queriedColor{};
-    const uint32_t packedColor = button.background;
-    const uint32_t expectedColor = ((packedColor >> 16) & 0xFFu) |
-        (packedColor & 0xFF00u) | ((packedColor & 0xFFu) << 16);
-    MicaThemeHandle themeHandle = IsThemeActive()
-        ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
-    const uint32_t invalidSystemColor = 0xFFFFFFFFu;
-    const bool systemColorQueryPassed = themeHandle &&
-        GetThemeSysColor(themeHandle, 15) == expectedColor &&
-        GetThemeSysColor(nullptr, 15) == expectedColor &&
-        GetThemeSysColor(themeHandle, 0x7FFFFFFF) == invalidSystemColor;
-    const bool queried = themeHandle && (button.flags & MICANT_THEME_HAS_BACKGROUND) &&
-        GetThemeColor(themeHandle, 1, 1, 3802, &queriedColor) == 0 &&
-        queriedColor == expectedColor;
-    uint32_t buttonAlpha = button.background >> 24;
-    if (button.flags & MICANT_THEME_HAS_OPACITY)
-        buttonAlpha = (buttonAlpha * button.opacity + 127u) / 255u;
-    int32_t transparent = static_cast<int32_t>(0xA5A5A5A5u);
-    const bool transparentQueryPassed = themeHandle &&
-        GetThemeBool(themeHandle, 1, 1, 2203, &transparent) == 0 &&
-        transparent == (buttonAlpha < 255u ? 1 : 0);
-    int32_t invalidDrawRect[4]{0, 0, 8, 8};
-    const int32_t dispatchFailureStatus = themeHandle
-        ? DrawThemeBackground(themeHandle, reinterpret_cast<void*>(1), 1, 1,
-                              invalidDrawRect, nullptr) : 0;
-    const bool dispatchFailureReported = themeHandle &&
-        dispatchFailureStatus == static_cast<int32_t>(0x80004005u);
-    int32_t unsupportedOrigin = 0x5A5A5A5A;
-    const bool unsupportedOriginFailed = themeHandle &&
-        GetThemePropertyOrigin(themeHandle, 1, 1, 4001, &unsupportedOrigin) ==
-            static_cast<int32_t>(0x80004001u) && unsupportedOrigin == 0;
-    int32_t unsupportedBoolean = 1;
-    const bool unsupportedBooleanFailed = themeHandle &&
-        GetThemeBool(themeHandle, 1, 1, 0x7FFFFFFF, &unsupportedBoolean) ==
-            static_cast<int32_t>(0x80004001u) && unsupportedBoolean == 0;
-    int32_t backgroundType = static_cast<int32_t>(0xA5A5A5A5u);
-    const bool backgroundTypeQueryPassed = themeHandle &&
-        GetThemeEnumValue(themeHandle, 1, 1, 4001, &backgroundType) == 0 &&
-        backgroundType == 1;
-    int32_t unsupportedEnum = 1;
-    const bool unsupportedEnumFailed = themeHandle &&
-        GetThemeEnumValue(themeHandle, 1, 1, 0x7FFFFFFF, &unsupportedEnum) ==
-            static_cast<int32_t>(0x80004001u) && unsupportedEnum == 0;
-    uint8_t themeFontOutput[92];
-    std::memset(themeFontOutput, 0xA5, sizeof(themeFontOutput));
-    const int32_t unsupportedFont = themeHandle
-        ? GetThemeFont(themeHandle, nullptr, 1, 1, 210, themeFontOutput)
-        : 0;
-    bool themeFontOutputCleared = true;
-    for (uint8_t value : themeFontOutput) themeFontOutputCleared &= value == 0;
-    LOGFONTW systemFont{};
-    const int32_t systemFontStatus = themeHandle
-        ? GetThemeSysFont(themeHandle, 801, &systemFont)
-        : static_cast<int32_t>(0x80070006u);
-    HFONT queriedFont = systemFontStatus == 0 ? CreateFontIndirectW(&systemFont) : nullptr;
-    LOGFONTW fontRoundTrip{};
-    const int32_t queriedFontBytes = queriedFont
-        ? GetObjectW(queriedFont, sizeof(fontRoundTrip), &fontRoundTrip) : 0;
-    const bool fontMetadataRoundTrip = queriedFontBytes == sizeof(fontRoundTrip) &&
-        fontRoundTrip.lfHeight == systemFont.lfHeight &&
-        fontRoundTrip.lfWeight == systemFont.lfWeight &&
-        fontRoundTrip.lfItalic == systemFont.lfItalic &&
-        std::memcmp(fontRoundTrip.lfFaceName, systemFont.lfFaceName,
-                    sizeof(systemFont.lfFaceName)) == 0;
-    LOGFONTW invalidSystemFont{};
-    std::memset(&invalidSystemFont, 0xA5, sizeof(invalidSystemFont));
-    const int32_t invalidSystemFontStatus = themeHandle
-        ? GetThemeSysFont(themeHandle, 999, &invalidSystemFont) : 0;
-    const auto* invalidFontBytes = reinterpret_cast<const uint8_t*>(&invalidSystemFont);
-    bool invalidFontCleared = true;
-    for (size_t index = 0; index < sizeof(invalidSystemFont); ++index)
-        invalidFontCleared &= invalidFontBytes[index] == 0;
-    HDC fontProbeDc = queriedFont ? CreateCompatibleDC(nullptr) : nullptr;
-    HGDIOBJ previousProbeFont = fontProbeDc && queriedFont
-        ? SelectObject(fontProbeDc, queriedFont) : nullptr;
-    TEXTMETRICW queriedFontMetrics{};
-    const bool fontMetricsRead = previousProbeFont &&
-        GetTextMetricsW(fontProbeDc, &queriedFontMetrics) &&
-        queriedFontMetrics.tmHeight > 0 && queriedFontMetrics.tmAscent > 0;
-    if (previousProbeFont) (void)SelectObject(fontProbeDc, previousProbeFont);
-    if (fontProbeDc) (void)DeleteDC(fontProbeDc);
-    if (queriedFont) (void)DeleteObject(queriedFont);
-    MicaThemeMargins rejectedMargins{1, 2, 3, 4};
-    const int32_t unsupportedMargin = themeHandle ? GetThemeMargins(themeHandle,
-        nullptr, 1, 1, 0x7FFFFFFF, nullptr, &rejectedMargins) : 0;
-    const bool closed = themeHandle && CloseThemeData(themeHandle) == 0;
-    uint32_t staleColor = 0xA5A5A5A5u;
-    const bool staleHandleRejected = closed &&
-        GetThemeColor(themeHandle, 1, 1, 3802, &staleColor) ==
-            static_cast<int32_t>(0x80070006u) && staleColor == 0;
-    MicaThemeHandle capacityHandles[64]{};
-    size_t openedHandles = 0;
-    for (; openedHandles < std::size(capacityHandles); ++openedHandles) {
-        capacityHandles[openedHandles] = OpenThemeData(nullptr, L"BUTTON");
-        if (!capacityHandles[openedHandles]) break;
-    }
-    const bool capacityReached = openedHandles == std::size(capacityHandles);
-    const bool capacityFailureReported = capacityReached &&
-        OpenThemeData(nullptr, L"BUTTON") == nullptr;
-    bool capacityHandlesClosed = true;
-    for (size_t index = 0; index < openedHandles; ++index)
-        capacityHandlesClosed &= CloseThemeData(capacityHandles[index]) == 0;
-    MicaThemeHandle reusedHandle = capacityHandlesClosed
-        ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
-    const bool capacityRecovered = reusedHandle && CloseThemeData(reusedHandle) == 0;
-    if (!queried || !closed) {
-        restorePreviousSnapshot();
-        PrintLine("[MicaNT Theme] UxTheme DLL handle/query path failed");
-        return;
-    }
-    PrintLine("[MicaNT Theme] UxTheme DLL handle/color query passed");
-    PrintLine(systemColorQueryPassed
-        ? "[MicaNT Theme] GetThemeSysColor resolves themed button face"
-        : "[MicaNT Theme] GetThemeSysColor result mismatch");
-    if (staleHandleRejected)
-        PrintLine("[MicaNT Theme] Closed UxTheme handle rejected and output cleared");
-    else
-        PrintLine("[MicaNT Theme] Closed UxTheme handle remained usable");
-    if (capacityFailureReported && capacityHandlesClosed && capacityRecovered)
-        PrintLine("[MicaNT Theme] UxTheme handle exhaustion fails and recovers cleanly");
-    else
-        PrintLine("[MicaNT Theme] UxTheme handle exhaustion or cleanup mismatch");
-    if (transparentQueryPassed && unsupportedBooleanFailed)
-        PrintLine("[MicaNT Theme] UxTheme TMT_TRANSPARENT follows alpha and opacity");
-    else
-        PrintLine("[MicaNT Theme] UxTheme transparent boolean query mismatch");
-    if (dispatchFailureReported)
-        PrintLine("[MicaNT Theme] UxTheme GDI dispatch failure surfaces E_FAIL");
-    else
-        PrintLine("[MicaNT Theme] UxTheme GDI dispatch failure status mismatch");
-    if (unsupportedOriginFailed)
-        PrintLine("[MicaNT Theme] Unsupported property origin clears output");
-    else
-        PrintLine("[MicaNT Theme] Unsupported property origin output mismatch");
-    if (backgroundTypeQueryPassed && unsupportedEnumFailed)
-        PrintLine("[MicaNT Theme] UxTheme TMT_BGTYPE reports borderfill");
-    else
-        PrintLine("[MicaNT Theme] UxTheme background enum query mismatch");
-    if (unsupportedFont == static_cast<int32_t>(0x80070490u) && themeFontOutputCleared)
-        PrintLine("[MicaNT Theme] Unsupported font query clears LOGFONTW output");
-    else
-        PrintLine("[MicaNT Theme] Unsupported font query output mismatch");
-    if (systemFontStatus == 0 && systemFont.lfHeight < 0 && systemFont.lfWeight >= 0 &&
-        fontMetadataRoundTrip && fontMetricsRead &&
-        invalidSystemFontStatus == static_cast<int32_t>(0x80070057u) && invalidFontCleared)
-        PrintLine("[MicaNT Theme] GetThemeSysFont returns GDI font metadata and metrics");
-    else
-        PrintLine("[MicaNT Theme] GetThemeSysFont or GDI font metadata mismatch");
-    if (!g.themeFontMetadataProbeReported) {
-        const MicaThemeStyleSnapshot originalButtonStyle = candidate.styles[0];
-        auto& fontQueryStyle = candidate.styles[0];
-        std::memcpy(fontQueryStyle.fontFamily, "Arial", 6);
-        fontQueryStyle.fontSize = 14;
-        fontQueryStyle.fontWeight = 600;
-        fontQueryStyle.fontItalic = 1;
-        fontQueryStyle.flags |= MICANT_THEME_HAS_FONT_SIZE |
-            MICANT_THEME_HAS_FONT_WEIGHT | MICANT_THEME_HAS_FONT_STYLE |
-            MICANT_THEME_HAS_FONT_FAMILY;
-        const bool fontSnapshotPublished = MicaWin32kSetThemeSnapshot(
-            &candidate, &g.visualThemeCaptionImages) &&
-            IsThemeActive();
-        MicaThemeHandle fontQueryTheme = fontSnapshotPublished
-            ? OpenThemeData(nullptr, L"BUTTON") : nullptr;
-        uint8_t supportedThemeFont[92];
-        std::memset(supportedThemeFont, 0xA5, sizeof(supportedThemeFont));
-        const int32_t supportedThemeFontStatus = fontQueryTheme
-            ? GetThemeFont(fontQueryTheme, nullptr, 1, 1, 210, supportedThemeFont)
-            : static_cast<int32_t>(0x80070006u);
-        int32_t themeFontHeight{}, themeFontWeight{};
-        std::memcpy(&themeFontHeight, supportedThemeFont, sizeof(themeFontHeight));
-        std::memcpy(&themeFontWeight, supportedThemeFont + 16, sizeof(themeFontWeight));
-        const bool supportedThemeFontPassed = supportedThemeFontStatus == 0 &&
-            themeFontHeight == -14 && themeFontWeight == 600 && supportedThemeFont[20] == 1 &&
-            std::memcmp(supportedThemeFont + 28, L"Arial", sizeof(L"Arial")) == 0;
-        const bool fontQueryHandleClosed = fontQueryTheme && CloseThemeData(fontQueryTheme) == 0;
-        candidate.styles[0] = originalButtonStyle;
-        const bool fontSnapshotRestored = MicaWin32kSetThemeSnapshot(
-            &candidate, &g.visualThemeCaptionImages) &&
-            IsThemeActive();
-        g.themeFontMetadataProbeReported = supportedThemeFontPassed &&
-            fontQueryHandleClosed && fontSnapshotRestored;
-        PrintLine(g.themeFontMetadataProbeReported
-            ? "[MicaNT Theme] GetThemeFont combines CSS snapshot fields with the GDI system face"
-            : "[MicaNT Theme] GetThemeFont snapshot metadata query mismatch");
-    }
-    if (unsupportedMargin == static_cast<int32_t>(0x80070490u) &&
-        rejectedMargins.cxLeftWidth == 0 && rejectedMargins.cxRightWidth == 0 &&
-        rejectedMargins.cyTopHeight == 0 && rejectedMargins.cyBottomHeight == 0)
-        PrintLine("[MicaNT Theme] UxTheme failed margin query clears its output");
-    else
-        PrintLine("[MicaNT Theme] UxTheme failed margin query output mismatch");
-    struct ThemeRect { int32_t left, top, right, bottom; };
-    uint32_t rejectedColor = 0xA5A5A5A5u;
-    int32_t rejectedSize[2]{static_cast<int32_t>(0xA5A5A5A5u),
-                            static_cast<int32_t>(0xA5A5A5A5u)};
-    int32_t rejectedInt = static_cast<int32_t>(0xA5A5A5A5u);
-    ThemeRect inputRect{0, 0, 100, 40};
-    ThemeRect rejectedContent{1, 2, 3, 4};
-    ThemeRect rejectedExtent{1, 2, 3, 4};
-    const int32_t invalidTheme = static_cast<int32_t>(0x80070006u);
-    const bool queryFailuresClearOutputs =
-        GetThemeColor(nullptr, 1, 1, 3802, &rejectedColor) == invalidTheme &&
-        rejectedColor == 0 &&
-        GetThemePartSize(nullptr, nullptr, 1, 1, nullptr, 0, rejectedSize) == invalidTheme &&
-        rejectedSize[0] == 0 && rejectedSize[1] == 0 &&
-        GetThemeInt(nullptr, 1, 1, 2403, &rejectedInt) == invalidTheme && rejectedInt == 0 &&
-        GetThemeBackgroundContentRect(nullptr, nullptr, 1, 1, &inputRect,
-                                      &rejectedContent) == invalidTheme &&
-        rejectedContent.left == 0 && rejectedContent.top == 0 &&
-        rejectedContent.right == 0 && rejectedContent.bottom == 0 &&
-        GetThemeBackgroundExtent(nullptr, nullptr, 1, 1, &inputRect,
-                                &rejectedExtent) == invalidTheme &&
-        rejectedExtent.left == 0 && rejectedExtent.top == 0 &&
-        rejectedExtent.right == 0 && rejectedExtent.bottom == 0;
-    rejectedContent = {1, 2, 3, 4};
-    rejectedExtent = {1, 2, 3, 4};
-    const int32_t invalidArgument = static_cast<int32_t>(0x80070057u);
-    const bool invalidRectQueriesClearOutputs =
-        GetThemeBackgroundContentRect(nullptr, nullptr, 1, 1, nullptr,
-                                      &rejectedContent) == invalidArgument &&
-        rejectedContent.left == 0 && rejectedContent.top == 0 &&
-        rejectedContent.right == 0 && rejectedContent.bottom == 0 &&
-        GetThemeBackgroundExtent(nullptr, nullptr, 1, 1, nullptr,
-                                &rejectedExtent) == invalidArgument &&
-        rejectedExtent.left == 0 && rejectedExtent.top == 0 &&
-        rejectedExtent.right == 0 && rejectedExtent.bottom == 0;
-    if (queryFailuresClearOutputs && invalidRectQueriesClearOutputs)
-        PrintLine("[MicaNT Theme] Failed UxTheme color, size, int and rect queries clear outputs");
-    else
-        PrintLine("[MicaNT Theme] Failed UxTheme query output contract mismatch");
-    void* animationFromDc = reinterpret_cast<void*>(1);
-    void* animationToDc = reinterpret_cast<void*>(1);
-    const auto animationBuffer = BeginBufferedAnimation(nullptr, nullptr, nullptr, 0,
-        nullptr, nullptr, &animationFromDc, &animationToDc);
-    const int32_t unsupportedAnimation = EndBufferedAnimation(nullptr, 0);
-    const int32_t unsupportedStop = BufferedPaintStopAllAnimations(nullptr);
-    if (!animationBuffer && !animationFromDc && !animationToDc &&
-        unsupportedAnimation == static_cast<int32_t>(0x80004001u) &&
-        unsupportedStop == static_cast<int32_t>(0x80004001u))
-        PrintLine("[MicaNT Theme] Buffered animation failure outputs cleared; E_NOTIMPL surfaced");
-    else
-        PrintLine("[MicaNT Theme] Buffered animation failure contract mismatch");
-    g.visualTheme = candidate;
-    g.visualThemeCaptionImages = g.themeCandidateCaptionImages;
+    g.visualTheme = g.themeCandidate;
     g.visualThemeReady = true;
-    for (size_t i = 0; i < profileBytes; ++i) g.themeProfile[i] = profile[i];
-    g.themeProfile[profileBytes] = '\0';
+    PrintLine("[MicaNT Theme] Explorer consumed UxTheme GTK snapshot");
+    if (selectedProfile) {
+        size_t length{};
+        while (selectedProfile[length] && length + 1 < sizeof(g.themeProfile)) {
+            g.themeProfile[length] = selectedProfile[length];
+            ++length;
+        }
+        if (selectedProfile[length]) return;
+        g.themeProfile[length] = '\0';
+    }
 }
 
 
@@ -2338,11 +2016,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         (message == 0x001A /* WM_SETTINGCHANGE */ ||
          message == 0x031A /* WM_THEMECHANGED */)) {
         // WM_SETTINGCHANGE can announce changed persisted preferences. A
-        // WM_THEMECHANGED broadcast follows an already-published snapshot;
-        // reloading active.profile here would replace a session-only runtime
-        // selection with the stale persisted profile that caused the switch.
-        if (message == 0x001A /* WM_SETTINGCHANGE */)
-            loadActiveVisualTheme();
+        // UxTheme owns the selected profile and has already published the
+        // snapshot before WM_THEMECHANGED reaches Explorer. Query its active
+        // state for both initial-load and settings notifications; never reload
+        // active.profile here, which could replace a session-only selection.
+        loadActiveVisualTheme();
         for (auto& app : g.apps) {
             if (!app.open || !app.hwnd || !app.pixels) continue;
             drawAppWindow(app);
@@ -2593,10 +2271,24 @@ extern "C" void _start(const char* = nullptr) {
     if (video.height) g.screenH = video.height;
     if (g.screenW < 640 || g.screenH < 480) { g.screenW = 1024; g.screenH = 768; }
     verifyCurrentUserThemeProfilePath();
+    // UxTheme begins loading GTK as soon as the compositor has presented its
+    // first frame. Let that worker publish its initial snapshot before making
+    // Explorer's first desktop palette and startup probes.
+    bool uxthemeReady = false;
+    for (unsigned attempt = 0; attempt < 6000; ++attempt) {
+        if (MicaWin32kGetThemeSnapshot(&g.themeCandidate) &&
+            MicaThemeSnapshotIsValid(&g.themeCandidate, sizeof(g.themeCandidate))) {
+            uxthemeReady = true;
+            break;
+        }
+        Sleep(5);
+    }
     loadActiveVisualTheme();
     PrintLine(g.visualThemeReady
-        ? "[MicaNT Theme] Native style snapshot accepted"
-        : "[MicaNT Theme] Base fallback active");
+        ? "[MicaNT Theme] UxTheme GTK snapshot available"
+        : (uxthemeReady
+            ? "[MicaNT Theme] UxTheme profile query failed"
+            : "[MicaNT Theme] UxTheme GTK load timed out; base fallback active"));
 
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
