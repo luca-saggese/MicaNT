@@ -567,6 +567,19 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
 
+    # Path parsing stays self-contained; file existence predicates report
+    # failure until their filesystem queries can use the native file API.
+    add_library(shlwapi_boot SHARED EXCLUDE_FROM_ALL tools/dlls/shlwapi.cpp)
+    target_compile_options(shlwapi_boot PRIVATE
+        -ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics
+        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone -O2)
+    target_link_options(shlwapi_boot PRIVATE
+        -nostdlib -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase)
+    set_target_properties(shlwapi_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "shlwapi"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+
     # Comctl32 image lists are process-local Ring 3 objects. Bitmap/icon bytes
     # cross the existing GDI32/User32 DLL interfaces; allocation uses NTDLL.
     add_library(comctl32_boot SHARED EXCLUDE_FROM_ALL
