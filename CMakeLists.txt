@@ -1068,6 +1068,21 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
+
+    # KernelBase owns Win32 base implementations and reaches executive
+    # services only through the NTDLL syscall interface.
+    add_library(kernelbase_boot SHARED EXCLUDE_FROM_ALL tools/dlls/kernelbase.cpp)
+    target_include_directories(kernelbase_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_options(kernelbase_boot PRIVATE
+        -ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics
+        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone -O2)
+    target_link_options(kernelbase_boot PRIVATE
+        -nostdlib -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase)
+    target_link_libraries(kernelbase_boot PRIVATE ntdll_boot)
+    set_target_properties(kernelbase_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "kernelbase"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
     target_link_libraries(compositor_boot PRIVATE ntdll_boot)
 
     # User32 owns per-process icon pixels and file-backed icon loading through
@@ -1378,7 +1393,7 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "msvcrt_probe" SUFFIX ".exe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot oleaut32_boot shlwapi_boot
+        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot oleaut32_boot shlwapi_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)
