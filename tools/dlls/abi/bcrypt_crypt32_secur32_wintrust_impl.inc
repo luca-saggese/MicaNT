@@ -128,59 +128,48 @@ int32_t Crypt32_CryptUnprotectData(WinNtDataBlob* pDataIn, wchar_t** /*ppszDataD
 #if !defined(BUILD_SYSTEM32_STANDALONE_DLL) || defined(BUILD_SYSTEM32_SECUR32_DLL)
 int32_t Secur32_AcquireCredentialsHandleW(const wchar_t* /*pszPrincipal*/, const wchar_t* /*pszPackage*/, uint32_t /*fCredentialUse*/, void* /*pvLogonId*/, void* /*pAuthData*/, void* /*pGetKeyFn*/, void* /*pvGetKeyArgument*/, WinNtSecHandle* phCredential, void* /*ptsExpiry*/) noexcept {
     if (!phCredential) return static_cast<int32_t>(0x80090305U);
-    phCredential->dwLower = 0x5343484E0001ULL;
-    phCredential->dwUpper = 0x000000000001ULL;
-    return 0; // SEC_E_OK
+    phCredential->dwLower = 0;
+    phCredential->dwUpper = 0;
+    return static_cast<int32_t>(0x80090302U); // SEC_E_UNSUPPORTED_FUNCTION
 }
 
 int32_t Secur32_FreeCredentialsHandle(WinNtSecHandle* phCredential) noexcept {
     if (!phCredential) return static_cast<int32_t>(0x80090301U);
-    phCredential->dwLower = 0;
-    phCredential->dwUpper = 0;
-    return 0;
+    return static_cast<int32_t>(0x80090302U);
 }
 
 int32_t Secur32_InitializeSecurityContextW(WinNtSecHandle* phCredential, WinNtSecHandle* /*phContext*/, const wchar_t* /*pszTargetName*/, uint32_t /*fContextReq*/, uint32_t /*Reserved1*/, uint32_t /*TargetDataRep*/, void* /*pInput*/, uint32_t /*Reserved2*/, WinNtSecHandle* phNewContext, void* /*pOutput*/, uint32_t* pfContextAttr, void* /*ptsExpiry*/) noexcept {
     if (!phCredential || !phNewContext) return static_cast<int32_t>(0x80090301U);
-    phNewContext->dwLower = 0x544C53313300ULL;
-    phNewContext->dwUpper = 0x000000000001ULL;
-    if (pfContextAttr) *pfContextAttr = 0x0000801EU;
-    return 0; // SEC_E_OK
+    phNewContext->dwLower = 0;
+    phNewContext->dwUpper = 0;
+    if (pfContextAttr) *pfContextAttr = 0;
+    return static_cast<int32_t>(0x80090302U);
 }
 
 int32_t Secur32_DeleteSecurityContext(WinNtSecHandle* phContext) noexcept {
     if (!phContext) return static_cast<int32_t>(0x80090301U);
-    phContext->dwLower = 0;
-    phContext->dwUpper = 0;
-    return 0;
+    return static_cast<int32_t>(0x80090302U);
 }
 
 int32_t Secur32_QueryContextAttributesW(WinNtSecHandle* phContext, uint32_t /*ulAttribute*/, void* pBuffer) noexcept {
     if (!phContext || !pBuffer) return static_cast<int32_t>(0x80090301U);
-    std::memset(pBuffer, 0, 16);
-    return 0;
+    return static_cast<int32_t>(0x80090302U);
 }
 
 int32_t Secur32_EncryptMessage(WinNtSecHandle* phContext, uint32_t /*fQOP*/, void* /*pMessage*/, uint32_t /*MessageSeqNo*/) noexcept {
-    return phContext ? 0 : static_cast<int32_t>(0x80090301U);
+    return phContext ? static_cast<int32_t>(0x80090302U) : static_cast<int32_t>(0x80090301U);
 }
 
 int32_t Secur32_DecryptMessage(WinNtSecHandle* phContext, void* /*pMessage*/, uint32_t /*MessageSeqNo*/, uint32_t* pfQOP) noexcept {
     if (pfQOP) *pfQOP = 0;
-    return phContext ? 0 : static_cast<int32_t>(0x80090301U);
+    return phContext ? static_cast<int32_t>(0x80090302U) : static_cast<int32_t>(0x80090301U);
 }
 
 uint8_t Secur32_GetUserNameExW(uint32_t /*NameFormat*/, wchar_t* lpNameBuffer, uint32_t* nSize) noexcept {
     if (!nSize) return 0;
-    constexpr wchar_t kUser[] = L"MicaNT\\Administrator";
-    constexpr uint32_t kChars = sizeof(kUser) / sizeof(wchar_t);
-    if (!lpNameBuffer || *nSize < kChars) {
-        *nSize = kChars;
-        return 0;
-    }
-    std::memcpy(lpNameBuffer, kUser, sizeof(kUser));
-    *nSize = kChars - 1;
-    return 1;
+    if (lpNameBuffer && *nSize) lpNameBuffer[0] = L'\0';
+    *nSize = 0;
+    return 0;
 }
 #endif
 
