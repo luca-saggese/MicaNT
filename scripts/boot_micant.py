@@ -2211,8 +2211,141 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
             # ReactOS Calc is a dialog-heavy app with many owner-draw child
             # windows; let its initial queued WM_PAINT messages drain before
             # judging its first frame.
-            time.sleep(5.0 if app == "calc" else 1.5)
+            time.sleep(5.0 if app in {"calc", "notepad"} else 1.5)
             before = screen(f"reactos-{app}-01-window-before-input.ppm")
+            if app == "notepad" and os.environ.get("MICANT_REACTOS_NOTEPAD_DIALOG_TEST") == "1":
+                def press_key(key: str, down: bool) -> None:
+                    execute("input-send-event", {"events": [{
+                        "type": "key", "data": {
+                            "down": down, "key": {"type": "qcode", "data": key},
+                        },
+                    }]})
+
+                def chord(*keys: str) -> None:
+                    for key in keys:
+                        press_key(key, True)
+                    for key in reversed(keys):
+                        press_key(key, False)
+                    time.sleep(1.0)
+
+                def type_text(value: str) -> None:
+                    for character in value:
+                        key = {" ": "spc", ".": "dot", "-": "minus"}.get(
+                            character, character.lower())
+                        press_key(key, True)
+                        press_key(key, False)
+                        time.sleep(0.04)
+                    time.sleep(0.5)
+
+                pointer_x, pointer_y = 512, 384
+
+                def click_at(x: int, y: int) -> None:
+                    nonlocal pointer_x, pointer_y
+                    for axis_name, distance in (("x", x - pointer_x), ("y", y - pointer_y)):
+                        while distance:
+                            step = max(-64, min(64, distance))
+                            execute("input-send-event", {"events": [{
+                                "type": "rel", "data": {"axis": axis_name, "value": step},
+                            }]})
+                            time.sleep(0.04)
+                            distance -= step
+                    pointer_x, pointer_y = x, y
+                    time.sleep(0.2)
+                    for down in (True, False):
+                        execute("input-send-event", {"events": [{
+                            "type": "btn", "data": {"button": "left", "down": down},
+                        }]})
+                        time.sleep(0.3)
+                    time.sleep(0.5)
+
+                def changed_pixels(left: bytes, right: bytes) -> int:
+                    return sum(a != b for a, b in zip(left, right))
+
+                def changed_dialog_area(left: bytes, right: bytes) -> int:
+                    # The common dialog is centered over the 928x672 Notepad
+                    # owner. Ignore the menu, cursor, desktop and taskbar.
+                    pixels = 0
+                    for y in range(145, 665):
+                        start = (y * 1024 + 230) * 3
+                        end = (y * 1024 + 794) * 3
+                        pixels += sum(a != b for a, b in zip(left[start:end], right[start:end]))
+                    return pixels
+
+                def changed_text_line(left: bytes, right: bytes) -> int:
+                    # The current edit renderer vertically centers a single
+                    # line in the control. Exclude the pointer and chrome.
+                    pixels = 0
+                    for y in range(125, 710):
+                        start = (y * 1024 + 55) * 3
+                        end = (y * 1024 + 200) * 3
+                        pixels += sum(a != b for a, b in zip(left[start:end], right[start:end]))
+                    return pixels
+
+                # Verify the edit control before opening any modal dialogs so
+                # a later file-system error cannot steal keyboard focus.
+                click_at(250, 180)
+                type_text("writecheck")
+                typed_initial = screen("reactos-notepad-02-typed-initial.ppm")
+                if changed_text_line(before, typed_initial) < 100:
+                    raise RuntimeError("Notepad Edit control did not display typed text")
+                if os.environ.get("MICANT_REACTOS_NOTEPAD_WRITE_TEST") == "1":
+                    print("Notepad accepted and visibly rendered typed text in QEMU.", flush=True)
+                    return
+                for _ in range(len("writecheck")):
+                    press_key("backspace", True)
+                    press_key("backspace", False)
+                time.sleep(0.5)
+                before = screen("reactos-notepad-02-empty-after-write.ppm")
+
+                # Use the actual menu commands: this PE exposes no Save As
+                # accelerator, and direct QMP key input may not focus a child.
+                click_at(70, 108)  # File menu
+                file_menu = screen("reactos-notepad-02-file-menu-open.ppm")
+                if changed_pixels(before, file_menu) < 500:
+                    raise RuntimeError("Notepad File menu did not open")
+                click_at(105, 183)  # Open...
+                time.sleep(1.0)
+                open_dialog = screen("reactos-notepad-02-open-dialog.ppm")
+                if changed_dialog_area(before, open_dialog) < 10000:
+                    raise RuntimeError("Notepad File > Open did not visibly open the file dialog")
+                chord("esc")
+                open_dismissed = screen("reactos-notepad-03-open-dialog-dismissed.ppm")
+                if changed_dialog_area(open_dialog, open_dismissed) < 10000:
+                    raise RuntimeError("Notepad Open dialog did not close on Escape")
+                # ReactOS Notepad exposes Save As through File > Save As.
+                click_at(70, 108)
+                menu = screen("reactos-notepad-04-file-menu.ppm")
+                if changed_pixels(open_dismissed, menu) < 500:
+                    raise RuntimeError("Notepad File menu did not open")
+                click_at(112, 232)  # Save As...
+                time.sleep(1.0)
+                save_dialog = screen("reactos-notepad-05-save-dialog.ppm")
+                if changed_dialog_area(open_dismissed, save_dialog) < 10000:
+                    raise RuntimeError("Notepad File > Save As did not visibly open Save As")
+                click_at(420, 652)  # File name edit
+                type_text("notepaddialogcheck.txt")
+                click_at(616, 689)  # Save
+                time.sleep(1.0)
+                after_save = screen("reactos-notepad-06-after-save-as.ppm")
+                if changed_dialog_area(save_dialog, after_save) < 10000:
+                    raise RuntimeError("Notepad Save As did not accept the file name")
+                click_at(250, 180)
+                type_text("dialogcheck")
+                typed_document = screen("reactos-notepad-06-typed-document.ppm")
+                if changed_pixels(after_save, typed_document) < 500:
+                    raise RuntimeError("Notepad Edit control did not display typed text")
+                chord("ctrl", "s")
+                chord("ctrl", "n")
+                chord("ctrl", "o")
+                click_at(420, 652)  # File name edit
+                type_text("notepaddialogcheck.txt")
+                click_at(616, 689)  # Open
+                time.sleep(1.0)
+                reopened = screen("reactos-notepad-07-file-reopened.ppm")
+                if changed_pixels(after_save, reopened) < 1000 or changed_dialog_area(save_dialog, reopened) > 10000:
+                    raise RuntimeError("Notepad did not change the document after reopening the saved file")
+                print("Notepad Open and Save As worked in QEMU; a saved text file was reopened.", flush=True)
+                return
             if app == "winmine" and os.environ.get("MICANT_REACTOS_WINMINE_INTERACTION_TEST") == "1":
                 # QEMU initializes the PS/2 absolute cursor at the middle of
                 # the 1024x768 scanout; relative deltas must be based there.
@@ -3073,8 +3206,8 @@ def run_qemu(
 ) -> None:
     if memory_mib not in (256, 500, 512, 1024, 2048, 4096):
         raise RuntimeError("unsupported QEMU RAM profile")
-    if reactos_debug_image is not None and reactos_app not in ("calc", "winver", "winmine"):
-        raise RuntimeError("a diagnostic image override is limited to Calc, winver or WinMine")
+    if reactos_debug_image is not None and reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad"):
+        raise RuntimeError("a diagnostic image override is limited to supported LuceOS application ports")
     if runtime_selftest and (interactive or verify_input):
         raise RuntimeError("runtime self-test halts before desktop/input; incompatible runner options")
     if timer_selftest and (interactive or verify_input or runtime_selftest):
@@ -3248,7 +3381,7 @@ def run_qemu(
                 raise RuntimeError(f"application bundle directory does not exist: {source}")
             target = esp / "ReactOSApps"
             target.mkdir()
-            if reactos_app in {"winver", "calc", "winmine"} and reactos_debug_image is not None:
+            if reactos_app in {"winver", "calc", "winmine", "mspaint", "notepad"} and reactos_debug_image is not None:
                 debug_image = reactos_debug_image.expanduser().resolve()
                 if not debug_image.is_file():
                     raise RuntimeError(
@@ -4176,8 +4309,8 @@ def main() -> int:
 
     if bool(args.reactos_apps_dir) != bool(args.reactos_app):
         parser.error("ReactOS execution requires both --reactos-app and --reactos-apps-dir")
-    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine"):
-        parser.error("--reactos-debug-image is only valid with --reactos-app calc, winver or winmine")
+    if args.reactos_debug_image is not None and args.reactos_app not in ("calc", "winver", "winmine", "mspaint", "notepad"):
+        parser.error("--reactos-debug-image is only valid with a supported LuceOS app port")
 
     if args.ovmf_code is None:
         parser.error("--ovmf-code or MICANT_OVMF_CODE is required")

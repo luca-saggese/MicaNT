@@ -134,7 +134,8 @@ enum {
     MICANT_WIN32K_OP_SET_WINDOW_MENU,
     MICANT_WIN32K_OP_GET_WINDOW_MENU,
     MICANT_WIN32K_OP_ADJUST_WINDOW_RECT,
-    MICANT_WIN32K_OP_DEBUG_INPUT_TRACE
+    MICANT_WIN32K_OP_DEBUG_INPUT_TRACE,
+    MICANT_WIN32K_OP_SET_FOREGROUND_WINDOW
 };
 
 enum {
@@ -192,6 +193,7 @@ MICANT_WIN32K_API int32_t MicaWin32kReleaseDC(void*, void*);
 MICANT_WIN32K_API void* MicaWin32kCreateCompatibleDC(void*);
 MICANT_WIN32K_API int32_t MicaWin32kDeleteDC(void*);
 MICANT_WIN32K_API void* MicaWin32kCreateCompatibleBitmap(void*, int32_t, int32_t);
+MICANT_WIN32K_API int32_t MicaWin32kGetBitmapSurface(void*, uint32_t**, uint32_t*, uint32_t*);
 MICANT_WIN32K_API void* MicaWin32kSelectObject(void*, void*);
 MICANT_WIN32K_API int32_t MicaWin32kBitBlt(void*, int32_t, int32_t, int32_t, int32_t, void*, int32_t, int32_t, uint32_t);
 MICANT_WIN32K_API int32_t MicaWin32kPresentDC(void*);
@@ -217,6 +219,7 @@ MICANT_WIN32K_API int32_t MicaWin32kGetWindowTextW(void*, wchar_t*, int32_t);
 MICANT_WIN32K_API int32_t MicaWin32kIsWindowVisible(void*);
 MICANT_WIN32K_API int32_t MicaWin32kIsIconic(void*);
 MICANT_WIN32K_API void* MicaWin32kGetForegroundWindow(void);
+MICANT_WIN32K_API int32_t MicaWin32kSetForegroundWindow(void*);
 MICANT_WIN32K_API void* MicaWin32kSetFocus(void*);
 MICANT_WIN32K_API void* MicaWin32kGetFocus(void);
 MICANT_WIN32K_API void* MicaWin32kGetCapture(void);

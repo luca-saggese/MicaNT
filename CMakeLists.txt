@@ -494,6 +494,9 @@ if (MICANT_ENABLE_BAREMETAL)
         add_library(${_client}_boot SHARED EXCLUDE_FROM_ALL
             tools/dlls/${_client}.cpp
         )
+        if(_client STREQUAL "user32")
+            target_sources(${_client}_boot PRIVATE tools/dlls/user32_exports.def)
+        endif()
         target_compile_definitions(${_client}_boot PRIVATE
             BUILD_SYSTEM32_STANDALONE_DLL
             MICANT_WIN32K_IMPORTS
@@ -546,9 +549,12 @@ if (MICANT_ENABLE_BAREMETAL)
     add_library(comdlg32_boot SHARED EXCLUDE_FROM_ALL tools/dlls/comdlg32.cpp)
     target_compile_options(comdlg32_boot PRIVATE
         -ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics
-        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone -O2)
+        -fno-use-cxa-atexit -fno-stack-protector -mno-red-zone
+        -mno-stack-arg-probe -O2)
     target_link_options(comdlg32_boot PRIVATE
         -nostdlib -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase)
+    target_link_libraries(comdlg32_boot PRIVATE
+        user32_boot gdi32_boot kernel32_boot ucrtbase_boot)
     set_target_properties(comdlg32_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "comdlg32"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -1018,6 +1024,15 @@ if (MICANT_ENABLE_BAREMETAL)
         elseif (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "winmine")
             target_compile_definitions(user32_boot PRIVATE
                 MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
+        elseif (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "mspaint")
+            target_compile_definitions(user32_boot PRIVATE
+                MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT)
+        elseif (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "notepad")
+            target_compile_definitions(user32_boot PRIVATE
+                MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+            target_compile_definitions(comdlg32_boot PRIVATE
+                MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD_DIALOG_TRACE)
+            target_link_libraries(comdlg32_boot PRIVATE win32k_boot)
         endif()
     endif()
     if (MICANT_BOOTSTRAP_CRASH_DUMP_SELFTEST)
@@ -1429,6 +1444,13 @@ if (MICANT_ENABLE_BAREMETAL)
         MICANT_FREESTANDING_KERNEL32
         BUILD_SYSTEM32_KERNEL32_DLL
     )
+    if (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "mspaint")
+        target_compile_definitions(kernel32_boot PRIVATE
+            MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT)
+    elseif (MICANT_BOOTSTRAP_REACTOS_APP STREQUAL "notepad")
+        target_compile_definitions(kernel32_boot PRIVATE
+            MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+    endif()
     target_compile_options(kernel32_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-emulated-tls

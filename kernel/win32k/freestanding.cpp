@@ -383,7 +383,10 @@ bool adjustWindowRect(MicaWin32kRect& rect, uint32_t style, bool hasMenu) noexce
     metricsWindow.style = style;
     const int64_t frame = frameInset(metricsWindow);
     const int64_t caption = captionHeight(metricsWindow);
-    const int64_t menu = hasMenu ? kMenuBarHeight : 0;
+    // Child windows cannot own a menu bar. Match the client-origin and
+    // client-size calculations, which only reserve menu space for top-level
+    // windows that actually have an attached menu.
+    const int64_t menu = hasMenu && !(style & kWsChild) ? kMenuBarHeight : 0;
     const int64_t left = static_cast<int64_t>(rect.left) - frame;
     const int64_t top = static_cast<int64_t>(rect.top) - frame - caption - menu;
     const int64_t right = static_cast<int64_t>(rect.right) + frame;
@@ -404,7 +407,10 @@ bool windowScreenOrigin(const Window& window, int64_t& screenX,
     for (size_t depth = 0; depth < g_windows.capacity(); ++depth) {
         screenX += current->x;
         screenY += current->y;
-        if (!current->parent) {
+        // A parent on an overlapped/popup window is its owner. Owned windows
+        // keep screen coordinates; only WS_CHILD coordinates are relative to
+        // their parent's client origin.
+        if (!current->parent || !(current->style & kWsChild)) {
             return screenX >= INT32_MIN && screenX <= INT32_MAX &&
                 screenY >= INT32_MIN && screenY <= INT32_MAX;
         }
@@ -1973,6 +1979,24 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
             MicantNetbootSerialWrite("\r\n");
             request.result = 1;
             return NtStatus::Success;
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT)
+            MicantNetbootSerialWrite("[MicaNT Paint] stage=");
+            MicantNetbootSerialWriteNumber(request.args[0]);
+            MicantNetbootSerialWrite(" value=");
+            MicantNetbootSerialWriteNumber(request.args[1]);
+            MicantNetbootSerialWrite(" flags=");
+            MicantNetbootSerialWriteNumber(request.args[2]);
+            MicantNetbootSerialWrite("\r\n");
+            request.result = 1;
+            return NtStatus::Success;
+#elif defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+            MicantNetbootSerialWrite("[MicaNT Notepad] debug hash=");
+            MicantNetbootSerialWriteNumber(request.args[1]);
+            MicantNetbootSerialWrite(" chars=");
+            MicantNetbootSerialWriteNumber(request.args[2]);
+            MicantNetbootSerialWrite("\r\n");
+            request.result = 1;
+            return NtStatus::Success;
 #else
             return NtStatus::NotImplemented;
 #endif
@@ -2017,6 +2041,13 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
         case MICANT_WIN32K_OP_GET_FOREGROUND_WINDOW:
             request.result = g_foregroundWindow;
             return NtStatus::Success;
+        case MICANT_WIN32K_OP_SET_FOREGROUND_WINDOW: {
+            auto* window = findWindow(request.args[0], ownerProcessId);
+            if (!window) return NtStatus::InvalidHandle;
+            if (!activateWindow(window)) return NtStatus::InsufficientResources;
+            request.result = 1;
+            return NtStatus::Success;
+        }
         case MICANT_WIN32K_OP_SET_FOCUS: {
             const uint64_t previousHandle = g_focusedWindow;
             if (!request.args[0]) {
@@ -2403,11 +2434,14 @@ bool dispatchMouseInput(const MicaWin32kInputEvent& event) noexcept {
         (void)activateWindow(target);
         markWindowBounds(*target);
         target->zOrder = nextZOrder();
-        // Focus follows the actual hit-test target. Mouse capture only reroutes
-        // button messages; it must not keep focus stranded on a child after a
-        // click lands on its top-level client window.
-        if (!target->parent && g_focusedWindow != target->handle)
-            (void)setFocusedWindow(target);
+        // A click on a top-level client area must not steal focus from one
+        // of its child controls. This matters for apps such as Notepad whose
+        // edit control covers the client area and owns keyboard input.
+        if (!target->parent && g_focusedWindow != target->handle) {
+            auto* focused = findWindowAny(g_focusedWindow);
+            if (!focused || !belongsToWindow(focused, target->handle))
+                (void)setFocusedWindow(target);
+        }
         int64_t targetX{}, targetY{};
         if (!windowScreenOrigin(*target, targetX, targetY)) return false;
         const uint8_t button = captionButtonAt(*target,

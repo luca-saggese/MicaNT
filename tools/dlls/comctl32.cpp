@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 
 #include "micant/shared/win32k_client.h"
@@ -33,6 +34,12 @@ struct TabItemW {
 struct TabPoint { int32_t x, y; };
 struct TabHitTestInfo { TabPoint point; uint32_t flags; };
 struct NotifyHeader { void* hwndFrom; uintptr_t idFrom; uint32_t code; };
+struct StatusBarState {
+    void* hwnd{};
+    int32_t parts[3]{-1, -1, -1};
+    wchar_t text[3][128]{};
+    int32_t minimumHeight{20};
+};
 
 constexpr uint32_t kIccProgress = 0x00000020u;
 constexpr uint32_t kIccTab = 0x00000008u;
@@ -168,6 +175,8 @@ TabState g_tabs[kTabCapacity]{};
 std::atomic<uint32_t> g_tabRegistrationState{0};
 TreeState g_trees[kTreeCapacity]{};
 std::atomic<uint32_t> g_treeRegistrationState{0};
+StatusBarState g_statusBars[16]{};
+std::atomic<uint32_t> g_statusRegistrationState{0};
 
 struct StateGuard {
     StateGuard() noexcept {
@@ -219,6 +228,8 @@ __declspec(dllimport) int32_t GetThemeColor(void*, int32_t, int32_t, int32_t,
 __declspec(dllimport) int32_t DrawThemeText(void*, void*, int32_t, int32_t,
         const wchar_t*, int32_t, uint32_t, uint32_t, const Rect*);
 __declspec(dllimport) intptr_t SendMessageW(void*, uint32_t, uintptr_t, intptr_t);
+__declspec(dllimport) void* CreateWindowExW(uint32_t, const wchar_t*, const wchar_t*,
+    uint32_t, int32_t, int32_t, int32_t, int32_t, void*, void*, void*, void*);
 __declspec(dllimport) void* SetFocus(void*);
 __declspec(dllimport) uint32_t SetTextColor(void*, uint32_t);
 __declspec(dllimport) int32_t SetBkMode(void*, int32_t);
@@ -1105,6 +1116,113 @@ bool registerTreeClass() noexcept {
     return registered;
 }
 
+StatusBarState* findStatusBar(void* hwnd) noexcept {
+    for (auto& state : g_statusBars) if (state.hwnd == hwnd) return &state;
+    return nullptr;
+}
+
+intptr_t StatusBarWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
+                          intptr_t lParam) noexcept {
+    if (message == kWmNCCreate) return 1;
+    if (message == kWmCreate) {
+        StateGuard guard;
+        for (auto& state : g_statusBars) if (!state.hwnd) {
+            state = {};
+            state.hwnd = hwnd;
+            state.minimumHeight = 20;
+            return 0;
+        }
+        return -1;
+    }
+    if (message == kWmDestroy) {
+        StateGuard guard;
+        if (auto* state = findStatusBar(hwnd)) *state = {};
+        return 0;
+    }
+    if (message == 0x0408u /* SB_SETMINHEIGHT */) {
+        StateGuard guard;
+        if (auto* state = findStatusBar(hwnd)) state->minimumHeight = static_cast<int32_t>(wParam);
+        return 0;
+    }
+    if (message == 0x0404u /* SB_SETPARTS */) {
+        StateGuard guard;
+        auto* state = findStatusBar(hwnd);
+        if (!state || !lParam || !wParam || wParam > 3) return 0;
+        const auto* parts = reinterpret_cast<const int32_t*>(lParam);
+        for (size_t i = 0; i < wParam; ++i) state->parts[i] = parts[i];
+        for (size_t i = static_cast<size_t>(wParam); i < 3; ++i) state->parts[i] = -1;
+        return 1;
+    }
+    if (message == 0x0401u /* SB_SETTEXTA */ || message == 0x040Bu /* SB_SETTEXTW */) {
+        const size_t index = static_cast<size_t>(wParam & 0xFFu);
+        if (index >= 3) return 0;
+        StateGuard guard;
+        auto* state = findStatusBar(hwnd);
+        if (!state) return 0;
+        const auto* text = reinterpret_cast<const wchar_t*>(lParam);
+        size_t length = 0;
+        if (text) while (length + 1 < std::size(state->text[index]) && text[length]) ++length;
+        for (size_t i = 0; i <= length; ++i) state->text[index][i] = text ? text[i] : 0;
+        (void)InvalidateRect(hwnd, nullptr, 1);
+        return 1;
+    }
+    if (message == kWmPaint) {
+        PaintStruct paint{};
+        void* dc = BeginPaint(hwnd, &paint);
+        if (!dc) return 0;
+        Rect client{};
+        (void)GetClientRect(hwnd, &client);
+        StatusBarState snapshot{};
+        {
+            StateGuard guard;
+            if (auto* state = findStatusBar(hwnd)) snapshot = *state;
+        }
+        (void)fillWithColor(dc, client, 0x00F0F0F0u);
+        const uint32_t oldColor = SetTextColor(dc, 0x00000000u);
+        const int32_t oldMode = SetBkMode(dc, 1);
+        int32_t left = 2;
+        for (size_t i = 0; i < 3; ++i) {
+            const int32_t right = snapshot.parts[i] < 0 ? client.right : snapshot.parts[i];
+            if (snapshot.text[i][0]) {
+                size_t length = 0;
+                while (length < std::size(snapshot.text[i]) && snapshot.text[i][length]) ++length;
+                (void)TextOutW(dc, left + 4, 2, snapshot.text[i], static_cast<int32_t>(length));
+            }
+            if (right < client.right) {
+                Rect divider{right - 2, 2, right - 1, client.bottom - 2};
+                (void)fillWithColor(dc, divider, 0x00B0B0B0u);
+            }
+            left = right;
+        }
+        if (oldMode > 0) (void)SetBkMode(dc, oldMode);
+        if (oldColor != 0xFFFFFFFFu) (void)SetTextColor(dc, oldColor);
+        return EndPaint(hwnd, &paint) != 0 ? 1 : 0;
+    }
+    if (message == kWmThemeChanged || message == 0x0005u /* WM_SIZE */) {
+        (void)InvalidateRect(hwnd, nullptr, 1);
+        return 0;
+    }
+    return 0;
+}
+
+bool registerStatusBarClass() noexcept {
+    uint32_t state = g_statusRegistrationState.load(std::memory_order_acquire);
+    for (;;) {
+        if (state == 2) return true;
+        if (state == 3) return false;
+        if (state == 0 && g_statusRegistrationState.compare_exchange_weak(
+                state, 1, std::memory_order_acq_rel, std::memory_order_acquire)) break;
+        state = g_statusRegistrationState.load(std::memory_order_acquire);
+    }
+    MicaWin32kWindowClassEx wc{};
+    wc.cbSize = sizeof(wc);
+    wc.wndProc = reinterpret_cast<void*>(StatusBarWndProc);
+    wc.className = L"msctls_statusbar32";
+    const bool registered = RegisterClassExW(&wc) != 0;
+    g_statusRegistrationState.store(registered ? 2u : 3u, std::memory_order_release);
+    return registered;
+}
+
 } // namespace
 
 extern "C" {
@@ -1128,6 +1246,15 @@ __declspec(dllexport) void __stdcall InitCommonControls() {
     const InitCommonControlsExArgs args{sizeof(InitCommonControlsExArgs),
         kIccProgress | kIccTab | kIccTreeView};
     (void)InitCommonControlsEx(&args);
+}
+
+__declspec(dllexport) void* __stdcall CreateStatusWindowW(
+    int32_t style, const wchar_t* text, void* parent, uint32_t identifier) {
+    if (!parent || !registerStatusBarClass()) return nullptr;
+    return CreateWindowExW(0, L"msctls_statusbar32", text ? text : L"",
+        static_cast<uint32_t>(style) | 0x40000000u /* WS_CHILD */ | 0x10000000u /* WS_VISIBLE */,
+        0, 0, 0, 0, parent, reinterpret_cast<void*>(static_cast<uintptr_t>(identifier)),
+        nullptr, nullptr);
 }
 
 struct _PROPSHEETPAGEA_V3;

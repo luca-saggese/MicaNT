@@ -10,6 +10,8 @@
 
 static_assert(sizeof(void*) == 8);
 
+namespace { void PaintDebugTrace(uint32_t, uint32_t, uint32_t) noexcept; }
+
 extern "C" {
 
 
@@ -26,6 +28,23 @@ __declspec(dllimport) int32_t __stdcall NtQueryVirtualMemory(
     void* process, const void* base, uint32_t informationClass,
     void* information, size_t informationLength, size_t* returnLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtClose(void* handle) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateSection(
+    void** section, uint32_t access, void* attributes, void* maximumSize,
+    uint32_t protection, uint32_t allocationAttributes, void* file) noexcept;
+__declspec(dllimport) int32_t __stdcall NtMapViewOfSection(
+    void* section, void* process, uintptr_t* base, uintptr_t zeroBits,
+    size_t commitSize, void* offset, size_t* viewSize, uint32_t inherit,
+    uint32_t allocationType, uint32_t protection) noexcept;
+__declspec(dllimport) int32_t __stdcall NtUnmapViewOfSection(
+    void* process, uintptr_t base) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateThreadEx(
+    void** thread, uint32_t access, void* attributes, void* process,
+    void* start, void* argument, uint32_t flags, uintptr_t zeroBits,
+    size_t stackSize, size_t maximumStackSize, void* attributeList) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryInformationThread(
+    void* thread, uint32_t informationClass, void* information,
+    uint32_t informationLength, uint32_t* returnLength) noexcept;
+__declspec(dllimport) uint32_t __stdcall RtlNtStatusToDosError(int32_t status) noexcept;
 __declspec(dllimport) int32_t __stdcall NtCreateEvent(void** handle, uint32_t access, void* attributes, uint32_t type, uint8_t initialState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtSetEvent(void* handle, int32_t* previousState) noexcept;
 __declspec(dllimport) int32_t __stdcall NtResetEvent(void* handle, int32_t* previousState) noexcept;
@@ -57,6 +76,8 @@ __declspec(dllimport) int32_t __stdcall NtQueryInformationProcess(
 __declspec(dllimport) int32_t __stdcall NtQueryInformationThread(
     void* thread, uint32_t informationClass, void* information,
     uint32_t informationLength, uint32_t* returnLength) noexcept;
+__declspec(dllimport) int32_t __stdcall NtFlushInstructionCache(
+    void* process, const void* base, size_t size) noexcept;
 __declspec(dllimport) int32_t __stdcall NtCreateFile(
     micant::Handle* fileHandle, uint32_t desiredAccess,
     micant::ObjectAttributes* objectAttributes, micant::IoStatusBlock* ioStatusBlock,
@@ -87,6 +108,10 @@ __declspec(dllimport) int32_t __stdcall NtDeviceIoControlFile(
     uint32_t ioControlCode, const void* inputBuffer, uint32_t inputBufferLength,
     void* outputBuffer, uint32_t outputBufferLength) noexcept;
 __declspec(dllimport) int32_t __stdcall NtQueryInformationFile(
+    micant::Handle fileHandle, micant::IoStatusBlock* ioStatusBlock,
+    void* fileInformation, uint32_t length,
+    micant::FileInformationClass fileInformationClass) noexcept;
+__declspec(dllimport) int32_t __stdcall NtSetInformationFile(
     micant::Handle fileHandle, micant::IoStatusBlock* ioStatusBlock,
     void* fileInformation, uint32_t length,
     micant::FileInformationClass fileInformationClass) noexcept;
@@ -534,6 +559,9 @@ __declspec(dllexport) int32_t __stdcall WriteFile(
     const int32_t status = NtWriteFile(reinterpret_cast<micant::Handle>(file),
         0, nullptr, nullptr, &ioStatus, buffer, bytesToWrite, nullptr, nullptr);
     if (status < 0) {
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+        PaintDebugTrace(212u, static_cast<uint32_t>(status), bytesToWrite);
+#endif
         SetLastError(status == static_cast<int32_t>(0xC000000Du) ? 87u : 31u);
         return 0;
     }
@@ -749,6 +777,38 @@ struct CurrentDirectoryGuard {
     ~CurrentDirectoryGuard() { UnlockCurrentDirectory(); }
 };
 
+bool IsPathSeparator(wchar_t value) noexcept;
+
+bool CopyCurrentDirectoryPath(
+    const micant::shared::native_process::ProcessParametersPrefix64* parameters,
+    wchar_t* destination, size_t capacity, size_t& length) noexcept {
+    length = 0;
+    if (!parameters || !destination || !capacity) return false;
+    const auto& current = parameters->CurrentDirectoryDosPath;
+    const char16_t* source = current.Buffer;
+    size_t sourceLength = current.Length / sizeof(char16_t);
+    if (!source || (current.Length & 1) || current.Length > current.MaximumLength ||
+        sourceLength < 2) {
+        // Kernel-started images may not receive an explicit current directory.
+        // Use their containing directory, matching the normal shell launch path.
+        const auto& image = parameters->ImagePathName;
+        if (!image.Buffer || (image.Length & 1) || image.Length > image.MaximumLength)
+            return false;
+        const size_t imageLength = image.Length / sizeof(char16_t);
+        size_t separator = imageLength;
+        while (separator && !IsPathSeparator(static_cast<wchar_t>(image.Buffer[separator - 1])))
+            --separator;
+        if (separator < 3) return false;
+        source = image.Buffer;
+        sourceLength = separator;
+    }
+    if (sourceLength >= capacity) return false;
+    for (; length < sourceLength; ++length)
+        destination[length] = static_cast<wchar_t>(source[length]);
+    destination[length] = L'\0';
+    return true;
+}
+
 bool IsPathSeparator(wchar_t value) noexcept {
     return value == L'\\' || value == L'/';
 }
@@ -816,17 +876,15 @@ bool ResolveDosPath(const wchar_t* input, wchar_t* output,
     CurrentDirectoryGuard guard;
     auto* parameters = CurrentProcessParameters();
     if (!parameters) return false;
-    const auto& current = parameters->CurrentDirectoryDosPath;
-    if (!current.Buffer || (current.Length & 1) ||
-        current.Length > current.MaximumLength) return false;
-    const size_t currentLength = current.Length / sizeof(char16_t);
-    if (currentLength < 2 || currentLength + inputLength + 2 >= capacity) return false;
-    for (; outputLength < currentLength; ++outputLength)
-        output[outputLength] = static_cast<wchar_t>(current.Buffer[outputLength]);
+    wchar_t currentPath[32767]{};
+    size_t currentLength{};
+    if (!CopyCurrentDirectoryPath(parameters, currentPath, std::size(currentPath), currentLength) ||
+        currentLength + inputLength + 2 >= capacity) return false;
+    for (; outputLength < currentLength; ++outputLength) output[outputLength] = currentPath[outputLength];
     size_t inputStart = 0;
     if (IsPathSeparator(input[0])) {
         outputLength = 2;
-        output[0] = static_cast<wchar_t>(current.Buffer[0]);
+        output[0] = currentPath[0];
         output[1] = L':';
         inputStart = 1;
     } else if (inputLength >= 2 && input[1] == L':') {
@@ -1058,12 +1116,12 @@ __declspec(dllexport) uint32_t __stdcall GetCurrentDirectoryW(
     CurrentDirectoryGuard guard;
     auto* parameters = CurrentProcessParameters();
     if (!parameters) { SetLastError(87); return 0; }
-    const auto& path = parameters->CurrentDirectoryDosPath;
-    if (!path.Buffer || (path.Length & 1) || path.Length > path.MaximumLength) {
+    wchar_t currentPath[32767]{};
+    size_t length{};
+    if (!CopyCurrentDirectoryPath(parameters, currentPath, std::size(currentPath), length)) {
         SetLastError(87);
         return 0;
     }
-    const size_t length = path.Length / sizeof(char16_t);
     if (length >= 32767 || length + 1 > UINT32_MAX) {
         SetLastError(206);
         return 0;
@@ -1073,9 +1131,7 @@ __declspec(dllexport) uint32_t __stdcall GetCurrentDirectoryW(
         SetLastError(122);
         return required;
     }
-    for (size_t i = 0; i < length; ++i)
-        buffer[i] = static_cast<wchar_t>(path.Buffer[i]);
-    buffer[length] = L'\0';
+    for (size_t i = 0; i <= length; ++i) buffer[i] = currentPath[i];
     return static_cast<uint32_t>(length);
 }
 
@@ -1099,20 +1155,18 @@ __declspec(dllexport) int32_t __stdcall SetCurrentDirectoryW(
         for (size_t i = 0; i < length; ++i)
             fullPath[i] = IsPathSeparator(pathName[i]) ? L'\\' : pathName[i];
     } else {
-        const auto& current = parameters->CurrentDirectoryDosPath;
-        if (!current.Buffer || (current.Length & 1) || current.Length > current.MaximumLength) {
-            SetLastError(87);
-            return 0;
+        wchar_t currentPath[32767]{};
+        size_t currentLength{};
+        if (!CopyCurrentDirectoryPath(parameters, currentPath, std::size(currentPath), currentLength)) {
+            SetLastError(87); return 0;
         }
-        const size_t currentLength = current.Length / sizeof(char16_t);
         if (currentLength < 2 || currentLength >= 32767) { SetLastError(87); return 0; }
         if (IsPathSeparator(pathName[0])) {
-            fullPath[0] = static_cast<wchar_t>(current.Buffer[0]);
+            fullPath[0] = currentPath[0];
             fullPath[1] = L':';
             length = 2;
         } else {
-            for (; length < currentLength; ++length)
-                fullPath[length] = static_cast<wchar_t>(current.Buffer[length]);
+            for (; length < currentLength; ++length) fullPath[length] = currentPath[length];
         }
         if (!length || !IsPathSeparator(fullPath[length - 1]))
             fullPath[length++] = L'\\';
@@ -1303,22 +1357,23 @@ __declspec(dllexport) void* __stdcall CreateFileW(
             SetLastError(87);
             return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
         }
-        const auto& current = parameters->CurrentDirectoryDosPath;
-        if (!current.Buffer || (current.Length & 1) ||
-            current.Length > current.MaximumLength) {
+        wchar_t currentPath[32767]{};
+        size_t currentLength{};
+        if (!CopyCurrentDirectoryPath(parameters, currentPath,
+                                      std::size(currentPath), currentLength)) {
             SetLastError(87);
             return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
         }
-        resolvedLength = current.Length / sizeof(char16_t);
+        resolvedLength = currentLength;
         if (resolvedLength < 2 || resolvedLength + inputLength + 2 >= 32767) {
             SetLastError(206);
             return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
         }
         for (size_t i = 0; i < resolvedLength; ++i)
-            resolvedPath[i] = static_cast<wchar_t>(current.Buffer[i]);
+            resolvedPath[i] = currentPath[i];
         if (IsPathSeparator(fileName[0])) {
             resolvedLength = 2;
-            resolvedPath[0] = static_cast<wchar_t>(current.Buffer[0]);
+            resolvedPath[0] = currentPath[0];
             resolvedPath[1] = L':';
         } else if (resolvedLength && !IsPathSeparator(resolvedPath[resolvedLength - 1])) {
             resolvedPath[resolvedLength++] = L'\\';
@@ -1340,6 +1395,9 @@ __declspec(dllexport) void* __stdcall CreateFileW(
         &ioStatus, nullptr, 0, shareMode,
         disposition, 0, nullptr, 0);
     if (status != 0) {
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+        PaintDebugTrace(211u, static_cast<uint32_t>(status), creationDisposition);
+#endif
         SetLastError(Win32ErrorFromNtStatus(status));
         return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
     }
@@ -1846,6 +1904,35 @@ __declspec(dllexport) void* __stdcall LocalReAlloc(void* block, size_t size, uin
 }
 __declspec(dllexport) void* __stdcall LocalFree(void* block) noexcept {
     return FreeHeapBlock(block) ? nullptr : block;
+}
+__declspec(dllexport) void* __stdcall LocalLock(void* block) noexcept {
+    size_t ignoredSize{};
+    if (!block || !QueryHeapBlock(block, ignoredSize)) { SetHeapError(87); return nullptr; }
+    return block;
+}
+__declspec(dllexport) int32_t __stdcall LocalUnlock(void* block) noexcept {
+    size_t ignoredSize{};
+    if (!block || !QueryHeapBlock(block, ignoredSize)) { SetHeapError(87); return 0; }
+    SetLastError(0);
+    return 0;
+}
+struct Kernel32FilePositionInformation { int64_t currentByteOffset; };
+__declspec(dllexport) int32_t __stdcall SetEndOfFile(void* file) noexcept {
+    if (!file || file == reinterpret_cast<void*>(static_cast<intptr_t>(-1))) {
+        SetLastError(6); return 0;
+    }
+    micant::IoStatusBlock ioStatus{};
+    Kernel32FilePositionInformation position{};
+    int32_t status = NtQueryInformationFile(reinterpret_cast<micant::Handle>(file),
+        &ioStatus, &position, sizeof(position),
+        static_cast<micant::FileInformationClass>(14u));
+    if (status >= 0) {
+        status = NtSetInformationFile(reinterpret_cast<micant::Handle>(file),
+            &ioStatus, &position, sizeof(position),
+            static_cast<micant::FileInformationClass>(20u));
+    }
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
 }
 
 static void SetConversionError(micant::um::winbase::utf8::Error error) noexcept {
@@ -2420,6 +2507,9 @@ __declspec(dllexport) void* __stdcall GetModuleHandleW(const wchar_t* name) noex
 // resource languages without hard-wiring applications to English.
 __declspec(dllexport) uint16_t __stdcall GetUserDefaultUILanguage() noexcept {
     return 0x0409;
+}
+__declspec(dllexport) uint16_t __stdcall GetUserDefaultLangID() noexcept {
+    return GetUserDefaultUILanguage();
 }
 
 __declspec(dllexport) int32_t __stdcall GetLocaleInfoW(
@@ -3055,6 +3145,41 @@ __declspec(dllexport) void __stdcall DeleteCriticalSection(void* section) noexce
     }
 }
 
+// SRWLOCK is a pointer-sized, zero-initialized exclusive lock. This limited
+// implementation accepts exclusive acquisition only; shared acquisitions
+// remain explicit failures until shared-reader state is present.
+__declspec(dllexport) void __stdcall AcquireSRWLockExclusive(void* lock) noexcept {
+    if (!lock) return;
+    auto* state = static_cast<uintptr_t*>(lock);
+    for (;;) {
+        uintptr_t expected = 0;
+        if (__atomic_compare_exchange_n(state, &expected, 1, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+        (void)NtYieldExecution();
+    }
+}
+__declspec(dllexport) void __stdcall ReleaseSRWLockExclusive(void* lock) noexcept {
+    if (lock) __atomic_store_n(static_cast<uintptr_t*>(lock), 0, __ATOMIC_RELEASE);
+}
+__declspec(dllexport) int32_t __stdcall TryAcquireSRWLockExclusive(void* lock) noexcept {
+    if (!lock) return 0;
+    uintptr_t expected = 0;
+    return __atomic_compare_exchange_n(static_cast<uintptr_t*>(lock), &expected, 1,
+        false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ? 1 : 0;
+}
+__declspec(dllexport) int32_t __stdcall TryEnterCriticalSection(void* section) noexcept {
+    auto* cs = static_cast<WinCriticalSection64*>(section);
+    if (!cs) return 0;
+    uint32_t thread{}; __asm__ __volatile__("movl %%gs:0x48, %0" : "=r"(thread));
+    if (!thread) return 0;
+    if (cs->owningThread == thread) { ++cs->recursionCount; return 1; }
+    int32_t expected = -1;
+    if (!__atomic_compare_exchange_n(&cs->lockCount, &expected, 0, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
+    cs->owningThread = thread; cs->recursionCount = 1;
+    return 1;
+}
+
 __declspec(dllexport) void* __stdcall TlsGetValue(uint32_t index) noexcept {
     uintptr_t teb{}; __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
     if (!teb || index >= 64) { SetLastError(87); return nullptr; }
@@ -3107,6 +3232,304 @@ __declspec(dllexport) [[noreturn]] void __stdcall RtlUnwindEx(
     if (function) function(targetFrame, targetIp, exceptionRecord, returnValue,
                            context, historyTable);
     __builtin_trap();
+}
+
+__declspec(dllexport) void* __stdcall FindResourceW(void* module,
+    const wchar_t* name, const wchar_t* type) noexcept {
+    return FindResourceExW(module, type, name, 0);
+}
+__declspec(dllexport) int32_t __stdcall IsTextUnicode(
+    const void* buffer, int32_t byteCount, int32_t* resultFlags) noexcept {
+    constexpr int32_t Ascii16 = 0x0001, Statistics = 0x0002,
+        Controls = 0x0004, NullBytes = 0x0008, ReverseAscii16 = 0x0010,
+        ReverseStatistics = 0x0020, ReverseControls = 0x0040,
+        ReverseNullBytes = 0x0080, OddLength = 0x0100;
+    if (!buffer || byteCount < 0) { SetLastError(87); return 0; }
+    const auto* bytes = static_cast<const uint8_t*>(buffer);
+    const size_t length = static_cast<size_t>(byteCount);
+    const size_t pairs = length / 2;
+    size_t highZero{}, lowZero{}, controls{}, nulBytes{};
+    for (size_t i = 0; i < pairs; ++i) {
+        const uint8_t low = bytes[i * 2], high = bytes[i * 2 + 1];
+        highZero += high == 0;
+        lowZero += low == 0;
+        nulBytes += low == 0 || high == 0;
+        controls += (low < 0x20 && low != '\n' && low != '\r' && low != '\t') || high != 0;
+    }
+    int32_t detected{};
+    if (pairs && highZero * 2 >= pairs) detected |= Ascii16 | Statistics;
+    if (pairs && lowZero * 2 >= pairs) detected |= ReverseAscii16 | ReverseStatistics;
+    if (pairs && controls * 2 < pairs) detected |= Controls | ReverseControls;
+    if (nulBytes) detected |= NullBytes | ReverseNullBytes;
+    if (length & 1u) detected |= OddLength;
+    if (resultFlags) *resultFlags = detected;
+    return pairs && highZero * 2 >= pairs && !(length & 1u) ? 1 : 0;
+}
+__declspec(dllexport) int32_t __stdcall FlushInstructionCache(
+    void* process, const void* base, size_t size) noexcept {
+    const int32_t status = NtFlushInstructionCache(process, base, size);
+    if (status < 0) { SetLastError(87); return 0; }
+    return 1;
+}
+__declspec(dllexport) int32_t __stdcall GetModuleHandleExW(uint32_t flags,
+    const wchar_t* name, void** module) noexcept {
+    constexpr uint32_t FromAddress = 4u, UnchangedRefcount = 2u;
+    if (!module || (flags & ~(FromAddress | UnchangedRefcount)) ||
+        ((flags & FromAddress) && !name)) { SetLastError(87); return 0; }
+    if (flags & FromAddress) { SetLastError(50); return 0; }
+    const uintptr_t base = FindModule(name);
+    if (!base || !FindLoadedModuleEntry(base)) { SetLastError(126); return 0; }
+    *module = reinterpret_cast<void*>(base);
+    return 1;
+}
+__declspec(dllexport) uint32_t __stdcall GetSystemDirectoryW(
+    wchar_t* buffer, uint32_t capacity) noexcept {
+    constexpr wchar_t path[] = L"C:\\Windows\\System32";
+    constexpr uint32_t length = static_cast<uint32_t>(sizeof(path) / sizeof(path[0]) - 1);
+    if (!buffer || capacity <= length) { SetLastError(122); return length + 1; }
+    for (uint32_t i = 0; i <= length; ++i) buffer[i] = path[i];
+    return length;
+}
+__declspec(dllexport) void* __stdcall GlobalFree(void* handle) noexcept {
+    if (!handle) return nullptr;
+    auto* header = GlobalHeader(handle);
+    if (header && __atomic_load_n(&header->lockCount, __ATOMIC_ACQUIRE)) {
+        SetLastError(158); return handle;
+    }
+    void* block = header ? static_cast<void*>(header) : handle;
+    if (header) header->signature = 0;
+    return HeapFree(GetProcessHeap(), 0, block) ? nullptr : handle;
+}
+__declspec(dllexport) size_t __stdcall HeapSize(
+    void*, uint32_t, const void*) noexcept {
+    SetLastError(87);
+    return static_cast<size_t>(-1);
+}
+__declspec(dllexport) int32_t __stdcall MulDiv(int32_t number,
+    int32_t numerator, int32_t denominator) noexcept {
+    if (!denominator) { SetLastError(87); return -1; }
+    const int64_t product = static_cast<int64_t>(number) * numerator;
+    const bool negative = (product < 0) != (denominator < 0);
+    const uint64_t magnitude = product < 0 ? static_cast<uint64_t>(-product)
+                                           : static_cast<uint64_t>(product);
+    const uint64_t divisor = denominator < 0
+        ? static_cast<uint64_t>(-static_cast<int64_t>(denominator))
+        : static_cast<uint64_t>(denominator);
+    const uint64_t quotient = (magnitude + divisor / 2) / divisor;
+    if (quotient > static_cast<uint64_t>(INT32_MAX) + (negative ? 1u : 0u)) {
+        SetLastError(87); return -1;
+    }
+    return static_cast<int32_t>(negative ? -static_cast<int64_t>(quotient)
+                                         : static_cast<int64_t>(quotient));
+}
+__declspec(dllexport) int32_t __stdcall InitOnceExecuteOnce(void* once,
+    int32_t (__stdcall *callback)(void*, void*, void**), void* parameter,
+    void** context) noexcept {
+    if (!once || !callback) { SetLastError(87); return 0; }
+    auto* state = static_cast<uintptr_t*>(once);
+    for (;;) {
+        uintptr_t value = __atomic_load_n(state, __ATOMIC_ACQUIRE);
+        if (value == 2) { if (context) *context = nullptr; return 1; }
+        if (value == 0) {
+            uintptr_t expected = 0;
+            if (__atomic_compare_exchange_n(state, &expected, 1, false,
+                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                void* resultContext{};
+                if (!callback(once, parameter, &resultContext)) {
+                    __atomic_store_n(state, 0, __ATOMIC_RELEASE); return 0;
+                }
+                if (context) *context = resultContext;
+                __atomic_store_n(state, 2, __ATOMIC_RELEASE); return 1;
+            }
+        }
+        (void)NtYieldExecution();
+    }
+}
+__declspec(dllexport) uint32_t __stdcall GetThreadId(void* thread) noexcept {
+    if (!thread) { SetLastError(6); return 0; }
+    struct ThreadBasicInformation { int32_t exitStatus; uint32_t padding;
+        void* teb; void* process; void* threadId; uintptr_t affinity;
+        int32_t priority, basePriority; } information{};
+    uint32_t returned{};
+    if (NtQueryInformationThread(thread, 0, &information, sizeof(information), &returned) < 0) {
+        SetLastError(6); return 0;
+    }
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(information.threadId));
+}
+__declspec(dllexport) int32_t __stdcall GetTempPathW(uint32_t, wchar_t*) noexcept {
+    SetLastError(50); return 0;
+}
+__declspec(dllexport) uint32_t __stdcall GetTempFileNameW(
+    const wchar_t*, const wchar_t*, uint32_t, wchar_t*) noexcept {
+    SetLastError(50); return 0;
+}
+__declspec(dllexport) int32_t __stdcall GetTimeFormatW(uint32_t, uint32_t,
+    const void*, const wchar_t*, wchar_t*, int32_t) noexcept {
+    SetLastError(50); return 0;
+}
+__declspec(dllexport) int32_t __stdcall SleepConditionVariableSRW(
+    void*, void*, uint32_t, uint32_t) noexcept {
+    SetLastError(50); return 0;
+}
+__declspec(dllexport) void __stdcall WakeAllConditionVariable(void*) noexcept {}
+__declspec(dllexport) void __stdcall WakeConditionVariable(void*) noexcept {}
+namespace { void PaintDebugTrace(uint32_t, uint32_t, uint32_t) noexcept; }
+__declspec(dllexport) void __stdcall OutputDebugStringW(const wchar_t* text) noexcept {
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) || defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+    if (!text) return;
+    uint32_t hash = 2166136261u;
+    uint32_t length{};
+    while (length < 4096 && text[length]) {
+        hash = (hash ^ static_cast<uint16_t>(text[length])) * 16777619u;
+        ++length;
+    }
+    PaintDebugTrace(210, hash, length);
+#else
+    (void)text;
+#endif
+}
+__declspec(dllexport) int32_t __stdcall SwitchToThread() noexcept {
+    const int32_t status = NtYieldExecution();
+    return status >= 0 && static_cast<uint32_t>(status) != 0x40000024U;
+}
+
+namespace {
+constexpr uint32_t FLSMaximumAvailable = 128;
+struct NativeFlsData { void* listForward; void* listBackward; void* values[FLSMaximumAvailable]; };
+using NativeFlsCallback = void (__stdcall *)(void*);
+uint8_t g_flsAllocated[FLSMaximumAvailable]{};
+NativeFlsCallback g_flsCallbacks[FLSMaximumAvailable]{};
+uint32_t g_flsLock{};
+void PaintDebugTrace(uint32_t stage, uint32_t value, uint32_t flags) noexcept {
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT) || defined(MICANT_BOOTSTRAP_REACTOS_APP_NOTEPAD)
+    using GetModuleFn = void* (__stdcall *)(const wchar_t*);
+    using GetProcFn = void* (__stdcall *)(void*, const char*);
+    using TraceFn = void (__stdcall *)(uint32_t, uint32_t, uint32_t);
+    auto getModule = reinterpret_cast<GetModuleFn>(GetModuleHandleW);
+    auto getProc = reinterpret_cast<GetProcFn>(GetProcAddress);
+    void* module = getModule ? getModule(L"win32k.dll") : nullptr;
+    auto trace = module && getProc ? reinterpret_cast<TraceFn>(
+        getProc(module, "MicaWin32kDebugInputTrace")) : nullptr;
+    if (trace) trace(stage, value, flags);
+#else
+    (void)stage; (void)value; (void)flags;
+#endif
+}
+void LockFls() noexcept {
+    while (__atomic_exchange_n(&g_flsLock, 1u, __ATOMIC_ACQUIRE))
+        __asm__ __volatile__("pause" ::: "memory");
+}
+void UnlockFls() noexcept { __atomic_store_n(&g_flsLock, 0u, __ATOMIC_RELEASE); }
+NativeFlsData* CurrentFlsData(bool create) noexcept {
+    uintptr_t teb{}; __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (!teb || teb > UINTPTR_MAX - 0x2E8) return nullptr;
+    auto** slot = reinterpret_cast<NativeFlsData**>(teb + 0x2E8);
+    auto* data = *slot;
+    if (!data && create) {
+        data = static_cast<NativeFlsData*>(HeapAlloc(GetProcessHeap(), 8u, sizeof(NativeFlsData)));
+        if (data) *slot = data;
+    }
+    return data;
+}
+}
+__declspec(dllexport) uint32_t __stdcall FlsAlloc(NativeFlsCallback callback) noexcept {
+    LockFls();
+    for (uint32_t i = 0; i < FLSMaximumAvailable; ++i) {
+        if (g_flsAllocated[i]) continue;
+        g_flsAllocated[i] = 1; g_flsCallbacks[i] = callback;
+        UnlockFls(); PaintDebugTrace(200, i, callback ? 1u : 0u); return i;
+    }
+    UnlockFls(); SetLastError(8); return UINT32_MAX;
+}
+__declspec(dllexport) int32_t __stdcall FlsFree(uint32_t index) noexcept {
+    if (index >= FLSMaximumAvailable) { SetLastError(87); return 0; }
+    LockFls();
+    if (!g_flsAllocated[index]) { UnlockFls(); SetLastError(87); return 0; }
+    const auto callback = g_flsCallbacks[index];
+    g_flsAllocated[index] = 0; g_flsCallbacks[index] = nullptr;
+    UnlockFls();
+    if (auto* data = CurrentFlsData(false); data && data->values[index]) {
+        void* value = data->values[index]; data->values[index] = nullptr;
+        if (callback) callback(value);
+    }
+    return 1;
+}
+__declspec(dllexport) void* __stdcall FlsGetValue(uint32_t index) noexcept {
+    if (index >= FLSMaximumAvailable || !g_flsAllocated[index]) {
+        SetLastError(87); return nullptr;
+    }
+    auto* data = CurrentFlsData(false);
+    SetLastError(0);
+    return data ? data->values[index] : nullptr;
+}
+__declspec(dllexport) int32_t __stdcall FlsSetValue(uint32_t index, void* value) noexcept {
+    if (index >= FLSMaximumAvailable || !g_flsAllocated[index]) {
+        SetLastError(87); return 0;
+    }
+    auto* data = CurrentFlsData(true);
+    if (!data) { SetLastError(8); return 0; }
+    data->values[index] = value;
+    PaintDebugTrace(201, index, value ? 1u : 0u);
+    return 1;
+}
+
+__declspec(dllexport) void* __stdcall CreateThread(
+    void*, size_t stackSize, uint32_t (__stdcall *start)(void*), void* argument,
+    uint32_t flags, uint32_t* threadId) noexcept {
+    if (!start) { SetLastError(87); return nullptr; }
+    void* thread = nullptr;
+    int32_t status = NtCreateThreadEx(&thread, 0x001F03FFu, nullptr,
+        reinterpret_cast<void*>(static_cast<intptr_t>(-1)),
+        reinterpret_cast<void*>(start), argument, flags, 0, stackSize, 0, nullptr);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    if (threadId) {
+        struct ThreadBasicInformation {
+            int32_t exitStatus; uint32_t padding; void* teb;
+            uintptr_t processId; uintptr_t id; uintptr_t affinity;
+            int32_t priority; int32_t basePriority;
+        } information{};
+        status = NtQueryInformationThread(thread, 0, &information,
+            sizeof(information), nullptr);
+        if (status < 0) {
+            (void)NtClose(thread);
+            SetLastError(RtlNtStatusToDosError(status));
+            return nullptr;
+        }
+        *threadId = static_cast<uint32_t>(information.id);
+    }
+    return thread;
+}
+
+struct Kernel32LargeInteger { uint64_t quadPart; };
+__declspec(dllexport) void* __stdcall CreateFileMappingW(
+    void* file, void*, uint32_t protection, uint32_t maximumHigh,
+    uint32_t maximumLow, const wchar_t*) noexcept {
+    Kernel32LargeInteger maximum{(static_cast<uint64_t>(maximumHigh) << 32) | maximumLow};
+    void* section = nullptr;
+    const int32_t status = NtCreateSection(&section, 0x000F001Fu, nullptr,
+        (maximum.quadPart ? &maximum : nullptr), protection ? protection : 0x04u,
+        0x08000000u, file == reinterpret_cast<void*>(static_cast<intptr_t>(-1)) ? nullptr : file);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    return section;
+}
+__declspec(dllexport) void* __stdcall MapViewOfFile(
+    void* section, uint32_t, uint32_t offsetHigh, uint32_t offsetLow,
+    size_t requestedSize) noexcept {
+    uintptr_t base = 0;
+    size_t viewSize = requestedSize;
+    Kernel32LargeInteger offset{(static_cast<uint64_t>(offsetHigh) << 32) | offsetLow};
+    const int32_t status = NtMapViewOfSection(section,
+        reinterpret_cast<void*>(static_cast<intptr_t>(-1)), &base, 0,
+        requestedSize, &offset, &viewSize, 1, 0x3000u, 0x04u);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    return reinterpret_cast<void*>(base);
+}
+__declspec(dllexport) int32_t __stdcall UnmapViewOfFile(const void* base) noexcept {
+    if (!base) { SetLastError(87); return 0; }
+    const int32_t status = NtUnmapViewOfSection(
+        reinterpret_cast<void*>(static_cast<intptr_t>(-1)), reinterpret_cast<uintptr_t>(base));
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
 }
 
 }
@@ -3687,6 +4110,37 @@ void WinNtKernel32Advapi32InitializeExecutiveSubsystem() noexcept {
 
 #if defined(BUILD_SYSTEM32_KERNEL32_DLL)
 extern "C" {
+struct Kernel32LargeInteger { uint64_t quadPart; };
+__declspec(dllexport) void* __stdcall CreateFileMappingW(
+    void* file, void*, uint32_t protection, uint32_t maximumHigh,
+    uint32_t maximumLow, const wchar_t*) noexcept {
+    Kernel32LargeInteger maximum{(static_cast<uint64_t>(maximumHigh) << 32) | maximumLow};
+    void* section = nullptr;
+    const int32_t status = NtCreateSection(&section, 0x000F001Fu, nullptr,
+        (maximum.quadPart ? &maximum : nullptr), protection ? protection : 0x04u,
+        0x08000000u, file == reinterpret_cast<void*>(static_cast<intptr_t>(-1)) ? nullptr : file);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    return section;
+}
+__declspec(dllexport) void* __stdcall MapViewOfFile(
+    void* section, uint32_t, uint32_t offsetHigh, uint32_t offsetLow,
+    size_t requestedSize) noexcept {
+    uintptr_t base = 0;
+    size_t viewSize = requestedSize;
+    Kernel32LargeInteger offset{(static_cast<uint64_t>(offsetHigh) << 32) | offsetLow};
+    const int32_t status = NtMapViewOfSection(section,
+        reinterpret_cast<void*>(static_cast<intptr_t>(-1)), &base, 0,
+        requestedSize, &offset, &viewSize, 1, 0x3000u, 0x04u);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return nullptr; }
+    return reinterpret_cast<void*>(base);
+}
+__declspec(dllexport) int32_t __stdcall UnmapViewOfFile(const void* base) noexcept {
+    if (!base) { SetLastError(87); return 0; }
+    const int32_t status = NtUnmapViewOfSection(
+        reinterpret_cast<void*>(static_cast<intptr_t>(-1)), reinterpret_cast<uintptr_t>(base));
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    return 1;
+}
 __declspec(dllexport) int32_t QueryPerformanceCounter(int64_t* lpPerformanceCount) {
     return micant::um::winnt_kernel32_advapi32_abi::Kernel32_QueryPerformanceCounter(lpPerformanceCount);
 }
@@ -3768,8 +4222,31 @@ __declspec(dllexport) int32_t SetThreadDescription(void* hThread, const wchar_t*
 } // extern "C"
 #elif defined(BUILD_SYSTEM32_ADVAPI32_DLL)
 extern "C" {
+__declspec(dllexport) int32_t IsTextUnicode(const void* buffer, int32_t byteCount,
+                                             int32_t* resultFlags) {
+    if (!buffer || byteCount < 0) { SetLastError(87); return 0; }
+    const auto* bytes = static_cast<const uint8_t*>(buffer);
+    const size_t pairs = static_cast<size_t>(byteCount) / 2;
+    size_t highZero{}, lowZero{};
+    for (size_t i = 0; i < pairs; ++i) {
+        highZero += bytes[i * 2 + 1] == 0;
+        lowZero += bytes[i * 2] == 0;
+    }
+    int32_t flags{};
+    if (pairs && highZero * 2 >= pairs) flags |= 0x0001 | 0x0002 | 0x0004;
+    if (pairs && lowZero * 2 >= pairs) flags |= 0x0010 | 0x0020 | 0x0040;
+    if (highZero || lowZero) flags |= 0x0008 | 0x0080;
+    if (byteCount & 1) flags |= 0x0100;
+    if (resultFlags) *resultFlags = flags;
+    return pairs && highZero * 2 >= pairs && !(byteCount & 1) ? 1 : 0;
+}
 __declspec(dllexport) int32_t RegOpenKeyExW(void* hKey, const wchar_t* lpSubKey, uint32_t ulOptions, uint32_t samDesired, void** phkResult) {
     return micant::um::winnt_kernel32_advapi32_abi::Advapi32_RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+}
+__declspec(dllexport) int32_t RegOpenKeyW(void* hKey, const wchar_t* subKey,
+                                          void** result) {
+    return micant::um::winnt_kernel32_advapi32_abi::Advapi32_RegOpenKeyExW(
+        hKey, subKey, 0, 0x20019u, result);
 }
 __declspec(dllexport) int32_t RegCreateKeyExW(void* hKey, const wchar_t* lpSubKey, uint32_t Reserved, wchar_t* lpClass, uint32_t dwOptions, uint32_t samDesired, void* lpSecurityAttributes, void** phkResult, uint32_t* lpdwDisposition) {
     return micant::um::winnt_kernel32_advapi32_abi::Advapi32_RegCreateKeyExW(hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);

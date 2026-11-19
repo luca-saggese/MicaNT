@@ -1,0 +1,3 @@
+LIBRARY user32
+EXPORTS
+    FillRect=MicaUser32FillRect

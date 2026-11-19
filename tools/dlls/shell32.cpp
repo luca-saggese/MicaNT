@@ -48,9 +48,54 @@ __declspec(dllimport) int32_t SetBkMode(void*, int32_t);
 __declspec(dllimport) int32_t TextOutW(void*, int32_t, int32_t, const wchar_t*, int32_t);
 __declspec(dllimport) int32_t DrawIconEx(void*, int32_t, int32_t, void*, int32_t,
                                          int32_t, uint32_t, void*, uint32_t);
+__declspec(dllimport) void* GlobalLock(void*);
+__declspec(dllimport) int32_t GlobalUnlock(void*);
+__declspec(dllimport) void* GlobalFree(void*);
+__declspec(dllimport) intptr_t GetWindowLongPtrW(void*, int32_t);
+__declspec(dllimport) intptr_t SetWindowLongPtrW(void*, int32_t, intptr_t);
+__declspec(dllimport) void SetLastError(uint32_t);
+__declspec(dllimport) uint32_t GetLastError();
+__declspec(dllimport) int32_t MultiByteToWideChar(uint32_t, uint32_t,
+    const char*, int32_t, wchar_t*, int32_t);
+__declspec(dllimport) int32_t CreateDirectoryW(const wchar_t*, void*);
 }
 
 namespace {
+constexpr int32_t kMaxPath = 260;
+constexpr uint32_t kCsidlFlagCreate = 0x8000u;
+constexpr uint32_t kCsidlLocalAppData = 0x001Cu;
+constexpr uint32_t kCsidlAppData = 0x001Au;
+constexpr uint32_t kCsidlPersonal = 0x0005u;
+constexpr uint32_t kCsidlProfile = 0x0028u;
+constexpr uint32_t kCsidlDesktopDirectory = 0x0010u;
+
+bool appendPath(wchar_t* output, size_t& used, const wchar_t* text) noexcept {
+    while (*text) {
+        if (used + 1 >= static_cast<size_t>(kMaxPath)) return false;
+        output[used++] = *text++;
+    }
+    output[used] = L'\0';
+    return true;
+}
+
+bool folderPath(uint32_t folder, wchar_t* output) noexcept {
+    const wchar_t* suffix = nullptr;
+    switch (folder & 0x00ffu) {
+        case kCsidlProfile: suffix = L""; break;
+        case kCsidlLocalAppData: suffix = L"\\AppData\\Local"; break;
+        case kCsidlAppData: suffix = L"\\AppData\\Roaming"; break;
+        case kCsidlPersonal: suffix = L"\\Documents"; break;
+        case kCsidlDesktopDirectory: suffix = L"\\Desktop"; break;
+        default: return false;
+    }
+    size_t used = 0;
+    output[0] = L'\0';
+    constexpr wchar_t profile[] = L"C:\\Users\\Default";
+    if (!appendPath(output, used, profile) || !appendPath(output, used, suffix))
+        return false;
+    return true;
+}
+
 constexpr wchar_t kAboutClassName[] = L"LuceOS_ShellAboutDialog";
 uint16_t g_aboutClassAtom{};
 const wchar_t* g_aboutApplication{};
@@ -156,6 +201,141 @@ intptr_t __stdcall ShellAboutWindowProc(void* window, uint32_t message,
 }
 
 extern "C" {
+__declspec(dllexport) void* WINAPI ShellExecuteW(
+    void*, const wchar_t*, const wchar_t*, const wchar_t*, const wchar_t*, int32_t) noexcept {
+    // This port has no registered verb/association service yet. Do not claim
+    // that a requested document or command was launched.
+    SetLastError(120); // ERROR_CALL_NOT_IMPLEMENTED
+    return reinterpret_cast<void*>(static_cast<intptr_t>(31)); // SE_ERR_NOASSOC
+}
+
+__declspec(dllexport) void WINAPI DragAcceptFiles(void* window, int32_t accept) noexcept {
+    if (!window) {
+        SetLastError(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return;
+    }
+    constexpr int32_t GWL_EXSTYLE = -20;
+    constexpr uint32_t WS_EX_ACCEPTFILES = 0x00000010u;
+    const uint32_t current = static_cast<uint32_t>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+    const uint32_t updated = accept ? (current | WS_EX_ACCEPTFILES) :
+                                      (current & ~WS_EX_ACCEPTFILES);
+    (void)SetWindowLongPtrW(window, GWL_EXSTYLE, static_cast<intptr_t>(updated));
+}
+
+struct ShellDropFiles {
+    uint32_t offset;
+    int32_t x;
+    int32_t y;
+    int32_t fNC;
+    int32_t fWide;
+};
+
+__declspec(dllexport) void WINAPI DragFinish(void* drop) noexcept {
+    if (drop) (void)GlobalFree(drop);
+}
+
+__declspec(dllexport) uint32_t WINAPI DragQueryFileW(
+    void* drop, uint32_t fileIndex, wchar_t* output, uint32_t outputChars) noexcept {
+    if (!drop) {
+        SetLastError(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    auto* header = static_cast<const ShellDropFiles*>(GlobalLock(drop));
+    if (!header || header->offset < sizeof(ShellDropFiles)) {
+        if (header) (void)GlobalUnlock(drop);
+        SetLastError(6);
+        return 0;
+    }
+    const auto* payload = reinterpret_cast<const uint8_t*>(header) + header->offset;
+    uint32_t count = 0;
+    const wchar_t* selected = nullptr;
+    uint32_t currentIndex = 0;
+    if (header->fWide) {
+        const auto* cursor = reinterpret_cast<const wchar_t*>(payload);
+        while (*cursor) {
+            if (fileIndex == UINT32_MAX) ++count;
+            else if (currentIndex == fileIndex) selected = cursor;
+            while (*cursor) ++cursor;
+            ++cursor;
+            ++currentIndex;
+        }
+        if (fileIndex == UINT32_MAX) {
+            (void)GlobalUnlock(drop);
+            return count;
+        }
+        if (selected) {
+            uint32_t length = 0;
+            while (selected[length]) ++length;
+            if (output && outputChars) {
+                const uint32_t copied = length < outputChars - 1 ? length : outputChars - 1;
+                for (uint32_t i = 0; i < copied; ++i) output[i] = selected[i];
+                output[copied] = L'\0';
+            }
+            (void)GlobalUnlock(drop);
+            return length;
+        }
+    } else {
+        const auto* cursor = reinterpret_cast<const char*>(payload);
+        while (*cursor) {
+            if (fileIndex == UINT32_MAX) ++count;
+            else if (currentIndex == fileIndex) selected =
+                reinterpret_cast<const wchar_t*>(cursor);
+            while (*cursor) ++cursor;
+            ++cursor;
+            ++currentIndex;
+        }
+        if (fileIndex == UINT32_MAX) {
+            (void)GlobalUnlock(drop);
+            return count;
+        }
+        if (selected) {
+            const auto* narrow = reinterpret_cast<const char*>(selected);
+            const int32_t required = MultiByteToWideChar(0, 0, narrow, -1, nullptr, 0);
+            if (required <= 0) {
+                (void)GlobalUnlock(drop);
+                return 0;
+            }
+            if (output && outputChars) {
+                if (MultiByteToWideChar(0, 0, narrow, -1, output,
+                        static_cast<int32_t>(outputChars)) == 0)
+                    output[0] = L'\0';
+            }
+            (void)GlobalUnlock(drop);
+            return static_cast<uint32_t>(required - 1);
+        }
+    }
+    (void)GlobalUnlock(drop);
+    if (output && outputChars) output[0] = L'\0';
+    return 0;
+}
+
+__declspec(dllexport) int32_t WINAPI SHGetFolderPathW(
+    void*, int32_t csidl, void*, uint32_t, wchar_t* output) noexcept {
+    if (!output) return static_cast<int32_t>(0x80070057u); // E_INVALIDARG
+    wchar_t path[kMaxPath]{};
+    const uint32_t id = static_cast<uint32_t>(csidl);
+    if (!folderPath(id, path)) {
+        output[0] = L'\0';
+        return static_cast<int32_t>(0x80070057u);
+    }
+    size_t length = 0;
+    while (path[length]) ++length;
+    for (size_t i = 0; i <= length; ++i) output[i] = path[i];
+    if (id & kCsidlFlagCreate) {
+        // SHGetFolderPath's CREATE flag creates the requested leaf directory.
+        if (!CreateDirectoryW(path, nullptr)) {
+            output[0] = L'\0';
+            return static_cast<int32_t>(0x80070005u); // E_ACCESSDENIED
+        }
+    }
+    return 0; // S_OK
+}
+
+__declspec(dllexport) void WINAPI SHAddToRecentDocs(uint32_t, const void*) noexcept {
+    // Recent-document persistence is owned by Explorer. Until its recent-item
+    // store is connected, this shell notification intentionally has no effect.
+}
+
 // ShellAboutW is a real shell operation: present the caller's about text in a
 // modal information dialog and report whether the dialog was acknowledged.
 // The shell does not claim success when the underlying window operation fails.

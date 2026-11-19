@@ -30,6 +30,12 @@ __declspec(dllimport) int32_t __stdcall NtReadFile(
     void* ioStatus, void* buffer, uint32_t length,
     void* byteOffset, uint32_t* key) noexcept;
 __declspec(dllimport) int32_t __stdcall NtQuerySystemTime(int64_t* systemTime) noexcept;
+__declspec(dllimport) int32_t __stdcall NtCreateThreadEx(
+    void**, uint32_t, void*, void*, void*, void*, uint32_t,
+    uintptr_t, size_t, size_t, void*) noexcept;
+__declspec(dllimport) int32_t __stdcall NtQueryInformationThread(
+    void*, uint32_t, void*, uint32_t, uint32_t*) noexcept;
+__declspec(dllimport) int32_t __stdcall NtClose(void*) noexcept;
 }
 
 namespace {
@@ -630,6 +636,36 @@ __declspec(dllexport) int __cdecl wcscmp(const wchar_t* left, const wchar_t* rig
     return static_cast<int>(*left) - static_cast<int>(*right);
 }
 
+__declspec(dllexport) wchar_t* __cdecl wcscat(wchar_t* destination, const wchar_t* source) {
+    wchar_t* result = destination;
+    while (*destination) ++destination;
+    while ((*destination++ = *source++) != L'\0') {}
+    return result;
+}
+
+__declspec(dllexport) wchar_t* __cdecl wcscpy(wchar_t* destination, const wchar_t* source) {
+    wchar_t* result = destination;
+    while ((*destination++ = *source++) != L'\0') {}
+    return result;
+}
+
+__declspec(dllexport) int __cdecl wcsncmp(
+    const wchar_t* left, const wchar_t* right, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (left[index] != right[index] || left[index] == L'\0')
+            return static_cast<int>(left[index]) - static_cast<int>(right[index]);
+    }
+    return 0;
+}
+
+__declspec(dllexport) wchar_t* __cdecl wcsncpy(
+    wchar_t* destination, const wchar_t* source, size_t count) {
+    size_t index = 0;
+    for (; index < count && source[index]; ++index) destination[index] = source[index];
+    for (; index < count; ++index) destination[index] = L'\0';
+    return destination;
+}
+
 __declspec(dllexport) int __cdecl _wcsicmp(const wchar_t* left, const wchar_t* right) {
     if (!left || !right) return left ? 1 : right ? -1 : 0;
     for (;;) {
@@ -641,6 +677,21 @@ __declspec(dllexport) int __cdecl _wcsicmp(const wchar_t* left, const wchar_t* r
         if ((b >= 0x00C0 && b <= 0x00D6) || (b >= 0x00D8 && b <= 0x00DE)) b += 0x20;
         if (a != b || a == 0) return static_cast<int>(a) - static_cast<int>(b);
     }
+}
+
+__declspec(dllexport) int __cdecl _wcsnicmp(
+    const wchar_t* left, const wchar_t* right, size_t count) {
+    if (!left || !right) return left ? 1 : right ? -1 : 0;
+    for (size_t index = 0; index < count; ++index) {
+        uint32_t a = static_cast<uint32_t>(left[index]);
+        uint32_t b = static_cast<uint32_t>(right[index]);
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if ((a >= 0x00C0 && a <= 0x00D6) || (a >= 0x00D8 && a <= 0x00DE)) a += 0x20;
+        if ((b >= 0x00C0 && b <= 0x00D6) || (b >= 0x00D8 && b <= 0x00DE)) b += 0x20;
+        if (a != b || a == 0) return static_cast<int>(a) - static_cast<int>(b);
+    }
+    return 0;
 }
 
 __declspec(dllexport) char* __cdecl _strdup(const char* source) {
@@ -1243,7 +1294,14 @@ static int32_t formatNative(char* output, size_t capacity, const char* format,
 
 static int32_t formatWide(wchar_t* output, size_t capacity, const wchar_t* format,
                           va_list arguments) noexcept {
-    if (!output || !capacity || !format) { g_nativeErrno = 22; return -1; }
+    // UCRT's sizing call is made with a null destination and zero capacity.
+    // ATL CStringW relies on this to allocate exactly enough space before its
+    // second formatting pass.
+    const bool sizingOnly = output == nullptr && capacity == 0;
+    if ((!output && !sizingOnly) || (output && !capacity) || !format) {
+        g_nativeErrno = 22;
+        return -1;
+    }
     char narrowFormat[1024]{};
     size_t formatLength{};
     bool inConversion = false;
@@ -1269,6 +1327,13 @@ static int32_t formatWide(wchar_t* output, size_t capacity, const wchar_t* forma
                 // widens it. The shared formatter emits that byte, then this
                 // routine widens each result byte into the UTF-16 output.
                 if (value == 'C') converted = 'c';
+                // In wide printf, %s consumes UTF-16 and %S consumes a
+                // narrow string. formatNative expresses the former as %ls.
+                if (value == 's') {
+                    narrowFormat[formatLength++] = 'l';
+                } else if (value == 'S') {
+                    converted = 's';
+                }
                 inConversion = false;
             }
         }
@@ -1283,11 +1348,15 @@ static int32_t formatWide(wchar_t* output, size_t capacity, const wchar_t* forma
     const int32_t result = formatNative(narrowOutput, OutputCapacity - 1,
                                         narrowFormat, copy);
     va_end(copy);
-    if (result < 0 || static_cast<size_t>(result) >= capacity) {
-        output[0] = L'\0';
+    if (result < 0 || (!sizingOnly && static_cast<size_t>(result) >= capacity)) {
+        if (output) output[0] = L'\0';
         if (result >= 0) g_nativeErrno = 34;
         g_nativeHeap.release(narrowOutput);
         return -1;
+    }
+    if (sizingOnly) {
+        g_nativeHeap.release(narrowOutput);
+        return result;
     }
     for (int32_t i = 0; i < result; ++i)
         output[i] = static_cast<unsigned char>(narrowOutput[i]);
@@ -1647,6 +1716,8 @@ __declspec(dllexport) int __cdecl __stdio_common_vsprintf(
 
 __declspec(dllexport) int __cdecl __stdio_common_vswprintf(
     uint64_t, wchar_t* buffer, size_t capacity, const wchar_t* format, void*, va_list arguments) {
+    if (!buffer && capacity == 0)
+        return formatWide(nullptr, 0, format, arguments);
     return formatWide(buffer, capacity, format, arguments);
 }
 
@@ -1769,6 +1840,38 @@ __declspec(dllexport) int __cdecl _set_new_mode(int mode) {
     if (mode != 0 && mode != 1) { g_nativeErrno = 22; return -1; }
     g_nativeNewMode = mode; return previous;
 }
+
+__declspec(dllexport) uintptr_t __cdecl _beginthreadex(void* security,
+    unsigned stackSize, unsigned (__stdcall *startAddress)(void*), void* argument,
+    unsigned initFlags, unsigned* threadId) {
+    if (security || !startAddress || (initFlags & ~1u)) {
+        g_nativeErrno = 22;
+        return 0;
+    }
+    void* thread{};
+    const int32_t status = NtCreateThreadEx(&thread, 0x00100040u, nullptr,
+        reinterpret_cast<void*>(static_cast<intptr_t>(-1)),
+        reinterpret_cast<void*>(startAddress), argument, initFlags,
+        0, stackSize, 0, nullptr);
+    if (status != 0 || !thread) return 0;
+    if (threadId) {
+        struct ThreadBasicInformation {
+            int32_t exitStatus; uint32_t padding; void* teb;
+            void* processId; void* threadId; uintptr_t affinity;
+            int32_t priority; int32_t basePriority;
+        } information{};
+        uint32_t returned{};
+        const int32_t queryStatus = NtQueryInformationThread(thread, 0,
+            &information, sizeof(information), &returned);
+        const uintptr_t id = reinterpret_cast<uintptr_t>(information.threadId);
+        if (queryStatus != 0 || !id || id > UINT32_MAX) {
+            (void)NtClose(thread);
+            return 0;
+        }
+        *threadId = static_cast<unsigned>(id);
+    }
+    return reinterpret_cast<uintptr_t>(thread);
+}
 __declspec(dllexport) NativeInvalidParameterHandler __cdecl
 _set_invalid_parameter_handler(NativeInvalidParameterHandler handler) {
     const auto previous = g_nativeInvalidParameterHandler;
@@ -1845,6 +1948,73 @@ __declspec(dllexport) void __cdecl _exit(int status) {
 __declspec(dllexport) void __cdecl _assert(const char* /*expression*/, const char* /*file*/, unsigned /*line*/) {
     (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}), 3);
     __builtin_trap();
+}
+
+__declspec(dllexport) void __cdecl _wassert(const wchar_t* /*expression*/,
+    const wchar_t* /*file*/, unsigned /*line*/) {
+    (void)NtTerminateProcess(reinterpret_cast<void*>(~uintptr_t{0}), 3);
+    __builtin_trap();
+}
+
+__declspec(dllexport) int __cdecl _wtoi(const wchar_t* text) {
+    if (!text) { g_nativeErrno = 22; return 0; }
+    while (*text == L' ' || (*text >= L'\t' && *text <= L'\r')) ++text;
+    bool negative = false;
+    if (*text == L'+' || *text == L'-') negative = *text++ == L'-';
+    int64_t value{};
+    while (*text >= L'0' && *text <= L'9') {
+        const int digit = *text++ - L'0';
+        value = value > (INT64_MAX - digit) / 10 ? INT64_MAX : value * 10 + digit;
+    }
+    if (negative) value = -value;
+    if (value > INT_MAX) return INT_MAX;
+    if (value < INT_MIN) return INT_MIN;
+    return static_cast<int>(value);
+}
+__declspec(dllexport) double __cdecl wcstod(const wchar_t* text, wchar_t** end) {
+    if (!text) { g_nativeErrno = 22; if (end) *end = nullptr; return 0.0; }
+    const wchar_t* cursor = text;
+    while (*cursor == L' ' || (*cursor >= L'\t' && *cursor <= L'\r')) ++cursor;
+    bool negative = false;
+    if (*cursor == L'+' || *cursor == L'-') negative = *cursor++ == L'-';
+    double value{}; bool any{};
+    while (*cursor >= L'0' && *cursor <= L'9') {
+        value = value * 10.0 + (*cursor++ - L'0'); any = true;
+    }
+    if (*cursor == L'.') {
+        ++cursor; double scale = 0.1;
+        while (*cursor >= L'0' && *cursor <= L'9') {
+            value += (*cursor++ - L'0') * scale; scale *= 0.1; any = true;
+        }
+    }
+    if (!any) { if (end) *end = const_cast<wchar_t*>(text); return 0.0; }
+    if (*cursor == L'e' || *cursor == L'E') {
+        const wchar_t* exponentStart = cursor++;
+        bool exponentNegative = false;
+        if (*cursor == L'+' || *cursor == L'-') exponentNegative = *cursor++ == L'-';
+        int exponent{}; bool exponentDigits{};
+        while (*cursor >= L'0' && *cursor <= L'9') {
+            if (exponent < 308) exponent = exponent * 10 + (*cursor - L'0');
+            ++cursor; exponentDigits = true;
+        }
+        if (!exponentDigits) cursor = exponentStart;
+        else {
+            if (exponent > 308) exponent = 308;
+            const double factor = __builtin_pow(10.0, exponent);
+            value = exponentNegative ? value / factor : value * factor;
+        }
+    }
+    if (end) *end = const_cast<wchar_t*>(cursor);
+    return negative ? -value : value;
+}
+__declspec(dllexport) double __cdecl atan2(double y, double x) {
+    return __builtin_atan2(y, x);
+}
+__declspec(dllexport) wchar_t* __cdecl wcsrchr(const wchar_t* text, wchar_t value) {
+    if (!text) return nullptr;
+    const wchar_t* found = nullptr;
+    do { if (*text == value) found = text; } while (*text++ != L'\0');
+    return const_cast<wchar_t*>(found);
 }
 
 __declspec(dllexport) char* __cdecl strerror(int error) {
@@ -1973,6 +2143,33 @@ __declspec(dllexport) size_t __cdecl wcrtomb(
     output[0] = static_cast<char>(0xE0 | (cp >> 12));
     output[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
     output[2] = static_cast<char>(0x80 | (cp & 0x3F)); return 3;
+}
+
+__declspec(dllexport) int __cdecl iswctype(wchar_t c, unsigned short type) {
+    constexpr unsigned short upper=1, lower=2, digit=4, space=8, punct=16,
+        control=32, blank=64, xdigit=128, alpha=256;
+    const bool isUpper=c>=L'A'&&c<=L'Z', isLower=c>=L'a'&&c<=L'z';
+    const bool isDigit=c>=L'0'&&c<=L'9';
+    const bool isSpace=c==L' '||(c>=L'\t'&&c<=L'\r');
+    const bool isControl=c<0x20||(c>=0x7f&&c<=0x9f);
+    const bool isPunct=!isUpper&&!isLower&&!isDigit&&!isSpace&&!isControl;
+    return ((type&upper)&&isUpper)||((type&lower)&&isLower)||((type&digit)&&isDigit)||
+        ((type&space)&&isSpace)||((type&blank)&&(c==L' '||c==L'\t'))||
+        ((type&control)&&isControl)||((type&punct)&&isPunct)||
+        ((type&alpha)&&(isUpper||isLower))||
+        ((type&xdigit)&&(isDigit||(c>=L'a'&&c<=L'f')||(c>=L'A'&&c<=L'F')));
+}
+__declspec(dllexport) uint32_t __cdecl towupper(uint32_t c) {
+    if ((c >= L'a' && c <= L'z') ||
+        (c >= 0x00E0 && c <= 0x00F6) || (c >= 0x00F8 && c <= 0x00FE))
+        return c - 0x20;
+    return c;
+}
+__declspec(dllexport) uint32_t __cdecl towlower(uint32_t c) {
+    if ((c >= L'A' && c <= L'Z') ||
+        (c >= 0x00C0 && c <= 0x00D6) || (c >= 0x00D8 && c <= 0x00DE))
+        return c + 0x20;
+    return c;
 }
 
 }
@@ -2507,7 +2704,6 @@ __declspec(dllexport) double __cdecl sinh(double value) { return std::sinh(value
 __declspec(dllexport) double __cdecl sqrt(double value) { return micant::ucrt::winnt_ucrtbase_abi::Ucrt_sqrt(value); }
 __declspec(dllexport) double __cdecl tan(double value) { return std::tan(value); }
 __declspec(dllexport) double __cdecl tanh(double value) { return std::tanh(value); }
-
 } // extern "C"
 #endif
 

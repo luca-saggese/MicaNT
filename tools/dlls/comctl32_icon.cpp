@@ -41,6 +41,9 @@ extern "C" __declspec(dllimport) void* SelectObject(void*, void*) noexcept;
 extern "C" __declspec(dllimport) int32_t DeleteObject(void*) noexcept;
 extern "C" __declspec(dllimport) int32_t BitBlt(void*, int32_t, int32_t, int32_t, int32_t,
                                                   void*, int32_t, int32_t, uint32_t) noexcept;
+extern "C" __declspec(dllimport) int32_t GetObjectW(void*, int32_t, void*) noexcept;
+extern "C" __declspec(dllimport) void* LoadImageW(void*, const wchar_t*, uint32_t,
+    int32_t, int32_t, uint32_t) noexcept;
 extern "C" __declspec(dllimport) int32_t DrawIconEx(void*, int32_t, int32_t, void*, int32_t,
                                                      int32_t, uint32_t, void*, uint32_t) noexcept;
 
@@ -309,6 +312,90 @@ __declspec(dllexport) int32_t ImageList_GetImageCount(void* himl) noexcept {
 }
 __declspec(dllexport) int32_t ImageList_Add(void* himl, void* bitmap, void* mask) noexcept {
     return captureBitmap(himl, bitmap, mask);
+}
+__declspec(dllexport) int32_t ImageList_AddMasked(void* himl, void* sourceBitmap,
+                                                   uint32_t transparentColor) noexcept {
+    struct BitmapObject { int32_t type, width, height, widthBytes;
+        uint16_t planes, bitsPixel; void* bits; } object{};
+    if (!sourceBitmap || GetObjectW(sourceBitmap, sizeof(object), &object) != sizeof(object) ||
+        object.width <= 0 || object.height <= 0 || object.width > 4096 ||
+        object.height > 4096) return -1;
+    uint32_t cellWidth{}, cellHeight{};
+    {
+        Guard guard; uint32_t index{}; ImageList* list = lookup(himl, index);
+        if (!list || list->busy) return -1;
+        cellWidth = list->width; cellHeight = list->height;
+    }
+    if (static_cast<uint32_t>(object.width) % cellWidth ||
+        static_cast<uint32_t>(object.height) < cellHeight) return -1;
+    const uint32_t columns = static_cast<uint32_t>(object.width) / cellWidth;
+    const uint32_t rows = static_cast<uint32_t>(object.height) / cellHeight;
+    const uint64_t total = uint64_t(columns) * rows;
+    if (!columns || !rows || total > MaxImagesPerList) return -1;
+    BitmapInfo info{}; info.header.width = object.width;
+    info.header.height = -object.height;
+    info.header.imageSize = static_cast<uint32_t>(uint64_t(object.width) * object.height * 4);
+    void* copyBitmap{}; void* copyDc{}; uint32_t* sourcePixels{};
+    if (!makeSurface(static_cast<uint32_t>(object.width),
+                     static_cast<uint32_t>(object.height), copyBitmap, copyDc, sourcePixels))
+        return -1;
+    void* previous = SelectObject(copyDc, copyBitmap);
+    void* sourceDc = CreateCompatibleDC(nullptr);
+    bool copied{};
+    if (previous && sourceDc) {
+        void* oldSource = SelectObject(sourceDc, sourceBitmap);
+        if (oldSource) {
+            copied = BitBlt(copyDc, 0, 0, object.width, object.height,
+                            sourceDc, 0, 0, RopSrcCopy) != 0;
+            (void)SelectObject(sourceDc, oldSource);
+        }
+    }
+    if (sourceDc) (void)DeleteDC(sourceDc);
+    if (!copied) { destroySurface(copyBitmap, copyDc, previous); return -1; }
+    int32_t first = -1;
+    for (uint32_t row = 0; row < rows; ++row) {
+        for (uint32_t column = 0; column < columns; ++column) {
+            uint32_t tile[MaxDimension * MaxDimension]{};
+            for (uint32_t y = 0; y < cellHeight; ++y) {
+                const uint32_t* src = sourcePixels +
+                    static_cast<size_t>(row * cellHeight + y) * object.width + column * cellWidth;
+                uint32_t* dst = tile + static_cast<size_t>(y) * cellWidth;
+                for (uint32_t x = 0; x < cellWidth; ++x) {
+                    const uint32_t pixel = src[x];
+                    const uint32_t rgb = ((pixel & 0xffu) << 16) |
+                        (pixel & 0xff00u) | ((pixel >> 16) & 0xffu);
+                    dst[x] = (rgb == (transparentColor & 0x00ffffffu))
+                        ? (pixel & 0x00ffffffu) : (pixel | 0xff000000u);
+                }
+            }
+            const int32_t index = publish(himl, cellWidth, cellHeight, tile);
+            if (index < 0) { destroySurface(copyBitmap, copyDc, previous); return -1; }
+            if (first < 0) first = index;
+        }
+    }
+    destroySurface(copyBitmap, copyDc, previous);
+    return first;
+}
+__declspec(dllexport) void* ImageList_LoadImageW(void* instance, const wchar_t* resource,
+    int32_t imageWidth, int32_t grow, uint32_t mask, uint32_t flags, uint32_t type) noexcept {
+    if (type != 0 || !resource || imageWidth < 0 || grow < 0 || (flags & ~0x00000010u))
+        return nullptr;
+    void* bitmap = LoadImageW(instance, resource, 0, 0, 0, flags);
+    if (!bitmap) return nullptr;
+    struct BitmapObject { int32_t type, width, height, widthBytes;
+        uint16_t planes, bitsPixel; void* bits; } object{};
+    if (GetObjectW(bitmap, sizeof(object), &object) != sizeof(object) ||
+        object.width <= 0 || object.height <= 0) { (void)DeleteObject(bitmap); return nullptr; }
+    const int32_t cellWidth = imageWidth ? imageWidth : object.height;
+    if (cellWidth <= 0 || object.width % cellWidth || cellWidth > object.height) {
+        (void)DeleteObject(bitmap); return nullptr;
+    }
+    void* list = ImageList_Create(cellWidth, object.height, 0x20u, 0, grow);
+    if (!list) { (void)DeleteObject(bitmap); return nullptr; }
+    const int32_t result = ImageList_AddMasked(list, bitmap, mask);
+    (void)DeleteObject(bitmap);
+    if (result < 0) { (void)ImageList_Destroy(list); return nullptr; }
+    return list;
 }
 __declspec(dllexport) int32_t ImageList_AddIcon(void* himl, void* icon) noexcept {
     return captureIcon(himl, icon, -1);

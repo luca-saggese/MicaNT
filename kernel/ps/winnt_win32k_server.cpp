@@ -642,6 +642,14 @@ void* MicaWin32kGetForegroundWindow() {
         ? reinterpret_cast<void*>(value.result) : nullptr;
 }
 
+int32_t MicaWin32kSetForegroundWindow(void* window) {
+    if (!window) return 0;
+    MicaWin32kRequest value{};
+    value.args[0] = reinterpret_cast<uint64_t>(window);
+    return request(MICANT_WIN32K_OP_SET_FOREGROUND_WINDOW, value)
+        ? static_cast<int32_t>(value.result) : 0;
+}
+
 void* MicaWin32kSetFocus(void* hwnd) {
     MicaWin32kRequest value{};
     value.args[0] = reinterpret_cast<uint64_t>(hwnd);
@@ -808,6 +816,20 @@ void* MicaWin32kCreateCompatibleBitmap(void*, int32_t width, int32_t height) {
     auto* bitmap = allocateBitmap(static_cast<uint32_t>(width),
                                  static_cast<uint32_t>(height));
     return bitmap ? reinterpret_cast<void*>(bitmap->handle) : nullptr;
+}
+
+int32_t MicaWin32kGetBitmapSurface(void* handle, uint32_t** pixels,
+                                   uint32_t* width, uint32_t* height) {
+    if (pixels) *pixels = nullptr;
+    if (width) *width = 0;
+    if (height) *height = 0;
+    if (!pixels || !width || !height) return 0;
+    auto* bitmap = findBitmap(handle);
+    if (!bitmap || !bitmap->pixels || !bitmap->width || !bitmap->height) return 0;
+    *pixels = bitmap->pixels;
+    *width = bitmap->width;
+    *height = bitmap->height;
+    return 1;
 }
 
 void* MicaWin32kSelectObject(void* dc, void* object) {

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
@@ -19,6 +20,8 @@ extern "C" bool DllMain(void*, unsigned long, void*) noexcept { return true; }
 namespace micant::um::winnt_user32_gdi32_imm32_abi {
 
 int32_t Gdi32_GetDeviceCaps(void*, int32_t) noexcept;
+void* Gdi32_GetStockObject(int32_t) noexcept;
+int32_t Gdi32_DeleteObject(void*) noexcept;
 
 
 namespace {
@@ -76,6 +79,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kCreateCompatibleDC);
     MICA_WIN32K_PROC(MicaWin32kDeleteDC);
     MICA_WIN32K_PROC(MicaWin32kCreateCompatibleBitmap);
+    MICA_WIN32K_PROC(MicaWin32kGetBitmapSurface);
     MICA_WIN32K_PROC(MicaWin32kSelectObject);
     MICA_WIN32K_PROC(MicaWin32kBitBlt);
     MICA_WIN32K_PROC(MicaWin32kPresentDC);
@@ -101,6 +105,7 @@ constexpr size_t GdiFontCapacity = 24;
 constexpr size_t GdiBitmapCapacity = 32;
 constexpr size_t GdiDcCapacity = 64;
 constexpr size_t GdiBrushCapacity = 64;
+constexpr size_t GdiPenCapacity = 64;
 constexpr int32_t GdiFontSize = 9;
 struct GdiLogFontW {
     int32_t height, width, escapement, orientation, weight;
@@ -151,8 +156,16 @@ struct GdiDcSelection {
     void* dc{};
     void* bitmap{};
     GdiFontObject* font{};
+    struct GdiBrushObject* brush{};
+    struct GdiPenObject* pen{};
     uint32_t textColor{0x00000000u}; // COLORREF black
+    uint32_t backgroundColor{0x00FFFFFFu};
+    uint32_t dcBrushColor{0x00FFFFFFu};
     int32_t backgroundMode{1};       // TRANSPARENT
+    int32_t currentX{}, currentY{};
+    int32_t rop2{13};
+    int32_t polyFillMode{1};
+    int32_t stretchBltMode{1};
     MicaWin32kRect clip{};
     struct ClipState { uint32_t generation{}; MicaWin32kRect previous{}; bool occupied{}; } clips[16]{};
     uint32_t nextClipGeneration{1};
@@ -160,13 +173,26 @@ struct GdiDcSelection {
 struct GdiBrushObject {
     uint32_t colorRef{};
     uint32_t generation{};
+    void* patternBitmap{};
+    uint32_t hatch{};
+    uint8_t style{};
+    bool stock{};
+    int32_t stockId{-1};
     bool active{};
+};
+struct GdiPenObject {
+    uint32_t colorRef{};
+    int32_t width{1};
+    uint32_t style{};
+    bool active{};
+    bool stock{};
 };
 GdiFontObject g_gdiFonts[GdiFontCapacity]{};
 GdiFontObject* g_systemFont{};
 GdiBitmapSurface g_gdiBitmaps[GdiBitmapCapacity]{};
 GdiDcSelection g_gdiDcs[GdiDcCapacity]{};
 GdiBrushObject g_gdiBrushes[GdiBrushCapacity]{};
+GdiPenObject g_gdiPens[GdiPenCapacity]{};
 uint32_t g_gdiBrushGeneration{1};
 uint32_t g_gdiBrushLock{};
 GdiFontObject* GetSystemGdiFont() noexcept;
@@ -198,6 +224,27 @@ GdiBitmapSurface* FindGdiBitmap(void* handle) noexcept {
     for (auto& bitmap : g_gdiBitmaps) if (bitmap.bitmap == handle && handle) return &bitmap;
     return nullptr;
 }
+GdiPenObject* FindGdiPen(void* handle) noexcept {
+    for (auto& pen : g_gdiPens) if (pen.active && handle == &pen) return &pen;
+    return nullptr;
+}
+bool TrackGdiBitmap(void* handle, uint32_t* pixels, uint32_t width,
+                    uint32_t height, bool topDown) noexcept {
+    if (!handle || !pixels || !width || !height || width > INT32_MAX / 4u ||
+        height > INT32_MAX) return false;
+    for (auto& current : g_gdiBitmaps) {
+        if (current.bitmap == handle) {
+            current = {handle, pixels, width, height, topDown};
+            return true;
+        }
+    }
+    for (auto& current : g_gdiBitmaps) {
+        if (current.bitmap) continue;
+        current = {handle, pixels, width, height, topDown};
+        return true;
+    }
+    return false;
+}
 GdiDcSelection* FindGdiDc(void* handle, bool create) noexcept {
     if (!handle) return nullptr;
     GdiDcSelection* freeSlot = nullptr;
@@ -217,6 +264,75 @@ GdiDcSelection* FindGdiDc(void* handle, bool create) noexcept {
         return nullptr;
     }
     return freeSlot;
+}
+
+struct GdiSurfaceView {
+    uint32_t* pixels{};
+    uint32_t width{}, height{}, stride{};
+    bool window{};
+};
+
+bool GetGdiSurface(void* hdc, GdiSurfaceView& surface) noexcept {
+    surface = {};
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return false;
+    if (auto* bitmap = FindGdiBitmap(dc->bitmap)) {
+        if (!bitmap->pixels || !bitmap->topDown) return false;
+        surface = {bitmap->pixels, bitmap->width, bitmap->height, bitmap->width, false};
+    } else {
+        using SurfaceFn = int32_t (*)(void*, uint32_t**, uint32_t*, uint32_t*, uint32_t*);
+        const auto getSurface = Win32kProc<SurfaceFn>("MicaWin32kGetDCSurface");
+        if (!getSurface || !getSurface(hdc, &surface.pixels, &surface.width,
+                &surface.height, &surface.stride) || !surface.pixels ||
+            !surface.width || !surface.height || surface.stride < surface.width)
+            return false;
+        surface.window = true;
+    }
+    if (dc->clip.right <= dc->clip.left || dc->clip.bottom <= dc->clip.top)
+        dc->clip = {0, 0, static_cast<int32_t>(surface.width),
+                    static_cast<int32_t>(surface.height)};
+    return true;
+}
+
+uint32_t GdiColorRefToPixel(uint32_t color) noexcept {
+    return 0xFF000000u | ((color & 0x000000FFu) << 16) |
+        (color & 0x0000FF00u) | ((color & 0x00FF0000u) >> 16);
+}
+uint32_t GdiPixelToColorRef(uint32_t pixel) noexcept {
+    return ((pixel & 0x00FF0000u) >> 16) | (pixel & 0x0000FF00u) |
+        ((pixel & 0x000000FFu) << 16);
+}
+bool WriteGdiPixel(void* hdc, int32_t x, int32_t y, uint32_t colorRef) noexcept {
+    auto* dc = FindGdiDc(hdc, false);
+    GdiSurfaceView surface{};
+    if (!dc || !GetGdiSurface(hdc, surface) || x < 0 || y < 0 ||
+        static_cast<uint32_t>(x) >= surface.width ||
+        static_cast<uint32_t>(y) >= surface.height || x < dc->clip.left ||
+        y < dc->clip.top || x >= dc->clip.right || y >= dc->clip.bottom)
+        return false;
+    uint32_t& destination = surface.pixels[static_cast<size_t>(y) * surface.stride +
+                                            static_cast<uint32_t>(x)];
+    const uint32_t source = GdiColorRefToPixel(colorRef);
+    switch (dc->rop2) {
+    case 13: destination = source; break; // R2_COPYPEN
+    case 7: destination = (destination & 0xFF000000u) |
+        ((destination ^ source) & 0x00FFFFFFu); break;
+    case 10: destination = (destination & 0xFF000000u) |
+        (~(destination ^ source) & 0x00FFFFFFu); break;
+    case 11: break; // R2_NOP
+    case 1: destination = (destination & 0xFF000000u); break;
+    case 16: destination = (destination & 0xFF000000u) | 0x00FFFFFFu; break;
+    default: return false;
+    }
+    return true;
+}
+int32_t PresentGdiRect(void* hdc, const MicaWin32kRect& rect) noexcept {
+    auto* dc = FindGdiDc(hdc, false);
+    if (!dc) return 0;
+    if (FindGdiBitmap(dc->bitmap)) return 1;
+    using PresentFn = int32_t (*)(void*, const MicaWin32kRect*);
+    const auto present = Win32kProc<PresentFn>("MicaWin32kPresentDCRect");
+    return present ? present(hdc, &rect) : 0;
 }
 
 GdiFontObject* CreateGdiFont(const GdiLogFontW& logical) noexcept {
@@ -331,7 +447,55 @@ void* Gdi32_CreateCompatibleDC(void* hdc) noexcept {
 
 void* Gdi32_CreateCompatibleBitmap(void* hdc, int32_t width, int32_t height) noexcept {
     using Fn=void* (*)(void*,int32_t,int32_t); auto fn=Win32kProc<Fn>("MicaWin32kCreateCompatibleBitmap");
-    return fn ? fn(hdc,width,height) : nullptr;
+    void* bitmap = fn ? fn(hdc,width,height) : nullptr;
+    if (!bitmap) return nullptr;
+    using SurfaceFn=int32_t (*)(void*,uint32_t**,uint32_t*,uint32_t*);
+    auto surfaceFn=Win32kProc<SurfaceFn>("MicaWin32kGetBitmapSurface");
+    uint32_t* pixels{}; uint32_t surfaceWidth{},surfaceHeight{};
+    if (!surfaceFn || !surfaceFn(bitmap,&pixels,&surfaceWidth,&surfaceHeight) ||
+        surfaceWidth != static_cast<uint32_t>(width) ||
+        surfaceHeight != static_cast<uint32_t>(height) ||
+        !TrackGdiBitmap(bitmap,pixels,surfaceWidth,surfaceHeight,true)) {
+        using DeleteFn=int32_t (*)(void*); auto deleteFn=Win32kProc<DeleteFn>("MicaWin32kDeleteObject");
+        if (deleteFn) (void)deleteFn(bitmap);
+        return nullptr;
+    }
+    return bitmap;
+}
+
+void* Gdi32_CreateBitmap(int32_t width, int32_t height, uint32_t planes,
+                         uint32_t bitsPerPixel, const void* initialBits) noexcept {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || planes != 1 ||
+        (bitsPerPixel != 1 && bitsPerPixel != 24 && bitsPerPixel != 32)) return nullptr;
+    const uint64_t rowBits = uint64_t(static_cast<uint32_t>(width)) * bitsPerPixel;
+    const uint64_t rowBytes = ((rowBits + 31u) / 32u) * 4u;
+    if (rowBytes > SIZE_MAX || rowBytes * static_cast<uint32_t>(height) > SIZE_MAX) return nullptr;
+    void* bitmapHandle = Gdi32_CreateCompatibleBitmap(nullptr, width, height);
+    auto* bitmap = FindGdiBitmap(bitmapHandle);
+    if (!bitmap) return nullptr;
+    if (!initialBits) return bitmapHandle;
+    const auto* input = static_cast<const uint8_t*>(initialBits);
+    for (int32_t y = 0; y < height; ++y) {
+        const uint8_t* row = input + static_cast<size_t>(height - 1 - y) *
+            static_cast<size_t>(rowBytes);
+        for (int32_t x = 0; x < width; ++x) {
+            uint32_t pixel{};
+            if (bitsPerPixel == 1) {
+                const bool white = (row[static_cast<uint32_t>(x) >> 3] &
+                    (0x80u >> (static_cast<uint32_t>(x) & 7u))) != 0;
+                pixel = white ? 0xFFFFFFFFu : 0xFF000000u;
+            } else if (bitsPerPixel == 24) {
+                const uint8_t* source = row + static_cast<size_t>(x) * 3u;
+                pixel = 0xFF000000u | (uint32_t(source[2]) << 16) |
+                    (uint32_t(source[1]) << 8) | source[0];
+            } else {
+                pixel = reinterpret_cast<const uint32_t*>(row)[x] | 0xFF000000u;
+            }
+            bitmap->pixels[static_cast<size_t>(y) * bitmap->width +
+                           static_cast<uint32_t>(x)] = pixel;
+        }
+    }
+    return bitmapHandle;
 }
 
 int32_t Gdi32_DeleteDC(void* hdc) noexcept {
@@ -365,6 +529,10 @@ void* Gdi32_CreateSolidBrush(uint32_t colorRef) noexcept {
         uint32_t generation = ++g_gdiBrushGeneration;
         if (!generation) generation = ++g_gdiBrushGeneration;
         brush.colorRef = colorRef & 0x00FFFFFFu;
+        brush.patternBitmap = nullptr;
+        brush.style = 0;
+        brush.stock = false;
+        brush.stockId = -1;
         brush.generation = generation;
         brush.active = true;
         return GdiBrushHandle(i, generation);
@@ -372,15 +540,375 @@ void* Gdi32_CreateSolidBrush(uint32_t colorRef) noexcept {
     return nullptr;
 }
 
+void* Gdi32_CreateBrushIndirect(const void* logicalBrush) noexcept {
+    if (!logicalBrush) return nullptr;
+    struct LogicalBrush { uint32_t style, color; uintptr_t hatch; };
+    const auto& source = *static_cast<const LogicalBrush*>(logicalBrush);
+    if (source.style > 2 || (source.style == 2 && source.hatch > 5)) return nullptr;
+    void* handle = Gdi32_CreateSolidBrush(source.color);
+    if (!handle) return nullptr;
+    GdiBrushGuard guard;
+    auto* brush = FindGdiBrush(handle);
+    if (!brush) return nullptr;
+    brush->style = static_cast<uint8_t>(source.style);
+    brush->hatch = static_cast<uint32_t>(source.hatch);
+    return handle;
+}
+
+void* Gdi32_CreatePen(int32_t style, int32_t width, uint32_t color) noexcept {
+    if (style < 0 || style > 5 || width < 0 || width > 128) return nullptr;
+    for (auto& pen : g_gdiPens) {
+        if (pen.active) continue;
+        pen = {color & 0x00FFFFFFu, width ? width : 1,
+               static_cast<uint32_t>(style), true, false};
+        return &pen;
+    }
+    return nullptr;
+}
+
+void* Gdi32_CreatePatternBrush(void* bitmapHandle) noexcept {
+    auto* bitmap = FindGdiBitmap(bitmapHandle);
+    if (!bitmap || !bitmap->pixels || !bitmap->width || !bitmap->height) return nullptr;
+    void* brushHandle = Gdi32_CreateSolidBrush(0);
+    if (!brushHandle) return nullptr;
+    GdiBrushGuard guard;
+    auto* brush = FindGdiBrush(brushHandle);
+    if (!brush) return nullptr;
+    brush->style = 3;
+    brush->patternBitmap = bitmapHandle;
+    return brushHandle;
+}
+
+namespace {
+bool GdiPenDraws(const GdiPenObject& pen, uint32_t step) noexcept {
+    switch (pen.style) {
+    case 0: return true; // PS_SOLID
+    case 1: return step % 8u < 5u;
+    case 2: return step % 4u == 0u;
+    case 3: return step % 12u < 6u || step % 12u == 9u;
+    case 4: return step % 16u < 6u || step % 16u == 9u || step % 16u == 12u;
+    case 5: return false; // PS_NULL
+    default: return false;
+    }
+}
+bool DrawGdiLine(void* hdc, int32_t x1, int32_t y1, int32_t x2,
+                 int32_t y2) noexcept {
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return false;
+    GdiPenObject* pen = dc->pen;
+    if (!pen) pen = static_cast<GdiPenObject*>(Gdi32_GetStockObject(7));
+    if (!pen) return false;
+    const int64_t dx = std::llabs(static_cast<int64_t>(x2) - x1);
+    const int64_t dy = std::llabs(static_cast<int64_t>(y2) - y1);
+    const int64_t steps = std::max(dx, dy);
+    if (steps > 1000000) return false;
+    if (dc->rop2 != 1 && dc->rop2 != 7 && dc->rop2 != 10 && dc->rop2 != 11 &&
+        dc->rop2 != 13 && dc->rop2 != 16) return false;
+    const int64_t half = std::max(1, pen->width) / 2;
+    const int32_t left = std::max<int64_t>(INT32_MIN,
+        int64_t(std::min(x1, x2)) - half);
+    const int32_t top = std::max<int64_t>(INT32_MIN,
+        int64_t(std::min(y1, y2)) - half);
+    const int32_t right = std::min<int64_t>(INT32_MAX,
+        int64_t(std::max(x1, x2)) + half + 1);
+    const int32_t bottom = std::min<int64_t>(INT32_MAX,
+        int64_t(std::max(y1, y2)) + half + 1);
+    for (int64_t index = 0; index < std::max<int64_t>(1, steps); ++index) {
+        if (!GdiPenDraws(*pen, static_cast<uint32_t>(index))) continue;
+        const int32_t x = steps ? static_cast<int32_t>(int64_t(x1) +
+            (int64_t(x2) - x1) * index / steps) : x1;
+        const int32_t y = steps ? static_cast<int32_t>(int64_t(y1) +
+            (int64_t(y2) - y1) * index / steps) : y1;
+        for (int32_t oy = -static_cast<int32_t>(half); oy <= static_cast<int32_t>(half); ++oy)
+            for (int32_t ox = -static_cast<int32_t>(half); ox <= static_cast<int32_t>(half); ++ox)
+                (void)WriteGdiPixel(hdc, x + ox, y + oy, pen->colorRef);
+    }
+    GdiSurfaceView surface{};
+    if (!GetGdiSurface(hdc, surface)) return false;
+    const int32_t clippedLeft = std::max({left, dc->clip.left, 0});
+    const int32_t clippedTop = std::max({top, dc->clip.top, 0});
+    const int32_t clippedRight = std::min({right, dc->clip.right,
+        static_cast<int32_t>(surface.width)});
+    const int32_t clippedBottom = std::min({bottom, dc->clip.bottom,
+        static_cast<int32_t>(surface.height)});
+    return clippedRight <= clippedLeft || clippedBottom <= clippedTop ||
+        PresentGdiRect(hdc, {clippedLeft, clippedTop, clippedRight, clippedBottom}) != 0;
+}
+void* SelectedGdiBrush(GdiDcSelection& dc) noexcept {
+    if (dc.brush) return GdiBrushHandle(
+        static_cast<size_t>(dc.brush - g_gdiBrushes), dc.brush->generation);
+    return Gdi32_GetStockObject(0);
+}
+}
+
+int32_t Gdi32_MoveToEx(void* hdc, int32_t x, int32_t y, void* previousPoint) noexcept {
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0;
+    if (previousPoint) {
+        struct Point { int32_t x, y; } previous{dc->currentX, dc->currentY};
+        std::memcpy(previousPoint, &previous, sizeof(previous));
+    }
+    dc->currentX = x;
+    dc->currentY = y;
+    return 1;
+}
+int32_t Gdi32_LineTo(void* hdc, int32_t x, int32_t y) noexcept {
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0;
+    if (!DrawGdiLine(hdc, dc->currentX, dc->currentY, x, y)) return 0;
+    dc->currentX = x;
+    dc->currentY = y;
+    return 1;
+}
+uint32_t Gdi32_GetPixel(void* hdc, int32_t x, int32_t y) noexcept {
+    GdiSurfaceView surface{};
+    if (!GetGdiSurface(hdc, surface) || x < 0 || y < 0 ||
+        static_cast<uint32_t>(x) >= surface.width || static_cast<uint32_t>(y) >= surface.height)
+        return 0xFFFFFFFFu;
+    return GdiPixelToColorRef(surface.pixels[static_cast<size_t>(y) * surface.stride + x]);
+}
+int32_t Gdi32_SetPixelV(void* hdc, int32_t x, int32_t y, uint32_t color) noexcept {
+    if (!WriteGdiPixel(hdc, x, y, color)) return 0;
+    return PresentGdiRect(hdc, {x, y, x + 1, y + 1});
+}
+uint32_t Gdi32_SetBkColor(void* hdc, uint32_t color) noexcept {
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0xFFFFFFFFu;
+    const uint32_t previous = dc->backgroundColor;
+    dc->backgroundColor = color & 0x00FFFFFFu;
+    return previous;
+}
+uint32_t Gdi32_SetDCBrushColor(void* hdc, uint32_t color) noexcept {
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0xFFFFFFFFu;
+    const uint32_t previous = dc->dcBrushColor;
+    dc->dcBrushColor = color & 0x00FFFFFFu;
+    return previous;
+}
+int32_t Gdi32_GetROP2(void* hdc) noexcept {
+    auto* dc = FindGdiDc(hdc, false);
+    return dc ? dc->rop2 : 0;
+}
+int32_t Gdi32_SetROP2(void* hdc, int32_t mode) noexcept {
+    if (mode < 1 || mode > 16) return 0;
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0;
+    const int32_t previous = dc->rop2;
+    dc->rop2 = mode;
+    return previous;
+}
+int32_t Gdi32_SetPolyFillMode(void* hdc, int32_t mode) noexcept {
+    if (mode != 1 && mode != 2) return 0;
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0;
+    const int32_t previous = dc->polyFillMode;
+    dc->polyFillMode = mode;
+    return previous;
+}
+int32_t Gdi32_SetStretchBltMode(void* hdc, int32_t mode) noexcept {
+    if (mode < 1 || mode > 4) return 0;
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc) return 0;
+    const int32_t previous = dc->stretchBltMode;
+    dc->stretchBltMode = mode;
+    return previous;
+}
+
 int32_t Gdi32_FillRect(void* hdc, const void* rectangle, void* hbrush) noexcept {
     if (!hdc || !rectangle) return 0;
     GdiBrushGuard guard;
     auto* brush = FindGdiBrush(hbrush);
     if (!brush) return 0;
-    using Fn = int32_t (*)(void*, const MicaWin32kRect*, uint32_t);
-    auto fill = Win32kProc<Fn>("MicaWin32kFillRect");
-    return fill ? fill(hdc, static_cast<const MicaWin32kRect*>(rectangle),
-                       brush->colorRef) : 0;
+    const auto& requested = *static_cast<const MicaWin32kRect*>(rectangle);
+    if (requested.right <= requested.left || requested.bottom <= requested.top) return 1;
+    if (brush->style == 1) return 1; // BS_NULL / HOLLOW_BRUSH
+    GdiSurfaceView surface{};
+    auto* dc = FindGdiDc(hdc, true);
+    if (!dc || !GetGdiSurface(hdc, surface)) return 0;
+    const int32_t left = std::max({requested.left, dc->clip.left, 0});
+    const int32_t top = std::max({requested.top, dc->clip.top, 0});
+    const int32_t right = std::min({requested.right, dc->clip.right,
+        static_cast<int32_t>(surface.width)});
+    const int32_t bottom = std::min({requested.bottom, dc->clip.bottom,
+        static_cast<int32_t>(surface.height)});
+    if (right <= left || bottom <= top) return 1;
+    auto* pattern = brush->style == 3 ? FindGdiBitmap(brush->patternBitmap) : nullptr;
+    if (brush->style == 3 && (!pattern || !pattern->pixels || !pattern->width || !pattern->height))
+        return 0;
+    for (int32_t y = top; y < bottom; ++y) {
+        for (int32_t x = left; x < right; ++x) {
+            bool foreground = true;
+            uint32_t pixel = GdiColorRefToPixel(brush->colorRef);
+            if (brush->style == 2) {
+                const uint32_t hx = static_cast<uint32_t>(x) & 7u;
+                const uint32_t hy = static_cast<uint32_t>(y) & 7u;
+                switch (brush->hatch) {
+                case 0: foreground = hy == 0; break;
+                case 1: foreground = hx == 0; break;
+                case 2: foreground = ((hx + hy) & 7u) == 0; break;
+                case 3: foreground = ((hx + 8u - hy) & 7u) == 0; break;
+                case 4: foreground = hx == 0 || hy == 0; break;
+                case 5: foreground = ((hx + hy) & 7u) == 0 ||
+                                     ((hx + 8u - hy) & 7u) == 0; break;
+                default: return 0;
+                }
+                if (!foreground && dc->backgroundMode == 1) continue;
+                if (!foreground) pixel = GdiColorRefToPixel(dc->backgroundColor);
+            } else if (pattern) {
+                const uint32_t px = static_cast<uint32_t>(x) % pattern->width;
+                const uint32_t py = static_cast<uint32_t>(y) % pattern->height;
+                pixel = pattern->pixels[static_cast<size_t>(py) * pattern->width + px];
+            }
+            surface.pixels[static_cast<size_t>(y) * surface.stride +
+                           static_cast<uint32_t>(x)] = pixel;
+        }
+    }
+    return surface.window ? PresentGdiRect(hdc, {left, top, right, bottom}) : 1;
+}
+
+namespace {
+bool FillBrushPixel(GdiDcSelection& dc, GdiBrushObject* brush,
+                    GdiSurfaceView& surface, int32_t x, int32_t y) noexcept {
+    if (!brush || brush->style == 1) return true;
+    uint32_t pixel = GdiColorRefToPixel(brush->colorRef);
+    if (brush->style == 2) {
+        const uint32_t hx = static_cast<uint32_t>(x) & 7u;
+        const uint32_t hy = static_cast<uint32_t>(y) & 7u;
+        bool foreground{};
+        switch (brush->hatch) {
+        case 0: foreground = hy == 0; break;
+        case 1: foreground = hx == 0; break;
+        case 2: foreground = ((hx + hy) & 7u) == 0; break;
+        case 3: foreground = ((hx + 8u - hy) & 7u) == 0; break;
+        case 4: foreground = hx == 0 || hy == 0; break;
+        case 5: foreground = ((hx + hy) & 7u) == 0 || ((hx + 8u - hy) & 7u) == 0; break;
+        default: return false;
+        }
+        if (!foreground && dc.backgroundMode == 1) return true;
+        if (!foreground) pixel = GdiColorRefToPixel(dc.backgroundColor);
+    } else if (brush->style == 3) {
+        auto* pattern = FindGdiBitmap(brush->patternBitmap);
+        if (!pattern || !pattern->pixels || !pattern->width || !pattern->height) return false;
+        const uint32_t px = static_cast<uint32_t>(x) % pattern->width;
+        const uint32_t py = static_cast<uint32_t>(y) % pattern->height;
+        pixel = pattern->pixels[static_cast<size_t>(py) * pattern->width + px];
+    }
+    surface.pixels[static_cast<size_t>(y) * surface.stride + static_cast<uint32_t>(x)] = pixel;
+    return true;
+}
+bool InsideEllipse(int64_t px, int64_t py, int64_t left, int64_t top,
+                   int64_t right, int64_t bottom) noexcept {
+    if (right <= left || bottom <= top) return false;
+    const int64_t rx = right - left, ry = bottom - top;
+    const int64_t dx = 2 * px + 1 - left - right;
+    const int64_t dy = 2 * py + 1 - top - bottom;
+    return dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry;
+}
+bool InsideRoundedRect(int64_t px, int64_t py, int64_t left, int64_t top,
+                       int64_t right, int64_t bottom, int64_t radiusX,
+                       int64_t radiusY) noexcept {
+    if (px < left || px >= right || py < top || py >= bottom) return false;
+    if (radiusX <= 0 || radiusY <= 0) return true;
+    const int64_t centerLeft = left + radiusX;
+    const int64_t centerRight = right - radiusX;
+    const int64_t centerTop = top + radiusY;
+    const int64_t centerBottom = bottom - radiusY;
+    if (px >= centerLeft && px < centerRight) return true;
+    if (py >= centerTop && py < centerBottom) return true;
+    const int64_t cx = px < centerLeft ? centerLeft : centerRight;
+    const int64_t cy = py < centerTop ? centerTop : centerBottom;
+    const int64_t dx = (2 * px + 1) - 2 * cx;
+    const int64_t dy = (2 * py + 1) - 2 * cy;
+    const int64_t rx = 2 * radiusX, ry = 2 * radiusY;
+    return dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry;
+}
+int32_t DrawGdiShape(void* hdc, int32_t left, int32_t top, int32_t right,
+    int32_t bottom, int32_t radiusX, int32_t radiusY) noexcept {
+    if (!hdc) return 0;
+    if (right <= left || bottom <= top) return 1;
+    const int64_t width = int64_t(right) - left;
+    const int64_t height = int64_t(bottom) - top;
+    if (width > 4096 || height > 4096) return 0;
+    auto* dc = FindGdiDc(hdc, true);
+    GdiSurfaceView surface{};
+    if (!dc || !GetGdiSurface(hdc, surface)) return 0;
+    GdiPenObject* pen = dc->pen ? dc->pen : static_cast<GdiPenObject*>(Gdi32_GetStockObject(7));
+    GdiBrushObject* brush = dc->brush ? dc->brush : FindGdiBrush(Gdi32_GetStockObject(0));
+    if (!pen || (dc->rop2 != 1 && dc->rop2 != 7 && dc->rop2 != 10 &&
+        dc->rop2 != 11 && dc->rop2 != 13 && dc->rop2 != 16)) return 0;
+    const int32_t thickness = pen->width > 0 ? pen->width : 1;
+    const int64_t innerLeft = int64_t(left) + thickness;
+    const int64_t innerTop = int64_t(top) + thickness;
+    const int64_t innerRight = int64_t(right) - thickness;
+    const int64_t innerBottom = int64_t(bottom) - thickness;
+    const int64_t innerRadiusX = std::max<int64_t>(0, int64_t(radiusX) - thickness);
+    const int64_t innerRadiusY = std::max<int64_t>(0, int64_t(radiusY) - thickness);
+    const int32_t drawLeft = std::max({left, dc->clip.left, 0});
+    const int32_t drawTop = std::max({top, dc->clip.top, 0});
+    const int32_t drawRight = std::min({right, dc->clip.right, static_cast<int32_t>(surface.width)});
+    const int32_t drawBottom = std::min({bottom, dc->clip.bottom, static_cast<int32_t>(surface.height)});
+    for (int32_t y = drawTop; y < drawBottom; ++y) {
+        for (int32_t x = drawLeft; x < drawRight; ++x) {
+            const bool outer = InsideRoundedRect(x, y, left, top, right, bottom,
+                                                  radiusX, radiusY);
+            if (!outer) continue;
+            const bool interior = InsideRoundedRect(x, y, innerLeft, innerTop,
+                innerRight, innerBottom, innerRadiusX, innerRadiusY);
+            if (interior && brush && brush->style != 1) {
+                if (!FillBrushPixel(*dc, brush, surface, x, y)) return 0;
+            } else if (!interior && GdiPenDraws(*pen, static_cast<uint32_t>(x + y))) {
+                (void)WriteGdiPixel(hdc, x, y, pen->colorRef);
+            }
+        }
+    }
+    if (drawRight <= drawLeft || drawBottom <= drawTop) return 1;
+    return PresentGdiRect(hdc, {drawLeft, drawTop, drawRight, drawBottom});
+}
+}
+
+int32_t Gdi32_Rectangle(void* hdc, int32_t left, int32_t top,
+                        int32_t right, int32_t bottom) noexcept {
+    return DrawGdiShape(hdc, left, top, right, bottom, 0, 0);
+}
+int32_t Gdi32_RoundRect(void* hdc, int32_t left, int32_t top,
+                        int32_t right, int32_t bottom,
+                        int32_t ellipseWidth, int32_t ellipseHeight) noexcept {
+    if (ellipseWidth < 0 || ellipseHeight < 0) return 0;
+    const int32_t radiusX = std::min(ellipseWidth / 2, std::max(0, (right - left) / 2));
+    const int32_t radiusY = std::min(ellipseHeight / 2, std::max(0, (bottom - top) / 2));
+    return DrawGdiShape(hdc, left, top, right, bottom, radiusX, radiusY);
+}
+int32_t Gdi32_Ellipse(void* hdc, int32_t left, int32_t top,
+                      int32_t right, int32_t bottom) noexcept {
+    if (right <= left || bottom <= top) return 1;
+    const int64_t width = int64_t(right) - left, height = int64_t(bottom) - top;
+    if (width > 4096 || height > 4096) return 0;
+    auto* dc = FindGdiDc(hdc, true);
+    GdiSurfaceView surface{};
+    if (!dc || !GetGdiSurface(hdc, surface)) return 0;
+    GdiPenObject* pen = dc->pen ? dc->pen : static_cast<GdiPenObject*>(Gdi32_GetStockObject(7));
+    GdiBrushObject* brush = dc->brush ? dc->brush : FindGdiBrush(Gdi32_GetStockObject(0));
+    if (!pen) return 0;
+    const int32_t thickness = std::max(1, pen->width);
+    const int32_t drawLeft = std::max({left, dc->clip.left, 0});
+    const int32_t drawTop = std::max({top, dc->clip.top, 0});
+    const int32_t drawRight = std::min({right, dc->clip.right, static_cast<int32_t>(surface.width)});
+    const int32_t drawBottom = std::min({bottom, dc->clip.bottom, static_cast<int32_t>(surface.height)});
+    for (int32_t y = drawTop; y < drawBottom; ++y) {
+        for (int32_t x = drawLeft; x < drawRight; ++x) {
+            if (!InsideEllipse(x, y, left, top, right, bottom)) continue;
+            const bool interior = InsideEllipse(x, y, int64_t(left) + thickness,
+                int64_t(top) + thickness, int64_t(right) - thickness,
+                int64_t(bottom) - thickness);
+            if (interior && brush && brush->style != 1) {
+                if (!FillBrushPixel(*dc, brush, surface, x, y)) return 0;
+            } else if (!interior && GdiPenDraws(*pen, static_cast<uint32_t>(x + y))) {
+                (void)WriteGdiPixel(hdc, x, y, pen->colorRef);
+            }
+        }
+    }
+    if (drawRight <= drawLeft || drawBottom <= drawTop) return 1;
+    return PresentGdiRect(hdc, {drawLeft, drawTop, drawRight, drawBottom});
 }
 
 int32_t Gdi32_SetPixelFormat(void* hdc, int32_t format, const void* ppfd) noexcept {
@@ -438,13 +966,65 @@ int32_t Gdi32_BitBlt(void* hdc, int32_t x, int32_t y, int32_t cx, int32_t cy, vo
 void* Gdi32_GetStockObject(int32_t i) noexcept {
     if (i == 10 || i == 11 || i == 12 || i == 13 || i == 14 || i == 16 || i == 17)
         return GetSystemGdiFont();
+    constexpr uint32_t stockColors[] = {
+        0x00FFFFFFu, 0x00C0C0C0u, 0x00808080u,
+        0x00404040u, 0x00000000u, 0x00FFFFFFu};
+    if (i >= 0 && i < static_cast<int32_t>(std::size(stockColors))) {
+        GdiBrushGuard guard;
+        for (size_t index = 0; index < GdiBrushCapacity; ++index) {
+            auto& brush = g_gdiBrushes[index];
+            if (brush.active && brush.stock && brush.stockId == i)
+                return GdiBrushHandle(index, brush.generation);
+        }
+        size_t slot = GdiBrushCapacity;
+        for (size_t index = 0; index < GdiBrushCapacity; ++index)
+            if (!g_gdiBrushes[index].active) { slot = index; break; }
+        if (slot == GdiBrushCapacity) return nullptr;
+        auto& brush = g_gdiBrushes[slot];
+        const uint32_t generation = static_cast<uint32_t>(slot + 1);
+        brush = {};
+        brush.colorRef = stockColors[i];
+        brush.generation = generation;
+        brush.style = i == 5 ? 1 : 0; // HOLLOW_BRUSH has no fill.
+        brush.stock = true;
+        brush.stockId = i;
+        brush.active = true;
+        return GdiBrushHandle(slot, generation);
+    }
+    if (i == 7 || i == 6) {
+        for (auto& pen : g_gdiPens) {
+            if (pen.active && pen.stock && pen.style == static_cast<uint32_t>(i))
+                return &pen;
+        }
+        for (auto& pen : g_gdiPens) {
+            if (pen.active) continue;
+            pen = {i == 7 ? 0x00000000u : 0x00FFFFFFu, 1, static_cast<uint32_t>(i), true, true};
+            return &pen;
+        }
+    }
     using Fn=void* (*)(int32_t); auto fn=Win32kProc<Fn>("MicaWin32kGetStockObject");
     return fn ? fn(i) : nullptr;
 }
 
 int32_t Gdi32_GetObjectW(void* handle, int32_t bufferBytes, void* output) noexcept {
     GdiFontObject* font = FindGdiFont(handle);
-    if (!font || bufferBytes < 0) return 0;
+    if (bufferBytes < 0) return 0;
+    if (!font) {
+        auto* bitmap = FindGdiBitmap(handle);
+        if (!bitmap) return 0;
+        struct BitmapObject {
+            int32_t type, width, height, widthBytes;
+            uint16_t planes, bitsPixel;
+            void* bits;
+        } object{0, static_cast<int32_t>(bitmap->width),
+            static_cast<int32_t>(bitmap->height),
+            static_cast<int32_t>(bitmap->width * sizeof(uint32_t)), 1, 32,
+            bitmap->pixels};
+        if (!output) return sizeof(object);
+        if (bufferBytes < static_cast<int32_t>(sizeof(object))) return 0;
+        std::memcpy(output, &object, sizeof(object));
+        return sizeof(object);
+    }
 
     GdiLogFontW logical{};
     const auto& request = font->request;
@@ -466,6 +1046,157 @@ int32_t Gdi32_GetObjectW(void* handle, int32_t bufferBytes, void* output) noexce
     return copiedBytes;
 }
 
+int32_t Gdi32_GetDIBits(void* hdc, void* handle, uint32_t startScan,
+                       uint32_t scanLines, void* outputBits, void* bitmapInfo,
+                       uint32_t usage) noexcept {
+    struct BitmapInfoHeader {
+        uint32_t size;
+        int32_t width, height;
+        uint16_t planes, bitCount;
+        uint32_t compression, sizeImage;
+        int32_t xPelsPerMeter, yPelsPerMeter;
+        uint32_t colorsUsed, colorsImportant;
+    };
+    static_assert(sizeof(BitmapInfoHeader) == 40);
+    if (!handle || !bitmapInfo || usage != 0) return 0;
+    auto* bitmap = FindGdiBitmap(handle);
+    if (!bitmap) return 0;
+    for (const auto& dc : g_gdiDcs)
+        if (dc.dc && dc.bitmap == handle) return 0;
+    auto* info = static_cast<BitmapInfoHeader*>(bitmapInfo);
+    if (info->size < sizeof(BitmapInfoHeader)) return 0;
+    if (!outputBits) {
+        info->width = static_cast<int32_t>(bitmap->width);
+        info->height = static_cast<int32_t>(bitmap->height);
+        info->planes = 1;
+        if (!info->bitCount) info->bitCount = 32;
+        info->compression = 0;
+        const uint64_t stride = ((uint64_t(bitmap->width) * info->bitCount + 31u) / 32u) * 4u;
+        const uint64_t imageBytes = stride * bitmap->height;
+        if (imageBytes > UINT32_MAX) return 0;
+        info->sizeImage = static_cast<uint32_t>(imageBytes);
+        return 0;
+    }
+    if (!hdc || !scanLines || startScan >= bitmap->height ||
+        scanLines > bitmap->height - startScan || info->width != static_cast<int32_t>(bitmap->width) ||
+        (info->height != static_cast<int32_t>(bitmap->height) &&
+         info->height != -static_cast<int32_t>(bitmap->height)) ||
+        info->planes != 1 || (info->bitCount != 1 && info->bitCount != 24 &&
+         info->bitCount != 32) || info->compression != 0) return 0;
+    const bool topDown = info->height < 0;
+    const uint64_t rowBytes64 = ((uint64_t(bitmap->width) * info->bitCount + 31u) / 32u) * 4u;
+    if (rowBytes64 > SIZE_MAX || rowBytes64 > UINT32_MAX) return 0;
+    const size_t rowBytes = static_cast<size_t>(rowBytes64);
+    auto* destination = static_cast<uint8_t*>(outputBits);
+    for (uint32_t row = 0; row < scanLines; ++row) {
+        const uint32_t logicalY = startScan + row;
+        const uint32_t sourceY = topDown ? logicalY : bitmap->height - 1u - logicalY;
+        uint8_t* target = destination + static_cast<size_t>(row) * rowBytes;
+        const uint32_t* source = bitmap->pixels + static_cast<size_t>(sourceY) * bitmap->width;
+        if (info->bitCount == 32) {
+            std::memcpy(target, source, static_cast<size_t>(bitmap->width) * 4u);
+        } else if (info->bitCount == 24) {
+            for (uint32_t x = 0; x < bitmap->width; ++x) {
+                target[x * 3u] = static_cast<uint8_t>(source[x]);
+                target[x * 3u + 1u] = static_cast<uint8_t>(source[x] >> 8);
+                target[x * 3u + 2u] = static_cast<uint8_t>(source[x] >> 16);
+            }
+        } else {
+            std::memset(target, 0, rowBytes);
+            for (uint32_t x = 0; x < bitmap->width; ++x) {
+                const uint32_t pixel = source[x];
+                const uint32_t luminance = ((pixel & 0xffu) * 29u +
+                    ((pixel >> 8) & 0xffu) * 150u +
+                    ((pixel >> 16) & 0xffu) * 77u) >> 8;
+                if (luminance >= 128u) target[x >> 3] |= static_cast<uint8_t>(0x80u >> (x & 7u));
+            }
+        }
+    }
+    return static_cast<int32_t>(scanLines);
+}
+
+int32_t Gdi32_SetDIBits(void* hdc, void* handle, uint32_t startScan,
+                       uint32_t scanLines, const void* inputBits,
+                       const void* bitmapInfo, uint32_t usage) noexcept {
+    struct BitmapInfoHeader {
+        uint32_t size;
+        int32_t width, height;
+        uint16_t planes, bitCount;
+        uint32_t compression, sizeImage;
+        int32_t xPelsPerMeter, yPelsPerMeter;
+        uint32_t colorsUsed, colorsImportant;
+    };
+    static_assert(sizeof(BitmapInfoHeader) == 40);
+    if (!hdc || !handle || !inputBits || !bitmapInfo || usage != 0) return 0;
+    auto* bitmap = FindGdiBitmap(handle);
+    if (!bitmap) return 0;
+    for (const auto& dc : g_gdiDcs) if (dc.dc && dc.bitmap == handle) return 0;
+    const auto* info = static_cast<const BitmapInfoHeader*>(bitmapInfo);
+    if (info->size < sizeof(BitmapInfoHeader) || info->width != static_cast<int32_t>(bitmap->width) ||
+        (info->height != static_cast<int32_t>(bitmap->height) &&
+         info->height != -static_cast<int32_t>(bitmap->height)) || info->planes != 1 ||
+        info->compression != 0 || (info->bitCount != 1 && info->bitCount != 24 &&
+         info->bitCount != 32) || !scanLines || startScan >= bitmap->height ||
+        scanLines > bitmap->height - startScan) return 0;
+    const uint64_t rowBytes64 = ((uint64_t(bitmap->width) * info->bitCount + 31u) / 32u) * 4u;
+    if (rowBytes64 > SIZE_MAX) return 0;
+    const size_t rowBytes = static_cast<size_t>(rowBytes64);
+    const auto* colors = reinterpret_cast<const uint8_t*>(bitmapInfo) + sizeof(BitmapInfoHeader);
+    const auto* input = static_cast<const uint8_t*>(inputBits);
+    const bool topDown = info->height < 0;
+    for (uint32_t row = 0; row < scanLines; ++row) {
+        const uint32_t logicalY = startScan + row;
+        const uint32_t targetY = topDown ? logicalY : bitmap->height - 1u - logicalY;
+        const auto* source = input + static_cast<size_t>(row) * rowBytes;
+        uint32_t* target = bitmap->pixels + static_cast<size_t>(targetY) * bitmap->width;
+        for (uint32_t x = 0; x < bitmap->width; ++x) {
+            if (info->bitCount == 32) {
+                target[x] = reinterpret_cast<const uint32_t*>(source)[x] | 0xFF000000u;
+            } else if (info->bitCount == 24) {
+                const uint8_t* pixel = source + static_cast<size_t>(x) * 3u;
+                target[x] = 0xFF000000u | (uint32_t(pixel[2]) << 16) |
+                    (uint32_t(pixel[1]) << 8) | pixel[0];
+            } else {
+                const bool set = (source[x >> 3] & (0x80u >> (x & 7u))) != 0;
+                const uint8_t* rgb = colors + (set ? 4u : 0u);
+                if (!info->colorsUsed) {
+                    target[x] = set ? 0xFFFFFFFFu : 0xFF000000u;
+                } else {
+                    target[x] = 0xFF000000u | (uint32_t(rgb[2]) << 16) |
+                        (uint32_t(rgb[1]) << 8) | rgb[0];
+                }
+            }
+        }
+    }
+    return static_cast<int32_t>(scanLines);
+}
+
+void* Gdi32_CreateDIBitmap(void* hdc, const void* headerPointer, uint32_t init,
+    const void* bits, const void* bitmapInfo, uint32_t usage) noexcept {
+    struct Header { uint32_t size; int32_t width, height; uint16_t planes, bitCount;
+        uint32_t compression, sizeImage; int32_t xPelsPerMeter, yPelsPerMeter;
+        uint32_t colorsUsed, colorsImportant; };
+    if (!hdc || !headerPointer || usage != 0 || (init & ~0x00000004u)) return nullptr;
+    const auto* header = static_cast<const Header*>(headerPointer);
+    if (header->size < sizeof(Header) || header->width <= 0 || header->height == 0 ||
+        header->height == INT32_MIN || header->width > 4096 ||
+        (header->bitCount != 1 && header->bitCount != 24 && header->bitCount != 32) ||
+        header->compression != 0 || (header->planes != 1)) return nullptr;
+    const uint32_t height = static_cast<uint32_t>(header->height < 0
+        ? -header->height : header->height);
+    void* bitmap = Gdi32_CreateCompatibleBitmap(hdc, header->width,
+                                                 static_cast<int32_t>(height));
+    if (!bitmap) return nullptr;
+    if (init & 0x00000004u) {
+        if (!bits || !bitmapInfo || Gdi32_SetDIBits(hdc, bitmap, 0, height,
+                bits, bitmapInfo, usage) != static_cast<int32_t>(height)) {
+            (void)Gdi32_DeleteObject(bitmap);
+            return nullptr;
+        }
+    }
+    return bitmap;
+}
+
 void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
     if (!hdc || !h) return nullptr;
     if (GdiFontObject* font = FindGdiFont(h)) {
@@ -474,6 +1205,24 @@ void* Gdi32_SelectObject(void* hdc, void* h) noexcept {
         void* previous = dc->font ? static_cast<void*>(dc->font) : Gdi32_GetStockObject(13);
         if (!previous) return nullptr;
         dc->font = font;
+        return previous;
+    }
+    if (GdiBrushObject* brush = FindGdiBrush(h)) {
+        GdiDcSelection* dc = FindGdiDc(hdc, true);
+        if (!dc) return nullptr;
+        void* previous = dc->brush ? GdiBrushHandle(
+            static_cast<size_t>(dc->brush - g_gdiBrushes), dc->brush->generation)
+            : Gdi32_GetStockObject(0);
+        if (!previous) return nullptr;
+        dc->brush = brush;
+        return previous;
+    }
+    if (GdiPenObject* pen = FindGdiPen(h)) {
+        GdiDcSelection* dc = FindGdiDc(hdc, true);
+        if (!dc) return nullptr;
+        void* previous = dc->pen ? static_cast<void*>(dc->pen) : Gdi32_GetStockObject(7);
+        if (!previous) return nullptr;
+        dc->pen = pen;
         return previous;
     }
     using Fn=void* (*)(void*,void*); auto fn=Win32kProc<Fn>("MicaWin32kSelectObject");
@@ -505,10 +1254,18 @@ int32_t Gdi32_DeleteObject(void* ho) noexcept {
     {
         GdiBrushGuard guard;
     if (GdiBrushObject* brush = FindGdiBrush(ho)) {
+        if (brush->stock) return 0;
+        for (const auto& dc : g_gdiDcs) if (dc.dc && dc.brush == brush) return 0;
         brush->active = false;
         brush->colorRef = 0;
         return 1;
     }
+    }
+    if (GdiPenObject* pen = FindGdiPen(ho)) {
+        if (pen->stock) return 0;
+        for (const auto& dc : g_gdiDcs) if (dc.dc && dc.pen == pen) return 0;
+        *pen = {};
+        return 1;
     }
     if (GdiFontObject* font = FindGdiFont(ho)) {
         if (font->stock) return 0;
@@ -814,11 +1571,28 @@ __declspec(dllexport) int32_t DeleteDC(void* hdc) {
 __declspec(dllexport) int32_t GetDeviceCaps(void* hdc, int32_t index) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetDeviceCaps(hdc, index);
 }
+// Printer DCs and spooler-backed documents are not provided by the current
+// LuceOS system image. Keep the GDI print ABI present and report failure.
+__declspec(dllexport) int32_t AbortDoc(void*) { return -1; }
+__declspec(dllexport) int32_t EndDoc(void*) { return -1; }
+__declspec(dllexport) int32_t EndPage(void*) { return -1; }
+__declspec(dllexport) int32_t StartDocW(void*, const void*) { return -1; }
+__declspec(dllexport) int32_t StartPage(void*) { return -1; }
+__declspec(dllexport) int32_t SetMapMode(void*, int32_t) { return 0; }
 __declspec(dllexport) int32_t ChoosePixelFormat(void* hdc, const void* ppfd) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_ChoosePixelFormat(hdc, ppfd);
 }
 __declspec(dllexport) void* CreateSolidBrush(uint32_t colorRef) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateSolidBrush(colorRef);
+}
+__declspec(dllexport) void* CreateBrushIndirect(const void* brush) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateBrushIndirect(brush);
+}
+__declspec(dllexport) void* CreatePen(int32_t style, int32_t width, uint32_t color) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreatePen(style, width, color);
+}
+__declspec(dllexport) void* CreatePatternBrush(void* bitmap) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreatePatternBrush(bitmap);
 }
 __declspec(dllexport) int32_t FillRect(void* hdc, const void* rectangle, void* hbrush) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_FillRect(hdc, rectangle, hbrush);
@@ -845,6 +1619,95 @@ __declspec(dllexport) int32_t GetObjectW(void* handle, int32_t bufferBytes, void
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetObjectW(
         handle, bufferBytes, output);
 }
+__declspec(dllexport) int32_t GetDIBits(void* hdc, void* bitmap,
+    uint32_t startScan, uint32_t scanLines, void* bits, void* bitmapInfo,
+    uint32_t usage) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetDIBits(
+        hdc, bitmap, startScan, scanLines, bits, bitmapInfo, usage);
+}
+__declspec(dllexport) int32_t SetDIBits(void* hdc, void* bitmap,
+    uint32_t startScan, uint32_t scanLines, const void* bits,
+    const void* bitmapInfo, uint32_t usage) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetDIBits(
+        hdc, bitmap, startScan, scanLines, bits, bitmapInfo, usage);
+}
+__declspec(dllexport) void* CreateBitmap(int32_t width, int32_t height,
+    uint32_t planes, uint32_t bitsPerPixel, const void* bits) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateBitmap(
+        width, height, planes, bitsPerPixel, bits);
+}
+__declspec(dllexport) void* CreateDIBitmap(void* hdc, const void* header,
+    uint32_t init, const void* bits, const void* info, uint32_t usage) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_CreateDIBitmap(
+        hdc, header, init, bits, info, usage);
+}
+__declspec(dllexport) int32_t MoveToEx(void* hdc, int32_t x, int32_t y, void* previous) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_MoveToEx(hdc, x, y, previous);
+}
+__declspec(dllexport) int32_t LineTo(void* hdc, int32_t x, int32_t y) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_LineTo(hdc, x, y);
+}
+__declspec(dllexport) uint32_t GetPixel(void* hdc, int32_t x, int32_t y) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetPixel(hdc, x, y);
+}
+__declspec(dllexport) int32_t SetPixelV(void* hdc, int32_t x, int32_t y, uint32_t color) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetPixelV(hdc, x, y, color);
+}
+__declspec(dllexport) uint32_t SetBkColor(void* hdc, uint32_t color) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetBkColor(hdc, color);
+}
+__declspec(dllexport) uint32_t SetDCBrushColor(void* hdc, uint32_t color) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetDCBrushColor(hdc, color);
+}
+__declspec(dllexport) int32_t GetROP2(void* hdc) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_GetROP2(hdc);
+}
+__declspec(dllexport) int32_t SetROP2(void* hdc, int32_t mode) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetROP2(hdc, mode);
+}
+__declspec(dllexport) int32_t SetPolyFillMode(void* hdc, int32_t mode) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetPolyFillMode(hdc, mode);
+}
+__declspec(dllexport) int32_t SetStretchBltMode(void* hdc, int32_t mode) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SetStretchBltMode(hdc, mode);
+}
+__declspec(dllexport) int32_t Rectangle(void* hdc, int32_t l, int32_t t, int32_t r, int32_t b) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_Rectangle(hdc, l, t, r, b);
+}
+__declspec(dllexport) int32_t RoundRect(void* hdc, int32_t l, int32_t t, int32_t r, int32_t b,
+                                        int32_t ew, int32_t eh) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_RoundRect(hdc, l, t, r, b, ew, eh);
+}
+__declspec(dllexport) int32_t Ellipse(void* hdc, int32_t l, int32_t t, int32_t r, int32_t b) {
+    return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_Ellipse(hdc, l, t, r, b);
+}
+// These contracts are exported explicitly so the PE loader can distinguish
+// unsupported drawing features from missing DLL exports. Implementations are
+// added at the GDI surface owner as Paint's real drawing paths are connected.
+__declspec(dllexport) int32_t BeginPath(void*) { return 0; }
+__declspec(dllexport) int32_t EndPath(void*) { return 0; }
+__declspec(dllexport) int32_t WidenPath(void*) { return 0; }
+__declspec(dllexport) void* PathToRegion(void*) { return nullptr; }
+__declspec(dllexport) int32_t Polygon(void*, const void*, int32_t) { return 0; }
+__declspec(dllexport) int32_t Polyline(void*, const void*, int32_t) { return 0; }
+__declspec(dllexport) int32_t PolyBezier(void*, const void*, uint32_t) { return 0; }
+__declspec(dllexport) void* ExtCreatePen(uint32_t, uint32_t, const void*, uint32_t, const void*) { return nullptr; }
+__declspec(dllexport) int32_t ExtFloodFill(void*, int32_t, int32_t, uint32_t, uint32_t) { return 0; }
+__declspec(dllexport) int32_t FillRgn(void*, void*, void*) { return 0; }
+__declspec(dllexport) int32_t GdiTransparentBlt(void*, int32_t, int32_t, int32_t, int32_t,
+    void*, int32_t, int32_t, int32_t, int32_t, uint32_t) { return 0; }
+__declspec(dllexport) int32_t MaskBlt(void*, int32_t, int32_t, int32_t, int32_t,
+    void*, int32_t, int32_t, void*, int32_t, int32_t, uint32_t) { return 0; }
+__declspec(dllexport) int32_t StretchBlt(void*, int32_t, int32_t, int32_t, int32_t,
+    void*, int32_t, int32_t, int32_t, int32_t, uint32_t) { return 0; }
+__declspec(dllexport) uint32_t GetDIBColorTable(void*, uint32_t, uint32_t, void*) { return 0; }
+__declspec(dllexport) uint32_t GetEnhMetaFileHeader(void*, uint32_t, void*) { return 0; }
+__declspec(dllexport) int32_t PlayEnhMetaFile(void*, void*, const void*) { return 0; }
+__declspec(dllexport) int32_t DeleteEnhMetaFile(void*) { return 0; }
+__declspec(dllexport) int32_t SaveDC(void*) { return 0; }
+__declspec(dllexport) int32_t RestoreDC(void*, int32_t) { return 0; }
+__declspec(dllexport) int32_t IntersectClipRect(void*, int32_t, int32_t, int32_t, int32_t) { return 0; }
+__declspec(dllexport) int32_t EnumFontFamiliesW(void*, const wchar_t*, void*, intptr_t) { return 0; }
 __declspec(dllexport) void* SelectObject(void* hdc, void* h) {
     return micant::um::winnt_user32_gdi32_imm32_abi::Gdi32_SelectObject(hdc, h);
 }
