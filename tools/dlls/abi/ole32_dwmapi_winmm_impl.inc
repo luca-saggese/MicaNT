@@ -51,7 +51,6 @@ constexpr WinNtComStubUnknownVtbl kComStubVtbl = {
 
 thread_local uint32_t g_comInitCount = 0;
 uint32_t g_activeTimerPeriodMs = 15;
-uint32_t g_dwmDarkModeAttr = 1;
 } // namespace
 
 // ole32.dll implementations
@@ -102,45 +101,41 @@ int32_t Ole32_StringFromGUID2(const void* rguid, wchar_t* lpsz, int32_t cchMax) 
 // dwmapi.dll implementations
 int32_t Dwmapi_DwmIsCompositionEnabled(int32_t* pfEnabled) noexcept {
     if (!pfEnabled) return static_cast<int32_t>(0x80070057U);
-    *pfEnabled = 1;
-    return 0;
+    // The boot path has a compositor process, but this DLL has no service
+    // query to establish its current lifecycle state for this caller.
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 int32_t Dwmapi_DwmExtendFrameIntoClientArea(void* hWnd, const void* pMarInset) noexcept {
     if (!hWnd || !pMarInset) return static_cast<int32_t>(0x80070057U);
-    return 0;
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 int32_t Dwmapi_DwmEnableBlurBehindWindow(void* hWnd, const void* pBlurBehind) noexcept {
     if (!hWnd || !pBlurBehind) return static_cast<int32_t>(0x80070057U);
-    return 0;
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 int32_t Dwmapi_DwmFlush() noexcept {
-    return 0;
+    // No compositor channel or frame fence is wired to this client DLL.
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 int32_t Dwmapi_DwmSetWindowAttribute(void* hwnd, uint32_t dwAttribute, const void* pvAttribute, uint32_t cbAttribute) noexcept {
     if (!hwnd || !pvAttribute || cbAttribute == 0) return static_cast<int32_t>(0x80070057U);
-    if (dwAttribute == DWMWA_USE_IMMERSIVE_DARK_MODE_OFF && cbAttribute >= sizeof(uint32_t)) {
-        std::memcpy(&g_dwmDarkModeAttr, pvAttribute, sizeof(uint32_t));
-    }
-    return 0;
+    (void)dwAttribute;
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 int32_t Dwmapi_DwmGetWindowAttribute(void* hwnd, uint32_t dwAttribute, void* pvAttribute, uint32_t cbAttribute) noexcept {
     if (!hwnd || !pvAttribute || cbAttribute < sizeof(uint32_t)) return static_cast<int32_t>(0x80070057U);
-    if (dwAttribute == DWMWA_USE_IMMERSIVE_DARK_MODE_OFF) {
-        std::memcpy(pvAttribute, &g_dwmDarkModeAttr, sizeof(uint32_t));
-    } else {
-        std::memset(pvAttribute, 0, cbAttribute);
-    }
-    return 0;
+    (void)dwAttribute;
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 int32_t Dwmapi_DwmGetCompositionTimingInfo(void* /*hwnd*/, void* pTimingInfo) noexcept {
     if (!pTimingInfo) return static_cast<int32_t>(0x80070057U);
-    return 0;
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 // winmm.dll implementations
@@ -225,18 +220,10 @@ Horizon112System32Complete24DllSealReport WinNtOle32DwmapiWinmmSealCoordinator::
         Ole32_CoUninitialize();
     }
 
-    // 2. Verify DWMAPI DwmIsCompositionEnabled + DwmExtendFrameIntoClientArea + DwmSetWindowAttribute + DwmFlush
-    int32_t compEnabled = 0;
-    WinNtMargins margins{-1, -1, -1, -1};
-    uint32_t darkMode = 1;
-    uint32_t readDarkMode = 0;
-    if (Dwmapi_DwmIsCompositionEnabled(&compEnabled) == 0 && compEnabled == 1 &&
-        Dwmapi_DwmExtendFrameIntoClientArea(u32Rep.createdHwnd, &margins) == 0 &&
-        Dwmapi_DwmSetWindowAttribute(u32Rep.createdHwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OFF, &darkMode, sizeof(darkMode)) == 0 &&
-        Dwmapi_DwmGetWindowAttribute(u32Rep.createdHwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OFF, &readDarkMode, sizeof(readDarkMode)) == 0 &&
-        Dwmapi_DwmFlush() == 0) {
-        rep.dwmCompositionAndFlushVerified = (readDarkMode == 1);
-    }
+    // This compatibility path must not label argument acceptance as a
+    // compositor or synchronization test. Keep the capability false until
+    // a real scene channel and frame acknowledgement are exercised.
+    rep.dwmCompositionAndFlushVerified = false;
 
     // 3. Verify WinMM 1ms high-resolution game loop scheduler timer
     WinNtTimeCaps caps{};
