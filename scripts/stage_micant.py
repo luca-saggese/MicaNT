@@ -271,6 +271,7 @@ KNOWN_DLLS = [
     ("tools/dlls/abi/secur32_system32.cpp", "build/secur32.dll", "secur32.dll"),
     ("tools/dlls/abi/wintrust_system32.cpp", "build/wintrust.dll", "wintrust.dll"),
     ("tools/dlls/abi/iphlpapi_system32.cpp", "build/iphlpapi.dll", "iphlpapi.dll"),
+    ("tools/dlls/abi/dwmapi_system32.cpp", "build/dwmapi.dll", "dwmapi.dll"),
     ("tools/dlls/ucrtbase.cpp", "build/ucrtbase.dll", "ucrtbase.dll"),
     ("tools/dlls/ws2_32.cpp", "build/ws2_32.dll", "ws2_32.dll"),
     ("tools/dlls/dnsapi.cpp", "build/dnsapi.dll", "dnsapi.dll"),
@@ -485,6 +486,8 @@ def run_local_build():
             runtime_dependencies.append("tools/dlls/abi/bcrypt_crypt32_secur32_wintrust_impl.inc")
         if name == "iphlpapi.dll":
             runtime_dependencies.append("tools/dlls/abi/ntdll_ws2_iphlpapi_winhttp_impl.inc")
+        if name == "dwmapi.dll":
+            runtime_dependencies.append("tools/dlls/abi/ole32_dwmapi_winmm_impl.inc")
         if name == "kernel32.dll":
             runtime_dependencies.extend((
                 "tools/dlls/abi/kernel32_advapi32_impl.inc",
@@ -534,7 +537,7 @@ def run_local_build():
             "-shared",
             "-nostdlib",
             "-Iinclude",
-            "-Wl,--entry=" if name == "ntdll.dll" else
+            "-Wl,--entry=" if name in ("ntdll.dll", "dwmapi.dll") else
                 ("-Wl,-e,DllMainCRTStartup" if name in ("kernel32.dll", "bcrypt.dll", "secur32.dll", "wintrust.dll", "iphlpapi.dll") else "-Wl,-e,DllMain"),
             "-Wl,--subsystem,native",
             "-O2",
@@ -581,6 +584,14 @@ def run_local_build():
                           "-ffunction-sections", "-fdata-sections",
                           "-DBUILD_SYSTEM32_STANDALONE_DLL", "-DBUILD_SYSTEM32_IPHLPAPI_DLL",
                           "-Wl,--gc-sections", src, "-o", out_path))
+        elif name == "dwmapi.dll":
+            c_cmd.extend(("-std=c++23", "-ffreestanding", "-fno-builtin",
+                          "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics",
+                          "-fno-use-cxa-atexit", "-fno-stack-protector", "-mno-red-zone",
+                          "-mno-stack-arg-probe", "-ffunction-sections", "-fdata-sections",
+                          "-DMICANT_NATIVE_USERMODE", "-DBUILD_SYSTEM32_STANDALONE_DLL",
+                          "-DBUILD_SYSTEM32_DWMAPI_DLL", "-Wl,--gc-sections", src,
+                          "-o", out_path))
         elif name == "ucrtbase.dll":
             c_cmd.extend(("-Wl,--out-implib,build/libucrtbase.dll.a", src, "-o", out_path))
         elif name == "ws2_32.dll":

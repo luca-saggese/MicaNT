@@ -8,9 +8,15 @@
 #include "micant/shared/compositor_surface.h"
 #include "micant/shared/pixel_composite.h"
 #include "micant/shared/native_nt_api.hpp"
+#include "micant/shared/composition_protocol.h"
 
 #include <cstdint>
 #include <algorithm>
+#include <cstring>
+
+extern "C" __declspec(dllimport) int32_t __stdcall NtReadVirtualMemory(
+    void* process, const void* base, void* buffer, size_t size,
+    size_t* bytesRead) noexcept;
 
 
 #if defined(BUILD_SYSTEM32_STANDALONE_DLL)
@@ -91,6 +97,71 @@ DeviceContext* allocateContext(void* window, bool memory) noexcept {
 }
 
 bool request(uint32_t operation, MicaWin32kRequest& value) noexcept;
+int32_t requestStatus(uint32_t operation, MicaWin32kRequest& value) noexcept;
+
+bool validateCompositionPacket(const uint8_t* packet,
+                               uint32_t packetBytes) noexcept {
+    if (!packet || packetBytes < sizeof(MicaCompositionRequestHeader) ||
+        packetBytes > sizeof(MicaWin32kRequest::args)) {
+        return false;
+    }
+
+    MicaCompositionRequestHeader header{};
+    std::memcpy(&header, packet, sizeof(header));
+    if (header.size != packetBytes ||
+        header.version != MICANT_COMPOSITION_PROTOCOL_VERSION ||
+        header.flags != MICANT_COMPOSITION_FLAG_NONE ||
+        header.requestSequence == 0) {
+        return false;
+    }
+
+    switch (header.operation) {
+    case MICANT_COMPOSITION_OP_CREATE_SURFACE: {
+        MicaCompositionCreateSurfaceRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateCreateSurfaceRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_RELEASE_SURFACE: {
+        MicaCompositionReleaseSurfaceRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateReleaseSurfaceRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_ATTACH_WINDOW_SURFACE: {
+        MicaCompositionAttachWindowSurfaceRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateAttachWindowSurfaceRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_DETACH_WINDOW_SURFACE: {
+        MicaCompositionDetachWindowSurfaceRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateDetachWindowSurfaceRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_COMMIT: {
+        MicaCompositionCommitRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateCommitRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_WAIT_FOR_FRAME: {
+        MicaCompositionWaitForFrameRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateWaitForFrameRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE: {
+        MicaCompositionAcquireWindowSurfaceRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateAcquireWindowSurfaceRequest(&value) != 0;
+    }
+    default:
+        return false;
+    }
+}
 
 uint32_t* allocateUserPixels(size_t count) noexcept {
     if (!count || count > SIZE_MAX / sizeof(uint32_t)) return nullptr;
@@ -198,11 +269,15 @@ uint32_t* pixelsFor(DeviceContext& context, uint32_t& width,
 }
 
 bool request(uint32_t operation, MicaWin32kRequest& value) noexcept {
+    return requestStatus(operation, value) == 0;
+}
+
+int32_t requestStatus(uint32_t operation, MicaWin32kRequest& value) noexcept {
     value.size = sizeof(value);
     value.version = MICANT_WIN32K_REQUEST_VERSION;
     value.operation = operation;
-    return micant::sys::invokeUserService(
-        0x86, reinterpret_cast<uint64_t>(&value)) == 0;
+    return static_cast<int32_t>(micant::sys::invokeUserService(
+        0x86, reinterpret_cast<uint64_t>(&value)));
 }
 
 bool copyText(uint16_t* destination, const wchar_t* source) noexcept {
@@ -264,6 +339,30 @@ void copyMessage(const MicaWin32kRequest& source,
 }
 
 extern "C" {
+
+__declspec(dllexport) int32_t MicaWin32kCompositionRequest(
+    const void* packet, uint32_t packetBytes) noexcept {
+    if (!packet || packetBytes < sizeof(MicaCompositionRequestHeader) ||
+        packetBytes > sizeof(MicaWin32kRequest::args)) {
+        return static_cast<int32_t>(micant::NtStatus::InvalidParameter);
+    }
+
+    alignas(8) uint8_t inlinePacket[sizeof(MicaWin32kRequest::args)]{};
+    size_t bytesRead = 0;
+    const int32_t copyStatus = NtReadVirtualMemory(
+        reinterpret_cast<void*>(micant::InvalidHandleValue), packet,
+        inlinePacket, packetBytes, &bytesRead);
+    if (copyStatus != static_cast<int32_t>(micant::NtStatus::Success))
+        return copyStatus;
+    if (bytesRead != packetBytes)
+        return static_cast<int32_t>(micant::NtStatus::PartialCopy);
+    if (!validateCompositionPacket(inlinePacket, packetBytes))
+        return static_cast<int32_t>(micant::NtStatus::InvalidParameter);
+
+    MicaWin32kRequest value{};
+    std::memcpy(value.args, inlinePacket, packetBytes);
+    return requestStatus(MICANT_WIN32K_OP_COMPOSITION_REQUEST, value);
+}
 
 void MicaWin32kDebugInputTrace(uint32_t stage, uint32_t controlId,
                               uint32_t flags) {

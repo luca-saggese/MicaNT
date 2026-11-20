@@ -572,6 +572,26 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
 
+    # DWM composition ABI lives in its own Ring 3 DLL. The current exported
+    # entry points report E_NOTIMPL until the compositor service is connected.
+    add_library(dwmapi_boot SHARED EXCLUDE_FROM_ALL
+        tools/dlls/abi/dwmapi_system32.cpp)
+    target_include_directories(dwmapi_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(dwmapi_boot PRIVATE
+        MICANT_NATIVE_USERMODE BUILD_SYSTEM32_STANDALONE_DLL
+        BUILD_SYSTEM32_DWMAPI_DLL)
+    target_compile_options(dwmapi_boot PRIVATE
+        -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
+        -mno-red-zone -mno-stack-arg-probe -ffunction-sections -fdata-sections -O2)
+    target_link_options(dwmapi_boot PRIVATE
+        -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native
+        -Wl,--gc-sections -Wl,--exclude-all-symbols -Wl,--dynamicbase)
+    set_target_properties(dwmapi_boot PROPERTIES
+        PREFIX "" OUTPUT_NAME "dwmapi"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports")
+
     # Separate runtime PE required by applications importing winmm.dll.
     add_library(winmm_boot SHARED EXCLUDE_FROM_ALL tools/dlls/winmm.cpp)
     target_compile_definitions(winmm_boot PRIVATE
@@ -1544,7 +1564,7 @@ if (MICANT_ENABLE_BAREMETAL)
         OUTPUT_NAME "msvcrt_probe" SUFFIX ".exe"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build")
     add_custom_target(explorer_runtime_boot
-        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot winmm_boot oleaut32_boot shlwapi_boot version_boot bcrypt_boot secur32_boot wintrust_boot iphlpapi_boot
+        DEPENDS explorer_boot mac_shell_boot compositor_boot imm32_boot kernel32_boot kernelbase_boot advapi32_boot ntdll_boot ws2_32_boot dnsapi_boot crypt32_boot winhttp_boot svchost_boot ucrtbase_boot msvcrt_boot dwrite_boot uxtheme_boot luceglass_boot comdlg32_boot comctl32_boot ole32_boot dwmapi_boot winmm_boot oleaut32_boot shlwapi_boot version_boot bcrypt_boot secur32_boot wintrust_boot iphlpapi_boot
     )
 
     add_executable(virtio_gpu_boot drivers/virtio_gpu/virtio_gpu.cpp)
@@ -1591,7 +1611,7 @@ if(WIN32 OR MICANT_ENABLE_BAREMETAL)
     foreach(_user_mode_variant IN ITEMS
         micant_win32k micant_user32 micant_gdi32 micant_imm32
         kernel32_boot ntdll_boot ws2_32_boot dnsapi_boot svchost_boot ucrtbase_boot win32k_boot user32_boot gdi32_boot shell32_boot comctl32_boot dwrite_boot uxtheme_boot luceglass_boot
-        imm32_boot version_boot bcrypt_boot secur32_boot wintrust_boot iphlpapi_boot explorer_boot mac_shell_boot explorer_runtime_boot
+        imm32_boot version_boot bcrypt_boot secur32_boot wintrust_boot iphlpapi_boot dwmapi_boot explorer_boot mac_shell_boot explorer_runtime_boot
     )
         add_custom_target(micant_boundary_${_user_mode_variant}
             COMMAND "${Python3_EXECUTABLE}"

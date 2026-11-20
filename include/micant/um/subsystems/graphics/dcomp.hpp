@@ -56,6 +56,9 @@ using micant::prismx::IID_IUnknown;
 using HWND = void*;
 using HANDLE = void*;
 
+inline constexpr int32_t kDcompEPointer = static_cast<int32_t>(0x80004003u);
+inline constexpr int32_t kDcompENotImpl = static_cast<int32_t>(0x80004001u);
+
 // ============================================================================
 // 1. GUIDs & Interface Identifiers
 // ============================================================================
@@ -1329,11 +1332,11 @@ inline int32_t __stdcall DCompositionCreateDevice(
     const GUID& riid,
     void** ppv
 ) {
-    if (!ppv) return -2147467261;
-    auto* dev = new MicaDCompositionDeviceImpl(renderingDevice);
-    int32_t hr = dev->QueryInterface(riid, ppv);
-    dev->Release();
-    return hr;
+    (void)renderingDevice;
+    (void)riid;
+    if (!ppv) return kDcompEPointer;
+    *ppv = nullptr;
+    return kDcompENotImpl;
 }
 
 inline int32_t __stdcall DCompositionCreateDevice2(
@@ -1341,11 +1344,11 @@ inline int32_t __stdcall DCompositionCreateDevice2(
     const GUID& riid,
     void** ppv
 ) {
-    if (!ppv) return -2147467261;
-    auto* dev = new MicaDCompositionDeviceImpl(renderingDevice);
-    int32_t hr = dev->QueryInterface(riid, ppv);
-    dev->Release();
-    return hr;
+    (void)renderingDevice;
+    (void)riid;
+    if (!ppv) return kDcompEPointer;
+    *ppv = nullptr;
+    return kDcompENotImpl;
 }
 
 inline int32_t __stdcall DCompositionCreateDevice3(
@@ -1353,22 +1356,23 @@ inline int32_t __stdcall DCompositionCreateDevice3(
     const GUID& riid,
     void** ppv
 ) {
-    if (!ppv) return -2147467261;
-    auto* dev = new MicaDCompositionDeviceImpl(renderingDevice);
-    int32_t hr = dev->QueryInterface(riid, ppv);
-    dev->Release();
-    return hr;
+    (void)renderingDevice;
+    (void)riid;
+    if (!ppv) return kDcompEPointer;
+    *ppv = nullptr;
+    return kDcompENotImpl;
 }
 
 inline int32_t __stdcall DCompositionCreateSurfaceHandle(
-    uint32_t,
-    void*,
+    uint32_t access,
+    void* attributes,
     HANDLE* surfaceHandle
 ) {
-    if (!surfaceHandle) return -2147467261;
-    static uint64_t s_nextHandle = 0xD0C00001;
-    *surfaceHandle = reinterpret_cast<HANDLE>(s_nextHandle++);
-    return 0;
+    (void)access;
+    (void)attributes;
+    if (!surfaceHandle) return kDcompEPointer;
+    *surfaceHandle = nullptr;
+    return kDcompENotImpl;
 }
 
 inline void InitializeDirectCompositionExports() {
