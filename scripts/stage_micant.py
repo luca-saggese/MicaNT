@@ -486,8 +486,6 @@ def run_local_build():
             runtime_dependencies.append("tools/dlls/abi/bcrypt_crypt32_secur32_wintrust_impl.inc")
         if name == "iphlpapi.dll":
             runtime_dependencies.append("tools/dlls/abi/ntdll_ws2_iphlpapi_winhttp_impl.inc")
-        if name == "dwmapi.dll":
-            runtime_dependencies.append("tools/dlls/abi/ole32_dwmapi_winmm_impl.inc")
         if name == "kernel32.dll":
             runtime_dependencies.extend((
                 "tools/dlls/abi/kernel32_advapi32_impl.inc",
