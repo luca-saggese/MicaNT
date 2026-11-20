@@ -7,8 +7,11 @@ This is a source and build-graph inventory, not a claim of full runtime
 acceptance. `build/qemu-cmake-mingw` was already incomplete (`rules.ninja`
 missing); its failed auto-configuration remains in place. A fresh
 `build/dwm-cmake-mingw` was configured and targets compiled as noted below.
-One QEMU boot reached the desktop scanout but failed the GTK theme acceptance
-check. No PE export dump or reference-Windows observation has been performed.
+The latest retained QEMU run reached desktop scanout and published/consumed the
+GTK theme markers, but later failed the app-window scanout check. The serial log
+also records `Shared surface metadata invalid`; surface validation is the next
+specific regression to diagnose. No PE export dump or reference-Windows
+observation has been performed.
 
 ## Scope and current outcome
 
@@ -117,7 +120,13 @@ Winlogon is not implemented. The protocol fixture and C11 header check passed;
 `micant_legacy_tests` did not compile due unrelated errors in
 `winnt_ucrtbase_runtime_abi.cpp`. The first QEMU attempt failed during default
 build configuration because the environment injected `-arch arm64` into the
-x86_64 compiler. The second reached initial compositor/Explorer scanout but
-failed `Compositor GTK theme was not published and consumed by Explorer`.
-Therefore neither the requested end-to-end behavior nor the full QEMU
-acceptance has passed.
+x86_64 compiler. A later retained QEMU run at
+`/private/tmp/micant-dwm-final-diagnostics-20261120` built all boot targets and
+reported the compositor first shared frame, GTK theme publication and
+Explorer consumption, and visible desktop. It then failed because the
+`app-window.ppm` scanout changed by 325 pixels, below the 10,000-pixel
+acceptance threshold. Serial evidence includes `Shared surface metadata
+invalid`, so the new compositor range checks may be rejecting a live surface;
+the first next action is to identify the exact rejected surface fields and
+reconcile their producer contract without weakening bounds checks. Therefore
+the required end-to-end behavior and full QEMU acceptance have not passed.
