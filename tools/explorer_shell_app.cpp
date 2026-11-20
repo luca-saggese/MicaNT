@@ -815,9 +815,6 @@ void drawAppWindow(AppWindow& app) noexcept {
     }
     fill(p, w, h, 0, h - 25, w, 1, separator);
     text(p, w, h, 12, h - 17, "3 objects", statusBarForeground);
-    if (app.view == View::MyComputer && g.fontReady && h > 64)
-        micant_gui::DrawStringClipped(p, w, h, 18, h - 46,
-            "MicaNT — Città, perché? e\xCC\x81 Ĉ ƀ", secondaryForeground);
     if (!g.bufferedPaintReported && app.dc && w >= 16 && h >= 16) {
         constexpr int32_t kBufferWidth = 16;
         constexpr int32_t kBufferHeight = 16;
