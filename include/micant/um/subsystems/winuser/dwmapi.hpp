@@ -569,93 +569,112 @@ public:
 // ============================================================================
 
 extern "C" inline ole32::HRESULT __stdcall DwmIsCompositionEnabled(int32_t* pfEnabled) {
-    if (!pfEnabled) return 0x80004003; // E_POINTER
-    *pfEnabled = DwmCoordinator::Instance().IsCompositionEnabled() ? 1 : 0;
-    return ole32::S_OK;
+    if (!pfEnabled) return ole32::E_POINTER;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmEnableComposition(uint32_t uCompositionAction) {
-    if (uCompositionAction == DWM_EC_DISABLECOMPOSITION) {
-        DwmCoordinator::Instance().SetCompositionEnabled(false);
-    } else {
-        DwmCoordinator::Instance().SetCompositionEnabled(true);
-    }
-    return ole32::S_OK;
+    if (uCompositionAction != DWM_EC_DISABLECOMPOSITION &&
+        uCompositionAction != DWM_EC_ENABLECOMPOSITION)
+        return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmExtendFrameIntoClientArea(win32::HWND hWnd, const MARGINS* pMarInset) {
-    return DwmCoordinator::Instance().ExtendFrameIntoClientArea(hWnd, pMarInset);
+    if (!hWnd || !pMarInset) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmEnableBlurBehindWindow(win32::HWND hWnd, const DWM_BLURBEHIND* pBlurBehind) {
-    return DwmCoordinator::Instance().EnableBlurBehindWindow(hWnd, pBlurBehind);
+    if (!hWnd || !pBlurBehind) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmSetWindowAttribute(win32::HWND hwnd, uint32_t dwAttribute, const void* pvAttribute, uint32_t cbAttribute) {
-    return DwmCoordinator::Instance().SetWindowAttribute(hwnd, dwAttribute, pvAttribute, cbAttribute);
+    (void)dwAttribute;
+    if (!hwnd || !pvAttribute || !cbAttribute) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmGetWindowAttribute(win32::HWND hwnd, uint32_t dwAttribute, void* pvAttribute, uint32_t cbAttribute) {
-    return DwmCoordinator::Instance().GetWindowAttribute(hwnd, dwAttribute, pvAttribute, cbAttribute);
+    (void)dwAttribute;
+    if (!hwnd || !pvAttribute || !cbAttribute) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmGetColorizationColor(uint32_t* pcrColorization, int32_t* pfOpaqueBlend) {
-    if (!pcrColorization) return 0x80004003; // E_POINTER
-    *pcrColorization = DwmCoordinator::Instance().GetColorizationColor(pfOpaqueBlend);
-    return ole32::S_OK;
+    if (!pcrColorization) return ole32::E_POINTER;
+    (void)pfOpaqueBlend;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmFlush() {
-    DwmCoordinator::Instance().Flush();
-    return ole32::S_OK;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmGetCompositionTimingInfo(win32::HWND hwnd, DWM_TIMING_INFO* pTimingInfo) {
-    return DwmCoordinator::Instance().GetCompositionTimingInfo(hwnd, pTimingInfo);
+    (void)hwnd;
+    if (!pTimingInfo) return ole32::E_POINTER;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmRegisterThumbnail(win32::HWND hwndDestination, win32::HWND hwndSource, HTHUMBNAIL* phThumbnailId) {
-    return DwmCoordinator::Instance().RegisterThumbnail(hwndDestination, hwndSource, phThumbnailId);
+    if (!hwndDestination || !hwndSource || !phThumbnailId ||
+        hwndDestination == hwndSource) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmUnregisterThumbnail(HTHUMBNAIL hThumbnailId) {
-    return DwmCoordinator::Instance().UnregisterThumbnail(hThumbnailId);
+    if (!hThumbnailId) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmUpdateThumbnailProperties(HTHUMBNAIL hThumbnailId, const DWM_THUMBNAIL_PROPERTIES* ptnProperties) {
-    return DwmCoordinator::Instance().UpdateThumbnailProperties(hThumbnailId, ptnProperties);
+    if (!hThumbnailId || !ptnProperties) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmQueryThumbnailSourceSize(HTHUMBNAIL hThumbnailId, PSIZE pSize) {
-    return DwmCoordinator::Instance().QueryThumbnailSourceSize(hThumbnailId, pSize);
+    if (!hThumbnailId || !pSize) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmSetIconicThumbnail(win32::HWND hwnd, void* hbmp, uint32_t dwSITFlags) {
-    return DwmCoordinator::Instance().SetIconicThumbnail(hwnd, hbmp, dwSITFlags);
+    (void)dwSITFlags;
+    if (!hwnd || !hbmp) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmSetIconicLivePreviewBitmap(win32::HWND hwnd, void* hbmp, micant::prismx::POINT* pptClient, uint32_t dwSITFlags) {
-    return DwmCoordinator::Instance().SetIconicLivePreviewBitmap(hwnd, hbmp, pptClient, dwSITFlags);
+    (void)pptClient;
+    (void)dwSITFlags;
+    if (!hwnd || !hbmp) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 extern "C" inline ole32::HRESULT __stdcall DwmInvalidateIconicBitmaps(win32::HWND hwnd) {
-    return DwmCoordinator::Instance().InvalidateIconicBitmaps(hwnd);
+    if (!hwnd) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
-extern "C" inline ole32::HRESULT __stdcall DwmAttachMilContent(win32::HWND /*hwnd*/) {
-    return ole32::S_OK;
+extern "C" inline ole32::HRESULT __stdcall DwmAttachMilContent(win32::HWND hwnd) {
+    if (!hwnd) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
-extern "C" inline ole32::HRESULT __stdcall DwmDetachMilContent(win32::HWND /*hwnd*/) {
-    return ole32::S_OK;
+extern "C" inline ole32::HRESULT __stdcall DwmDetachMilContent(win32::HWND hwnd) {
+    if (!hwnd) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
-extern "C" inline ole32::HRESULT __stdcall DwmModifyPreviousDxFrameDuration(win32::HWND /*hwnd*/, int32_t /*cRefreshes*/, int32_t /*fRelative*/) {
-    return ole32::S_OK;
+extern "C" inline ole32::HRESULT __stdcall DwmModifyPreviousDxFrameDuration(win32::HWND hwnd, int32_t cRefreshes, int32_t /*fRelative*/) {
+    if (!hwnd || cRefreshes <= 0) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
-extern "C" inline ole32::HRESULT __stdcall DwmSetPresentParameters(win32::HWND /*hwnd*/, DWM_PRESENT_PARAMETERS* /*pPresentParams*/) {
-    return ole32::S_OK;
+extern "C" inline ole32::HRESULT __stdcall DwmSetPresentParameters(win32::HWND hwnd, DWM_PRESENT_PARAMETERS* pPresentParams) {
+    if (!hwnd || !pPresentParams) return ole32::E_INVALIDARG;
+    return ole32::E_NOTIMPL;
 }
 
 // ============================================================================
