@@ -47,6 +47,24 @@ is a local build fact, not a Windows ordinal compatibility claim.
 | Surface acquisition | `Window.surface` has no independent allocation generation, pin table or token rundown across resize/destroy/process exit. | `UNKNOWN/NOT IMPLEMENTED`; see the audit's next-slice dependency. Do not issue a token until references are safe. |
 | Runtime proof | Retained QEMU image `/private/tmp/micant-dwm-mycomputer-click-20261120/app-window.ppm` shows the My Computer window after one click; the run later fails its production BUTTON/control acceptance gate. | Visual slice observed; full window/control/composition acceptance remains incomplete. |
 
+## Private reference notes (not compatibility contracts)
+
+The public [kawapure/DWM-Documentation repository](https://github.com/kawapure/DWM-Documentation)
+states that its pseudo-C++ notes analyze `uDWM.dll` 10.0.19041.2075 and
+`dwmcore.dll` 10.0.19041.2311 and warns that layouts may change across Windows
+releases. The exact repository commit SHA was not recoverable during this
+pass, so the notes below are tied to the repository's current `main` view and
+are not pinned binary evidence.
+
+| Reference note | Source | Confidence / use |
+|---|---|---|
+| `CCompositor` proxies uDWM information to the MIL server; its initializer calls `MilConnection_CreateChannel` and `DCompositionCreateDevice3`. The referenced DComp IID is called undocumented, and the author says `IDirectCompositionDevice` may be an incorrect type. | [udwm/compositor.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/compositor.h) | `INFERRED_PRIVATE`; supports keeping public DComp separate from a future internal channel. No private IID or layout is implemented from this note. |
+| `CVisual` is reported as 240 bytes in the analyzed x64 binary and has dirty propagation, content/parent, transform, size, opacity and rendering methods. | [udwm/visual.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/visual.h) | `INFERRED_PRIVATE`; architectural vocabulary only. Not a stable ABI or class-size target. |
+| `VisualCollection` is described as inlined inside `CVisual`; the note says the class does not exist outside that owner. | [udwm/visualcollection.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/visualcollection.h) | `INFERRED_PRIVATE`; do not force a corresponding binary class into MicaNT. |
+| `CResource` owns a channel pointer; `CResourceProxy` models a resource proxy over a channel; `CBaseObject` describes reference counting. | [udwm/resource.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/resource.h), [udwm/resourceproxy.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/resourceproxy.h), [udwm/baseobject.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/baseobject.h) | `INFERRED_PRIVATE`; not copied and not treated as an exact object model. |
+| `IDwmChannel` is explicitly unfinished in the supplied specification. Its full header could not be retrieved in this source pass; parameter/vtable details remain unknown. | [shared/idwmchannel.h](https://github.com/kawapure/DWM-Documentation/blob/main/shared/idwmchannel.h) | `UNKNOWN`; do not implement or expose this private interface from the current notes. |
+| `DynArray` documentation was not available through the source retrieval path in this pass. | [udwm/dynarray.h](https://github.com/kawapure/DWM-Documentation/blob/main/udwm/dynarray.h) | `UNKNOWN`; no private allocation layout is used. |
+
 ## Source boundaries
 
 * Public contracts above use Microsoft Learn. They do not establish private
