@@ -7,11 +7,14 @@ This is a source and build-graph inventory, not a claim of full runtime
 acceptance. `build/qemu-cmake-mingw` was already incomplete (`rules.ninja`
 missing); its failed auto-configuration remains in place. A fresh
 `build/dwm-cmake-mingw` was configured and targets compiled as noted below.
-The latest retained QEMU run reached desktop scanout and published/consumed the
-GTK theme markers, but later failed the app-window scanout check. The serial log
-also records `Shared surface metadata invalid`; surface validation is the next
-specific regression to diagnose. No PE export dump or reference-Windows
-observation has been performed.
+The retained QEMU run at
+`/private/tmp/micant-dwm-mycomputer-click-20261120` reached the desktop,
+published and consumed the GTK theme, and captured the themed My Computer
+window after a single click. The overall QEMU script then failed a later
+production USER32 BUTTON acceptance check. An earlier run exposed and helped
+locate a surface-bounds validator regression; the current run no longer logged
+invalid surface metadata. No PE export dump or reference-Windows observation
+has been performed.
 
 ## Scope and current outcome
 
@@ -120,13 +123,14 @@ Winlogon is not implemented. The protocol fixture and C11 header check passed;
 `micant_legacy_tests` did not compile due unrelated errors in
 `winnt_ucrtbase_runtime_abi.cpp`. The first QEMU attempt failed during default
 build configuration because the environment injected `-arch arm64` into the
-x86_64 compiler. A later retained QEMU run at
-`/private/tmp/micant-dwm-final-diagnostics-20261120` built all boot targets and
-reported the compositor first shared frame, GTK theme publication and
-Explorer consumption, and visible desktop. It then failed because the
-`app-window.ppm` scanout changed by 325 pixels, below the 10,000-pixel
-acceptance threshold. Serial evidence includes `Shared surface metadata
-invalid`, so the new compositor range checks may be rejecting a live surface;
-the first next action is to identify the exact rejected surface fields and
-reconcile their producer contract without weakening bounds checks. Therefore
-the required end-to-end behavior and full QEMU acceptance have not passed.
+x86_64 compiler. The initial QEMU rerun failed because the new range validator
+treated a normal full-window rectangle as the client backing surface; a
+subsequent retained serial run identified an active window with no backing
+store yet, which the existing renderer intentionally skips. Validation now
+checks the renderer's client source bounds and accepts a fully absent backing
+store only when pointer, size and pitch are all zero. The latest full QEMU run
+captured `app-window.ppm` with the themed My Computer window opened by one mouse
+click; it later failed the production USER32 BUTTON acceptance check. The
+specific visual request is therefore verified, but the full integration suite
+is not passing and the broader window/control/composition requirements remain
+incomplete.

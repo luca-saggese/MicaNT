@@ -1103,16 +1103,55 @@ bool validUserPixelRange(uint64_t address, uint64_t bytes) noexcept {
         bytes - 1u <= highestUserAddress - address;
 }
 
-bool validSurfacePixels(const MicaCompositorSurfaceInfo& surface) noexcept {
+bool validSurfacePixels(const MicaCompositorMetadataStore& metadata,
+                        const MicaCompositorSurfaceInfo& surface) noexcept {
     if (!surface.surfaceAddress || !surface.surfaceSizeBytes ||
-        !surface.width || !surface.height || !surface.pitch ||
+        !surface.width || !surface.height || !surface.pitch)
+        return false;
+
+    // Window bounds include non-client pixels, while Win32k's backing block
+    // contains only the client area. Validate the source rectangle the render
+    // path actually samples instead of requiring the backing pitch to contain
+    // the whole framed window.
+    constexpr uint32_t kWsChild = 0x40000000u;
+    constexpr uint32_t kWsBorder = 0x00800000u;
+    constexpr uint32_t kWsDlgFrame = 0x00400000u;
+    constexpr uint32_t kWsCaption = kWsBorder | kWsDlgFrame;
+    constexpr uint32_t kWsThickFrame = 0x00040000u;
+    const bool topLevel = (surface.style & kWsChild) == 0;
+    const bool themeValid = MicaThemeSnapshotIsValid(&metadata.theme,
+                                                       sizeof(metadata.theme));
+    const auto* headerbar = themeValid
+        ? &metadata.theme.styles[13u * MICANT_THEME_STATE_COUNT] : nullptr;
+    const auto* windowStyle = themeValid
+        ? &metadata.theme.styles[14u * MICANT_THEME_STATE_COUNT] : nullptr;
+    const int64_t themedFrame = windowStyle &&
+        (windowStyle->flags & MICANT_THEME_HAS_BORDER_WIDTH) &&
+        windowStyle->borderWidth >= 1 && windowStyle->borderWidth <= 16
+            ? windowStyle->borderWidth : 0;
+    const int64_t sourceFrame = !topLevel ? 0 :
+        ((surface.style & kWsThickFrame) ? std::max<int64_t>(themedFrame, 5) :
+         ((surface.style & (kWsBorder | kWsDlgFrame))
+            ? (themedFrame ? themedFrame : 1) : 0));
+    const int64_t sourceCaption = topLevel && (surface.style & kWsCaption)
+        ? (headerbar && (headerbar->flags & MICANT_THEME_HAS_MIN_HEIGHT) &&
+           headerbar->minHeight >= 24 && headerbar->minHeight <= 96
+            ? headerbar->minHeight : 28)
+        : 0;
+    const int64_t sourceWidth = static_cast<int64_t>(surface.width) - sourceFrame * 2;
+    const int64_t sourceHeight = static_cast<int64_t>(surface.height) -
+        sourceFrame * 2 - sourceCaption;
+    if (sourceWidth <= 0 || sourceHeight <= 0 ||
         surface.surfaceSourceX > surface.pitch ||
-        surface.width > surface.pitch - surface.surfaceSourceX ||
-        surface.surfaceSourceY > UINT32_MAX - surface.height)
+        static_cast<uint64_t>(sourceWidth) >
+            surface.pitch - surface.surfaceSourceX ||
+        surface.surfaceSourceY > UINT32_MAX - static_cast<uint32_t>(sourceHeight))
         return false;
     uint64_t requiredBytes{};
-    if (!requiredPixelBytes(surface.surfaceSourceX + surface.width,
-            surface.surfaceSourceY + surface.height, surface.pitch, requiredBytes) ||
+    if (!requiredPixelBytes(surface.surfaceSourceX +
+                static_cast<uint32_t>(sourceWidth),
+            surface.surfaceSourceY + static_cast<uint32_t>(sourceHeight),
+            surface.pitch, requiredBytes) ||
         requiredBytes > surface.surfaceSizeBytes)
         return false;
     return validUserPixelRange(surface.surfaceAddress, surface.surfaceSizeBytes);
@@ -1138,7 +1177,10 @@ bool validVisibleSnapshotPixels(const MicaCompositorMetadataStore& metadata) noe
             ((surface.flags & MICANT_COMPOSITOR_SURFACE_ICONIC) &&
              !(surface.animationFlags & MICANT_COMPOSITOR_ANIMATION_ACTIVE)))
             continue;
-        if (!surface.window || !validSurfacePixels(surface) ||
+        const bool hasNoBackingStore = !surface.surfaceAddress &&
+            !surface.surfaceSizeBytes && !surface.pitch;
+        if (!surface.window ||
+            (!hasNoBackingStore && !validSurfacePixels(metadata, surface)) ||
             !validOptionalBitmap(surface.iconWidth, surface.iconHeight,
                 surface.iconStride, surface.iconGeneration, surface.iconAddress,
                 surface.iconSizeBytes) ||

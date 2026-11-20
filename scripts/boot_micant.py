@@ -1153,13 +1153,7 @@ def verify_mouse(
             execute("input-send-event", {"events": [
                 {"type": "btn", "data": {"button": "left", "down": False}},
             ]})
-            for down in (True, False):
-                execute("input-send-event", {"events": [{
-                    "type": "key", "data": {
-                        "down": down,
-                        "key": {"type": "qcode", "data": "ret"},
-                    },
-                }]})
+            # A single click on the My Computer desktop icon opens its window.
             # Explorer performs GTK profile switch/rollback probes before it
             # enters the message loop; under TCG those full CSS compilations
             # can take longer than the former native.style probes.
@@ -1171,7 +1165,7 @@ def verify_mouse(
                     break
                 time.sleep(0.1)
             else:
-                raise RuntimeError("Explorer did not dispatch Enter into an application window action")
+                raise RuntimeError("Explorer did not open My Computer from the desktop icon click")
             paint_deadline = time.monotonic() + 30
             while time.monotonic() < paint_deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
