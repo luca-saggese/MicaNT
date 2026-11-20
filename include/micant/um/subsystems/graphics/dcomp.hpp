@@ -57,6 +57,7 @@ using HWND = void*;
 using HANDLE = void*;
 
 inline constexpr int32_t kDcompEPointer = static_cast<int32_t>(0x80004003u);
+inline constexpr int32_t kDcompEInvalidArg = static_cast<int32_t>(0x80070057u);
 inline constexpr int32_t kDcompENotImpl = static_cast<int32_t>(0x80004001u);
 
 // ============================================================================
@@ -1368,10 +1369,14 @@ inline int32_t __stdcall DCompositionCreateSurfaceHandle(
     void* attributes,
     HANDLE* surfaceHandle
 ) {
-    (void)access;
     (void)attributes;
     if (!surfaceHandle) return kDcompEPointer;
     *surfaceHandle = nullptr;
+    // The documented access mask consists of COMPOSITIONOBJECT_READ and
+    // COMPOSITIONOBJECT_WRITE. Reject unknown bits without creating a
+    // placeholder kernel handle; valid requests remain unsupported until
+    // the surface object manager and inheritance rules are connected.
+    if ((access & ~0x3u) != 0) return kDcompEInvalidArg;
     return kDcompENotImpl;
 }
 
