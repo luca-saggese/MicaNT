@@ -134,9 +134,6 @@ void Ring2ScmInitializeExecutiveSubsystem() noexcept;
 // Sovereign Ring 3 Win32 Base DLL & DynamicLoader Bridge (kernel/ps/ring3_win32_base.cpp)
 void Ring3BaseInitializeExecutiveSubsystem() noexcept;
 
-// Sovereign Ring 3 Interactive Session winlogon.exe, Native C++23 explorer.exe & Zero-Copy dwm.exe (kernel/ps/ring3_desktop_shell.cpp)
-void Ring3ShellInitializeExecutiveSubsystem() noexcept;
-
 // Sovereign Ring 3 Real-World Application Triad Roll-In (Notepad++, VLC, 7-Zip & TaskMgr/Primes) (kernel/ps/ring3_real_apps.cpp)
 void Ring3AppsInitializeExecutiveSubsystem() noexcept;
 

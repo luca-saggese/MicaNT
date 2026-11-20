@@ -37,7 +37,6 @@ void SyscallDispatcher::initializeStandardTable() {
     internal::Ring2LsaInitializeExecutiveSubsystem();
     internal::Ring2ScmInitializeExecutiveSubsystem();
     internal::Ring3BaseInitializeExecutiveSubsystem();
-    internal::Ring3ShellInitializeExecutiveSubsystem();
     internal::Ring3AppsInitializeExecutiveSubsystem();
     internal::Ring3PrismX3D12InitializeExecutiveSubsystem();
     internal::Ring3DirectStorageD2DInitializeExecutiveSubsystem();
