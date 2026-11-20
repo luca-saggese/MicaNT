@@ -1095,6 +1095,74 @@ bool requiredPixelBytes(uint32_t width, uint32_t height, uint32_t stride,
     return true;
 }
 
+bool validUserPixelRange(uint64_t address, uint64_t bytes) noexcept {
+    constexpr uint64_t lowestUserAddress = 0x0000000000010000ull;
+    constexpr uint64_t highestUserAddress = 0x00007fffffffffffull;
+    return address >= lowestUserAddress && address <= highestUserAddress &&
+        !(address & (alignof(uint32_t) - 1u)) && bytes &&
+        bytes - 1u <= highestUserAddress - address;
+}
+
+bool validSurfacePixels(const MicaCompositorSurfaceInfo& surface) noexcept {
+    if (!surface.surfaceAddress || !surface.surfaceSizeBytes ||
+        !surface.width || !surface.height || !surface.pitch ||
+        surface.surfaceSourceX > surface.pitch ||
+        surface.width > surface.pitch - surface.surfaceSourceX ||
+        surface.surfaceSourceY > UINT32_MAX - surface.height)
+        return false;
+    uint64_t requiredBytes{};
+    if (!requiredPixelBytes(surface.surfaceSourceX + surface.width,
+            surface.surfaceSourceY + surface.height, surface.pitch, requiredBytes) ||
+        requiredBytes > surface.surfaceSizeBytes)
+        return false;
+    return validUserPixelRange(surface.surfaceAddress, surface.surfaceSizeBytes);
+}
+
+bool validOptionalBitmap(uint32_t width, uint32_t height, uint32_t stride,
+                         uint64_t generation, uint64_t address,
+                         uint64_t sizeBytes) noexcept {
+    if (!width && !height && !stride && !generation && !address && !sizeBytes)
+        return true;
+    uint64_t requiredBytes{};
+    return generation && requiredPixelBytes(width, height, stride, requiredBytes) &&
+        requiredBytes <= sizeBytes && validUserPixelRange(address, sizeBytes);
+}
+
+bool validVisibleSnapshotPixels(const MicaCompositorMetadataStore& metadata) noexcept {
+    for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
+        const auto& surface = metadata.surfaces[index];
+        if ((surface.flags & (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                              MICANT_COMPOSITOR_SURFACE_VISIBLE)) !=
+                (MICANT_COMPOSITOR_SURFACE_ACTIVE |
+                 MICANT_COMPOSITOR_SURFACE_VISIBLE) ||
+            ((surface.flags & MICANT_COMPOSITOR_SURFACE_ICONIC) &&
+             !(surface.animationFlags & MICANT_COMPOSITOR_ANIMATION_ACTIVE)))
+            continue;
+        if (!surface.window || !validSurfacePixels(surface) ||
+            !validOptionalBitmap(surface.iconWidth, surface.iconHeight,
+                surface.iconStride, surface.iconGeneration, surface.iconAddress,
+                surface.iconSizeBytes) ||
+            !validOptionalBitmap(surface.titleWidth, surface.titleHeight,
+                surface.titleStride, surface.titleGeneration, surface.titleAddress,
+                surface.titleSizeBytes))
+            return false;
+    }
+    if ((metadata.cursor.flags & (MICANT_COMPOSITOR_CURSOR_ACTIVE |
+                                  MICANT_COMPOSITOR_CURSOR_VISIBLE)) ==
+            (MICANT_COMPOSITOR_CURSOR_ACTIVE |
+             MICANT_COMPOSITOR_CURSOR_VISIBLE)) {
+        uint64_t requiredBytes{};
+        if (!requiredPixelBytes(metadata.cursor.width, metadata.cursor.height,
+                metadata.cursor.pitch, requiredBytes) ||
+            metadata.cursor.hotX >= metadata.cursor.width ||
+            metadata.cursor.hotY >= metadata.cursor.height ||
+            requiredBytes > metadata.cursor.pixelSizeBytes ||
+            !validUserPixelRange(metadata.cursor.pixelsAddress, requiredBytes))
+            return false;
+    }
+    return true;
+}
+
 uint64_t glassBackdropGeneration(const MicaCompositorMetadataStore& metadata,
                                 const MicaCompositorSurfaceInfo& glassSurface,
                                 int64_t windowLeft, int64_t windowTop) noexcept;
@@ -1108,6 +1176,7 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
     const uint32_t height = metadata.screenHeight;
     if (!width || !height || width > SIZE_MAX / height ||
         (metadata.surfaceEntryCount && (!metadata.surfaces || !animationFrames)) ||
+        !validVisibleSnapshotPixels(metadata) ||
         !ensureOrderedSurfaceCapacity(metadata.surfaceEntryCount) ||
         clip.left < 0 || clip.top < 0 || clip.right > width || clip.bottom > height ||
         clip.left >= clip.right || clip.top >= clip.bottom) return false;
@@ -1879,7 +1948,8 @@ bool cursorVisible(const MicaCompositorCursorInfo& cursor) noexcept {
         cursor.hotX < cursor.width && cursor.hotY < cursor.height &&
         cursor.pixelsAddress &&
         requiredPixelBytes(cursor.width, cursor.height, cursor.pitch, requiredBytes) &&
-        requiredBytes <= cursor.pixelSizeBytes;
+        requiredBytes <= cursor.pixelSizeBytes &&
+        validUserPixelRange(cursor.pixelsAddress, cursor.pixelSizeBytes);
 }
 
 bool sameCursorState(const MicaCompositorCursorInfo& left,
@@ -2203,6 +2273,17 @@ bool copyStableMetadata(const MicaCompositorMetadataStore* source,
             dst[offset + index] = src[offset + index];
     };
     copyRange(0, sizeof(destination));
+    // Reject an incompatible snapshot before following any of its array
+    // pointers. The store is shared with another process and its pointer
+    // fields are meaningful only after the protocol header is accepted.
+    if (destination.magic != MICANT_COMPOSITOR_STORE_MAGIC ||
+        destination.version != MICANT_COMPOSITOR_STORE_VERSION)
+        return false;
+    if (destination.surfaceEntryCount >
+            destination.surfaceArraySizeBytes / sizeof(MicaCompositorSurfaceInfo) ||
+        destination.dirtyRegionCount >
+            destination.dirtyRegionArraySizeBytes / sizeof(MicaCompositorDirtyRect))
+        return false;
     const size_t surfaceBytes = static_cast<size_t>(destination.surfaceEntryCount) *
         sizeof(MicaCompositorSurfaceInfo);
     const size_t dirtyBytes = static_cast<size_t>(destination.dirtyRegionCount) *
@@ -2261,6 +2342,7 @@ extern "C" void _start() noexcept {
     if (micant::sys::invokeUserService(0x80,
             reinterpret_cast<uint64_t>(&displayInfo)) != 0 ||
         !displayInfo.width || !displayInfo.height || displayInfo.pitch < displayInfo.width ||
+        displayInfo.width > INT32_MAX || displayInfo.height > INT32_MAX ||
         displayInfo.height > SIZE_MAX / displayInfo.width ||
         static_cast<size_t>(displayInfo.width) * displayInfo.height >
             SIZE_MAX / sizeof(uint32_t)) {
@@ -2400,7 +2482,14 @@ extern "C" void _start() noexcept {
             continue;
         }
         if (snapshot.screenWidth != g_displayWidth ||
-            snapshot.screenHeight != g_displayHeight) {
+            snapshot.screenHeight != g_displayHeight ||
+            !validVisibleSnapshotPixels(snapshot)) {
+            if (!invalidHeaderReported) {
+                constexpr char invalid[] =
+                    "[MicaNT Compositor] Shared surface metadata invalid\r\n";
+                print(invalid, sizeof(invalid) - 1);
+                invalidHeaderReported = true;
+            }
             waitForUpdate(sequence);
             continue;
         }
