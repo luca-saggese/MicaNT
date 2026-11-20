@@ -4,6 +4,11 @@
 #include "micant/km/hal/amd64_bootstrap.hpp"
 #include <cstring>
 
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+#endif
+
 namespace micant::sys {
 namespace {
 struct UserExceptionRecord64 {
@@ -40,6 +45,36 @@ NtStatus NtRaiseException(const void* recordAddress, const void* contextAddress,
     };
     auto status = copyRecord(reinterpret_cast<uintptr_t>(recordAddress), record);
     if (status != NtStatus::Success) return status;
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
+    MicantNetbootSerialWrite("[MicaNT TaskmgrFault] code=");
+    MicantNetbootSerialWriteNumber(record.code);
+    MicantNetbootSerialWrite(" address=");
+    MicantNetbootSerialWriteNumber(record.exceptionAddress);
+    MicantNetbootSerialWrite(" access=");
+    MicantNetbootSerialWriteNumber(record.information[0]);
+    MicantNetbootSerialWrite(" target=");
+    MicantNetbootSerialWriteNumber(record.information[1]);
+    CONTEXT capturedContext{};
+    const auto contextCopy = ex::ExSafeCopyFromUser(&capturedContext, contextAddress,
+        offsetof(CONTEXT, FltSave), mm::UserMode);
+    MicantNetbootSerialWrite(" contextRip=");
+    MicantNetbootSerialWriteNumber(contextCopy == NtStatus::Success ? capturedContext.Rip : 0);
+    MicantNetbootSerialWrite(" contextRsp=");
+    MicantNetbootSerialWriteNumber(contextCopy == NtStatus::Success ? capturedContext.Rsp : 0);
+    if (contextCopy == NtStatus::Success) {
+        uint64_t returns[4]{};
+        if (ex::ExSafeCopyFromUser(returns, reinterpret_cast<const void*>(capturedContext.Rsp),
+                sizeof(returns), mm::UserMode) == NtStatus::Success) {
+            for (size_t i = 0; i < 4; ++i) {
+                MicantNetbootSerialWrite(" ret=");
+                MicantNetbootSerialWriteNumber(returns[i]);
+            }
+        }
+    }
+    MicantNetbootSerialWrite(" rip=");
+    MicantNetbootSerialWriteNumber(static_cast<hal::amd64::SyscallFrame*>(trapFrame)->rip);
+    MicantNetbootSerialWrite("\r\n");
+#endif
     if (record.parameterCount > 15) return NtStatus::InvalidParameter;
     record.code &= ~uint32_t{0x10000000}; // NT reserves this bit for internal exception codes.
     uintptr_t visited[16]{};

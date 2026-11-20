@@ -58,6 +58,8 @@ extern "C" __declspec(dllimport) int32_t GetDeviceCaps(
     void*, int32_t) noexcept;
 
 int32_t User32_IsWindowEnabled(void*) noexcept;
+int32_t User32_GetWindowTextW(void*, wchar_t*, int32_t) noexcept;
+int32_t User32_IsWindowVisible(void*) noexcept;
 extern "C" __declspec(dllimport) void MicaGdi32ForgetDcState(void*) noexcept;
 extern "C" void MicaUser32MenuWindowDestroyed(void*) noexcept;
 extern "C" void* CreateFontW(int32_t, int32_t, int32_t, int32_t,
@@ -208,7 +210,7 @@ constexpr uint32_t kEsPassword = 0x00000020u;
 constexpr uint32_t kEsReadOnly = 0x00000800u;
 // The standard multiline editor flags are needed by applications such as
 // Notepad; the unsupported set contains only modes whose semantics are absent.
-constexpr uint32_t kEsUnsupportedMask = 0x0000061Bu;
+constexpr uint32_t kEsUnsupportedMask = 0x00000619u;
 constexpr uint32_t kEsControlMask = 0x00003FFFu;
 constexpr uint32_t kVkBack = 0x08u;
 constexpr uint32_t kWmChar = 0x0102u;
@@ -860,9 +862,7 @@ template <typename T> T Win32kProc(const char* name) noexcept {
     MICA_WIN32K_PROC(MicaWin32kGetClientRect);
     MICA_WIN32K_PROC(MicaWin32kGetWindowRect);
     MICA_WIN32K_PROC(MicaWin32kAdjustWindowRectEx);
-#if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC) || defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE) || defined(MICANT_BOOTSTRAP_REACTOS_APP_MSPAINT)
     MICA_WIN32K_PROC(MicaWin32kDebugInputTrace);
-#endif
     MICA_WIN32K_PROC(MicaWin32kEnumWindows);
     MICA_WIN32K_PROC(MicaWin32kGetClassNameW);
     MICA_WIN32K_PROC(MicaWin32kGetWindowThreadProcessId);
@@ -4654,11 +4654,42 @@ int32_t User32_GetWindowRect(void* hWnd, WinNtRect* lpRect) noexcept {
     return fn ? fn(hWnd,reinterpret_cast<MicaWin32kRect*>(lpRect)) : 0;
 }
 
+namespace {
+struct TaskmgrEnumTraceContext {
+    int32_t (*callback)(void*, intptr_t){};
+    intptr_t parameter{};
+    uint32_t count{};
+};
+
+int32_t TaskmgrEnumTraceCallback(void* hwnd, intptr_t opaque) noexcept {
+    auto* context = reinterpret_cast<TaskmgrEnumTraceContext*>(opaque);
+    if (!context || !context->callback) return 0;
+    ++context->count;
+    using TraceFn = int32_t (*)(uint32_t, uint32_t, uint32_t);
+    if (const auto trace = Win32kProc<TraceFn>("MicaWin32kDebugInputTrace")) {
+        trace(151, context->count, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hwnd)));
+        wchar_t title[96]{};
+        const int32_t titleLength = User32_GetWindowTextW(hwnd, title, static_cast<int32_t>(std::size(title)));
+        trace(152, context->count, static_cast<uint32_t>(titleLength));
+        trace(153, context->count, static_cast<uint32_t>(User32_IsWindowVisible(hwnd)));
+    }
+    return context->callback(hwnd, context->parameter);
+}
+} // namespace
+
 int32_t User32_EnumWindows(void* callback, intptr_t parameter) noexcept {
     if (!callback) return 0;
     using Fn=int32_t (*)(void*,intptr_t);
     auto fn=Win32kProc<Fn>("MicaWin32kEnumWindows");
-    return fn ? fn(callback,parameter) : 0;
+    if (!fn) return 0;
+    TaskmgrEnumTraceContext context{
+        reinterpret_cast<int32_t (*)(void*, intptr_t)>(callback), parameter, 0};
+    const int32_t result = fn(reinterpret_cast<void*>(&TaskmgrEnumTraceCallback),
+                               reinterpret_cast<intptr_t>(&context));
+    using TraceFn = int32_t (*)(uint32_t, uint32_t, uint32_t);
+    if (const auto trace = Win32kProc<TraceFn>("MicaWin32kDebugInputTrace"))
+        trace(154, context.count, static_cast<uint32_t>(result));
+    return result;
 }
 
 void* User32_GetDlgItem(void* dialog, int32_t controlId) noexcept {
@@ -5571,6 +5602,12 @@ __declspec(dllexport) uintptr_t SetClassLongPtrA(void* hwnd, int32_t index, uint
 }
 __declspec(dllexport) uint16_t RegisterClassExW(const void* lpWndClassEx) {
     const uint16_t result = micant::um::winnt_user32_gdi32_imm32_abi::User32_RegisterClassExW(lpWndClassEx);
+    if (lpWndClassEx) {
+        const auto* cls = static_cast<const MicaWin32kWindowClassEx*>(lpWndClassEx);
+        if (cls->className && cls->className[0] == L'S')
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(134,
+                static_cast<uint32_t>(cls->className[1]), result);
+    }
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_WINMINE)
     if (!result && lpWndClassEx) {
         const auto* cls = static_cast<const MicaWin32kWindowClassEx*>(lpWndClassEx);
@@ -7832,6 +7869,8 @@ __declspec(dllexport) void* __stdcall CreateDialogParamW(void* instance,
             instance, nullptr);
         if (!control) {
             micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(121, 12, itemIndex);
+            micant::um::winnt_user32_gdi32_imm32_abi::User32_DebugTrace(133,
+                static_cast<uint32_t>(classPointer[0]), itemStyle);
             (void)DestroyWindow(window); return nullptr;
         }
         if (!firstFocus && (itemStyle & 0x00010000u) /* WS_TABSTOP */ &&

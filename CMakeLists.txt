@@ -579,7 +579,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_include_directories(dwmapi_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")
     target_compile_definitions(dwmapi_boot PRIVATE
         MICANT_NATIVE_USERMODE BUILD_SYSTEM32_STANDALONE_DLL
-        BUILD_SYSTEM32_DWMAPI_DLL)
+        BUILD_SYSTEM32_DWMAPI_DLL MICANT_WIN32K_IMPORTS)
     target_compile_options(dwmapi_boot PRIVATE
         -ffreestanding -fno-builtin -fno-exceptions -fno-rtti
         -fno-threadsafe-statics -fno-use-cxa-atexit -fno-stack-protector
@@ -587,6 +587,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_link_options(dwmapi_boot PRIVATE
         -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native
         -Wl,--gc-sections -Wl,--exclude-all-symbols -Wl,--dynamicbase)
+    target_link_libraries(dwmapi_boot PRIVATE win32k_boot)
     set_target_properties(dwmapi_boot PROPERTIES
         PREFIX "" OUTPUT_NAME "dwmapi"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/system32"
@@ -663,7 +664,7 @@ if (MICANT_ENABLE_BAREMETAL)
         -mno-red-zone -O2
     )
     target_link_options(comctl32_boot PRIVATE
-        -nostdlib -fuse-ld=lld -Wl,--entry= -Wl,--subsystem,native -Wl,--dynamicbase
+        -nostdlib -fuse-ld=lld -Wl,--entry=DllMain -Wl,--subsystem,native -Wl,--dynamicbase
     )
     target_link_libraries(comctl32_boot PRIVATE
         gdi32_boot user32_boot uxtheme_boot ntdll_boot win32k_boot)
@@ -756,7 +757,7 @@ if (MICANT_ENABLE_BAREMETAL)
     target_compile_definitions(explorer_boot PRIVATE MICANT_UXTHEME_IMPORTS)
     target_link_libraries(explorer_boot PRIVATE
         user32_boot gdi32_boot win32k_boot dwrite_boot uxtheme_boot comctl32_boot
-        m)
+        dwmapi_boot m)
     set_target_properties(explorer_boot PROPERTIES
         OUTPUT_NAME "explorer"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
@@ -1124,10 +1125,8 @@ if (MICANT_ENABLE_BAREMETAL)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
     )
     add_dependencies(file_image_boot ntdll_process_image)
-    # The Ps loader rejects a DLL with a DllMain entry point because DLL
-    # initializers are not part of M4. Publish the entry-point-free NTDLL
-    # build separately so the file-backed image path can be verified without
-    # replacing the NTDLL used by the desktop path.
+    # Publish the entry-point-free NTDLL build separately so the file-backed
+    # image path can be verified without replacing the NTDLL used by desktop.
     add_custom_command(TARGET file_image_boot POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory
             "${CMAKE_SOURCE_DIR}/build/fileimage-system32"
@@ -1272,9 +1271,8 @@ if (MICANT_ENABLE_BAREMETAL)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/boot-imports"
     )
 
-    # The native process loader currently rejects DLL entrypoints because
-    # DllMain/TLS attach dispatch is not implemented. This entrypoint-free
-    # copy is for the bounded DHCP service host only.
+    # The bounded DHCP service host uses this entrypoint-free copy; the normal
+    # system32 DLL retains the Winsock initialization entry point.
     add_library(ws2_32_service_boot SHARED EXCLUDE_FROM_ALL tools/dlls/ws2_32.cpp
         tools/dlls/native_stack_probe.cpp kernel/ex/freestanding_memory.cpp)
     target_include_directories(ws2_32_service_boot PRIVATE "${CMAKE_SOURCE_DIR}/include")

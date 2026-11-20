@@ -26,7 +26,14 @@ enum {
     MICANT_COMPOSITION_OP_DETACH_WINDOW_SURFACE = 4u,
     MICANT_COMPOSITION_OP_COMMIT = 5u,
     MICANT_COMPOSITION_OP_WAIT_FOR_FRAME = 6u,
-    MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE = 7u
+    MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE = 7u,
+    MICANT_COMPOSITION_OP_FLUSH_LATEST_FRAME = 8u,
+    MICANT_COMPOSITION_OP_RELEASE_WINDOW_SURFACE = 9u,
+    MICANT_COMPOSITION_OP_SET_WINDOW_TRANSITIONS_FORCEDISABLED = 10u
+};
+
+enum {
+    MICANT_DWM_WINDOW_ATTRIBUTE_TRANSITIONS_FORCEDISABLED = 3u
 };
 
 enum {
@@ -97,10 +104,18 @@ typedef struct MicaCompositionWaitForFrameRequest {
     uint32_t reserved;
 } MicaCompositionWaitForFrameRequest;
 
+/* Waits for the latest stable frame published by the kernel compositor owner. */
+typedef struct MicaCompositionFlushLatestFrameRequest {
+    MicaCompositionRequestHeader header;
+    uint32_t timeoutMilliseconds;
+    uint32_t reserved;
+} MicaCompositionFlushLatestFrameRequest;
+
 /*
  * Resolves an already-created, caller-owned Win32k window surface to an
- * opaque generation-checked token. The token grants no extra access and
- * contains no address; the current process must still own the window.
+ * opaque generation-checked lease token. The owner process or compositor
+ * process may acquire it. The token contains no address and must be released
+ * with RELEASE_WINDOW_SURFACE after the associated read completes.
  */
 typedef struct MicaCompositionAcquireWindowSurfaceRequest {
     MicaCompositionRequestHeader header;
@@ -112,6 +127,20 @@ typedef struct MicaCompositionAcquireWindowSurfaceRequest {
     uint32_t strideBytes;
     uint32_t pixelFormat;
 } MicaCompositionAcquireWindowSurfaceRequest;
+
+/* Releases one acquire lease. Invalidated leases remain releasable. */
+typedef struct MicaCompositionReleaseWindowSurfaceRequest {
+    MicaCompositionRequestHeader header;
+    MicaCompositionHandle lease;
+} MicaCompositionReleaseWindowSurfaceRequest;
+
+/* Sets the documented setter-only DWMWA_TRANSITIONS_FORCEDISABLED BOOL. */
+typedef struct MicaCompositionSetWindowTransitionsRequest {
+    MicaCompositionRequestHeader header;
+    uint64_t windowId;
+    uint32_t attribute;
+    int32_t value;
+} MicaCompositionSetWindowTransitionsRequest;
 
 static inline int MicaCompositionHandleIsValid(MicaCompositionHandle handle) {
     return handle.index != 0u && handle.generation != 0u;
@@ -211,6 +240,15 @@ static inline int MicaCompositionValidateWaitForFrameRequest(
            request->reserved == 0u;
 }
 
+static inline int MicaCompositionValidateFlushLatestFrameRequest(
+    const MicaCompositionFlushLatestFrameRequest* request) {
+    return request != 0 && MicaCompositionValidateRequestHeader(
+               &request->header, MICANT_COMPOSITION_OP_FLUSH_LATEST_FRAME,
+               (uint32_t)sizeof(*request)) && request->timeoutMilliseconds != 0u &&
+           request->timeoutMilliseconds <= MICANT_COMPOSITION_MAX_WAIT_MILLISECONDS &&
+           request->reserved == 0u;
+}
+
 static inline int MicaCompositionValidateAcquireWindowSurfaceRequest(
     const MicaCompositionAcquireWindowSurfaceRequest* request) {
     return request != 0 && MicaCompositionValidateRequestHeader(
@@ -221,6 +259,25 @@ static inline int MicaCompositionValidateAcquireWindowSurfaceRequest(
            request->contentGeneration == 0u && request->width == 0u &&
            request->height == 0u && request->strideBytes == 0u &&
            request->pixelFormat == 0u;
+}
+
+static inline int MicaCompositionValidateReleaseWindowSurfaceRequest(
+    const MicaCompositionReleaseWindowSurfaceRequest* request) {
+    return request != 0 && MicaCompositionValidateRequestHeader(
+               &request->header, MICANT_COMPOSITION_OP_RELEASE_WINDOW_SURFACE,
+               (uint32_t)sizeof(*request)) &&
+           MicaCompositionHandleIsValid(request->lease);
+}
+
+static inline int MicaCompositionValidateSetWindowTransitionsRequest(
+    const MicaCompositionSetWindowTransitionsRequest* request) {
+    return request != 0 && MicaCompositionValidateRequestHeader(
+               &request->header,
+               MICANT_COMPOSITION_OP_SET_WINDOW_TRANSITIONS_FORCEDISABLED,
+               (uint32_t)sizeof(*request)) &&
+           request->windowId != 0u &&
+           request->attribute ==
+               MICANT_DWM_WINDOW_ATTRIBUTE_TRANSITIONS_FORCEDISABLED;
 }
 
 #ifdef __cplusplus
@@ -236,4 +293,6 @@ static_assert(sizeof(MicaCompositionDetachWindowSurfaceRequest) == 32);
 static_assert(sizeof(MicaCompositionCommitRequest) == 40);
 static_assert(sizeof(MicaCompositionWaitForFrameRequest) == 40);
 static_assert(sizeof(MicaCompositionAcquireWindowSurfaceRequest) == 64);
+static_assert(sizeof(MicaCompositionReleaseWindowSurfaceRequest) == 32);
+static_assert(sizeof(MicaCompositionSetWindowTransitionsRequest) == 40);
 #endif

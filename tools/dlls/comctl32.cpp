@@ -34,22 +34,51 @@ struct TabItemW {
 struct TabPoint { int32_t x, y; };
 struct TabHitTestInfo { TabPoint point; uint32_t flags; };
 struct NotifyHeader { void* hwndFrom; uintptr_t idFrom; uint32_t code; };
+struct TabKeyDownNotification {
+    NotifyHeader header;
+    uint16_t virtualKey;
+    uint16_t padding{};
+    uint32_t flags{};
+};
 struct StatusBarState {
     void* hwnd{};
     int32_t parts[3]{-1, -1, -1};
     wchar_t text[3][128]{};
     int32_t minimumHeight{20};
 };
+constexpr size_t kListViewCapacity = 8;
+constexpr size_t kListViewItemCapacity = 128;
+constexpr size_t kListViewColumnCapacity = 16;
+constexpr size_t kListViewTextCapacity = 128;
+struct ListViewItemState {
+    uint32_t state{};
+    intptr_t parameter{};
+    uint32_t callbackMask{};
+    wchar_t text[kListViewColumnCapacity][kListViewTextCapacity]{};
+};
+struct ListViewColumnState { int32_t width{120}; wchar_t text[kListViewTextCapacity]{}; };
+struct ListViewState {
+    void* hwnd{};
+    void* parent{};
+    uint32_t style{}, extendedStyle{}, view{1};
+    uintptr_t id{};
+    uint32_t itemCount{}, columnCount{};
+    int32_t selectionMark{-1};
+    ListViewColumnState columns[kListViewColumnCapacity]{};
+    ListViewItemState items[kListViewItemCapacity]{};
+};
 
 constexpr uint32_t kIccProgress = 0x00000020u;
 constexpr uint32_t kIccTab = 0x00000008u;
 constexpr uint32_t kIccTreeView = 0x00000002u;
+constexpr uint32_t kIccListView = 0x00000001u;
 constexpr uint32_t kWmCreate = 0x0001u;
 constexpr uint32_t kWmDestroy = 0x0002u;
 constexpr uint32_t kWmNCCreate = 0x0081u;
 constexpr uint32_t kWmPaint = 0x000Fu;
 constexpr uint32_t kWmThemeChanged = 0x031Au;
 constexpr uint32_t kWmMouseMove = 0x0200u;
+constexpr uint32_t kWmLButtonDown = 0x0201u;
 constexpr uint32_t kWmLButtonUp = 0x0202u;
 constexpr uint32_t kWmSetFocus = 0x0007u;
 constexpr uint32_t kWmKillFocus = 0x0008u;
@@ -81,17 +110,70 @@ constexpr size_t kTreeTextCapacity = 96;
 constexpr uint32_t kTcmFirst = 0x1300u;
 constexpr uint32_t kTcmGetItemCount = kTcmFirst + 4u;
 constexpr uint32_t kTcmDeleteItem = kTcmFirst + 8u;
+constexpr uint32_t kTcmDeleteAllItems = kTcmFirst + 9u;
+constexpr uint32_t kTcmGetItemRect = kTcmFirst + 10u;
 constexpr uint32_t kTcmGetCurSel = kTcmFirst + 11u;
 constexpr uint32_t kTcmSetCurSel = kTcmFirst + 12u;
 constexpr uint32_t kTcmHitTest = kTcmFirst + 13u;
 constexpr uint32_t kTcmInsertItemW = kTcmFirst + 62u;
 constexpr uint32_t kTcmGetItemW = kTcmFirst + 60u;
 constexpr uint32_t kTcmSetItemW = kTcmFirst + 61u;
+constexpr uint32_t kTcmGetCurFocus = kTcmFirst + 47u;
+constexpr uint32_t kTcmSetCurFocus = kTcmFirst + 48u;
+constexpr uint32_t kTcmAdjustRect = kTcmFirst + 40u;
+constexpr uint32_t kTcmSetItemSize = kTcmFirst + 41u;
+constexpr uint32_t kTcmSetPadding = kTcmFirst + 43u;
+constexpr uint32_t kTcmGetRowCount = kTcmFirst + 44u;
+constexpr uint32_t kTcmSetMinTabWidth = kTcmFirst + 49u;
+constexpr uint32_t kTcmDeselectAll = kTcmFirst + 50u;
+constexpr uint32_t kTcmHighlightItem = kTcmFirst + 51u;
+constexpr uint32_t kTcmSetExtendedStyle = kTcmFirst + 52u;
+constexpr uint32_t kTcmGetExtendedStyle = kTcmFirst + 53u;
+constexpr uint32_t kCcmSetUnicodeFormat = 0x2005u;
+constexpr uint32_t kCcmGetUnicodeFormat = 0x2006u;
 constexpr uint32_t kTcnSelChange = static_cast<uint32_t>(-551);
+constexpr uint32_t kTcnSelChanging = static_cast<uint32_t>(-552);
+constexpr uint32_t kTcnFocusChange = static_cast<uint32_t>(-553);
+constexpr uint32_t kTcnKeyDown = static_cast<uint32_t>(-550);
 constexpr uint32_t kTcifText = 0x0001u;
 constexpr uint32_t kTcifImage = 0x0002u;
 constexpr uint32_t kTcifParam = 0x0008u;
+constexpr uint32_t kTcifState = 0x0010u;
+constexpr uint32_t kTcisButtonPressed = 0x0001u;
+constexpr uint32_t kTcisHighlighted = 0x0002u;
+constexpr uint32_t kTcsButtons = 0x0100u;
+constexpr uint32_t kTcsFocusNever = 0x8000u;
+constexpr uint32_t kTcsFocusOnButtonDown = 0x1000u;
 constexpr uint32_t kTcsStyleMask = 0x0000FFFEu;
+constexpr uint32_t kLvmFirst = 0x1000u;
+constexpr uint32_t kLvmGetItemCount = kLvmFirst + 4u;
+constexpr uint32_t kLvmGetItemW = kLvmFirst + 75u;
+constexpr uint32_t kLvmSetItemW = kLvmFirst + 76u;
+constexpr uint32_t kLvmInsertItemW = kLvmFirst + 77u;
+constexpr uint32_t kLvmDeleteItem = kLvmFirst + 8u;
+constexpr uint32_t kLvmDeleteAllItems = kLvmFirst + 9u;
+constexpr uint32_t kLvmGetNextItem = kLvmFirst + 12u;
+constexpr uint32_t kLvmEnsureVisible = kLvmFirst + 19u;
+constexpr uint32_t kLvmRedrawItems = kLvmFirst + 21u;
+constexpr uint32_t kLvmInsertColumnW = kLvmFirst + 97u;
+constexpr uint32_t kLvmGetColumnWidth = kLvmFirst + 29u;
+constexpr uint32_t kLvmSetExtendedStyle = kLvmFirst + 54u;
+constexpr uint32_t kLvmGetExtendedStyle = kLvmFirst + 55u;
+constexpr uint32_t kLvmGetSelectedCount = kLvmFirst + 50u;
+constexpr uint32_t kLvmSetItemState = kLvmFirst + 43u;
+constexpr uint32_t kLvmGetItemState = kLvmFirst + 44u;
+constexpr uint32_t kLvmSetSelectionMark = kLvmFirst + 67u;
+constexpr uint32_t kLvmGetSelectionMark = kLvmFirst + 66u;
+constexpr uint32_t kLvmGetHeader = kLvmFirst + 31u;
+constexpr uint32_t kLvifText = 0x0001u;
+constexpr uint32_t kLvifParam = 0x0004u;
+constexpr uint32_t kLvifState = 0x0008u;
+constexpr uint32_t kLvnGetDispInfoW = static_cast<uint32_t>(-177);
+constexpr uint32_t kLvcfText = 0x0004u;
+constexpr uint32_t kLvcfWidth = 0x0002u;
+constexpr uint32_t kLvisFocused = 0x0001u;
+constexpr uint32_t kLvisSelected = 0x0002u;
+constexpr uint32_t kLvsReport = 0x0001u;
 constexpr uint32_t kTvmFirst = 0x1100u;
 constexpr uint32_t kTvmInsertItemW = kTvmFirst + 50u;
 constexpr uint32_t kTvmDeleteItem = kTvmFirst + 1u;
@@ -158,7 +240,12 @@ struct ProgressState {
 std::atomic_flag g_stateLock = ATOMIC_FLAG_INIT;
 ProgressState g_progress[kProgressCapacity]{};
 std::atomic<uint32_t> g_registrationState{0};
-struct TabItem { wchar_t text[kTabTextCapacity]{}; intptr_t parameter{}; };
+struct TabItem {
+    wchar_t text[kTabTextCapacity]{};
+    uint32_t state{};
+    int32_t image{-1};
+    intptr_t parameter{};
+};
 struct TabState {
     void* hwnd{};
     void* parent{};
@@ -166,7 +253,15 @@ struct TabState {
     uint32_t style{};
     int32_t count{};
     int32_t selected{-1};
+    int32_t focusIndex{-1};
     int32_t hot{-1};
+    int32_t itemWidth{};
+    int32_t itemHeight{24};
+    int32_t minimumItemWidth{54};
+    int32_t horizontalPadding{6};
+    int32_t verticalPadding{3};
+    uint32_t extendedStyle{};
+    bool unicodeFormat{true};
     bool focused{};
     bool enabled{true};
     TabItem items[kTabItemCapacity]{};
@@ -177,12 +272,18 @@ TreeState g_trees[kTreeCapacity]{};
 std::atomic<uint32_t> g_treeRegistrationState{0};
 StatusBarState g_statusBars[16]{};
 std::atomic<uint32_t> g_statusRegistrationState{0};
+ListViewState g_listViews[kListViewCapacity]{};
+std::atomic<uint32_t> g_listViewRegistrationState{0};
 
 struct StateGuard {
+    bool held{true};
     StateGuard() noexcept {
         while (g_stateLock.test_and_set(std::memory_order_acquire)) { }
     }
-    ~StateGuard() { g_stateLock.clear(std::memory_order_release); }
+    void release() noexcept {
+        if (held) { g_stateLock.clear(std::memory_order_release); held = false; }
+    }
+    ~StateGuard() { release(); }
 };
 
 ProgressState* findProgress(void* hwnd) noexcept {
@@ -456,6 +557,7 @@ TabState* acquireTab(void* hwnd) noexcept {
             state = {};
             state.hwnd = hwnd;
             state.selected = -1;
+            state.focusIndex = -1;
             state.hot = -1;
             return &state;
         }
@@ -480,13 +582,41 @@ bool validTabIndex(const TabState& state, intptr_t index) noexcept {
 
 int32_t tabAt(const TabState& state, const Rect& bounds, int32_t x,
               int32_t y) noexcept {
-    if (x < bounds.left || x >= bounds.right || y < bounds.top || y >= bounds.bottom ||
-        state.count <= 0) return -1;
-    const int32_t width = bounds.right - bounds.left;
-    const int32_t tabWidth = std::max<int32_t>(1, width / state.count);
-    const int32_t index = std::min<int32_t>(state.count - 1,
-        (x - bounds.left) / tabWidth);
-    return index;
+    if (state.count <= 0) return -1;
+    int32_t left = bounds.left + 2;
+    const int32_t top = bounds.top + 2;
+    const int32_t bottom = std::min(bounds.bottom, top + state.itemHeight);
+    for (int32_t index = 0; index < state.count; ++index) {
+        const auto& item = state.items[index];
+        size_t chars{};
+        while (chars + 1 < kTabTextCapacity && item.text[chars]) ++chars;
+        const int32_t width = state.itemWidth > 0 ? state.itemWidth :
+            std::max(state.minimumItemWidth,
+                static_cast<int32_t>(chars * 7) + state.horizontalPadding * 2);
+        const int32_t right = std::min(bounds.right - 2, left + width);
+        if (x >= left && x < right && y >= top && y < bottom) return index;
+        left = right;
+    }
+    return -1;
+}
+
+Rect tabItemRect(const TabState& state, const Rect& bounds, int32_t item) noexcept {
+    int32_t left = bounds.left + 2;
+    for (int32_t index = 0; index < item; ++index) {
+        const auto& previous = state.items[index];
+        size_t chars{};
+        while (chars + 1 < kTabTextCapacity && previous.text[chars]) ++chars;
+        left += state.itemWidth > 0 ? state.itemWidth : std::max(state.minimumItemWidth,
+            static_cast<int32_t>(chars * 7) + state.horizontalPadding * 2);
+    }
+    const auto& tab = state.items[item];
+    size_t chars{};
+    while (chars + 1 < kTabTextCapacity && tab.text[chars]) ++chars;
+    const int32_t width = state.itemWidth > 0 ? state.itemWidth : std::max(state.minimumItemWidth,
+        static_cast<int32_t>(chars * 7) + state.horizontalPadding * 2);
+    const int32_t top = bounds.top + 2;
+    return {left, top, std::min(bounds.right - 2, left + width),
+            std::min(bounds.bottom, top + state.itemHeight)};
 }
 
 void notifyTabSelection(const TabState& state) noexcept {
@@ -496,23 +626,33 @@ void notifyTabSelection(const TabState& state) noexcept {
                        reinterpret_cast<intptr_t>(&header));
 }
 
+intptr_t notifyTab(const TabState& state, uint32_t code) noexcept {
+    if (!state.parent) return 0;
+    const NotifyHeader header{state.hwnd, state.id, code};
+    return SendMessageW(state.parent, kWmNotify, state.id,
+                       reinterpret_cast<intptr_t>(&header));
+}
+
 intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                            intptr_t lParam) noexcept {
     if (!hwnd) return 0;
-    if (message == kWmGetDlgCode) return 0x0001u; // DLGC_WANTARROWS
+    if (message == kTcmInsertItemW || message == kWmPaint)
+        MicaWin32kDebugInputTrace(143, message, static_cast<uint32_t>(wParam));
+    if (message == kWmGetDlgCode) return 0x0005u; // DLGC_WANTARROWS | DLGC_WANTCHARS
     if (message == kWmNCCreate) {
         const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
         if (!create) return 0;
         const uint32_t styles = static_cast<uint32_t>(create->style) & kTcsStyleMask;
-        // This bounded control implements the standard top, single-row tab
-        // strip. Unsupported layout/style modes fail window creation.
-        if (styles) return 0;
+        constexpr uint32_t supportedTabStyles = kTcsButtons | kTcsFocusNever |
+            kTcsFocusOnButtonDown | 0x0040u; // HOTTRACK
+        if (styles & ~supportedTabStyles) return 0;
         TabState initial{};
         initial.hwnd = hwnd;
         initial.parent = create->parent;
         initial.id = reinterpret_cast<uintptr_t>(create->menu);
         initial.style = styles;
         initial.selected = -1;
+        initial.focusIndex = -1;
         initial.hot = -1;
         initial.enabled = (static_cast<uint32_t>(create->style) & 0x08000000u) == 0;
         StateGuard guard;
@@ -533,8 +673,80 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         return 0;
     }
 
+    if (message == kWmLButtonDown) {
+        TabState before{};
+        int32_t index{-1};
+        {
+            StateGuard guard;
+            auto* state = findTab(hwnd);
+            if (!state || !state->enabled) return 0;
+            Rect bounds{};
+            if (!GetClientRect(hwnd, &bounds)) return 0;
+            index = tabAt(*state, bounds,
+                static_cast<int16_t>(static_cast<uintptr_t>(lParam)),
+                static_cast<int16_t>(static_cast<uintptr_t>(lParam) >> 16));
+            if (index < 0 || index == state->selected) return 0;
+            before = *state;
+        }
+        if (!(before.style & kTcsFocusNever)) (void)SetFocus(hwnd);
+        if (notifyTab(before, kTcnSelChanging) != 0) return 0;
+        TabState after{};
+        {
+            StateGuard guard;
+            auto* state = findTab(hwnd);
+            if (!state || !validTabIndex(*state, index)) return 0;
+            state->selected = index;
+            state->focusIndex = index;
+            state->items[index].state |= kTcisButtonPressed;
+            for (int32_t i = 0; i < state->count; ++i)
+                if (i != index) state->items[i].state &= ~kTcisButtonPressed;
+            after = *state;
+        }
+        (void)InvalidateRect(hwnd, nullptr, 1);
+        notifyTabSelection(after);
+        return 0;
+    }
+    if (message == kWmLButtonUp) {
+        TabState snapshot{};
+        {
+            StateGuard guard;
+            auto* state = findTab(hwnd);
+            if (!state) return 0;
+            snapshot = *state;
+        }
+        (void)notifyTab(snapshot, 0xFFFFFFFEu); // NM_CLICK
+        return 0;
+    }
+    if (message == kWmKeyDown) {
+        TabState snapshot{};
+        {
+            StateGuard guard;
+            auto* state = findTab(hwnd);
+            if (!state) return 0;
+            snapshot = *state;
+        }
+        if (snapshot.parent) {
+            TabKeyDownNotification notification{};
+            notification.header = {hwnd, snapshot.id, kTcnKeyDown};
+            notification.virtualKey = static_cast<uint16_t>(wParam);
+            notification.flags = static_cast<uint32_t>(lParam);
+            (void)SendMessageW(snapshot.parent, kWmNotify, snapshot.id,
+                reinterpret_cast<intptr_t>(&notification));
+        }
+        if ((wParam == 0x25u || wParam == 0x27u) && snapshot.enabled &&
+            snapshot.count > 0) {
+            const int32_t next = snapshot.focusIndex + (wParam == 0x25u ? -1 : 1);
+            if (next >= 0 && next < snapshot.count)
+                (void)SendMessageW(hwnd, kTcmSetCurFocus,
+                    static_cast<uintptr_t>(next), 0);
+        }
+        return 0;
+    }
+
     TabState snapshot{};
     bool selectionChanged = false;
+    bool selectionChanging = false;
+    bool focusChanged = false;
     bool repaint = false;
     {
         StateGuard guard;
@@ -543,21 +755,54 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         switch (message) {
             case kTcmGetItemCount: return state->count;
             case kTcmGetCurSel: return state->selected;
+            case kTcmGetCurFocus: return state->focusIndex;
             case kTcmSetCurSel: {
                 const int32_t previous = state->selected;
                 const int32_t index = static_cast<int32_t>(wParam);
                 if (index < -1 || index >= state->count) return -1;
-                state->selected = index;
-                repaint = previous != index;
+                if (previous != index) {
+                    if (previous >= 0) state->items[previous].state &= ~kTcisButtonPressed;
+                    state->selected = index;
+                    state->focusIndex = index;
+                    if (index >= 0) state->items[index].state |= kTcisButtonPressed;
+                    repaint = true;
+                }
                 snapshot = *state;
                 if (repaint) (void)InvalidateRect(hwnd, nullptr, 1);
                 return previous;
             }
+            case kTcmSetCurFocus: {
+                const int32_t index = static_cast<int32_t>(wParam);
+                if (index < 0) {
+                    state->focusIndex = -1;
+                    if (state->selected != -1) {
+                        state->selected = -1;
+                        selectionChanged = true;
+                        repaint = true;
+                    }
+                } else if (index < state->count) {
+                    const int32_t previousFocus = state->focusIndex;
+                    if (previousFocus != index) {
+                        state->focusIndex = index;
+                        if (state->style & kTcsButtons) {
+                            focusChanged = true;
+                        } else if (previousFocus != -1 && state->selected != index) {
+                            state->selected = index;
+                            selectionChanged = true;
+                            selectionChanging = true;
+                        }
+                        repaint = true;
+                    }
+                } else {
+                    return 0;
+                }
+                snapshot = *state;
+                break;
+            }
             case kTcmInsertItemW: {
                 if (!lParam || state->count >= static_cast<int32_t>(kTabItemCapacity)) return -1;
                 const auto* item = reinterpret_cast<const TabItemW*>(lParam);
-                if ((item->mask & ~(kTcifText | kTcifParam)) ||
-                    (item->mask & kTcifImage)) return -1;
+                if (item->mask & ~(kTcifText | kTcifParam | kTcifImage | kTcifState)) return -1;
                 const intptr_t requested = static_cast<intptr_t>(wParam);
                 const int32_t index = requested == -1 ? state->count
                     : static_cast<int32_t>(requested);
@@ -566,12 +811,16 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                 if ((item->mask & kTcifText) && !copyTabText(inserted.text, item->text))
                     return -1;
                 if (item->mask & kTcifParam) inserted.parameter = item->parameter;
+                if (item->mask & kTcifImage) inserted.image = item->image;
+                if (item->mask & kTcifState) inserted.state = item->state & item->stateMask;
                 for (int32_t current = state->count; current > index; --current)
                     state->items[current] = state->items[current - 1];
                 state->items[index] = inserted;
                 ++state->count;
                 if (state->selected >= index) ++state->selected;
                 if (state->selected < 0) state->selected = 0;
+                if (state->focusIndex >= index) ++state->focusIndex;
+                if (state->focusIndex < 0) state->focusIndex = index;
                 snapshot = *state;
                 repaint = true;
                 (void)InvalidateRect(hwnd, nullptr, 1);
@@ -587,17 +836,107 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                 else if (state->selected > index) --state->selected;
                 else if (state->selected == index)
                     state->selected = std::min(index, state->count - 1);
+                if (!state->count) state->focusIndex = -1;
+                else if (state->focusIndex > index) --state->focusIndex;
+                else if (state->focusIndex == index)
+                    state->focusIndex = state->selected;
                 snapshot = *state;
                 (void)InvalidateRect(hwnd, nullptr, 1);
                 return 1;
             }
+            case kTcmDeleteAllItems:
+                if (!state->count) return 1;
+                for (int32_t i = 0; i < state->count; ++i) state->items[i] = {};
+                state->count = 0;
+                state->selected = state->focusIndex = state->hot = -1;
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return 1;
+            case kTcmGetItemRect: {
+                if (!lParam || !validTabIndex(*state, static_cast<intptr_t>(wParam))) return 0;
+                Rect bounds{};
+                if (!GetClientRect(hwnd, &bounds)) return 0;
+                *reinterpret_cast<Rect*>(lParam) = tabItemRect(*state, bounds,
+                    static_cast<int32_t>(wParam));
+                return 1;
+            }
+            case kTcmAdjustRect: {
+                if (!lParam) return -1;
+                auto& rect = *reinterpret_cast<Rect*>(lParam);
+                if (wParam) {
+                    rect.left -= 4;
+                    rect.right += 4;
+                    rect.top -= state->itemHeight + 4;
+                    rect.bottom += 4;
+                } else {
+                    rect.left += 4;
+                    rect.right -= 4;
+                    rect.top += state->itemHeight + 4;
+                    rect.bottom -= 4;
+                }
+                return 0;
+            }
+            case kTcmSetItemSize: {
+                const int32_t oldWidth = state->itemWidth;
+                const int32_t oldHeight = state->itemHeight;
+                const int32_t width = static_cast<int16_t>(static_cast<uintptr_t>(lParam));
+                const int32_t height = static_cast<int16_t>(static_cast<uintptr_t>(lParam) >> 16);
+                if (width <= 0 || height <= 0) return 0;
+                state->itemWidth = width;
+                state->itemHeight = height;
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return static_cast<uint16_t>(oldWidth) |
+                    (static_cast<uint32_t>(static_cast<uint16_t>(oldHeight)) << 16);
+            }
+            case kTcmSetPadding:
+                state->horizontalPadding = static_cast<uint16_t>(static_cast<uintptr_t>(lParam));
+                state->verticalPadding = static_cast<uint16_t>(static_cast<uintptr_t>(lParam) >> 16);
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return 0;
+            case kTcmGetRowCount: return state->count ? 1 : 0;
+            case kTcmSetMinTabWidth: {
+                const int32_t previous = state->minimumItemWidth;
+                state->minimumItemWidth = std::max<int32_t>(0, static_cast<int32_t>(lParam));
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return previous;
+            }
+            case kTcmDeselectAll:
+                for (int32_t i = 0; i < state->count; ++i)
+                    if (!wParam || i != state->focusIndex)
+                        state->items[i].state &= ~kTcisButtonPressed;
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return 0;
+            case kTcmHighlightItem: {
+                if (!validTabIndex(*state, static_cast<intptr_t>(wParam))) return 0;
+                auto& item = state->items[wParam];
+                if (static_cast<uint16_t>(lParam)) item.state |= kTcisHighlighted;
+                else item.state &= ~kTcisHighlighted;
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return 1;
+            }
+            case kTcmSetExtendedStyle: {
+                const uint32_t previous = state->extendedStyle;
+                const uint32_t mask = static_cast<uint32_t>(wParam);
+                state->extendedStyle = mask ? (previous & ~mask) |
+                    (static_cast<uint32_t>(lParam) & mask) : static_cast<uint32_t>(lParam);
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return previous;
+            }
+            case kTcmGetExtendedStyle: return state->extendedStyle;
+            case kCcmSetUnicodeFormat: {
+                const bool previous = state->unicodeFormat;
+                state->unicodeFormat = wParam != 0;
+                return previous;
+            }
+            case kCcmGetUnicodeFormat: return state->unicodeFormat;
             case kTcmGetItemW: {
                 if (!lParam || !validTabIndex(*state, static_cast<intptr_t>(wParam))) return 0;
                 auto* item = reinterpret_cast<TabItemW*>(lParam);
-                if (item->mask & ~(kTcifText | kTcifParam | kTcifImage)) return 0;
-                if (item->mask & kTcifImage) { item->image = -1; }
+                if (item->mask & ~(kTcifText | kTcifParam | kTcifImage | kTcifState)) return 0;
+                if (item->mask & kTcifImage) item->image = state->items[wParam].image;
                 if (item->mask & kTcifParam)
                     item->parameter = state->items[wParam].parameter;
+                if (item->mask & kTcifState)
+                    item->state = state->items[wParam].state & item->stateMask;
                 if ((item->mask & kTcifText) && item->text && item->textCapacity > 0) {
                     int32_t index = 0;
                     for (; index + 1 < item->textCapacity &&
@@ -610,12 +949,14 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
             case kTcmSetItemW: {
                 if (!lParam || !validTabIndex(*state, static_cast<intptr_t>(wParam))) return 0;
                 const auto* item = reinterpret_cast<const TabItemW*>(lParam);
-                if (item->mask & ~(kTcifText | kTcifParam) ||
-                    (item->mask & kTcifImage)) return 0;
+                if (item->mask & ~(kTcifText | kTcifParam | kTcifImage | kTcifState)) return 0;
                 auto& destination = state->items[wParam];
                 if ((item->mask & kTcifText) && !copyTabText(destination.text, item->text))
                     return 0;
                 if (item->mask & kTcifParam) destination.parameter = item->parameter;
+                if (item->mask & kTcifImage) destination.image = item->image;
+                if (item->mask & kTcifState) destination.state =
+                    (destination.state & ~item->stateMask) | (item->state & item->stateMask);
                 snapshot = *state;
                 (void)InvalidateRect(hwnd, nullptr, 1);
                 return 1;
@@ -642,38 +983,9 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                 snapshot = *state;
                 break;
             }
-            case kWmLButtonUp: {
-                Rect bounds{};
-                if (!GetClientRect(hwnd, &bounds)) return 0;
-                const int32_t x = static_cast<int16_t>(
-                    static_cast<uintptr_t>(lParam) & 0xFFFFu);
-                const int32_t y = static_cast<int16_t>(
-                    (static_cast<uintptr_t>(lParam) >> 16) & 0xFFFFu);
-                const int32_t index = tabAt(*state, bounds, x, y);
-                if (index >= 0 && state->enabled) {
-                    selectionChanged = state->selected != index;
-                    state->selected = index;
-                    state->focused = true;
-                    snapshot = *state;
-                    repaint = true;
-                }
-                break;
-            }
             case kWmSetFocus: state->focused = true; repaint = true; snapshot = *state; break;
             case kWmKillFocus: state->focused = false; repaint = true; snapshot = *state; break;
             case 0x000Au: state->enabled = wParam != 0; repaint = true; snapshot = *state; break;
-            case kWmKeyDown: {
-                if (!state->focused || !state->enabled || state->count == 0 ||
-                    (wParam != 0x25u && wParam != 0x27u)) return 0;
-                const int32_t old = state->selected;
-                if (wParam == 0x25u && state->selected > 0) --state->selected;
-                if (wParam == 0x27u && state->selected + 1 < state->count)
-                    ++state->selected;
-                selectionChanged = old != state->selected;
-                repaint = selectionChanged;
-                snapshot = *state;
-                break;
-            }
             case kWmThemeChanged:
                 (void)InvalidateRect(hwnd, nullptr, 1);
                 return 0;
@@ -687,7 +999,10 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
         }
     }
     if (repaint) (void)InvalidateRect(hwnd, nullptr, 1);
-    if (selectionChanged) notifyTabSelection(snapshot);
+    const bool changingCancelled = selectionChanging &&
+        notifyTab(snapshot, kTcnSelChanging) != 0;
+    if (selectionChanged && !changingCancelled) notifyTabSelection(snapshot);
+    if (focusChanged) (void)notifyTab(snapshot, kTcnFocusChange);
     if (message != kWmPaint) {
         if (message == kWmLButtonUp) (void)SetFocus(hwnd);
         return 0;
@@ -710,14 +1025,15 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
             clientColor = themedClientColor;
     }
     bool painted = fillWithColor(hdc, bounds, clientColor);
-    const int32_t tabWidth = std::max<int32_t>(1,
-        (bounds.right - bounds.left) / std::max<int32_t>(1, snapshot.count));
-    const int32_t tabHeight = std::min<int32_t>(28, bounds.bottom - bounds.top);
     for (int32_t index = 0; index < snapshot.count; ++index) {
-        Rect tab{bounds.left + index * tabWidth, bounds.top,
-            index + 1 == snapshot.count ? bounds.right :
-                std::min(bounds.right, bounds.left + (index + 1) * tabWidth),
-            bounds.top + tabHeight};
+        Rect tab = tabItemRect(snapshot, bounds, index);
+        if (snapshot.style & kTcsButtons) {
+            tab.bottom = std::min(bounds.bottom, tab.bottom + snapshot.verticalPadding);
+        } else if (snapshot.selected == index) {
+            tab.left = std::max(bounds.left, tab.left - 2);
+            tab.right = std::min(bounds.right, tab.right + 2);
+            tab.top = std::max(bounds.top, tab.top - 2);
+        }
         const int32_t state = !snapshot.enabled ? 4 :
             snapshot.selected == index ? 7 : snapshot.hot == index ? 2 : 1;
         const bool themed = theme &&
@@ -729,7 +1045,9 @@ intptr_t TabControlWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
                 color = themedColor;
             painted &= fillWithColor(hdc, tab, color);
         }
-        Rect text{tab.left + 6, tab.top + 2, tab.right - 6, tab.bottom - 2};
+        Rect text{tab.left + snapshot.horizontalPadding, tab.top + snapshot.verticalPadding,
+                  tab.right - snapshot.horizontalPadding,
+                  tab.bottom - snapshot.verticalPadding};
         const auto& label = snapshot.items[index].text;
         int32_t length = 0;
         while (length < static_cast<int32_t>(kTabTextCapacity) && label[length]) ++length;
@@ -1223,16 +1541,357 @@ bool registerStatusBarClass() noexcept {
     return registered;
 }
 
+struct ListViewItemW {
+    uint32_t mask;
+    int32_t item, subItem;
+    uint32_t state, stateMask;
+    wchar_t* text;
+    int32_t textCapacity, image;
+    intptr_t parameter;
+    int32_t indent, groupId;
+};
+struct ListViewColumnW {
+    uint32_t mask;
+    int32_t format, width;
+    wchar_t* text;
+    int32_t textCapacity, subItem, image, order;
+};
+
+ListViewState* findListView(void* hwnd) noexcept {
+    for (auto& state : g_listViews) if (state.hwnd == hwnd) return &state;
+    return nullptr;
+}
+
+bool copyListText(wchar_t* destination, const wchar_t* source, size_t capacity) noexcept {
+    if (!destination || !capacity) return false;
+    if (reinterpret_cast<uintptr_t>(source) == UINTPTR_MAX) return false;
+    size_t length{};
+    if (source && reinterpret_cast<uintptr_t>(source) > UINT16_MAX) {
+        while (length + 1 < capacity && source[length]) ++length;
+        if (length + 1 == capacity && source[length]) return false;
+    }
+    for (size_t i = 0; i < length; ++i) destination[i] = source[i];
+    destination[length] = 0;
+    return true;
+}
+
+bool getCallbackText(const ListViewState& state, uint32_t row, uint32_t column,
+                     wchar_t* text, size_t capacity) noexcept {
+    if (!state.parent || !text || capacity == 0 || row >= state.itemCount ||
+        column >= kListViewColumnCapacity) return false;
+    struct DisplayInfo { NotifyHeader header; ListViewItemW item; } info{};
+    info.header = {state.hwnd, state.id, kLvnGetDispInfoW};
+    info.item.mask = kLvifText | kLvifParam;
+    info.item.item = static_cast<int32_t>(row);
+    info.item.subItem = static_cast<int32_t>(column);
+    info.item.text = text;
+    info.item.textCapacity = static_cast<int32_t>(std::min<size_t>(capacity, INT32_MAX));
+    info.item.parameter = state.items[row].parameter;
+    text[0] = L'\0';
+    (void)SendMessageW(state.parent, kWmNotify, state.id,
+                       reinterpret_cast<intptr_t>(&info));
+    static uint32_t tracedCells = 0;
+    if (tracedCells < 64) {
+        ++tracedCells;
+        size_t length = 0;
+        while (length + 1 < capacity && text[length]) ++length;
+        MicaWin32kDebugInputTrace(155, row, column);
+        MicaWin32kDebugInputTrace(156, static_cast<uint32_t>(length),
+                                 text[0] ? 1u : 0u);
+    }
+    return true;
+}
+
+intptr_t ListViewWndProc(void* hwnd, uint32_t message, uintptr_t wParam,
+                         intptr_t lParam) noexcept {
+    if (!hwnd) return 0;
+    if (message == kWmGetDlgCode) return 0x0004u; // DLGC_WANTCHARS
+    if (message == kWmNCCreate) return 1;
+    if (message == kWmCreate) {
+        const auto* create = reinterpret_cast<const MicaWin32kCreateStruct*>(lParam);
+        if (!create) return -1;
+        StateGuard guard;
+        for (auto& state : g_listViews) {
+            if (state.hwnd) continue;
+            state = {};
+            state.hwnd = hwnd;
+            state.parent = create->parent;
+            state.style = static_cast<uint32_t>(create->style);
+            state.view = state.style & 0x0003u;
+            state.id = reinterpret_cast<uintptr_t>(create->menu);
+            state.selectionMark = -1;
+            return 0;
+        }
+        return -1;
+    }
+    if (message == kWmDestroy) {
+        StateGuard guard;
+        if (auto* state = findListView(hwnd)) *state = {};
+        return 0;
+    }
+    if (message == kWmPaint) {
+        ListViewState snapshot{};
+        {
+            StateGuard guard;
+            if (auto* state = findListView(hwnd)) snapshot = *state;
+            else return 0;
+        }
+        PaintStruct paint{};
+        void* dc = BeginPaint(hwnd, &paint);
+        if (!dc) return 0;
+        Rect client{};
+        if (!GetClientRect(hwnd, &client)) { (void)EndPaint(hwnd, &paint); return 0; }
+        (void)fillWithColor(dc, client, 0x00FFFFFFu);
+        uint32_t headerColor = 0x00E8E8E8u;
+        int32_t y = 0;
+        if (snapshot.view == kLvsReport && snapshot.columnCount) {
+            Rect header{0, 0, client.right, 24};
+            (void)fillWithColor(dc, header, headerColor);
+            int32_t x = 0;
+            for (uint32_t col = 0; col < snapshot.columnCount && x < client.right; ++col) {
+                const auto& column = snapshot.columns[col];
+                if (column.text[0]) (void)TextOutW(dc, x + 6, 5, column.text,
+                    static_cast<int32_t>(std::char_traits<wchar_t>::length(column.text)));
+                x += std::max(24, column.width);
+                Rect divider{x - 1, 0, x, 24};
+                (void)fillWithColor(dc, divider, 0x00C0C0C0u);
+            }
+            Rect headerLine{0, 23, client.right, 24};
+            (void)fillWithColor(dc, headerLine, 0x00808080u);
+            y = 24;
+        }
+        for (uint32_t row = 0; row < snapshot.itemCount && y < client.bottom; ++row) {
+            const auto& item = snapshot.items[row];
+            const bool selected = (item.state & kLvisSelected) != 0;
+            if (selected) {
+                Rect rowRect{0, y, client.right, y + 22};
+                (void)fillWithColor(dc, rowRect, 0x00D77800u);
+            }
+            int32_t x = 4;
+            const uint32_t cells = snapshot.view == kLvsReport
+                ? std::max(1u, snapshot.columnCount) : 1u;
+            for (uint32_t col = 0; col < cells; ++col) {
+                const int32_t width = col < snapshot.columnCount
+                    ? std::max(24, snapshot.columns[col].width) : client.right - x;
+                wchar_t callbackText[kListViewTextCapacity]{};
+                const wchar_t* cellText = item.text[col];
+                if (item.callbackMask & (1u << col)) {
+                    if (getCallbackText(snapshot, row, col, callbackText,
+                                        kListViewTextCapacity)) cellText = callbackText;
+                }
+                if (cellText[0]) (void)TextOutW(dc, x + 2, y + 3, cellText,
+                    static_cast<int32_t>(std::char_traits<wchar_t>::length(cellText)));
+                x += width;
+            }
+            y += 22;
+        }
+        return EndPaint(hwnd, &paint) != 0 ? 1 : 0;
+    }
+    if (message == kWmLButtonUp) {
+        Rect client{};
+        if (!GetClientRect(hwnd, &client)) return 0;
+        const int32_t y = static_cast<int16_t>((static_cast<uintptr_t>(lParam) >> 16) & 0xFFFFu);
+        const int32_t row = (y - (client.top + 24)) / 22;
+        StateGuard guard;
+        auto* state = findListView(hwnd);
+        if (state && row >= 0 && static_cast<uint32_t>(row) < state->itemCount) {
+            for (uint32_t i = 0; i < state->itemCount; ++i)
+                state->items[i].state &= ~(kLvisSelected | kLvisFocused);
+            state->items[row].state |= kLvisSelected | kLvisFocused;
+            state->selectionMark = row;
+            (void)InvalidateRect(hwnd, nullptr, 1);
+        }
+        return 0;
+    }
+
+    StateGuard guard;
+    auto* state = findListView(hwnd);
+    if (!state) return 0;
+    switch (message) {
+        case kLvmGetItemCount: return state->itemCount;
+        case kLvmInsertColumnW: {
+            if (!lParam || state->columnCount >= kListViewColumnCapacity) return -1;
+            const auto* column = reinterpret_cast<const ListViewColumnW*>(lParam);
+            const size_t index = std::min<size_t>(static_cast<size_t>(wParam), state->columnCount);
+            for (uint32_t i = state->columnCount; i > index; --i)
+                state->columns[i] = state->columns[i - 1];
+            auto& destination = state->columns[index];
+            destination = {};
+            destination.width = (column->mask & kLvcfWidth) ? std::max(24, column->width) : 120;
+            if ((column->mask & kLvcfText) && !copyListText(destination.text, column->text,
+                    kListViewTextCapacity)) return -1;
+            ++state->columnCount;
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return static_cast<intptr_t>(index);
+        }
+        case kLvmGetColumnWidth:
+            return wParam < state->columnCount ? state->columns[wParam].width : 0;
+        case kLvmInsertItemW: {
+            if (!lParam || state->itemCount >= kListViewItemCapacity) return -1;
+            const auto* source = reinterpret_cast<const ListViewItemW*>(lParam);
+            if (source->item < 0 || static_cast<uint32_t>(source->item) > state->itemCount)
+                return -1;
+            const uint32_t index = static_cast<uint32_t>(source->item);
+            for (uint32_t i = state->itemCount; i > index; --i)
+                state->items[i] = state->items[i - 1];
+            state->items[index] = {};
+            if (source->mask & kLvifText) {
+                if (reinterpret_cast<uintptr_t>(source->text) == UINTPTR_MAX)
+                    state->items[index].callbackMask |= 1u;
+                else if (!copyListText(state->items[index].text[0], source->text,
+                                       kListViewTextCapacity)) return -1;
+            }
+            if (source->mask & kLvifParam) state->items[index].parameter = source->parameter;
+            if (source->mask & kLvifState) state->items[index].state = source->state & source->stateMask;
+            ++state->itemCount;
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return index;
+        }
+        case kLvmSetItemW:
+        case kLvmGetItemW: {
+            if (!lParam) return 0;
+            auto* item = reinterpret_cast<ListViewItemW*>(lParam);
+            if (item->item < 0 || static_cast<uint32_t>(item->item) >= state->itemCount ||
+                item->subItem < 0 || static_cast<uint32_t>(item->subItem) >= kListViewColumnCapacity)
+                return 0;
+            auto& destination = state->items[item->item];
+            if (message == kLvmSetItemW) {
+                if (item->mask & kLvifText) {
+                    if (reinterpret_cast<uintptr_t>(item->text) == UINTPTR_MAX) {
+                        destination.callbackMask |= 1u << item->subItem;
+                        destination.text[item->subItem][0] = L'\0';
+                    } else {
+                        destination.callbackMask &= ~(1u << item->subItem);
+                        if (!copyListText(destination.text[item->subItem], item->text,
+                                          kListViewTextCapacity)) return 0;
+                    }
+                }
+                if (item->mask & kLvifParam) destination.parameter = item->parameter;
+                if (item->mask & kLvifState) destination.state =
+                    (destination.state & ~item->stateMask) | (item->state & item->stateMask);
+                (void)InvalidateRect(hwnd, nullptr, 1);
+                return 1;
+            }
+            if (item->mask & kLvifText) {
+                if (destination.callbackMask & (1u << item->subItem)) {
+                    const auto snapshot = *state;
+                    // Parent notifications must run without the global control-state lock.
+                    guard.release();
+                    const bool ok = getCallbackText(snapshot, static_cast<uint32_t>(item->item),
+                        static_cast<uint32_t>(item->subItem), item->text,
+                        item->textCapacity > 0 ? static_cast<size_t>(item->textCapacity) : 1u);
+                    return ok ? 1 : 0;
+                }
+                (void)copyListText(item->text, destination.text[item->subItem],
+                    item->textCapacity > 0 ? static_cast<size_t>(item->textCapacity) : 1u);
+            }
+            if (item->mask & kLvifParam) item->parameter = destination.parameter;
+            if (item->mask & kLvifState) item->state = destination.state & item->stateMask;
+            return 1;
+        }
+        case kLvmDeleteItem: {
+            if (wParam >= state->itemCount) return 0;
+            for (uint32_t i = static_cast<uint32_t>(wParam); i + 1 < state->itemCount; ++i)
+                state->items[i] = state->items[i + 1];
+            state->items[--state->itemCount] = {};
+            if (state->selectionMark == static_cast<int32_t>(wParam)) state->selectionMark = -1;
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return 1;
+        }
+        case kLvmDeleteAllItems:
+            for (uint32_t i = 0; i < state->itemCount; ++i) state->items[i] = {};
+            state->itemCount = 0; state->selectionMark = -1;
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return 1;
+        case kLvmGetItemState:
+            return wParam < state->itemCount
+                ? state->items[wParam].state & static_cast<uint32_t>(lParam) : 0;
+        case kLvmSetItemState: {
+            if (!lParam) return 0;
+            const auto* item = reinterpret_cast<const ListViewItemW*>(lParam);
+            const uint32_t first = wParam == UINT32_MAX ? 0u : static_cast<uint32_t>(wParam);
+            const uint32_t last = wParam == UINT32_MAX ? state->itemCount : first + 1;
+            if (first > state->itemCount || last > state->itemCount) return 0;
+            for (uint32_t i = first; i < last; ++i)
+                state->items[i].state = (state->items[i].state & ~item->stateMask) |
+                    (item->state & item->stateMask);
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return 1;
+        }
+        case kLvmGetNextItem: {
+            const uint32_t wanted = static_cast<uint32_t>(lParam);
+            uint32_t first = wParam == UINT32_MAX ? 0u : static_cast<uint32_t>(wParam + 1);
+            for (uint32_t i = first; i < state->itemCount; ++i)
+                if ((state->items[i].state & wanted) == wanted) return i;
+            return -1;
+        }
+        case kLvmGetSelectedCount: {
+            uint32_t count{};
+            for (uint32_t i = 0; i < state->itemCount; ++i)
+                if (state->items[i].state & kLvisSelected) ++count;
+            return count;
+        }
+        case kLvmSetSelectionMark: {
+            const int32_t previous = state->selectionMark;
+            state->selectionMark = static_cast<int32_t>(wParam);
+            return previous;
+        }
+        case kLvmGetSelectionMark: return state->selectionMark;
+        case kLvmSetExtendedStyle: {
+            const uint32_t previous = state->extendedStyle;
+            const uint32_t mask = static_cast<uint32_t>(wParam);
+            state->extendedStyle = mask ? (previous & ~mask) | (static_cast<uint32_t>(lParam) & mask)
+                                        : static_cast<uint32_t>(lParam);
+            (void)InvalidateRect(hwnd, nullptr, 1);
+            return previous;
+        }
+        case kLvmGetExtendedStyle: return state->extendedStyle;
+        case kLvmEnsureVisible:
+        case kLvmRedrawItems: (void)InvalidateRect(hwnd, nullptr, 1); return 1;
+        case kLvmGetHeader: return reinterpret_cast<intptr_t>(hwnd);
+        default:
+            if (message >= kLvmFirst && message < kLvmFirst + 160u) return 0;
+            return 0;
+    }
+}
+
+bool registerListViewClass() noexcept {
+    uint32_t state = g_listViewRegistrationState.load(std::memory_order_acquire);
+    for (;;) {
+        if (state == 2) return true;
+        if (state == 3) return false;
+        if (state == 0 && g_listViewRegistrationState.compare_exchange_weak(
+                state, 1, std::memory_order_acq_rel, std::memory_order_acquire)) break;
+        state = g_listViewRegistrationState.load(std::memory_order_acquire);
+    }
+    MicaWin32kWindowClassEx wc{};
+    wc.cbSize = sizeof(wc);
+    wc.wndProc = reinterpret_cast<void*>(ListViewWndProc);
+    wc.className = L"SysListView32";
+    const bool registered = RegisterClassExW(&wc) != 0;
+    g_listViewRegistrationState.store(registered ? 2u : 3u, std::memory_order_release);
+    return registered;
+}
+
 } // namespace
 
 extern "C" {
 
-int32_t __stdcall DllMain(void*, uint32_t, void*) { return 1; }
+int32_t __stdcall DllMain(void*, uint32_t reason, void*) {
+    // Common-control classes must be available while the resource dialog
+    // manager creates child controls, before WM_INITDIALOG can call the
+    // application's later InitCommonControls entry point.
+    if (reason == 1u /* DLL_PROCESS_ATTACH */)
+        return registerProgressClass() && registerTabClass() && registerTreeClass() &&
+            registerListViewClass();
+    return 1;
+}
 
 __declspec(dllexport) int32_t __stdcall InitCommonControlsEx(
     const InitCommonControlsExArgs* args) {
     if (!args || args->size != sizeof(InitCommonControlsExArgs) ||
-        (args->classes & ~(kIccProgress | kIccTab | kIccTreeView)) != 0) return 0;
+        (args->classes & ~(kIccProgress | kIccTab | kIccTreeView | kIccListView)) != 0) return 0;
+    if ((args->classes & kIccListView) && !registerListViewClass()) return 0;
     if ((args->classes & kIccProgress) && !registerProgressClass()) return 0;
     if ((args->classes & kIccTab) && !registerTabClass()) return 0;
     if ((args->classes & kIccTreeView) && !registerTreeClass()) return 0;
@@ -1244,17 +1903,22 @@ __declspec(dllexport) int32_t __stdcall InitCommonControlsEx(
 // initializers used by the Ex variant.
 __declspec(dllexport) void __stdcall InitCommonControls() {
     const InitCommonControlsExArgs args{sizeof(InitCommonControlsExArgs),
-        kIccProgress | kIccTab | kIccTreeView};
+        kIccProgress | kIccTab | kIccTreeView | kIccListView};
     (void)InitCommonControlsEx(&args);
 }
 
 __declspec(dllexport) void* __stdcall CreateStatusWindowW(
     int32_t style, const wchar_t* text, void* parent, uint32_t identifier) {
-    if (!parent || !registerStatusBarClass()) return nullptr;
-    return CreateWindowExW(0, L"msctls_statusbar32", text ? text : L"",
+    const bool registered = registerStatusBarClass();
+    MicaWin32kDebugInputTrace(141, registered ? 1u : 0u,
+        parent ? 1u : 0u);
+    if (!parent || !registered) return nullptr;
+    void* status = CreateWindowExW(0, L"msctls_statusbar32", text ? text : L"",
         static_cast<uint32_t>(style) | 0x40000000u /* WS_CHILD */ | 0x10000000u /* WS_VISIBLE */,
         0, 0, 0, 0, parent, reinterpret_cast<void*>(static_cast<uintptr_t>(identifier)),
         nullptr, nullptr);
+    MicaWin32kDebugInputTrace(142, status ? 1u : 0u, style);
+    return status;
 }
 
 struct _PROPSHEETPAGEA_V3;

@@ -59,6 +59,33 @@ struct SystemBasicInformation {
 };
 static_assert(sizeof(SystemBasicInformation) == 64);
 
+// SYSTEM_TIMEOFDAY_INFORMATION (class 3), AMD64.
+struct SystemTimeOfDayInformation {
+    int64_t bootTime{};
+    int64_t currentTime{};
+    int64_t timeZoneBias{};
+    uint32_t timeZoneId{};
+    uint32_t reserved{};
+    uint64_t bootTimeBias{};
+    uint64_t sleepTimeBias{};
+};
+static_assert(sizeof(SystemTimeOfDayInformation) == 48);
+
+// SYSTEM_FILECACHE_INFORMATION (class 21), AMD64.
+struct SystemFileCacheInformation {
+    uintptr_t currentSize{};
+    uintptr_t peakSize{};
+    uint32_t pageFaultCount{};
+    uint32_t padding{};
+    uintptr_t minimumWorkingSet{};
+    uintptr_t maximumWorkingSet{};
+    uintptr_t currentSizeIncludingTransitionInPages{};
+    uintptr_t peakSizeIncludingTransitionInPages{};
+    uint32_t transitionRepurposeCount{};
+    uint32_t flags{};
+};
+static_assert(sizeof(SystemFileCacheInformation) == 64);
+
 // AMD64 SYSTEM_PROCESS_INFORMATION fixed record. Native callers append
 // NumberOfThreads SYSTEM_THREAD_INFORMATION records after this 256-byte part.
 struct SystemUnicodeString {

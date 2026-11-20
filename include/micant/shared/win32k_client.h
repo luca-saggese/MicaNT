@@ -143,6 +143,11 @@ enum {
     MICANT_WIN32K_OP_COMPOSITION_REQUEST
 };
 
+/* App-facing wait service. Service 0x87 is already reserved for cursor images. */
+enum {
+    MICANT_WIN32K_SERVICE_WAIT_FOR_COMPOSITOR_FRAME = 0x88u
+};
+
 enum {
     MICANT_WIN32K_ANIMATION_MINIMIZE = 1u,
     MICANT_WIN32K_ANIMATION_RESTORE = 2u
@@ -278,6 +283,8 @@ MICANT_WIN32K_API int32_t MicaWin32kGetClassNameW(void*, wchar_t*, int32_t);
 MICANT_WIN32K_API uint32_t MicaWin32kGetWindowThreadProcessId(void*, uint32_t*);
 MICANT_WIN32K_API int32_t MicaWin32kPostThreadMessageW(uint32_t, uint32_t,
     uintptr_t, intptr_t);
+MICANT_WIN32K_API int32_t MicaWin32kCompositionRequest(
+    const void*, uint32_t) noexcept;
 MICANT_WIN32K_API int32_t MicaWin32kEnumChildWindows(
     void*, void*, intptr_t);
 MICANT_WIN32K_API int32_t MicaWin32kEnableWindow(void*, int32_t,

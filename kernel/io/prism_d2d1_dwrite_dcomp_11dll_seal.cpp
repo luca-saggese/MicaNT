@@ -81,8 +81,10 @@ __declspec(dllexport) int32_t DWriteCreateFactory(uint32_t /*factoryType*/, cons
 extern "C" {
 __declspec(dllexport) int32_t DCompositionCreateDevice(void* /*dxgiDevice*/, const void* /*iid*/, void** dcompositionDevice) {
     if (!dcompositionDevice) return static_cast<int32_t>(0x80070057U);
-    *dcompositionDevice = &g_DummyInstance;
-    return 0; // S_OK
+    *dcompositionDevice = nullptr;
+    // The system32 seal has no DirectComposition object implementation. Do
+    // not hand callers a dummy pointer that appears to be a valid COM object.
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 
 __declspec(dllexport) int32_t DCompositionCreateDevice2(void* /*renderingDevice*/, const void* /*iid*/, void** dcompositionDevice) {
@@ -95,8 +97,8 @@ __declspec(dllexport) int32_t DCompositionCreateDevice3(void* /*renderingDevice*
 
 __declspec(dllexport) int32_t DCompositionCreateSurfaceHandle(uint32_t /*desiredAccess*/, void* /*securityAttributes*/, void** surfaceHandle) {
     if (!surfaceHandle) return static_cast<int32_t>(0x80070057U);
-    *surfaceHandle = reinterpret_cast<void*>(0x2000);
-    return 0;
+    *surfaceHandle = nullptr;
+    return static_cast<int32_t>(0x80004001U); // E_NOTIMPL
 }
 }
 #endif

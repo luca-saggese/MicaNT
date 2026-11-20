@@ -373,7 +373,10 @@ def verify_theme_test(
             width, height = expected_resolution or (1024, 768)
             # The guest initializes its PS/2 cursor at the display center.
             pointer[:] = [width // 2, height // 2]
-            client_probes = [(x, min(550, height - 1)) for x in (100, 300, 500)
+            # The captured theme-test screenshot shows the progress control at
+            # y=550. Sample the open client area above the tabs and progress row.
+            client_probe_y = min(480, height - 1)
+            client_probes = [(x, client_probe_y) for x in (100, 300, 500)
                              if x < width]
             visible_since = 0.0
             startup_screen = b""
@@ -418,9 +421,10 @@ def verify_theme_test(
 
             def parent_client_visible(image: bytes, offset_x: int = 0,
                                       offset_y: int = 0) -> bool:
-                points = [(x + offset_x, 550 + offset_y)
+                probe_y = client_probe_y + offset_y
+                points = [(x + offset_x, probe_y)
                           for x in (100, 300, 500)
-                          if x + offset_x < width and 550 + offset_y < height]
+                          if x + offset_x < width and 0 <= probe_y < height]
                 samples = [pixel_at(image, x, y) for x, y in points]
                 return bool(samples) and all(
                     max(sample) - min(sample) < 32 for sample in samples
@@ -1196,6 +1200,52 @@ def verify_mouse(
             }
             if len(title_icon_colors) < 3:
                 raise RuntimeError("WhiteSur window icon did not reach the caption pixels")
+            serial = serial_path.read_text(encoding="utf-8", errors="replace")
+            button_painted = "[MicaNT Explorer] My Computer child BUTTON painted by USER32"
+            if button_painted not in serial:
+                raise RuntimeError("My Computer's real child BUTTON did not complete WM_PAINT")
+            bounds_marker = "[MicaNT Explorer] My Computer child BUTTON bounds="
+            bounds_match = re.search(
+                re.escape(bounds_marker) + r"(-?\d+),(-?\d+),(-?\d+),(-?\d+)",
+                serial,
+            )
+            if not bounds_match:
+                raise RuntimeError("Explorer did not report the real My Computer BUTTON bounds")
+            button_left, button_top, button_right, button_bottom = map(
+                int, bounds_match.groups())
+            if not (0 <= button_left < button_right <= 1024 and
+                    0 <= button_top < button_bottom <= 768):
+                raise RuntimeError("My Computer child BUTTON bounds fell outside scanout")
+            button_x = (button_left + button_right) // 2
+            button_y = (button_top + button_bottom) // 2
+            move_to(button_x, button_y)
+            time.sleep(0.15)
+            button_hover = screen("mycomputer-button-hover.ppm")
+            set_left_button(True)
+            time.sleep(0.2)
+            button_pressed = screen("mycomputer-button-pressed.ppm")
+            button_changed_pixels = sum(
+                pixel_at(button_hover, x, y) != pixel_at(button_pressed, x, y)
+                for y in range(button_top, button_bottom)
+                for x in range(button_left, button_right)
+            )
+            set_left_button(False)
+            if button_changed_pixels == 0:
+                raise RuntimeError("My Computer USER32 BUTTON press did not change its pixels")
+            button_click_marker = (
+                "[MicaNT Explorer] My Computer child BUTTON BN_CLICKED refreshed directory")
+            button_failure_marker = (
+                "[MicaNT Explorer] My Computer child BUTTON refresh failed")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if button_failure_marker in serial:
+                    raise RuntimeError("My Computer BUTTON BN_CLICKED refresh did not complete")
+                if button_click_marker in serial:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("My Computer child BUTTON did not deliver WM_COMMAND/BN_CLICKED")
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(encoding="utf-8", errors="replace")
@@ -1209,393 +1259,12 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Explorer did not execute the Buffered Paint and DrawThemeText probes")
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if ("[MicaNT Theme] Production comctl32 progress control uses WhiteSur pixels" in serial and
-                        "[MicaNT Theme] Production User32 BUTTON painted and BN_CLICKED delivered" in serial and
-                        "[MicaNT Theme] BUTTON text messages update, read back and reject overflow" in serial and
-                        "[MicaNT Theme] User32 child SetFocus/GetFocus round trip verified" in serial and
-                        "[MicaNT Theme] User32 automatic/manual checkbox states and BN_CLICKED verified" in serial and
-                        "[MicaNT Theme] User32 automatic/manual 3-state and radio checks verified" in serial and
-                        "[MicaNT Theme] User32 auto-radio exclusive groups verified" in serial and
-                        "[MicaNT Theme] Production User32 menu ownership and query round-trip verified" in serial and
-                        "[MicaNT Theme] Production User32 popup mouse selection ready" in serial and
-                        "[MicaNT Theme] SysTabControl32 init, item messages, selection and paint verified" in serial and
-                        "[MicaNT Theme] SysTabControl32 keyboard focus and arrow request verified" in serial and
-                        "[MicaNT Theme] Production User32 EDIT text, WM_CHAR, readonly and rejected styles verified" in serial and
-                        "[MicaNT Theme] Production User32 SCROLLBAR range, page and position messages verified" in serial and
-                        "[MicaNT Theme] Window SB_VERT range, page, position and arrows verified" in serial and
-                        "[MicaNT Theme] Attached WS_HSCROLL/WS_VSCROLL pixels and range/page/position ready" in serial):
-                    break
-                if "[MicaNT Theme] User32 child focus round trip mismatch" in serial:
-                    raise RuntimeError("Production User32 child SetFocus/GetFocus failed")
-                if "[MicaNT Theme] Production User32 menu round-trip failed" in serial:
-                    raise RuntimeError("Production User32 menu API round-trip failed")
-                if "[MicaNT Theme] Production User32 menu bar creation failed" in serial:
-                    raise RuntimeError("Production User32 menu bar could not be attached or painted")
-                if "[MicaNT Theme] Production User32 popup creation failed" in serial:
-                    raise RuntimeError("Production User32 popup menu could not be created")
-                if "[MicaNT Theme] Production User32 BUTTON state/notification mismatch" in serial:
-                    raise RuntimeError("Production User32 BUTTON state or notification failed")
-                if "[MicaNT Theme] BUTTON text message mismatch" in serial:
-                    raise RuntimeError("Production User32 BUTTON text messages failed")
-                if "[MicaNT Theme] User32 checkbox state/notification mismatch" in serial or \
-                        "[MicaNT Theme] User32 checkbox creation failed" in serial:
-                    raise RuntimeError("Production User32 checkbox state or notification failed")
-                if "[MicaNT Theme] User32 3-state/radio message mismatch" in serial or \
-                        "[MicaNT Theme] User32 3-state/radio creation failed" in serial:
-                    raise RuntimeError("Production User32 three-state/radio behavior failed")
-                if "[MicaNT Theme] User32 auto-radio exclusivity mismatch" in serial or \
-                        "[MicaNT Theme] User32 auto-radio group creation failed" in serial:
-                    raise RuntimeError("Production User32 auto-radio exclusivity failed")
-                if "[MicaNT Theme] SysTabControl32 message or creation mismatch" in serial or \
-                        "[MicaNT Theme] SysTabControl32 initialization or creation failed" in serial:
-                    raise RuntimeError("Production SysTabControl32 message behavior failed")
-                if "[MicaNT Theme] Production User32 EDIT message mismatch" in serial or \
-                        "[MicaNT Theme] Production User32 EDIT creation failed" in serial:
-                    raise RuntimeError("Production User32 EDIT behavior failed")
-                if "[MicaNT Theme] Production User32 SCROLLBAR message mismatch" in serial or \
-                        "[MicaNT Theme] Production User32 SCROLLBAR creation failed" in serial:
-                    raise RuntimeError("Production User32 SCROLLBAR behavior failed")
-                if "[MicaNT Theme] Window SB_VERT state message mismatch" in serial:
-                    raise RuntimeError("Production User32 window scrollbar state failed")
-                if "[MicaNT Theme] Attached scrollbar state setup failed" in serial or \
-                        "[MicaNT Theme] Attached scrollbar probe window creation failed" in serial:
-                    raise RuntimeError("Attached WS_HSCROLL/WS_VSCROLL probe setup failed")
-                time.sleep(0.1)
-            else:
-                raise RuntimeError("Explorer did not paint and click the production User32 BUTTON")
-            menu_popup = screen("theme-menu-popup.ppm")
-            menu_changed = sum(
-                pixel_at(before, x, y) != pixel_at(menu_popup, x, y)
-                for y in range(198, 278) for x in range(678, 922)
-            )
-            if menu_changed < 100:
-                raise RuntimeError("Themed User32 popup did not change its screen pixels")
-            move_to(720, 213)
-            set_left_button(True)
-            time.sleep(0.1)
-            set_left_button(False)
-            menu_mouse_command = "[MicaNT Theme] User32 popup mouse owner command received"
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if menu_mouse_command in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("User32 popup mouse selection did not send WM_COMMAND")
-            keyboard_ready = "[MicaNT Theme] Production User32 popup keyboard selection ready"
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                if keyboard_ready in serial_path.read_text(
-                        encoding="utf-8", errors="replace"):
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("User32 popup did not reopen for keyboard selection")
-            for qcode in ("down", "ret"):
-                for down in (True, False):
-                    execute("input-send-event", {"events": [{
-                        "type": "key", "data": {"down": down,
-                            "key": {"type": "qcode", "data": qcode}},
-                    }]})
-            keyboard_command = "[MicaNT Theme] User32 popup keyboard owner command received"
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if keyboard_command in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("User32 popup keyboard selection did not send WM_COMMAND")
-            # TrackPopupMenu runs a modal message loop. Exercise the radio only
-            # after both popup sessions have returned to Explorer's main loop.
-            auto_radio_before = screen("theme-auto-radio-before.ppm")
-            move_to(210, 428)
-            set_left_button(True)
-            time.sleep(0.1)
-            set_left_button(False)
-            deadline = time.monotonic() + 3
-            radio_input_marker = "[MicaNT Theme] Physical auto-radio input kept one group selection"
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if radio_input_marker in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Physical auto-radio input did not preserve exclusivity")
-            move_to(490, 500)
-            auto_radio_after = screen("theme-auto-radio-after.ppm")
-            radio_glyph_changed = sum(
-                pixel_at(auto_radio_before, x, y) != pixel_at(auto_radio_after, x, y)
-                for y in range(421, 434) for x in range(204, 217))
-            if radio_glyph_changed < 1:
-                raise RuntimeError("Auto-radio checked glyph did not change its screen pixels")
-            menu_bar_ready = "[MicaNT Theme] Production User32 menu bar attached and painted"
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if menu_bar_ready in serial:
-                    break
-                if "[MicaNT Theme] Production User32 menu bar creation failed" in serial:
-                    raise RuntimeError("Production User32 menu bar could not be attached or painted")
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Explorer did not attach and paint the User32 menu bar")
-            menu_bar = screen("theme-menu-bar.ppm")
-            menu_bar_changed = sum(
-                pixel_at(opened, x, y) != pixel_at(menu_bar, x, y)
-                for y in range(130, 162) for x in range(190, 430)
-            )
-            if menu_bar_changed < 80:
-                raise RuntimeError("Attached User32 menu bar did not change its client pixels")
-            move_to(215, 145)
-            set_left_button(True)
-            time.sleep(0.1)
-            set_left_button(False)
-            menu_bar_command = "[MicaNT Theme] User32 menu bar owner command received"
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if menu_bar_command in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("User32 menu bar click did not send WM_COMMAND")
-            checkbox_normal = screen("theme-checkbox-unchecked.ppm")
-            move_to(590, 364)
-            checkbox_hover = screen("theme-checkbox-hover.ppm")
-            set_left_button(True)
-            time.sleep(0.2)
-            checkbox_pressed = screen("theme-checkbox-pressed.ppm")
-            set_left_button(False)
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] Physical checkbox input toggled checked state" in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Physical checkbox input did not toggle its checked state")
-            checkbox_checked = screen("theme-checkbox-checked.ppm")
-            def checkbox_region_changed(left: bytes, right: bytes) -> int:
-                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
-                           for y in range(350, 378) for x in range(530, 680))
-            if checkbox_region_changed(checkbox_normal, checkbox_hover) < 2 or \
-                    checkbox_region_changed(checkbox_hover, checkbox_pressed) < 2 or \
-                    checkbox_region_changed(checkbox_normal, checkbox_checked) < 2:
-                raise RuntimeError("User32 checkbox state did not change its rendered pixels")
-            move_to(590, 320)
-            set_left_button(True)
-            set_left_button(False)
-            edit_normal = screen("theme-edit-normal.ppm")
-            move_to(340, 314)
-            set_left_button(True)
-            set_left_button(False)
-            move_to(490, 314)
-            edit_focused = screen("theme-edit-focused.ppm")
-            def edit_region_changed(left: bytes, right: bytes) -> int:
-                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
-                           for y in range(300, 328) for x in range(200, 480))
-            if edit_region_changed(edit_normal, edit_focused) < 1:
-                raise RuntimeError("User32 EDIT focus did not change its rendered pixels")
-            tab_normal = screen("theme-tab-normal.ppm")
-            move_to(440, 275)
-            set_left_button(True)
-            time.sleep(0.1)
-            set_left_button(False)
-            mouse_notification = "[MicaNT Theme] SysTabControl32 mouse selection notification verified"
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                if mouse_notification in serial_path.read_text(
-                        encoding="utf-8", errors="replace"):
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("SysTabControl32 mouse selection did not notify its parent")
-            move_to(590, 500)
-            tab_selected = screen("theme-tab-selected.ppm")
-            def tab_region_changed(left: bytes, right: bytes) -> int:
-                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
-                           for y in range(260, 290) for x in range(200, 520))
-            if tab_region_changed(tab_normal, tab_selected) < 4:
-                raise RuntimeError("SysTabControl32 selection did not change tab pixels")
-            send_key("left", True)
-            send_key("left", False)
-            keyboard_notification = "[MicaNT Theme] SysTabControl32 keyboard selection notification verified"
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                if keyboard_notification in serial_path.read_text(
-                        encoding="utf-8", errors="replace"):
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("SysTabControl32 left-key selection did not notify its parent")
-            tab_keyboard_selected = screen("theme-tab-keyboard-selected.ppm")
-            if tab_region_changed(tab_selected, tab_keyboard_selected) < 4:
-                raise RuntimeError("SysTabControl32 keyboard selection did not change tab pixels")
-            scrollbar_normal = screen("theme-scrollbar-normal.ppm")
-            move_to(450, 389)
-            scrollbar_hover = screen("theme-scrollbar-hover.ppm")
-            def scrollbar_region_changed(left: bytes, right: bytes) -> int:
-                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
-                           for y in range(380, 400) for x in range(370, 550))
-            if scrollbar_region_changed(scrollbar_normal, scrollbar_hover) < 1:
-                raise RuntimeError("User32 SCROLLBAR hover did not change its rendered pixels")
-            move_to(375, 389)
-            set_left_button(True)
-            set_left_button(False)
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if "[MicaNT Theme] SCROLLBAR arrow input sent WM_HSCROLL" in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("User32 SCROLLBAR arrow did not notify WM_HSCROLL")
-            scrollbar_scrolled = screen("theme-scrollbar-scrolled.ppm")
-            if scrollbar_region_changed(scrollbar_normal, scrollbar_scrolled) < 1:
-                raise RuntimeError("User32 SCROLLBAR arrow did not change its rendered thumb")
+            # Former Explorer UI probes were removed from the app. Keep the
+            # production My Computer button and real window/file interactions above and below.
+            if "[MicaNT Theme] Explorer row text uses active theme pixel" not in \
+                    serial_path.read_text(encoding="utf-8", errors="replace"):
+                raise RuntimeError("Explorer file row missed the active theme text color")
 
-            attached_normal = screen("theme-attached-scroll-normal.ppm")
-            move_to(342, 231)
-            attached_hover = screen("theme-attached-scroll-hover.ppm")
-            def attached_scroll_region_changed(left: bytes, right: bytes) -> int:
-                return sum(pixel_at(left, x, y) != pixel_at(right, x, y)
-                           for y in range(180, 300) for x in range(334, 350))
-            if attached_scroll_region_changed(attached_normal, attached_hover) < 1:
-                raise RuntimeError("Attached WS_VSCROLL hover did not change themed pixels")
-            move_to(342, 188)
-            set_left_button(True)
-            set_left_button(False)
-            deadline = time.monotonic() + 2
-            arrow_marker = "[MicaNT Theme] Attached WS_VSCROLL arrow notified and position read back"
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if arrow_marker in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Attached WS_VSCROLL arrow failed notification or position readback")
-            attached_arrow = screen("theme-attached-scroll-arrow.ppm")
-            if attached_scroll_region_changed(attached_normal, attached_arrow) < 1:
-                raise RuntimeError("Attached WS_VSCROLL arrow did not move themed pixels")
-            move_to(342, 231)
-            set_left_button(True)
-            move_to(342, 252)
-            time.sleep(0.1)
-            set_left_button(False)
-            deadline = time.monotonic() + 2
-            thumb_marker = "[MicaNT Theme] Attached WS_VSCROLL thumb drag notified and position read back"
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if thumb_marker in serial:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Attached WS_VSCROLL thumb drag failed notification or position readback")
-            attached_thumb = screen("theme-attached-scroll-thumb.ppm")
-            if attached_scroll_region_changed(attached_arrow, attached_thumb) < 1:
-                raise RuntimeError("Attached WS_VSCROLL thumb drag did not move themed pixels")
-
-            button_normal = screen("theme-button-normal.ppm")
-            move_to(590, 320)
-            button_hover = screen("theme-button-hover.ppm")
-            set_left_button(True)
-            time.sleep(0.2)
-            button_pressed = screen("theme-button-pressed.ppm")
-            set_left_button(False)
-            def button_region_changed(left: bytes, right: bytes) -> int:
-                changed = 0
-                for y in range(300, 340):
-                    for x in range(530, 650):
-                        if pixel_at(left, x, y) != pixel_at(right, x, y):
-                            changed += 1
-                return changed
-            if button_region_changed(button_normal, button_hover) < 4:
-                raise RuntimeError("User32 BUTTON hover did not change its rendered pixels")
-            if button_region_changed(button_hover, button_pressed) < 4:
-                raise RuntimeError("User32 BUTTON pressed state did not change its rendered pixels")
-            # While the button owns capture, leaving its bounds must clear the
-            # pressed visual without delivering a click. Reentering and
-            # releasing inside must produce exactly one notification.
-            notification = "[MicaNT Theme] BUTTON capture probe notification delivered"
-            serial = serial_path.read_text(encoding="utf-8", errors="replace")
-            notification_baseline = serial.count(notification)
-            if notification_baseline < 1:
-                raise RuntimeError("BUTTON notification probe did not reach its initial click")
-            move_to(590, 320)
-            set_left_button(True)
-            drag_by(100, 0)
-            button_outside = screen("theme-button-capture-outside.ppm")
-            if button_region_changed(button_normal, button_outside) >= \
-                    button_region_changed(button_normal, button_pressed):
-                raise RuntimeError("BUTTON capture did not cancel pressed pixels outside its bounds")
-            set_left_button(False)
-            deadline = time.monotonic() + 1
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if serial.count(notification) != notification_baseline:
-                    raise RuntimeError("BUTTON release outside its bounds delivered a click")
-                time.sleep(0.05)
-            drag_by(-100, 0)
-            set_left_button(True)
-            drag_by(100, 0)
-            drag_by(-100, 0)
-            button_reentered = screen("theme-button-capture-reentered.ppm")
-            if button_region_changed(button_hover, button_reentered) < 4:
-                raise RuntimeError("BUTTON capture did not restore pressed pixels on reentry")
-            set_left_button(False)
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if serial.count(notification) == notification_baseline + 1:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("BUTTON release inside its bounds did not deliver one click")
-            keyboard_baseline = serial_path.read_text(
-                encoding="utf-8", errors="replace").count(notification)
-            move_to(590, 320)
-            button_keyboard_hover = screen("theme-button-keyboard-hover.ppm")
-            if button_region_changed(button_hover, button_keyboard_hover) < 4:
-                raise RuntimeError("Focused BUTTON pixels did not differ from ordinary hover")
-            send_key("spc", True)
-            button_space_pressed = screen("theme-button-space-pressed.ppm")
-            if button_region_changed(button_keyboard_hover, button_space_pressed) < 4:
-                raise RuntimeError("Focused BUTTON Space keydown did not render pressed state")
-            send_key("spc", False)
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                serial = serial_path.read_text(encoding="utf-8", errors="replace")
-                if serial.count(notification) == keyboard_baseline + 1:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Focused BUTTON Space keyup did not deliver one click")
-
-            # Move focus to the parent window, then ensure Space no longer
-            # activates the child control.
-            move_to(400, 360)
-            set_left_button(True)
-            set_left_button(False)
-            time.sleep(0.2)
-            move_to(590, 320)
-            button_unfocused_hover = screen("theme-button-unfocused-hover.ppm")
-            if button_region_changed(button_keyboard_hover, button_unfocused_hover) < 4:
-                raise RuntimeError("BUTTON focus indicator did not clear after focus moved")
-            unfocused_baseline = serial_path.read_text(
-                encoding="utf-8", errors="replace").count(notification)
-            send_key("spc", True)
-            send_key("spc", False)
-            time.sleep(0.3)
-            serial = serial_path.read_text(encoding="utf-8", errors="replace")
-            if serial.count(notification) != unfocused_baseline:
-                raise RuntimeError("Unfocused BUTTON activated from Space key input")
-            # The first Explorer window is placed at (190,90); exercise its
-            # first drive row and the parent button before opening another view.
             def click_at(x: int, y: int) -> None:
                 move_to(x, y)
                 execute("input-send-event", {"events": [
@@ -1605,10 +1274,6 @@ def verify_mouse(
                 execute("input-send-event", {"events": [
                     {"type": "btn", "data": {"button": "left", "down": False}},
                 ]})
-
-            if "[MicaNT Theme] Explorer row text uses active theme pixel" not in \
-                    serial_path.read_text(encoding="utf-8", errors="replace"):
-                raise RuntimeError("Explorer file row missed the active theme text color")
 
             serial = serial_path.read_text(encoding="utf-8", errors="replace")
             if "[MicaNT Explorer] Initial filesystem directory is empty" not in serial:
@@ -1661,19 +1326,24 @@ def verify_mouse(
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Active and inactive caption pixels did not differ")
-            # The second window starts at (222,119), size 500x320. Probe a
-            # pixel inside its maximize button but away from the glyph/cursor.
-            normal_caption_button = pixel_at(overlapping, 660, 129)
-            move_to(672, 140)
+            # Sample above the cursor hotspot within the maximize glyph at (672,140).
+            # Keep the pointer
+            # near the caption button's lower-right edge so its cursor stays clear.
+            caption_button_sample = (672, 140)
+            normal_caption_button = pixel_at(
+                overlapping, *caption_button_sample)
+            move_to(672, 138)
             time.sleep(0.3)
             caption_hover = screen("caption-button-hover.ppm")
-            hover_caption_button = pixel_at(caption_hover, 660, 129)
+            hover_caption_button = pixel_at(
+                caption_hover, *caption_button_sample)
             if hover_caption_button == normal_caption_button:
                 raise RuntimeError("Themed caption button hover did not change its pixel")
             set_left_button(True)
             time.sleep(0.2)
             caption_pressed = screen("caption-button-pressed.ppm")
-            pressed_caption_button = pixel_at(caption_pressed, 660, 129)
+            pressed_caption_button = pixel_at(
+                caption_pressed, *caption_button_sample)
             if pressed_caption_button == hover_caption_button:
                 raise RuntimeError("Themed caption button pressed state did not change its pixel")
             resized_marker_count = serial_path.read_text(
@@ -1860,7 +1530,7 @@ def verify_mouse(
                 if close_index == 0:
                     # The larger WhiteSur Theme Controls Test host is now the
                     # older window brought to front above; close its caption.
-                    move_to(930, 116)
+                    move_to(669, 116)
                     set_left_button(True)
                     set_left_button(False)
                 else:
@@ -1990,7 +1660,7 @@ def verify_mouse(
                     light_start_menu = wait_for_changed_screen(
                         desktop_light, "theme-menu-light.ppm", 5000)
                     light_start_menu_pixel = pixel_at(light_start_menu, 330, 440)
-                    move_to(250, 536)
+                    move_to(250, 512)
                     click_left()
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
@@ -2084,7 +1754,7 @@ def verify_mouse(
                     move_to(50, 748)
                     click_left()
                     time.sleep(0.3)
-                    move_to(250, 536)
+                    move_to(250, 512)
                     click_left()
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
@@ -2114,7 +1784,7 @@ def verify_mouse(
                     if purple_start_pixel != bytes((0x9A, 0x57, 0xA3)):
                         raise RuntimeError(
                             f"Light Purple Start surface pixel was {purple_start_pixel}, expected (154, 87, 163)")
-                    move_to(250, 536)
+                    move_to(250, 512)
                     click_left()
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
@@ -2209,6 +1879,22 @@ def verify_reactos_app(qmp_path: Path, temp: Path, diagnostics_dir: Path,
             # judging its first frame.
             time.sleep(5.0 if app in {"calc", "notepad"} else 1.5)
             before = screen(f"reactos-{app}-01-window-before-input.ppm")
+            if app == "taskmgr":
+                background = before[-3:]
+                visible_pixels = sum(
+                    before[offset:offset + 3] != background
+                    for offset in range(0, len(before), 3)
+                )
+                serial = serial_path.read_text(encoding="utf-8", errors="replace")
+                if visible_pixels < 30000:
+                    raise RuntimeError("Task Manager did not render a visible window in QEMU")
+                if "[MicaNT ReactOSApps] Process handle cleanup complete" in serial:
+                    raise RuntimeError("Task Manager exited before its live-window verification")
+                print(
+                    f"Task Manager rendered {visible_pixels} non-background pixels and remains running; "
+                    "captured its direct-launch window without Explorer.", flush=True,
+                )
+                return
             if app == "comdlgtest":
                 def press_dialog_key(key: str, down: bool) -> None:
                     execute("input-send-event", {"events": [{

@@ -42,6 +42,8 @@ extern "C" void* memcpy(void* destination, const void* source, size_t count) {
 
 namespace {
 
+void print(const char* text, size_t length) noexcept;
+
 uint32_t* g_frame{};
 constexpr size_t kLiquidGlassCacheCount = 8;
 struct LiquidGlassCacheEntry {
@@ -283,6 +285,140 @@ bool ensureOrderedSurfaceCapacity(size_t required) noexcept {
     g_orderedSurfaceCapacity = required;
     return true;
 }
+
+struct AcquiredWindowSurface {
+    MicaCompositionHandle lease{};
+};
+
+uint64_t g_nextCompositionRequestSequence{};
+bool g_windowSurfaceLeaseReported{};
+
+uint64_t nextCompositionRequestSequence() noexcept {
+    for (;;) {
+        const uint64_t sequence = __atomic_add_fetch(
+            &g_nextCompositionRequestSequence, 1, __ATOMIC_RELAXED);
+        if (sequence) return sequence;
+    }
+}
+
+bool invokeCompositionRequest(MicaWin32kRequest& request) noexcept {
+    request.size = sizeof(request);
+    request.version = MICANT_WIN32K_REQUEST_VERSION;
+    request.operation = MICANT_WIN32K_OP_COMPOSITION_REQUEST;
+    request.flags = 0;
+    return micant::sys::invokeUserService(0x86,
+        reinterpret_cast<uint64_t>(&request)) == 0;
+}
+
+class WindowSurfaceLeaseSet {
+public:
+    WindowSurfaceLeaseSet() = default;
+    WindowSurfaceLeaseSet(const WindowSurfaceLeaseSet&) = delete;
+    WindowSurfaceLeaseSet& operator=(const WindowSurfaceLeaseSet&) = delete;
+    ~WindowSurfaceLeaseSet() {
+        releaseAll();
+        releaseAllocation(leases_);
+    }
+
+    bool acquire(const MicaCompositorMetadataStore& metadata,
+                 const MicaCompositorMetadataStore* liveMetadata,
+                 uint64_t sequence,
+                 const AnimationFrame* animationFrames) noexcept {
+        if (metadata.surfaceEntryCount) {
+            void* allocation{};
+            if (!allocateZeroed(metadata.surfaceEntryCount *
+                    sizeof(AcquiredWindowSurface), allocation))
+                return false;
+            leases_ = static_cast<AcquiredWindowSurface*>(allocation);
+            capacity_ = metadata.surfaceEntryCount;
+        }
+
+        constexpr uint32_t visibleFlags = MICANT_COMPOSITOR_SURFACE_ACTIVE |
+            MICANT_COMPOSITOR_SURFACE_VISIBLE;
+        for (size_t index = 0; index < metadata.surfaceEntryCount; ++index) {
+            const auto& surface = metadata.surfaces[index];
+            if ((surface.flags & visibleFlags) != visibleFlags ||
+                ((surface.flags & MICANT_COMPOSITOR_SURFACE_ICONIC) &&
+                 (!animationFrames || !animationFrames[index].active)) ||
+                surface.parentWindow || !surface.surfaceAddress ||
+                !surface.surfaceSizeBytes || !surface.pitch)
+                continue;
+
+            MicaCompositionAcquireWindowSurfaceRequest packet{};
+            packet.header.size = sizeof(packet);
+            packet.header.version = MICANT_COMPOSITION_PROTOCOL_VERSION;
+            packet.header.operation = MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE;
+            packet.header.requestSequence = nextCompositionRequestSequence();
+            packet.windowId = surface.window;
+
+            MicaWin32kRequest request{};
+            memcpy(request.args, &packet, sizeof(packet));
+            if (!invokeCompositionRequest(request)) {
+                releaseAll();
+                return false;
+            }
+            memcpy(&packet, request.args, sizeof(packet));
+            if (request.result != 1 ||
+                !MicaCompositionHandleIsValid(packet.outputHandle) ||
+                !packet.contentGeneration || !packet.width || !packet.height ||
+                packet.pixelFormat != MICANT_COMPOSITION_FORMAT_BGRA8 ||
+                surface.pitch > UINT32_MAX / sizeof(uint32_t) ||
+                packet.strideBytes != surface.pitch * sizeof(uint32_t) ||
+                static_cast<uint64_t>(packet.strideBytes) <
+                    static_cast<uint64_t>(packet.width) * sizeof(uint32_t)) {
+                if (MicaCompositionHandleIsValid(packet.outputHandle))
+                    (void)releaseLease(packet.outputHandle);
+                releaseAll();
+                return false;
+            }
+            if (count_ == capacity_) {
+                (void)releaseLease(packet.outputHandle);
+                releaseAll();
+                return false;
+            }
+            leases_[count_++].lease = packet.outputHandle;
+        }
+
+        if (__atomic_load_n(&liveMetadata->frameSequence, __ATOMIC_ACQUIRE) !=
+            sequence) {
+            releaseAll();
+            return false;
+        }
+        if (count_ && !g_windowSurfaceLeaseReported) {
+            constexpr char message[] =
+                "[MicaNT Compositor] Kernel surface leases held through scene presentation\r\n";
+            print(message, sizeof(message) - 1);
+            g_windowSurfaceLeaseReported = true;
+        }
+        return true;
+    }
+
+private:
+    AcquiredWindowSurface* leases_{};
+    size_t count_{};
+    size_t capacity_{};
+
+    static bool releaseLease(MicaCompositionHandle lease) noexcept {
+        MicaCompositionReleaseWindowSurfaceRequest packet{};
+        packet.header.size = sizeof(packet);
+        packet.header.version = MICANT_COMPOSITION_PROTOCOL_VERSION;
+        packet.header.operation = MICANT_COMPOSITION_OP_RELEASE_WINDOW_SURFACE;
+        packet.header.requestSequence = nextCompositionRequestSequence();
+        packet.lease = lease;
+
+        MicaWin32kRequest request{};
+        memcpy(request.args, &packet, sizeof(packet));
+        return invokeCompositionRequest(request);
+    }
+
+    void releaseAll() noexcept {
+        while (count_) {
+            const auto lease = leases_[--count_].lease;
+            (void)releaseLease(lease);
+            leases_[count_] = {};
+        }
+    }
+};
 
 uint64_t animationClockMilliseconds() noexcept {
     const auto* shared = reinterpret_cast<volatile const micant::KUserSharedData*>(
@@ -1466,10 +1602,10 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                     const bool inactive = !foreground;
                     const uint32_t imageState = pressed ? 2u : hovered
                         ? (inactive ? 4u : 1u) : (inactive ? 3u : 0u);
-                    const uint32_t imageIndex = (button == 3 ? 0u :
+                    const uint32_t buttonImageBase = button == 3 ? 0u :
                         button == 1 ? 5u :
-                        ((surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) ? 15u : 10u)) +
-                        imageState;
+                        ((surface.flags & MICANT_COMPOSITOR_SURFACE_MAXIMIZED) ? 15u : 10u);
+                    const uint32_t imageIndex = buttonImageBase + imageState;
                     bool drewImage = false;
                     const MicaThemeCaptionImage* captionImage = imageIndex <
                         MICANT_THEME_CAPTION_IMAGE_COUNT
@@ -1481,6 +1617,35 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                         captionImage->stride >= captionImage->width &&
                         captionImage->width <= MICANT_THEME_CAPTION_IMAGE_SIZE &&
                         captionImage->height <= MICANT_THEME_CAPTION_IMAGE_SIZE;
+                    bool hoverImageDiffersFromNormal = false;
+                    if (hovered && !pressed && hasCaptionImage) {
+                        const auto& normalImage = metadata.captionImageSet.images[
+                            buttonImageBase];
+                        if (normalImage.width && normalImage.height &&
+                            normalImage.stride >= normalImage.width &&
+                            normalImage.width <= MICANT_THEME_CAPTION_IMAGE_SIZE &&
+                            normalImage.height <= MICANT_THEME_CAPTION_IMAGE_SIZE) {
+                            hoverImageDiffersFromNormal =
+                                captionImage->width != normalImage.width ||
+                                captionImage->height != normalImage.height;
+                            for (uint32_t row = 0;
+                                 !hoverImageDiffersFromNormal && row < captionImage->height;
+                                 ++row) {
+                                const auto* hoverPixels =
+                                    &metadata.captionImageSet.pixels[imageIndex][
+                                        static_cast<size_t>(row) * captionImage->stride];
+                                const auto* normalPixels =
+                                    &metadata.captionImageSet.pixels[buttonImageBase][
+                                        static_cast<size_t>(row) * normalImage.stride];
+                                for (uint32_t column = 0; column < captionImage->width; ++column) {
+                                    if (hoverPixels[column] != normalPixels[column]) {
+                                        hoverImageDiffersFromNormal = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     const uint32_t state = pressed ? 2u : hovered ? 1u :
                         foreground ? 0u : 7u;
                     const auto* buttonStyle = themeValid
@@ -1514,6 +1679,22 @@ bool composeRegion(const MicaCompositorMetadataStore& metadata,
                     } else if (!hasCaptionImage) {
                         fillRect(buttonLeft, buttonTop, buttonRight, buttonBottom,
                                  background, width, height);
+                    }
+                    const bool hoverBackgroundDiffers = buttonStyle && normalButton &&
+                        ((buttonStyle->flags & MICANT_THEME_HAS_BACKGROUND) &&
+                         (!(normalButton->flags & MICANT_THEME_HAS_BACKGROUND) ||
+                          buttonStyle->background != normalButton->background) ||
+                         (buttonStyle->flags & MICANT_THEME_HAS_BORDER) &&
+                         (!(normalButton->flags & MICANT_THEME_HAS_BORDER) ||
+                          buttonStyle->border != normalButton->border ||
+                          buttonStyle->borderWidth != normalButton->borderWidth));
+                    if (hovered && !pressed && !hoverImageDiffersFromNormal &&
+                        !hoverBackgroundDiffers) {
+                        // Some imported profiles provide identical or missing
+                        // hover assets. Preserve a visible native hover state
+                        // instead of leaving the caption button inert.
+                        fillRect(buttonLeft, buttonTop, buttonRight, buttonBottom,
+                                 0x28FFFFFFu, width, height);
                     }
                     if (hasCaptionImage) {
                         const int64_t imageLeft = buttonLeft +
@@ -2634,6 +2815,12 @@ extern "C" void _start() noexcept {
 #if MICANT_COMPOSITOR_LOCAL_STATS
             ++g_localPerformanceStats.writers;
 #endif
+            waitForUpdate(sequence);
+            continue;
+        }
+        WindowSurfaceLeaseSet surfaceLeases;
+        if (!surfaceLeases.acquire(snapshot, metadata, sequence,
+                                   animationFrames)) {
             waitForUpdate(sequence);
             continue;
         }

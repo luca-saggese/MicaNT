@@ -16,6 +16,11 @@
 #include "micant/km/win32k/freestanding.hpp"
 #include <algorithm>
 #include <cstring>
+
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
+extern "C" void MicantNetbootSerialWrite(const char*) noexcept;
+extern "C" void MicantNetbootSerialWriteNumber(uint64_t) noexcept;
+#endif
 #include <iterator>
 
 
@@ -1382,6 +1387,22 @@ extern "C" bool MicantPsPrepareUserException(uint32_t exceptionCode,
                                               uint64_t* savedRegisters,
                                               const void* floatingState) noexcept {
     auto* current = ke::KeGetCurrentThread();
+#if defined(MICANT_BOOTSTRAP_REACTOS_APP_TASKMGR)
+    MicantNetbootSerialWrite("[MicaNT TaskmgrTrap] pid=");
+    MicantNetbootSerialWriteNumber(current && current->owningProcess
+        ? static_cast<uint64_t>(current->owningProcess->processId()) : 0);
+    MicantNetbootSerialWrite(" code=");
+    MicantNetbootSerialWriteNumber(exceptionCode);
+    MicantNetbootSerialWrite(" vector=");
+    MicantNetbootSerialWriteNumber(exceptionVector);
+    MicantNetbootSerialWrite(" address=");
+    MicantNetbootSerialWriteNumber(address);
+    MicantNetbootSerialWrite(" rip=");
+    MicantNetbootSerialWriteNumber(hardwareFrame ? hardwareFrame[1] : 0);
+    MicantNetbootSerialWrite(" rsp=");
+    MicantNetbootSerialWriteNumber(hardwareFrame ? hardwareFrame[4] : 0);
+    MicantNetbootSerialWrite("\r\n");
+#endif
     return current && current->owningThread &&
         current->owningThread->prepareUserException(exceptionCode, exceptionVector, address,
                                                      hardwareFrame, savedRegisters,

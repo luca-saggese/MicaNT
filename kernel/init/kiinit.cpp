@@ -2894,11 +2894,12 @@ micant::NtStatus createCompositorSurfaceSection(uint32_t width, uint32_t height,
 
 micant::NtStatus releaseCompositorSurfaceSection(
     micant::win32k::freestanding::CompositorSurfaceStorage& storage,
-    bool ownerAddressValid) noexcept {
+    bool ownerAddressValid, bool compositorAddressValid) noexcept {
     using namespace micant;
     NtStatus status = NtStatus::Success;
     RetiredCompositorSurface* retired{};
-    if (storage.compositorAddress && g_compositorProcessObject) {
+    if (storage.compositorAddress && g_compositorProcessObject &&
+        compositorAddressValid) {
         retired = new (std::nothrow_t{}) RetiredCompositorSurface{};
         if (!retired) return NtStatus::InsufficientResources;
 
@@ -2935,10 +2936,31 @@ micant::NtStatus releaseCompositorSurfaceSection(
         g_retiredSurfaces = retired;
         unlockRetiredSurfaces();
     } else if (storage.sectionReference) {
+        // A terminating compositor's address space will unmap this view as
+        // part of Ps teardown; it cannot consume or acknowledge a retired
+        // mapping, so release our section reference without waiting for DWM.
         ob::ObDereferenceObject(static_cast<ob::ObjectHeader*>(storage.sectionReference));
     }
     storage = {};
     return NtStatus::Success;
+}
+
+void releaseRetiredCompositorSurfacesOnExit() noexcept {
+    using namespace micant;
+    lockRetiredSurfaces();
+    auto* retired = g_retiredSurfaces;
+    g_retiredSurfaces = nullptr;
+    unlockRetiredSurfaces();
+
+    // Ps owns compositor-process view teardown. Once the process is exiting,
+    // no frame can read these mappings and no acknowledgement can arrive.
+    while (retired) {
+        auto* item = retired;
+        retired = retired->next;
+        if (item->sectionReference)
+            ob::ObDereferenceObject(static_cast<ob::ObjectHeader*>(item->sectionReference));
+        delete item;
+    }
 }
 
 bool initializeCompositorSections() noexcept {
@@ -3304,7 +3326,8 @@ bool launchUserImageProcess(const char16_t* imageName,
                     win32k::freestanding::bindCompositorStore(
                         g_compositorMetadata, publishCompositorSurfacesInCompositorSpace,
                         nullptr,
-                        createCompositorSurfaceSection, releaseCompositorSurfaceSection);
+                        createCompositorSurfaceSection, releaseCompositorSurfaceSection,
+                        releaseRetiredCompositorSurfacesOnExit);
                 }
                 ke::KeUnstackDetachProcess(&attachState);
             } else if (result == NtStatus::Success) result = NtStatus::InvalidHandle;
@@ -4885,8 +4908,18 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (!thread || !thread->owningProcess || !g_compositorProcessId ||
             thread->owningProcess->processId() != g_compositorProcessId)
             return status(NtStatus::AccessDenied);
+        if (second) return status(NtStatus::InvalidParameter);
+        auto* metadata = g_compositorMetadata;
+        if (!metadata) return status(NtStatus::DeviceNotReady);
+        const uint64_t publishedSequence = __atomic_load_n(
+            &metadata->frameSequence, __ATOMIC_ACQUIRE) & ~uint64_t{1};
+        const uint64_t acknowledgedSequence = __atomic_load_n(
+            &metadata->compositorAckSequence, __ATOMIC_ACQUIRE);
+        if (!first || (first & 1u) || first != acknowledgedSequence ||
+            first > publishedSequence)
+            return status(NtStatus::InvalidParameter);
         reapAcknowledgedCompositorSurfaces();
-        return status(NtStatus::Success);
+        return status(win32k::freestanding::notifyCompositorAcknowledgement(first));
     }
     if (number == 0x83) {
         const auto* thread = ke::KeGetCurrentThread();
@@ -5228,7 +5261,22 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
             surfaceRequestObserved = true;
             serialWrite("[MicaNT Compositor] Explorer requested shared window surface\r\n");
         }
-        publishCompositorSurfacesInCompositorSpace();
+        bool compositionLeaseRequest = false;
+        if (request.operation == MICANT_WIN32K_OP_COMPOSITION_REQUEST) {
+            MicaCompositionRequestHeader compositionHeader{};
+            std::memcpy(&compositionHeader, request.args,
+                        sizeof(compositionHeader));
+            compositionLeaseRequest =
+                compositionHeader.operation ==
+                    MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE ||
+                compositionHeader.operation ==
+                    MICANT_COMPOSITION_OP_RELEASE_WINDOW_SURFACE;
+        }
+        // Lease acquisition/release changes only the lifetime of an existing
+        // surface. Publishing unchanged scene metadata here would advance the
+        // frame sequence and make the compositor reject its own lease batch.
+        if (!compositionLeaseRequest)
+            publishCompositorSurfacesInCompositorSpace();
         const NtStatus resultStatus = ex::ExSafeCopyToUser(
             reinterpret_cast<void*>(first), &request, sizeof(request));
         static bool explorerEntryObserved = false;
@@ -5354,6 +5402,58 @@ uint64_t dispatchBootstrapService(const micant::hal::amd64::UserServiceArguments
         if (resultStatus != NtStatus::Success) return status(resultStatus);
         publishCompositorSurfacesInCompositorSpace();
         return status(NtStatus::Success);
+    }
+    if (number == MICANT_WIN32K_SERVICE_WAIT_FOR_COMPOSITOR_FRAME) {
+        const auto* thread = ke::KeGetCurrentThread();
+        auto* process = ke::KeGetCurrentProcess();
+        if (!thread || !process || thread->owningProcess != process ||
+            !thread->previousUserMode)
+            return status(NtStatus::AccessDenied);
+        if (ke::KeGetCurrentIrql() != ke::PASSIVE_LEVEL ||
+            thread->eventWaitInProgress)
+            return status(NtStatus::InvalidDeviceState);
+        if (!first || second) return status(NtStatus::InvalidParameter);
+        const auto* userRequest = reinterpret_cast<const void*>(first);
+        const NtStatus probeStatus = ex::ProbeForRead(userRequest,
+            sizeof(MicaCompositionRequestHeader),
+            alignof(MicaCompositionRequestHeader));
+        if (probeStatus != NtStatus::Success) return status(probeStatus);
+        MicaCompositionRequestHeader header{};
+        const NtStatus copyStatus = ex::ExSafeCopyFromUser(
+            &header, userRequest, sizeof(header));
+        if (copyStatus != NtStatus::Success) return status(copyStatus);
+        if (header.operation == MICANT_COMPOSITION_OP_WAIT_FOR_FRAME) {
+            MicaCompositionWaitForFrameRequest request{};
+            const NtStatus packetProbe = ex::ProbeForRead(userRequest,
+                sizeof(request), alignof(MicaCompositionWaitForFrameRequest));
+            if (packetProbe != NtStatus::Success) return status(packetProbe);
+            const NtStatus packetCopy = ex::ExSafeCopyFromUser(
+                &request, userRequest, sizeof(request));
+            if (packetCopy != NtStatus::Success) return status(packetCopy);
+            if (!MicaCompositionValidateWaitForFrameRequest(&request) ||
+                (request.frameSequence & 1u) || !request.timeoutMilliseconds)
+                return status(NtStatus::InvalidParameter);
+            const uint64_t timeout100ns =
+                static_cast<uint64_t>(request.timeoutMilliseconds) * 10'000u;
+            return status(win32k::freestanding::waitForCompositorAcknowledgement(
+                request.frameSequence, timeout100ns));
+        }
+        if (header.operation == MICANT_COMPOSITION_OP_FLUSH_LATEST_FRAME) {
+            MicaCompositionFlushLatestFrameRequest request{};
+            const NtStatus packetProbe = ex::ProbeForRead(userRequest,
+                sizeof(request), alignof(MicaCompositionFlushLatestFrameRequest));
+            if (packetProbe != NtStatus::Success) return status(packetProbe);
+            const NtStatus packetCopy = ex::ExSafeCopyFromUser(
+                &request, userRequest, sizeof(request));
+            if (packetCopy != NtStatus::Success) return status(packetCopy);
+            if (!MicaCompositionValidateFlushLatestFrameRequest(&request))
+                return status(NtStatus::InvalidParameter);
+            const uint64_t timeout100ns =
+                static_cast<uint64_t>(request.timeoutMilliseconds) * 10'000u;
+            return status(win32k::freestanding::flushLatestCompositorFrame(
+                timeout100ns));
+        }
+        return status(NtStatus::InvalidParameter);
     }
     return status(NtStatus::NotSupported);
 }

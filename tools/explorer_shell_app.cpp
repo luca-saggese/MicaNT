@@ -35,7 +35,8 @@
 #include "explorer_shell/notification_area.hpp"
 #include "explorer_shell/task_switcher.hpp"
 
-extern "C" __declspec(dllimport) int32_t InitCommonControlsEx(const void*) noexcept;
+extern "C" __declspec(dllimport) HRESULT WINAPI DwmFlush() noexcept;
+extern "C" __declspec(dllimport) HRESULT WINAPI DwmIsCompositionEnabled(BOOL* enabled) noexcept;
 namespace {
 
 using namespace micant_gui;
@@ -69,6 +70,7 @@ struct AppWindow {
     bool open{};
     bool minimized{};
     bool firstPaintPresented{};
+    HWND refreshButton{};
 };
 
 struct CachedDesktopIcon {
@@ -96,6 +98,7 @@ struct ShellState {
     bool visualThemeReady{};
     char themeProfile[96]{};
     bool themeAuto{};
+    bool dwmFlushProbeReported{};
     bool themeGdiDrawReported{};
     bool themeFontMetadataProbeReported{};
     bool themeGdiEditDrawReported{};
@@ -898,6 +901,33 @@ void present(HWND hwnd) noexcept {
     }
 }
 
+void verifyDwmFlushExport() noexcept {
+    const HRESULT result = DwmFlush();
+    char message[96] = "[MicaNT DwmFlush] returned HRESULT 0x";
+    constexpr char digits[] = "0123456789ABCDEF";
+    for (uint32_t index = 0; index < 8; ++index) {
+        const uint32_t shift = (7u - index) * 4u;
+        message[sizeof("[MicaNT DwmFlush] returned HRESULT 0x") - 1u + index] =
+            digits[(static_cast<uint32_t>(result) >> shift) & 0xFu];
+    }
+    constexpr char suffix[] = " (kernel frame acknowledgement confirmed)";
+    size_t length = sizeof("[MicaNT DwmFlush] returned HRESULT 0x") - 1u + 8u;
+    if (result == 0) {
+        for (size_t index = 0; index < sizeof(suffix) - 1u; ++index)
+            message[length++] = suffix[index];
+    }
+    message[length] = '\0';
+    PrintLine(message);
+
+    BOOL compositionEnabled = FALSE;
+    const HRESULT compositionResult = DwmIsCompositionEnabled(&compositionEnabled);
+    if (compositionResult == 0 && compositionEnabled) {
+        PrintLine("[MicaNT DwmIsCompositionEnabled] acknowledged compositor frame reported enabled");
+    } else {
+        PrintLine("[MicaNT DwmIsCompositionEnabled] live compositor readiness query failed");
+    }
+}
+
 size_t collectTaskbarButtons(micant::explorer::TaskbarButton* buttons) noexcept {
     micant::explorer::BuildTaskSwitchSnapshot(&g.taskSwitch, g.desktop, g.taskbar, g.startMenu);
     for (size_t i = 0; buttons && i < g.taskSwitch.count; ++i) {
@@ -1057,7 +1087,11 @@ void verifyThemeChangeQueueRollback() noexcept {
     char previousProfile[sizeof(g.themeProfile)]{};
     std::memcpy(previousProfile, g.themeProfile, sizeof(previousProfile));
     size_t queued = 0;
-    while (queued < 512 && PostMessageW(g.desktop,
+    // Win32k owns a bounded global queue of 2048 entries. Exceed that bound
+    // deliberately so this probe exercises the kernel's atomic rejection
+    // path instead of merely applying a theme with spare queue capacity.
+    constexpr size_t kThemeQueuePressureLimit = 4096;
+    while (queued < kThemeQueuePressureLimit && PostMessageW(g.desktop,
             WM_THEME_QUEUE_PRESSURE_PROBE, 0, 0)) ++queued;
 
     // A full queue must reject snapshot publication before changing the
@@ -1637,6 +1671,30 @@ AppWindow* appFromHwnd(HWND hwnd) noexcept {
     return nullptr;
 }
 
+void PrintMyComputerButtonBounds(const RECT& rect) noexcept {
+    char message[160] = "[MicaNT Explorer] My Computer child BUTTON bounds=";
+    size_t length = sizeof("[MicaNT Explorer] My Computer child BUTTON bounds=") - 1;
+    auto appendNumber = [&message, &length](int32_t value) noexcept {
+        char digits[12]{};
+        size_t count{};
+        uint32_t magnitude = value < 0
+            ? static_cast<uint32_t>(-static_cast<int64_t>(value))
+            : static_cast<uint32_t>(value);
+        do {
+            digits[count++] = static_cast<char>('0' + magnitude % 10u);
+            magnitude /= 10u;
+        } while (magnitude && count < sizeof(digits));
+        if (value < 0) message[length++] = '-';
+        while (count) message[length++] = digits[--count];
+    };
+    appendNumber(rect.left); message[length++] = ',';
+    appendNumber(rect.top); message[length++] = ',';
+    appendNumber(rect.right); message[length++] = ',';
+    appendNumber(rect.bottom);
+    message[length] = '\0';
+    PrintLine(message);
+}
+
 LRESULT CALLBACK ThemeAttachedScrollProc(HWND hwnd, UINT message,
                                           WPARAM wParam, LPARAM lParam) {
     if (message == 0x0081u) return 1; // WM_NCCREATE
@@ -1773,6 +1831,39 @@ void openView(View view) noexcept {
         if (appBitmap) DeleteObject(appBitmap);
         *app = {};
         return;
+    }
+    if (view == View::MyComputer) {
+        constexpr uint32_t kButtonId = 0x0790u;
+        constexpr int32_t kButtonWidth = 112;
+        constexpr int32_t kButtonHeight = 28;
+        constexpr int32_t kRightInset = 16;
+        constexpr int32_t kStatusAndGap = 38;
+        const int32_t buttonX = static_cast<int32_t>(app->width) -
+            kButtonWidth - kRightInset;
+        const int32_t buttonY = static_cast<int32_t>(app->height) -
+            kButtonHeight - kStatusAndGap;
+        app->refreshButton = CreateWindowExW(0, L"BUTTON", L"Refresh",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            buttonX, buttonY, kButtonWidth, kButtonHeight,
+            app->hwnd, reinterpret_cast<HMENU>(static_cast<uintptr_t>(kButtonId)),
+            nullptr, nullptr);
+        if (app->refreshButton) {
+            RECT buttonRect{};
+            if (GetWindowRect(app->refreshButton, &buttonRect))
+                PrintMyComputerButtonBounds(buttonRect);
+            (void)InvalidateRect(app->refreshButton, nullptr, TRUE);
+            const BOOL painted = UpdateWindow(app->refreshButton);
+            HDC buttonDc = painted ? GetDC(app->refreshButton) : nullptr;
+            const COLORREF sampled = buttonDc
+                ? GetPixel(buttonDc, kButtonWidth / 2, kButtonHeight / 2)
+                : CLR_INVALID;
+            if (buttonDc) (void)ReleaseDC(app->refreshButton, buttonDc);
+            const bool buttonPainted = painted && sampled != CLR_INVALID;
+            if (buttonPainted)
+                PrintLine("[MicaNT Explorer] My Computer child BUTTON painted by USER32");
+        } else {
+            PrintLine("[MicaNT Explorer] My Computer child BUTTON creation failed");
+        }
     }
     drawAppWindow(*app);
     redrawDesktop();
@@ -1917,6 +2008,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         updateClock();
         updateAutomaticTheme();
         redrawTaskbar();
+        return 0;
+    }
+    if (message == WM_COMMAND && LOWORD(wParam) == 0x0790u &&
+        HIWORD(wParam) == BN_CLICKED) {
+        auto* app = appFromHwnd(hwnd);
+        if (!app || app->view != View::MyComputer || !app->refreshButton ||
+            reinterpret_cast<HWND>(lParam) != app->refreshButton) return 0;
+        if (!enumerateDirectory(*app)) {
+            PrintLine("[MicaNT Explorer] My Computer child BUTTON refresh failed");
+            return 0;
+        }
+        drawAppWindow(*app);
+        present(app->hwnd);
+        PrintLine("[MicaNT Explorer] My Computer child BUTTON BN_CLICKED refreshed directory");
         return 0;
     }
     if (message == WM_COMMAND && reinterpret_cast<HWND>(lParam) == g.themeButtonProbe &&
@@ -2248,9 +2353,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         else if (app && !copied)
             PrintLine("[MicaNT Explorer] Application paint BitBlt failed");
         const bool ended = EndPaint(hwnd, &paint) != FALSE;
+        // The application bitmap is blitted after child creation and can
+        // cover the child in this compositor. Paint the real child last so
+        // the idle/hover frame includes USER32's control pixels.
+        if (app && ended && app->refreshButton) {
+            (void)InvalidateRect(app->refreshButton, nullptr, TRUE);
+            (void)UpdateWindow(app->refreshButton);
+        }
         if (app && copied && ended && !app->firstPaintPresented) {
             app->firstPaintPresented = true;
             PrintLine("[MicaNT Explorer] Application window paint presented");
+            if (!g.dwmFlushProbeReported) {
+                g.dwmFlushProbeReported = true;
+                verifyDwmFlushExport();
+            }
         } else if (app && (!copied || !ended)) {
             PrintLine("[MicaNT Explorer] Application window paint failed");
         }

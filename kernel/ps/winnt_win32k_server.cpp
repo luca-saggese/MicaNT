@@ -158,6 +158,18 @@ bool validateCompositionPacket(const uint8_t* packet,
         std::memcpy(&value, packet, sizeof(value));
         return MicaCompositionValidateAcquireWindowSurfaceRequest(&value) != 0;
     }
+    case MICANT_COMPOSITION_OP_RELEASE_WINDOW_SURFACE: {
+        MicaCompositionReleaseWindowSurfaceRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateReleaseWindowSurfaceRequest(&value) != 0;
+    }
+    case MICANT_COMPOSITION_OP_SET_WINDOW_TRANSITIONS_FORCEDISABLED: {
+        MicaCompositionSetWindowTransitionsRequest value{};
+        if (packetBytes != sizeof(value)) return false;
+        std::memcpy(&value, packet, sizeof(value));
+        return MicaCompositionValidateSetWindowTransitionsRequest(&value) != 0;
+    }
     default:
         return false;
     }

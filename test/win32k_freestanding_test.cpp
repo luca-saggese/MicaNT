@@ -3,8 +3,60 @@
 #include <cstring>
 
 #include "micant/km/win32k/freestanding.hpp"
+#include "micant/shared/composition_protocol.h"
 
 namespace {
+
+MicaWin32kRequest makeRequest(uint32_t operation);
+
+uint32_t g_surfaceCreateCount{};
+uint32_t g_surfaceReleaseCount{};
+bool g_lastOwnerAddressValid{};
+
+micant::NtStatus testCreateSurface(uint32_t width, uint32_t height,
+    micant::win32k::freestanding::CompositorSurfaceStorage& storage) noexcept {
+    storage = {};
+    if (!width || !height) return micant::NtStatus::InvalidParameter;
+    ++g_surfaceCreateCount;
+    storage.sectionReference = reinterpret_cast<void*>(static_cast<uintptr_t>(g_surfaceCreateCount));
+    storage.ownerAddress = 0x100000u + g_surfaceCreateCount * 0x100000u;
+    storage.compositorAddress = 0x200000u + g_surfaceCreateCount * 0x100000u;
+    storage.width = width;
+    storage.height = height;
+    storage.pitch = width;
+    storage.sizeBytes = static_cast<size_t>(width) * height * sizeof(uint32_t);
+    return micant::NtStatus::Success;
+}
+
+micant::NtStatus testReleaseSurface(
+    micant::win32k::freestanding::CompositorSurfaceStorage& storage,
+    bool ownerAddressValid, bool compositorAddressValid) noexcept {
+    assert(storage.sectionReference);
+    ++g_surfaceReleaseCount;
+    g_lastOwnerAddressValid = ownerAddressValid && compositorAddressValid;
+    storage = {};
+    return micant::NtStatus::Success;
+}
+
+MicaWin32kRequest makeAcquireRequest(uint64_t window) {
+    MicaCompositionAcquireWindowSurfaceRequest packet{};
+    packet.header = {sizeof(packet), MICANT_COMPOSITION_PROTOCOL_VERSION,
+        MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE, 0, 1};
+    packet.windowId = window;
+    auto request = makeRequest(MICANT_WIN32K_OP_COMPOSITION_REQUEST);
+    std::memcpy(request.args, &packet, sizeof(packet));
+    return request;
+}
+
+MicaWin32kRequest makeReleaseRequest(MicaCompositionHandle lease) {
+    MicaCompositionReleaseWindowSurfaceRequest packet{};
+    packet.header = {sizeof(packet), MICANT_COMPOSITION_PROTOCOL_VERSION,
+        MICANT_COMPOSITION_OP_RELEASE_WINDOW_SURFACE, 0, 2};
+    packet.lease = lease;
+    auto request = makeRequest(MICANT_WIN32K_OP_COMPOSITION_REQUEST);
+    std::memcpy(request.args, &packet, sizeof(packet));
+    return request;
+}
 
 MicaWin32kRequest makeRequest(uint32_t operation) {
     MicaWin32kRequest request{};
@@ -133,6 +185,73 @@ int main() {
     auto registrationAfterRundown = makeRequest(MICANT_WIN32K_OP_REGISTER_CLASS);
     setText(registrationAfterRundown.className, "MicaNT.Explorer.Desktop");
     assert(dispatchRequest(registrationAfterRundown, 42) == NtStatus::Success);
+
+    micant::win32k::freestanding::bindCompositorStore(nullptr, nullptr, nullptr,
+        testCreateSurface, testReleaseSurface);
+    auto surfaceWindowRequest = makeRequest(MICANT_WIN32K_OP_CREATE_WINDOW);
+    setText(surfaceWindowRequest.className, "MicaNT.Explorer.Desktop");
+    surfaceWindowRequest.args[1] = 0x10000000;
+    surfaceWindowRequest.args[2] = 10;
+    surfaceWindowRequest.args[3] = 10;
+    surfaceWindowRequest.args[4] = 320;
+    surfaceWindowRequest.args[5] = 240;
+    assert(dispatchRequest(surfaceWindowRequest, 42) == NtStatus::Success);
+    const uint64_t surfaceWindow = surfaceWindowRequest.result;
+    auto getSurface = makeRequest(MICANT_WIN32K_OP_GET_WINDOW_SURFACE);
+    getSurface.args[0] = surfaceWindow;
+    assert(dispatchRequest(getSurface, 42) == NtStatus::Success);
+    auto acquire = makeAcquireRequest(surfaceWindow);
+    assert(dispatchRequest(acquire, 42) == NtStatus::Success);
+    MicaCompositionAcquireWindowSurfaceRequest acquired{};
+    std::memcpy(&acquired, acquire.args, sizeof(acquired));
+    assert(MicaCompositionHandleIsValid(acquired.outputHandle));
+    assert(acquired.width == 320 && acquired.height == 240 &&
+           acquired.strideBytes == 320 * sizeof(uint32_t));
+    assert(g_surfaceCreateCount == 1 && g_surfaceReleaseCount == 0);
+
+    auto surfaceResize = makeRequest(MICANT_WIN32K_OP_SET_WINDOW_POS);
+    surfaceResize.args[0] = surfaceWindow;
+    surfaceResize.args[3] = 640;
+    surfaceResize.args[4] = 480;
+    assert(dispatchRequest(surfaceResize, 42) == NtStatus::Success);
+    auto staleAcquire = makeAcquireRequest(surfaceWindow);
+    assert(dispatchRequest(staleAcquire, 42) == NtStatus::DeviceBusy);
+    assert(g_surfaceReleaseCount == 0);
+    auto releaseLease = makeReleaseRequest(acquired.outputHandle);
+    assert(dispatchRequest(releaseLease, 42) == NtStatus::Success);
+    assert(g_surfaceReleaseCount == 1 && g_lastOwnerAddressValid);
+    assert(dispatchRequest(releaseLease, 42) == NtStatus::InvalidHandle);
+    getSurface = makeRequest(MICANT_WIN32K_OP_GET_WINDOW_SURFACE);
+    getSurface.args[0] = surfaceWindow;
+    assert(dispatchRequest(getSurface, 42) == NtStatus::Success);
+    acquire = makeAcquireRequest(surfaceWindow);
+    assert(dispatchRequest(acquire, 42) == NtStatus::Success);
+    std::memcpy(&acquired, acquire.args, sizeof(acquired));
+
+    auto surfaceDestroy = makeRequest(MICANT_WIN32K_OP_DESTROY_WINDOW);
+    surfaceDestroy.args[0] = surfaceWindow;
+    assert(dispatchRequest(surfaceDestroy, 42) == NtStatus::Success);
+    staleAcquire = makeAcquireRequest(surfaceWindow);
+    assert(dispatchRequest(staleAcquire, 42) == NtStatus::InvalidHandle);
+    assert(g_surfaceReleaseCount == 1);
+    releaseLease = makeReleaseRequest(acquired.outputHandle);
+    assert(dispatchRequest(releaseLease, 42) == NtStatus::Success);
+    assert(g_surfaceReleaseCount == 2 && g_lastOwnerAddressValid);
+
+    auto exitWindowRequest = makeRequest(MICANT_WIN32K_OP_CREATE_WINDOW);
+    setText(exitWindowRequest.className, "MicaNT.Explorer.Desktop");
+    exitWindowRequest.args[1] = 0x10000000;
+    exitWindowRequest.args[4] = 200;
+    exitWindowRequest.args[5] = 100;
+    assert(dispatchRequest(exitWindowRequest, 42) == NtStatus::Success);
+    auto exitGetSurface = makeRequest(MICANT_WIN32K_OP_GET_WINDOW_SURFACE);
+    exitGetSurface.args[0] = exitWindowRequest.result;
+    assert(dispatchRequest(exitGetSurface, 42) == NtStatus::Success);
+    auto exitAcquire = makeAcquireRequest(exitWindowRequest.result);
+    assert(dispatchRequest(exitAcquire, 42) == NtStatus::Success);
+    micant::win32k::freestanding::releaseProcess(42);
+    assert(g_surfaceReleaseCount == 3 && !g_lastOwnerAddressValid);
+    micant::win32k::freestanding::bindCompositorStore(nullptr, nullptr);
 
     auto inputWindowRequest = makeRequest(MICANT_WIN32K_OP_CREATE_WINDOW);
     setText(inputWindowRequest.className, "MicaNT.Explorer.Desktop");

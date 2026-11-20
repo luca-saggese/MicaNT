@@ -27,33 +27,35 @@ contains a separate in-process `DwmCoordinator`, while
 image process and waits for its frame acknowledgement before Explorer startup
 (`kernel/init/kiinit.cpp`: `launchCompositorProcess`,
 `waitForCompositorPresentation`). `tools/compositor_app.cpp` contains the
-separate composition/present loop. The public DWMAPI path is not connected to
-that service, while the inline coordinator remains a separate state owner.
+separate composition/present loop. The public DWMAPI path now reaches the
+kernel frame-ack service for `DwmFlush` and sends one owner-checked per-window
+transition attribute through Win32k. The inline coordinator remains a separate
+state owner.
 
-The first bounded migration slice is the System32 DWM ABI truthfulness
-boundary: valid calls without a connected service query or frame fence now
-fail explicitly rather than claiming compositor state/effects. This does not
-implement composition or public DWM behavior generally.
+Implemented slices cover System32 DWM ABI validation, acknowledged `DwmFlush`,
+a per-window transition-disable attribute, and generation-checked surface
+leases held by the Ring 3 compositor through presentation. They do not
+implement DComp transactions or public DWM behavior generally.
 
 ## Active path and ownership inventory
 
 | Path / symbols | Build or caller evidence | Current responsibility and finding | Intended owner / next step |
 |---|---|---|---|
-| `kernel/win32k/freestanding.cpp`: `dispatchRequest`, `publishCompositorSurfaces`, `waitForCompositorUpdate`, `releaseProcess` | Canonical kernel source; `CMakeLists.txt` includes it in kernel targets | Owns Win32k request state, process rundown and publishing of window metadata. It is kernel-side authority, not a user-mode compositor. | Retain HWND/window and access authority here; later expose validated, versioned scene events and surface handles. |
+| `kernel/win32k/freestanding.cpp`: `dispatchRequest`, `publishCompositorSurfaces`, `waitForCompositorUpdate`, `releaseProcess` | Canonical kernel source; `CMakeLists.txt` includes it in kernel targets | Owns HWND state, per-window `DWMWA_TRANSITIONS_FORCEDISABLED`, process rundown, surface leases and metadata publication. Lease acquire/release do not republish the scene, preserving the compositor's stable-frame check. | Continue migrating scene state to validated scene transactions; finish attribute coverage and compositor restart handling. |
 | `include/micant/shared/win32k_client.h` | Included by USER32-facing and kernel Win32k code | Mode-neutral Win32k request ABI. Callers marshal window operations into the kernel service. | Keep as an explicit syscall contract; audit all request sizes and user-pointer validation when adding scene operations. |
 | `include/micant/shared/compositor_surface.h`: `MicaCompositorMetadataStore` v15 | Included by Win32k freestanding interfaces and implementation | Shared metadata contains pointer-shaped `uint64_t` addresses, process/window identifiers, mutable writer/frame fields, and arrays. This snapshot alone does not establish mapping validation or ownership. | Replace incrementally with generation-checked surface handles and an explicit producer/consumer protocol; preserve old consumer behind an adapter until parity. |
 | `tools/dlls/user32.cpp` | Compiled into native user-mode `user32_boot`; CMake links `gdi32_boot`, `uxtheme_boot`, `ntdll_boot`, `kernel32_boot` | USER32 client implementation uses native NT and Win32k client interfaces. It also contains built-in control procedures/state. The canonical kernel remains HWND authority, but controls have local per-process client state. | Keep HWND ownership in Win32k; retain control procedure state in USER32 and connect invalidation/paint to owned surfaces. |
 | `tools/dlls/gdi32.cpp` | `gdi32_boot` target; USER32 imports it | Ring 3 drawing APIs and resources. It must render into process-owned drawing targets; this audit has not traced all DC selection and pixel paths. | GDI32/graphics engine owns raster and text operations; map DC-to-surface lifetime and damage path before migration. |
 | `tools/dlls/comctl32.cpp` | `comctl32_boot` links GDI32, USER32, UXTheme, NTDLL and `win32k_boot` | Common-control DLL. Built-in `BUTTON`/`EDIT` ownership must remain distinct from COMCTL32. | Keep common controls in COMCTL32; trace user32 built-in class dispatch and notifications independently. |
 | `tools/dlls/uxtheme.cpp` | `uxtheme_boot` links Win32k, GDI32, Kernel32, NTDLL and UCRT | Theme query/drawing helper layer. The link graph indicates USER32/window-state coupling; full call graph not yet inspected. | UXTheme supplies theme parts/metrics; it must not own HWND state or composition. |
-| `tools/dlls/abi/dwmapi_system32.cpp` | Freestanding `dwmapi_boot` emits `build/system32/dwmapi.dll`; its seven exports inspected with `llvm-readobj --coff-exports` | Current documented attribute IDs/directions/value sizes are validated. Valid calls return `E_NOTIMPL`; invalid direction/ID/size or required pointer returns `E_INVALIDARG`. No service forwarding is present. | DWMAPI remains a client ABI. Add validated forwarding only after a compositor request is actually implemented and state lives in the window authority. |
+| `tools/dlls/abi/dwmapi_system32.cpp` | Freestanding `dwmapi_boot` emits `build/system32/dwmapi.dll`; its seven exports inspected with `llvm-readobj --coff-exports` | Attribute IDs/directions/value sizes are validated. `DwmFlush` waits for a real kernel frame acknowledgement. `DWMWA_TRANSITIONS_FORCEDISABLED` is forwarded to owner-checked Win32k state. Other valid unsupported requests return `E_NOTIMPL`. | Add remaining documented per-window attributes and composition effects only when their canonical state and behavior are connected. |
 | `include/micant/um/subsystems/winuser/dwmapi.hpp`: `DwmCoordinator`, inline C exports | Included from `shell.hpp`; shell command paths call DWM functions | A second in-process coordinator owns global window-property, thumbnail and frame state and exposes many inline APIs. It is not connected to the System32 DLL server contract. | Retire only after usage/call-graph proof; client calls should marshal to a single validated owner. |
-| `include/micant/um/subsystems/graphics/dcomp.hpp` | Header declarations; focused syntax compile reported by implementation agent | Factories null valid output pointers and return `E_NOTIMPL`; `DCompositionCreateSurfaceHandle` rejects unknown access bits with `E_INVALIDARG`. No COM device or handle is fabricated. | DComp creation/transaction APIs remain unimplemented; verify SDK identities/vtables and service before adding behavior. |
-| `kernel/ps/winnt_win32k_server.cpp` | `win32k_boot`; `MicaWin32kCompositionRequest` export; native service syscall 0x86 | Bridge safely copies caller bytes with `NtReadVirtualMemory`, validates exact packet variants, then submits inline request bytes and returns the dispatcher NTSTATUS. This avoids passing raw caller pointers through the syscall. | Kernel dispatcher currently validates the request but returns `STATUS_NOT_SUPPORTED` for valid operations; bridge is transport/validation only, not operational composition. |
+| `include/micant/um/subsystems/graphics/dcomp.hpp` | Header declarations; focused syntax compile reported by implementation agent | Device and Device2 public IIDs were corrected. Factories still clear valid output pointers and return `E_NOTIMPL`; surface-handle validation rejects unknown access bits. | DComp creation/transaction APIs remain unimplemented; verify complete SDK vtables before returning objects. |
+| `kernel/ps/winnt_win32k_server.cpp` | `win32k_boot`; `MicaWin32kCompositionRequest` export; native service syscall 0x86 | Bridge safely copies and validates versioned packets and submits inline request bytes. The dispatcher operationally handles surface acquire/release and the transition-disable attribute; attach/commit/render remain `STATUS_NOT_SUPPORTED`. |
 | `tools/explorer_shell/*`, `tools/explorer_shell_app.cpp` | Explorer boot target; `kiinit` launches compositor and waits for ack before Explorer | Explorer shell creates desktop/taskbar UI. It is a distinct process from the compositor; one QEMU boot reported initial scanout with Explorer visible. | Keep shell/client role; two independent application windows, input routing and DWM API IPC remain unproven. |
 | `kernel/ps/ring3_desktop_shell.cpp`, the removed `ring3_winlogon_explorer_dwm.hpp`, and Suite 285 | Previously called by `ke::SyscallDispatcher::initializeStandardTable` and the legacy host runner | The path printed hard-coded Winlogon/Explorer/DWM PIDs, working set, GPU planes, latency and cursor rates. It was unrelated to the real compositor launch later in `kiinit.cpp`. | Removed the initialization call, fabricated report types and Suite 285 acceptance fixture. The source TU remains empty with an explanatory comment; no real Winlogon/session manager is claimed. |
 | `drivers/virtio_gpu/virtio_gpu.cpp` and boot display path | `virtio_gpu_boot`; architecture docs describe bootstrap scanout | Display driver owns device/scanout and bounded present. This is not evidence of multi-window scene composition or hardware GPU blending. | Retain display ownership; future software compositor can submit actual composed frames through this driver. |
-| `tools/compositor_app.cpp`, `compositor_boot` | `kiinit.cpp` launches the staged image; CMake target emits `build/compositor.exe` | Separate Ring 3 compositor and first-frame acknowledgement path are present. Safe multi-process surface lifetime, restart, and public DWMAPI linkage remain open. | Keep this as the compositor owner; harden metadata reads and map shutdown/restart/fence behavior. |
+| `tools/compositor_app.cpp`, `compositor_boot` | `kiinit.cpp` launches the staged image; CMake target emits `build/compositor.exe` | Separate Ring 3 compositor acquires generation-checked leases for visible root surfaces and holds them through composition/presentation. QEMU observed the lease marker and rendered themed My Computer. | Protect icon/title surfaces too; complete multi-window scene transactions, shutdown and restart behavior. |
 
 ## First call-path sketches
 
@@ -89,7 +91,7 @@ establish two independent app windows or validated public DWMAPI/DComp IPC.
 |---|---|---|---|---|
 | Local files listed above | Base `89138cfee1008dd38f7f0352cfc058ff2121cc7c`; dirty worktree on `DWM` | Repository observation | VERIFIED_LOCAL_SOURCE | Source/build inclusion inspected selectively; comprehensive call graph and export inventory remain open. |
 | `docs/KERNEL_ARCHITECTURE.md` and `docs/KERNEL_INTEGRATION_STATUS.md` | Current checkout | Project architecture/evidence records | VERIFIED_LOCAL_DOCUMENT | Establish canonical modular kernel, bootstrap display, and incomplete Ring 3 desktop process integration; verify against current runtime before stronger claims. |
-| [Microsoft Learn DWMAPI](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/) | Current documentation viewed 2026-11-20; proposed Windows 10 19041-family profile not binary-tested | Public contract | VERIFIED_PUBLIC | `DwmFlush` waits until outstanding surface updates have been made at a later Present; `DwmIsCompositionEnabled` provides an output value on success; `DwmSetWindowAttribute` value type/size depends on the enum. Current exports do not implement these effects and report `E_NOTIMPL`. |
+| [Microsoft Learn DWMAPI](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/) | Current documentation viewed 2026-11-20; proposed Windows 10 19041-family profile not binary-tested | Public contract | VERIFIED_PUBLIC | `DwmFlush` waits for the real compositor-frame acknowledgement; `DwmIsCompositionEnabled` now reports TRUE only after a real acknowledged frame (runtime getter not yet exercised); `DwmSetWindowAttribute` supports only the owner-checked transition-disable BOOL. Other valid attributes and visual effects remain unsupported. |
 | [Windows interface evidence ledger](WINDOWS_INTERFACE_EVIDENCE.md) | Local DWM branch | Public contracts + local PE observations | VERIFIED_LOCAL / VERIFIED_PUBLIC | Seven `dwmapi.dll` exports and current public attribute size/direction validation recorded. Ordinals are linker-assigned local observations only; SDK pin and reference Windows run remain open. |
 | Local sibling ReactOS `../reactos/dll/win32/dwmapi/dwmapi_main.c` | Local checkout, revision not recorded | Comparative behavior only | VERIFIED_LOCAL_SOURCE | `DwmGetWindowAttribute` is `E_NOTIMPL`; `DwmSetWindowAttribute` returns unconditional success. This source does not resolve size/error behavior and is not treated as contract evidence. |
 | `kawapure/DWM-Documentation` | Proposed private reference family: uDWM 10.0.19041.2075 and dwmcore 10.0.19041.2311, as stated by the specification; commit SHA not yet acquired | Reconstructed private hypothesis | INFERRED / UNKNOWN | Headers are explicitly incomplete; acquire exact repository SHA and inspect required files before using any private layout. |
@@ -99,26 +101,26 @@ establish two independent app windows or validated public DWMAPI/DComp IPC.
 
 ## Prioritized gaps and next slices
 
-1. **DWMAPI operation path:** dispatcher supports packet validation only;
-   implement canonical per-window operation state, safe handles and frame
-   acknowledgement before wiring public exports. Do not return success early.
-2. **Window authority:** the real compositor process still reads the legacy
-   metadata contract; connect future scene updates to validated owner handles.
+1. **DWMAPI behavior:** only `DwmFlush` and one setter-only per-window
+   attribute are operational; implement remaining APIs with documented
+   behavior, canonical state and truthful errors.
+2. **Window authority:** the compositor still consumes legacy scene metadata;
+   replace it incrementally with validated handles and scene transactions.
 3. **Compositor metadata validation:** validate headers/counts before
    dereferencing shared pointers and map rundown safety. Initial header/count
    checks have been added to `copyStableMetadata`, pending integration proof.
-4. **Surface trust and lifetime:** map every metadata writer/reader, address
-   mapping, active-writer protocol, resize, process rundown and PFN release.
+4. **Surface trust and lifetime:** root window pixels have generation-checked
+   leases through presentation; add equivalent protection for icon/title
+   surfaces and verify cleanup/restart under process rundown.
 5. **USER32/GDI/control paint:** map built-in BUTTON messages through
    BeginPaint/EndPaint, pixel writes, damage and present; keep COMCTL32 separate.
-6. **DComp:** verify all public SDK identities/vtables and required output/error
-   behavior before implementing a selected public transaction slice. Surface
-   handle manager and security attributes remain absent.
+6. **DComp:** factories and transactions remain unimplemented. Verify complete
+   SDK vtables, then add a real transactional scene path and secure handles.
 
-The initial slices intentionally do not introduce a second compositor or
-window table. The mode-neutral packet contract has a C/C++ layout validator,
-kernel dispatcher validation, and a Win32k DLL bridge; valid requests still
-return `STATUS_NOT_SUPPORTED`, so there is no operational composition IPC.
+The current slices do not introduce a second compositor or window table. The
+mode-neutral contract has C/C++ validators, a Win32k bridge, operational
+surface leases and an owner-checked transition attribute; attach/commit/render
+still return `STATUS_NOT_SUPPORTED`.
 Fabricated Horizon shell metrics and Suite 285 were removed; interactive
 Winlogon is not implemented. The protocol fixture and C11 header check passed;
 `dwmapi_boot`, `win32k_boot`, `gdi32_boot`, `compositor_boot`,
@@ -131,9 +133,12 @@ treated a normal full-window rectangle as the client backing surface; a
 subsequent retained serial run identified an active window with no backing
 store yet, which the existing renderer intentionally skips. Validation now
 checks the renderer's client source bounds and accepts a fully absent backing
-store only when pointer, size and pitch are all zero. The latest full QEMU run
-captured `app-window.ppm` with the themed My Computer window opened by one mouse
-click; it later failed the production USER32 BUTTON acceptance check. The
-specific visual request is therefore verified, but the full integration suite
-is not passing and the broader window/control/composition requirements remain
+store only when pointer, size and pitch are all zero. The lease-fix QEMU run
+captured `app-window.ppm`; serial confirmed compositor-held leases, `DwmFlush`
+acknowledgement, Refresh `BN_CLICKED`, and queue-pressure theme rollback. A
+dedicated `--theme-test` QEMU run passed startup and scanout; its drag probe
+saw 192 changed pixels (below the 10,000 threshold), though shifted and returned
+client areas stayed visible. The default runner still fails while awaiting a legacy Explorer
+control-probe matrix not initialized in that path. Full DComp transactions,
+broad DWMAPI behavior and the remaining integration requirements are
 incomplete.

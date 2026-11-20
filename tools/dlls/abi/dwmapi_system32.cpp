@@ -4,9 +4,43 @@
  */
 #include <cstdint>
 
+#include "micant/shared/user_syscall.hpp"
+#include "micant/shared/win32k_client.h"
+
 namespace {
 constexpr int32_t kEInvalidArg = static_cast<int32_t>(0x80070057u);
 constexpr int32_t kENotImpl = static_cast<int32_t>(0x80004001u);
+constexpr int32_t kSOk = 0;
+constexpr uint32_t kStatusSuccess = 0x00000000u;
+constexpr uint32_t kStatusTimeout = 0x00000102u;
+constexpr uint32_t kStatusDeviceNotReady = 0xC00000A3u;
+constexpr uint32_t kStatusProcessIsTerminating = 0xC000010Au;
+constexpr uint32_t kErrorTimeout = 1460u;
+constexpr uint32_t kErrorNotReady = 21u;
+constexpr uint32_t kErrorProcessAborted = 1067u;
+constexpr uint32_t kCompositionProbeTimeoutMilliseconds = 1000u;
+uint64_t g_dwmRequestSequence{};
+
+int32_t statusToHresult(uint32_t status) noexcept {
+    if (status == kStatusSuccess) return kSOk;
+    if (status == kStatusTimeout)
+        return static_cast<int32_t>(0x80070000u | kErrorTimeout);
+    if (status == kStatusDeviceNotReady)
+        return static_cast<int32_t>(0x80070000u | kErrorNotReady);
+    if (status == kStatusProcessIsTerminating)
+        return static_cast<int32_t>(0x80070000u | kErrorProcessAborted);
+    // HRESULT_FROM_NT preserves the failing NT status in HRESULT form.
+    return static_cast<int32_t>((status & 0x80000000u)
+        ? (status | 0x10000000u) : 0x80004005u);
+}
+
+uint64_t nextDwmRequestSequence() noexcept {
+    for (;;) {
+        const uint64_t sequence = __atomic_add_fetch(
+            &g_dwmRequestSequence, 1, __ATOMIC_RELAXED);
+        if (sequence) return sequence;
+    }
+}
 
 constexpr uint32_t kDwmAttributeNcRenderingEnabled = 1;
 constexpr uint32_t kDwmAttributeNcRenderingPolicy = 2;
@@ -89,7 +123,23 @@ uint32_t setWindowAttributeSize(uint32_t attribute) noexcept {
 
 extern "C" {
 __declspec(dllexport) int32_t DwmIsCompositionEnabled(int32_t* enabled) {
-    return enabled ? kENotImpl : kEInvalidArg;
+    if (!enabled) return kEInvalidArg;
+
+    // Composition is enabled only after the canonical compositor has
+    // published a frame and Win32k has acknowledged it. Keep the output
+    // untouched when that live readiness check fails.
+    MicaCompositionFlushLatestFrameRequest request{};
+    request.header.size = sizeof(request);
+    request.header.version = MICANT_COMPOSITION_PROTOCOL_VERSION;
+    request.header.operation = MICANT_COMPOSITION_OP_FLUSH_LATEST_FRAME;
+    request.header.requestSequence = nextDwmRequestSequence();
+    request.timeoutMilliseconds = kCompositionProbeTimeoutMilliseconds;
+    const auto result = static_cast<uint32_t>(micant::sys::invokeUserService(
+        MICANT_WIN32K_SERVICE_WAIT_FOR_COMPOSITOR_FRAME,
+        reinterpret_cast<uint64_t>(&request)));
+    if (result != kStatusSuccess) return statusToHresult(result);
+    *enabled = 1;
+    return kSOk;
 }
 __declspec(dllexport) int32_t DwmExtendFrameIntoClientArea(void* hwnd, const void* margins) {
     return hwnd && margins ? kENotImpl : kEInvalidArg;
@@ -97,7 +147,18 @@ __declspec(dllexport) int32_t DwmExtendFrameIntoClientArea(void* hwnd, const voi
 __declspec(dllexport) int32_t DwmEnableBlurBehindWindow(void* hwnd, const void* blur) {
     return hwnd && blur ? kENotImpl : kEInvalidArg;
 }
-__declspec(dllexport) int32_t DwmFlush() { return kENotImpl; }
+__declspec(dllexport) int32_t DwmFlush() {
+    MicaCompositionFlushLatestFrameRequest request{};
+    request.header.size = sizeof(request);
+    request.header.version = MICANT_COMPOSITION_PROTOCOL_VERSION;
+    request.header.operation = MICANT_COMPOSITION_OP_FLUSH_LATEST_FRAME;
+    request.header.requestSequence = nextDwmRequestSequence();
+    request.timeoutMilliseconds = MICANT_COMPOSITION_MAX_WAIT_MILLISECONDS;
+    const auto result = static_cast<uint32_t>(micant::sys::invokeUserService(
+        MICANT_WIN32K_SERVICE_WAIT_FOR_COMPOSITOR_FRAME,
+        reinterpret_cast<uint64_t>(&request)));
+    return statusToHresult(result);
+}
 __declspec(dllexport) int32_t DwmGetWindowAttribute(void* hwnd, uint32_t attribute, void* value, uint32_t bytes) {
     const uint32_t expectedBytes = getWindowAttributeSize(attribute);
     if (!hwnd || !value || !expectedBytes || bytes != expectedBytes)
@@ -108,7 +169,21 @@ __declspec(dllexport) int32_t DwmSetWindowAttribute(void* hwnd, uint32_t attribu
     const uint32_t expectedBytes = setWindowAttributeSize(attribute);
     if (!hwnd || !value || !expectedBytes || bytes != expectedBytes)
         return kEInvalidArg;
-    return kENotImpl;
+    if (attribute != kDwmAttributeTransitionsForceDisabled)
+        return kENotImpl;
+
+    MicaCompositionSetWindowTransitionsRequest request{};
+    request.header.size = sizeof(request);
+    request.header.version = MICANT_COMPOSITION_PROTOCOL_VERSION;
+    request.header.operation =
+        MICANT_COMPOSITION_OP_SET_WINDOW_TRANSITIONS_FORCEDISABLED;
+    request.header.requestSequence = nextDwmRequestSequence();
+    request.windowId = reinterpret_cast<uintptr_t>(hwnd);
+    request.attribute = MICANT_DWM_WINDOW_ATTRIBUTE_TRANSITIONS_FORCEDISABLED;
+    request.value = *static_cast<const int32_t*>(value);
+    const auto result = static_cast<uint32_t>(MicaWin32kCompositionRequest(
+        &request, sizeof(request)));
+    return statusToHresult(result);
 }
 __declspec(dllexport) int32_t DwmGetCompositionTimingInfo(void*, void* info) {
     return info ? kENotImpl : kEInvalidArg;

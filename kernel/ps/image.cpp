@@ -1293,8 +1293,6 @@ NtStatus EProcess::loadNativeImage(std::string_view name, std::span<const uint8_
     pe::PeImageView64 view;
     auto status = view.inspect(file);
     if (status != NtStatus::Success) return status;
-    if ((view.headers().fileHeader.characteristics & pe::IMAGE_FILE_DLL) &&
-        view.headers().optionalHeader.addressOfEntryPoint) return NtStatus::NotSupported;
     status = validateProtectionLayout(view);
     if (status != NtStatus::Success) return status;
     // Reject an existing module name before allocating/mapping section pages;
