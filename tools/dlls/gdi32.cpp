@@ -975,7 +975,27 @@ void* Gdi32_CreateDIBSection(void* hdc, const void* pbmi, uint32_t usage, void**
 int32_t Gdi32_BitBlt(void* hdc, int32_t x, int32_t y, int32_t cx, int32_t cy, void* hdcSrc, int32_t x1, int32_t y1, uint32_t rop) noexcept {
     using Fn=int32_t (*)(void*,int32_t,int32_t,int32_t,int32_t,void*,int32_t,int32_t,uint32_t);
     auto fn=Win32kProc<Fn>("MicaWin32kBitBlt");
-    return fn ? fn(hdc,x,y,cx,cy,hdcSrc,x1,y1,rop) : 0;
+    if (!fn || cx <= 0 || cy <= 0 ||
+        !fn(hdc,x,y,cx,cy,hdcSrc,x1,y1,rop)) return 0;
+
+    // The window-manager blit copies into the selected surface but does not
+    // publish damage. Submit the bounded destination area here so an ordinary
+    // GetDC/ReleaseDC caller does not turn a small blit into a full-window
+    // invalidation when ReleaseDC closes the update scope.
+    GdiSurfaceView surface{};
+    if (!GetGdiSurface(hdc, surface)) return 0;
+    const int64_t requestedRight = static_cast<int64_t>(x) + cx;
+    const int64_t requestedBottom = static_cast<int64_t>(y) + cy;
+    const int32_t surfaceRight = static_cast<int32_t>(
+        std::min<uint32_t>(surface.width, static_cast<uint32_t>(INT32_MAX)));
+    const int32_t surfaceBottom = static_cast<int32_t>(
+        std::min<uint32_t>(surface.height, static_cast<uint32_t>(INT32_MAX)));
+    const MicaWin32kRect dirty{
+        static_cast<int32_t>(std::clamp<int64_t>(x, 0, surfaceRight)),
+        static_cast<int32_t>(std::clamp<int64_t>(y, 0, surfaceBottom)),
+        static_cast<int32_t>(std::clamp<int64_t>(requestedRight, 0, surfaceRight)),
+        static_cast<int32_t>(std::clamp<int64_t>(requestedBottom, 0, surfaceBottom))};
+    return PresentGdiRect(hdc, dirty);
 }
 
 void* Gdi32_GetStockObject(int32_t i) noexcept {
