@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "micant/shared/compositor_surface.h"
+#include "micant/shared/composition_protocol.h"
 
 #if defined(MICANT_WIN32K_EXPORTS)
 #define MICANT_WIN32K_API __declspec(dllexport)
@@ -137,7 +138,9 @@ enum {
     MICANT_WIN32K_OP_DEBUG_INPUT_TRACE,
     MICANT_WIN32K_OP_SET_FOREGROUND_WINDOW,
     MICANT_WIN32K_OP_GET_WINDOW_THREAD_PROCESS_ID,
-    MICANT_WIN32K_OP_POST_THREAD_MESSAGE
+    MICANT_WIN32K_OP_POST_THREAD_MESSAGE,
+    /* `args` contains one fixed-size MicaComposition*Request packet. */
+    MICANT_WIN32K_OP_COMPOSITION_REQUEST
 };
 
 enum {
@@ -151,6 +154,7 @@ typedef struct MicaWin32kRequest {
     uint32_t operation;
     uint32_t flags;
     uint64_t result;
+    /* For MICANT_WIN32K_OP_COMPOSITION_REQUEST, args is the packet byte area. */
     uint64_t args[8];
     uint64_t messageHwnd;
     uint64_t messageWParam;

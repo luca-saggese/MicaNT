@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cstring>
 #include <new>
 
 #if defined(MICANT_BOOTSTRAP_REACTOS_APP_CALC)
@@ -1387,6 +1388,74 @@ NtStatus dispatchRequest(MicaWin32kRequest& request, uint64_t ownerProcessId) no
     switch (request.operation) {
         case MICANT_WIN32K_OP_REGISTER_CLASS:
             return registerClass(request, ownerProcessId);
+        case MICANT_WIN32K_OP_COMPOSITION_REQUEST: {
+            /* The syscall dispatcher copied the fixed MicaWin32kRequest from
+             * the caller before reaching here. Keep the composition packet
+             * inline in args: never chase a user supplied packet pointer. */
+            static_assert(sizeof(MicaCompositionAttachWindowSurfaceRequest) <=
+                          sizeof(request.args));
+            MicaCompositionRequestHeader header{};
+            std::memcpy(&header, request.args, sizeof(header));
+            if (header.size < sizeof(header) || header.size > sizeof(request.args) ||
+                header.version != MICANT_COMPOSITION_PROTOCOL_VERSION ||
+                header.flags != 0 || !header.requestSequence)
+                return NtStatus::InvalidParameter;
+            const auto* payloadBytes =
+                reinterpret_cast<const uint8_t*>(request.args);
+            for (size_t index = header.size; index < sizeof(request.args); ++index)
+                if (payloadBytes[index] != 0) return NtStatus::InvalidParameter;
+            switch (header.operation) {
+                case MICANT_COMPOSITION_OP_CREATE_SURFACE: {
+                    MicaCompositionCreateSurfaceRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    return MicaCompositionValidateCreateSurfaceRequest(&packet)
+                        ? NtStatus::NotSupported : NtStatus::InvalidParameter;
+                }
+                case MICANT_COMPOSITION_OP_RELEASE_SURFACE: {
+                    MicaCompositionReleaseSurfaceRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    return MicaCompositionValidateReleaseSurfaceRequest(&packet)
+                        ? NtStatus::NotSupported : NtStatus::InvalidParameter;
+                }
+                case MICANT_COMPOSITION_OP_ATTACH_WINDOW_SURFACE: {
+                    MicaCompositionAttachWindowSurfaceRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    return MicaCompositionValidateAttachWindowSurfaceRequest(&packet)
+                        ? NtStatus::NotSupported : NtStatus::InvalidParameter;
+                }
+                case MICANT_COMPOSITION_OP_DETACH_WINDOW_SURFACE: {
+                    MicaCompositionDetachWindowSurfaceRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    return MicaCompositionValidateDetachWindowSurfaceRequest(&packet)
+                        ? NtStatus::NotSupported : NtStatus::InvalidParameter;
+                }
+                case MICANT_COMPOSITION_OP_COMMIT: {
+                    MicaCompositionCommitRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    return MicaCompositionValidateCommitRequest(&packet)
+                        ? NtStatus::NotSupported : NtStatus::InvalidParameter;
+                }
+                case MICANT_COMPOSITION_OP_WAIT_FOR_FRAME: {
+                    MicaCompositionWaitForFrameRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    return MicaCompositionValidateWaitForFrameRequest(&packet)
+                        ? NtStatus::NotSupported : NtStatus::InvalidParameter;
+                }
+                case MICANT_COMPOSITION_OP_ACQUIRE_WINDOW_SURFACE: {
+                    MicaCompositionAcquireWindowSurfaceRequest packet{};
+                    std::memcpy(&packet, request.args, sizeof(packet));
+                    if (!MicaCompositionValidateAcquireWindowSurfaceRequest(&packet))
+                        return NtStatus::InvalidParameter;
+                    // A section may already have owner and compositor views,
+                    // but the store does not yet publish a generation-checked
+                    // reference that pins it through a DWM read. Returning an
+                    // index here would create a stale, unusable token.
+                    return NtStatus::NotSupported;
+                }
+                default:
+                    return NtStatus::InvalidParameter;
+            }
+        }
         case MICANT_WIN32K_OP_GET_SYSTEM_METRICS:
             if (request.args[0] == 0) request.result = static_cast<uint32_t>(g_screenWidth);
             else if (request.args[0] == 1) request.result = static_cast<uint32_t>(g_screenHeight);
